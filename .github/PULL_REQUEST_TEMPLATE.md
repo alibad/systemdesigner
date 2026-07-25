@@ -42,8 +42,8 @@ Closes #
 - [ ] Ran `pnpm validate:registry` and it passes (this is the content gate; CI runs it too)
 - [ ] Ran `pnpm scan:secrets` after touching config, docs examples, or environment setup
 - [ ] `pnpm lint` passes
-- [ ] Followed the authoring standards in [CLAUDE.md](../CLAUDE.md) and [AGENTS.md](../AGENTS.md)
-- [ ] Added/updated the quiz in `lib/quiz-bank/all-quizzes.json` and ran `node scripts/generate-quiz-bank.cjs` (if the page has a quiz)
+- [ ] Followed the authoring standards in [AGENTS.md](../AGENTS.md)
+- [ ] Added/updated co-located quiz JSON (or the existing bank entry) and ran `pnpm validate:content` (if the page has a quiz)
 - [ ] Added content under `content/entries/<section>/<slug>/index.mdoc` without a concrete content `page.tsx`
 - [ ] Kept interactive React blocks focused on user-controlled behavior instead of wrapping whole lessons
 - [ ] Updated docs ([README.md](../README.md), [docs/CONTENT_GUIDE.md](../docs/CONTENT_GUIDE.md), etc.) if behavior or structure changed

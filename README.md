@@ -15,7 +15,7 @@
 
 ## What is SystemDesigner?
 
-SystemDesigner is a free, open-source platform that turns "I should probably learn system design" into a guided, hands-on journey. Instead of a wall of text, you get **300+ structured lessons**, **413 interactive quizzes**, **hands-on calculators** for back-of-the-envelope math, and a **tldraw diagramming sandbox** to sketch architectures as you go. Learning paths track your progress and stitch lessons into prerequisite-aware sequences — so you always know what to learn next.
+SystemDesigner is a free, open-source platform that turns "I should probably learn system design" into a guided, hands-on journey. Instead of a wall of text, you get **425 structured content entries**, **interactive quizzes across the curriculum**, **hands-on calculators** for back-of-the-envelope math, and a **tldraw diagramming sandbox** to sketch architectures as you go. Learning paths track your progress and stitch lessons into prerequisite-aware sequences — so you always know what to learn next.
 
 It covers the full spectrum: classic distributed-systems design (caching, sharding, queues, consistency), **modern GenAI systems** (RAG, agents, evals, token economics), and **ML systems engineering** (feature stores, serving, monitoring). Every concept follows one editorial rule — **"Explain before you dive deep"** — so each topic opens with a plain-language *"What is [Concept]?"* intro you can grasp in 15–30 seconds, then progressively unfolds into the trade-offs.
 
@@ -36,7 +36,7 @@ The app runs fully anonymously with zero configuration. Sign-in is optional and 
 - **Dark mode** throughout.
 
 ### 🧠 Practice
-- **413 interactive quizzes** from a centralized quiz bank — test your understanding on every topic.
+- **Interactive quizzes throughout the curriculum** — co-located lesson quizzes and the shared quiz bank test understanding on every topic.
 - **Practice problems** — structured, interview-style walkthroughs (clarify → estimate → architect → deep-dive → operate) for system design, ML systems, and GenAI systems.
 
 ### 🛠️ Build
@@ -127,11 +127,13 @@ systemdesigner/
 ├── content/entries/            # Canonical registry-driven content bodies
 │   └── [section]/[slug]/
 │       ├── index.mdoc          # The lesson body (path must match the registry)
-│       └── code/               # Co-located code examples, served via /api/content/[...]
+│       ├── code/               # Co-located code examples, served via /api/content/[...]
+│       ├── quiz/               # Canonical lesson quiz JSON
+│       └── data/               # Other structured lesson data
 ├── lib/
 │   ├── content-registry.ts     # ⭐ Single source of truth — every content entry's metadata
 │   └── quiz-bank/
-│       └── all-quizzes.json    # Centralized quiz bank, referenced by quizId (the slug)
+│       └── all-quizzes.json    # Shared/legacy quiz bank for entries that reference quizId
 ├── components/                 # Shared UI — CodeBlock, InteractiveQuiz, LessonHeader, calculators/
 ├── docs/                       # CONTENT_GUIDE, ARCHITECTURE, DEVELOPMENT
 ├── scripts/                    # validate-content-registry.cjs, generate-quiz-bank.cjs
@@ -174,7 +176,7 @@ pnpm check               # full local pre-PR check
 | [SECURITY.md](./SECURITY.md) | Reporting security issues |
 | [SUPPORT.md](./SUPPORT.md) | Where to get help |
 
-Deeper authoring standards also live in [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md). Need help? See [SUPPORT.md](./SUPPORT.md) or email the community list at **system-designer@googlegroups.com**.
+Deeper authoring standards live in [`AGENTS.md`](./AGENTS.md). Need help? See [SUPPORT.md](./SUPPORT.md) or email the community list at **system-designer@googlegroups.com**.
 
 ---
 

@@ -32,7 +32,7 @@ There's a path here for everyone, whatever your background:
 - 🧱 **Set up your environment** → [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)
 - 📝 **Write or edit lessons, quizzes, calculators** → [docs/CONTENT_GUIDE.md](./docs/CONTENT_GUIDE.md)
 - 🏛️ **Understand how it all fits together** → [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
-- 📐 **Authoring standards (authoritative)** → [CLAUDE.md](./CLAUDE.md) and [AGENTS.md](./AGENTS.md)
+- 📐 **Authoring standards (authoritative)** → [AGENTS.md](./AGENTS.md)
 - 🆘 **Need help?** → [SUPPORT.md](./SUPPORT.md)
 - 🔒 **Found a security issue?** → [SECURITY.md](./SECURITY.md) (please don't open a public issue)
 
@@ -129,10 +129,10 @@ Run through this checklist locally — it's the same gate CI enforces, so passin
 - [ ] **Run the full local check:** `pnpm check` (secret scan, content validation, tests, lint, build).
 - [ ] **Validate the content registry:** `pnpm validate:registry` (this is the content gate — it must pass).
 - [ ] **Lint:** `pnpm lint` is clean.
-- [ ] **Follow the authoring standards** in [CLAUDE.md](./CLAUDE.md) and [AGENTS.md](./AGENTS.md).
+- [ ] **Follow the authoring standards** in [AGENTS.md](./AGENTS.md).
 - [ ] **Use canonical content:** the body lives at `content/entries/[section]/[slug]/index.mdoc`, has no concrete content `page.tsx`, and matches the registry path.
 - [ ] **Keep interactivity focused:** React islands contain only behavior that cannot be expressed with shared Markdoc tags.
-- [ ] **For new quizzes:** regenerate the bank with `node scripts/generate-quiz-bank.cjs` and reference it with the `quiz` tag.
+- [ ] **For new quizzes:** add JSON under `content/entries/<section>/<slug>/quiz/`, load it with the Markdoc `quiz` tag's `questionsFile`, and run `pnpm validate:content`.
 - [ ] **Write a clear PR summary** that explains user/contributor impact and testing.
 - [ ] **Link the issue** your PR addresses (e.g. `Closes #123`).
 
@@ -153,16 +153,16 @@ If your PR sits without a response, a gentle nudge on the PR or in [Discussions]
 
 ## Code standards
 
-The **authoritative** standards live in two files in the repo root — read them before writing code or content:
+Read the authoritative standards before writing code or content:
 
-- 📐 [CLAUDE.md](./CLAUDE.md) — UI standards, content system, page templates, layout rules, quiz bank, calculators.
-- 📐 [AGENTS.md](./AGENTS.md) — companion authoring and automation standards.
+- 📐 [AGENTS.md](./AGENTS.md) — authoritative content authoring and automation standards.
+- 🧱 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — application and rendering architecture.
 
 The top rules to internalize:
 
 1. **"Explain before you dive deep."** Every concept opens with a plain-language **"What is [Concept]?"** intro a beginner can grasp in 15–30 seconds, then uses progressive disclosure into trade-offs and details. Never start with a comparison table the reader has no context for.
-2. **The content registry is the single source of truth.** Add new content to [`lib/content-registry.ts`](./lib/content-registry.ts) first; pages must match the registered `path`. Quizzes are centralized in [`lib/quiz-bank/all-quizzes.json`](./lib/quiz-bank/all-quizzes.json) and referenced by `quizId`.
-3. **Use the shared components.** `CodeBlock` from `@/components/shared/CodeBlock` (named import, `file=` prop), `InteractiveQuiz` from `@/components/fundamentals/InteractiveLearning` (`quizId` prop), `LessonHeader` from `@/components/fundamentals/LessonHeader`, and calculators in `components/calculators/`.
+2. **The content registry is the metadata source of truth.** Add new content to [`lib/content-registry.ts`](./lib/content-registry.ts) first; the canonical body and assets must match the registered `path`.
+3. **Use the shared Markdoc tags.** Load co-located code, quiz, and data assets through `/api/content/...`; use focused React content blocks only for behavior that the canonical tags cannot express.
 4. **Use shadcn/ui components, never native browser primitives.** No `confirm()`, `alert()`, `prompt()`, or native `<select>` — they break dark mode. Use Dialog / Select / Toast instead.
 5. **Escape `<` and `>` in JSX text** (`&lt;` / `&gt;`), and always use the standard wide layout `max-w-[1200px] mx-auto px-4 md:px-6 py-8`.
 6. **Never commit secrets.** Keep `.env.local`, GitHub App private keys, OpenAI keys, and Firebase service-account files out of git. Run `pnpm scan:secrets` before opening a PR if you touched config or docs with examples.

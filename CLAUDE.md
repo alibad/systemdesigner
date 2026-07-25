@@ -1,5 +1,10 @@
 # Claude Development Guidelines
 
+> **Legacy implementation reference:** For current content authoring rules, use
+> [`AGENTS.md`](./AGENTS.md) and [`docs/CONTENT_GUIDE.md`](./docs/CONTENT_GUIDE.md).
+> Where this historical reference conflicts with either document, those current
+> guides take precedence.
+
 ## Whiteboard & TLDraw Guidelines
 
 ### ⚠️ CRITICAL: NEVER Use `loadSnapshot()` on TLStore

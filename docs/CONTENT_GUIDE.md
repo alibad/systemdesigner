@@ -11,8 +11,7 @@ thousands of learners. Thank you for being here. 🙌
 
 > **New to the project?** Skim the top-level [README](../README.md) and
 > [CONTRIBUTING](../CONTRIBUTING.md) first, then come back here for the content-specific
-> details. For the exhaustive authoring standards, see [CLAUDE.md](../CLAUDE.md) and
-> [AGENTS.md](../AGENTS.md).
+> details. For the exhaustive authoring standards, see [AGENTS.md](../AGENTS.md).
 
 ---
 
@@ -82,9 +81,10 @@ because each piece has exactly one home.
 
 ```
 lib/content-registry.ts          ← (1) the registry entry (source of truth)
-content/entries/<section>/<slug>/index.mdoc  ← (3) the lesson body
-content/entries/<section>/<slug>/code/*.py   ← (4) co-located code examples
-lib/quiz-bank/all-quizzes.json    ← (5) the quiz, referenced by quizId
+content/entries/<section>/<slug>/index.mdoc  ← (2) the lesson body
+content/entries/<section>/<slug>/code/*      ← (3) co-located code examples
+content/entries/<section>/<slug>/quiz/*.json ← (4) the lesson quiz
+content/entries/<section>/<slug>/data/*      ← (5) other structured lesson data
 ```
 
 Here's the end-to-end flow.
@@ -122,7 +122,7 @@ The registry (`CONTENT_REGISTRY: ContentNode[]`) is the **single source of truth
 **Field rules that trip people up:**
 
 - `path` must be exactly `/<section>/<slug>` and must match the entry directory.
-- `id` is usually the slug (e.g. `rate-limiting`) — it's also the `quizId`.
+- `id` is usually the slug (e.g. `rate-limiting`).
 - `seo.metaDescription` must be **≤ 160 characters**. The validator enforces this.
 - `prerequisites` and `related` must reference **ids that already exist** in the registry.
 
@@ -166,7 +166,10 @@ Now introduce the mechanics and trade-offs through progressive disclosure.
    title="Token Bucket Implementation" /%}
 {% /section-card %}
 
-{% quiz quizId="rate-limiting" title="Test Your Understanding" /%}
+{% quiz
+   questionsFile="/api/content/fundamentals/rate-limiting/quiz/rate-limiting-review.json"
+   lessonSlug="rate-limiting"
+   title="Test Your Understanding" /%}
 ```
 
 Do not add `app/<section>/<slug>/page.tsx`. Concrete content routes bypass the shared
@@ -198,32 +201,31 @@ Use descriptive names (`token-bucket.py`, not `code1.py`) and the right extensio
 (`.py`, `.ts`, `.yaml`, `.sql`, `.json`, …). These files are excluded from TypeScript
 compilation, so they're treated as content, not code.
 
-### 5. Add quiz questions to `lib/quiz-bank/all-quizzes.json`
+### 5. Co-locate quiz questions under `quiz/`
 
-Quizzes live in the centralized bank or co-located JSON files. Add a bank entry keyed by your slug (the
-`quizId`). The schema:
+New lesson quizzes live beside the lesson at
+`content/entries/<section>/<slug>/quiz/<descriptive-name>.json`. Existing entries
+that already use the shared quiz bank may continue using `quizId`, but do not add
+inline questions to a body or component.
+
+The co-located schema is:
 
 ```json
 {
-  "rate-limiting": {
-    "title": "Rate Limiting",
-    "section": "fundamentals",
-    "difficulty": "intermediate",
-    "duration": "10 min",
-    "questions": [
-      {
-        "question": "Which algorithm allows short bursts above the average rate?",
-        "options": [
-          "Fixed window counter",
-          "Token bucket",
-          "Leaky bucket",
-          "Sliding window log"
-        ],
-        "correctAnswer": 1,
-        "explanation": "Token bucket accumulates tokens up to a cap, so a client that was idle can briefly burst above the steady rate — unlike a leaky bucket, which smooths output to a constant rate."
-      }
-    ]
-  }
+  "title": "Rate Limiting Review",
+  "questions": [
+    {
+      "question": "Which algorithm allows short bursts above the average rate?",
+      "options": [
+        "Fixed window counter",
+        "Token bucket",
+        "Leaky bucket",
+        "Sliding window log"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Token bucket accumulates tokens up to a cap, so an idle client can briefly burst above the steady rate."
+    }
+  ]
 }
 ```
 
@@ -231,12 +233,9 @@ Quizzes live in the centralized bank or co-located JSON files. Add a bank entry 
 
 - `correctAnswer` is a **zero-based index** into `options`.
 - Always include a helpful `explanation` — it teaches even when the learner guessed.
-- `difficulty` is `beginner` | `intermediate` | `advanced`.
-- After editing, you can regenerate/refresh the bank with:
-
-  ```bash
-  node scripts/generate-quiz-bank.cjs
-  ```
+- Use a descriptive kebab-case filename rather than `questions.json`.
+- Reference it with `questionsFile="/api/content/<section>/<slug>/quiz/<file>.json"`.
+- Run `pnpm validate:content` after editing it.
 
 ### 6. Validate + lint
 
@@ -319,8 +318,8 @@ Most contributions improve what's already there. Here's exactly where each kind 
 | Clarify a confusing explanation | `content/entries/<section>/<slug>/index.mdoc` | Add or expand the intro `section-card`; apply the golden rule |
 | Add a real-world example or analogy | `content/entries/<section>/<slug>/index.mdoc` | Add a `section-card`; banking/social/e-commerce analogies preferred |
 | Add or fix a code example | `content/entries/<section>/<slug>/code/*` | Add a file under `code/`, reference it via `code-block file=…` |
-| Fix a wrong quiz answer / explanation | `lib/quiz-bank/all-quizzes.json` | Correct `correctAnswer` (zero-based) or `explanation` |
-| Improve a quiz question | `lib/quiz-bank/all-quizzes.json` | Edit `question`/`options`; keep one clearly-correct answer |
+| Fix a wrong quiz answer / explanation | `content/entries/<section>/<slug>/quiz/*.json` or the existing bank entry | Correct `correctAnswer` (zero-based) or `explanation` |
+| Improve a quiz question | The quiz JSON referenced by the lesson's `quiz` tag | Edit `question`/`options`; keep one clearly-correct answer |
 | Add a diagram | `content/entries/<section>/<slug>/index.mdoc` | Use an approved content tag or a focused interactive block; keep it dark-mode friendly |
 | Suggest something you can't write yet | — | Click **"Suggest an improvement"** to open the Content improvement issue |
 
@@ -339,7 +338,7 @@ Run through this before you open a PR. It's exactly what reviewers (and CI) look
 - [ ] **Canonical body** — content lives at `content/entries/<section>/<slug>/index.mdoc`; no concrete content `page.tsx` exists
 - [ ] **Beginner context** — every concept opens with a "What is [Concept]?" intro card
 - [ ] **Markdoc syntax** — literal source syntax appears in inline code or fenced code blocks
-- [ ] **Quiz wiring** — `{% quiz quizId="<slug>" /%}`, never inline questions
+- [ ] **Quiz wiring** — `quiz` loads co-located JSON through `questionsFile` (or an existing bank entry through `quizId`); questions are never inline
 - [ ] **External code files** — examples live in `code/` and load via `code-block file=…`
 - [ ] **Focused islands** — interactive blocks contain only user-controlled behavior, never the whole lesson
 - [ ] **SEO description** ≤ 160 characters; tags present
@@ -379,8 +378,8 @@ implementation/trade-offs last. (See "the golden rule" above.)
 - **[CONTRIBUTING.md](../CONTRIBUTING.md)** — overall contribution workflow & PR process
 - **[docs/DEVELOPMENT.md](./DEVELOPMENT.md)** — local setup, env vars, scripts
 - **[docs/ARCHITECTURE.md](./ARCHITECTURE.md)** — how the app is wired together
-- **[CLAUDE.md](../CLAUDE.md)** & **[AGENTS.md](../AGENTS.md)** — the exhaustive authoring
-  standards (templates, component rules, edge cases)
+- **[AGENTS.md](../AGENTS.md)** — the exhaustive authoring standards
+  (templates, component rules, edge cases)
 - **GitHub Issues** — filter by **`good first issue`** for a friendly starting point
 - **GitHub Discussions** — ask questions, float ideas, get unstuck
 - **Community mailing list** — [system-designer@googlegroups.com](mailto:system-designer@googlegroups.com)
