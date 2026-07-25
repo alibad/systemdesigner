@@ -25,29 +25,28 @@ with every concept explained from first principles before the trade-offs.
 
 These are the areas where contributions move the needle most right now:
 
-1. **Fill the content graph.** The content registry references many prerequisite
-   and related lessons that don't exist yet. Running
-   `node scripts/validate-content-registry.cjs` lists every
-   referenced-but-missing topic (currently ~740 unique ids). Each one is a
-   ready-made lesson idea — see "Great first contributions" below.
-2. **Deepen quizzes & calculators.** Add or improve quiz questions and
-   interactive calculators for existing lessons.
-3. **Strengthen the editorial bar.** Audit lessons that jump into trade-offs
-   without a *"What is [Concept]?"* intro and add the missing context.
-4. **Polish & accessibility.** Dark-mode consistency, keyboard navigation, and
-   mobile layout fixes.
+1. **Strengthen the editorial bar.** Review lessons for technical accuracy,
+   beginner-friendly context, useful examples, explicit trade-offs, and
+   production guidance.
+2. **Deepen quizzes and interactive labs.** Improve questions, calculators, and
+   decision exercises so they test reasoning rather than recall.
+3. **Polish accessibility and responsive behavior.** Improve keyboard
+   navigation, focus management, screen-reader output, dark-mode consistency,
+   and mobile layouts.
+4. **Improve contributor tooling.** Make authoring, validation, testing, and
+   first-time setup easier to understand and harder to get wrong.
 
 ## Great first contributions
 
 Looking for somewhere to start? Any of these is a self-contained, high-value PR:
 
-- **Write a missing lesson.** Pick a topic from the validator's
-  "dangling relationship references" list, then follow
-  [docs/CONTENT_GUIDE.md](./docs/CONTENT_GUIDE.md) to add it. This shrinks the
-  backlog *and* improves cross-linking across the whole site.
 - **Improve an existing lesson** via the in-app "Edit this page on GitHub" /
-  "Suggest an improvement" links at the bottom of any lesson.
-- **Add a quiz** to a lesson that's missing strong questions.
+  "Suggest an improvement" links at the bottom of any lesson. Focus on one
+  concrete accuracy, clarity, example, or production-readiness improvement.
+- **Improve a quiz or interactive lab** whose questions or scenarios do not yet
+  test the lesson's important decisions and trade-offs.
+- **Improve contributor documentation or tests** where a setup step, authoring
+  rule, or validation failure is unclear.
 - **Fix a `good first issue`** —
   [browse them here](https://github.com/alibad/systemdesigner/labels/good%20first%20issue).
 
