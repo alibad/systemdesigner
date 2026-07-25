@@ -5,6 +5,15 @@ import { readFileSync } from 'node:fs';
 export const GITHUB_OWNER = process.env.GITHUB_REPO_OWNER || 'alibad';
 export const GITHUB_REPO = process.env.GITHUB_REPO_NAME || 'systemdesigner';
 
+export function isGitHubAppConfigured(): boolean {
+  return Boolean(
+    process.env.GITHUB_APP_ID &&
+      process.env.GITHUB_APP_INSTALLATION_ID &&
+      (process.env.GITHUB_APP_PRIVATE_KEY_PATH ||
+        process.env.GITHUB_APP_PRIVATE_KEY)
+  );
+}
+
 /**
  * Resolve the GitHub App private key from one of three formats:
  *  - a file path (local dev): GITHUB_APP_PRIVATE_KEY_PATH
@@ -31,10 +40,8 @@ function resolvePrivateKey(): string {
 export function getOctokit(): Octokit {
   const appId = process.env.GITHUB_APP_ID;
   const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
-  const hasKey =
-    process.env.GITHUB_APP_PRIVATE_KEY_PATH || process.env.GITHUB_APP_PRIVATE_KEY;
 
-  if (!appId || !installationId || !hasKey) {
+  if (!isGitHubAppConfigured()) {
     throw new Error(
       'GitHub App auth not configured. Set GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, and either GITHUB_APP_PRIVATE_KEY_PATH or GITHUB_APP_PRIVATE_KEY.'
     );

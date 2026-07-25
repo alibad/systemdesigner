@@ -21,6 +21,8 @@ import {
   Paperclip,
   Trash2,
   ImagePlus,
+  Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -30,7 +32,10 @@ import {
   HtmlScope,
 } from '@/lib/stores/feedbackStore';
 import { useAuth } from '@/hooks/useAuth';
-import { submitFeedback as submitFirebaseFeedback } from '@/lib/firebase';
+import {
+  isFirebaseConfigured,
+  submitFeedback as submitFirebaseFeedback,
+} from '@/lib/firebase';
 import { useNotificationTriggers } from '@/hooks/useNotificationTriggers';
 import { useToast } from '@/components/ui/toast';
 import ScreenshotAnnotator from './ScreenshotAnnotator';
@@ -61,7 +66,7 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
-    const mq = window.matchMedia('(pointer: coarse)');
+    const mq = window.matchMedia('(max-width: 639px), (pointer: coarse)');
     const check = () => setIsMobile(mq.matches);
     check();
     mq.addEventListener('change', check);
@@ -189,12 +194,22 @@ function ConfirmDialog({
   );
 }
 
-export default function FeedbackWidget() {
+interface FeedbackWidgetProps {
+  onOpenAI?: () => void;
+}
+
+interface FeedbackDeliveryStatus {
+  configured: boolean;
+  issuesUrl: string;
+}
+
+export default function FeedbackWidget({ onOpenAI }: FeedbackWidgetProps) {
   const store = useFeedbackStore();
   const { user } = useAuth();
   const { triggerFeedback } = useNotificationTriggers();
   const { addToast } = useToast();
   const isMobile = useIsMobile();
+  const hasMediaStorage = isFirebaseConfigured;
 
   const [annotatingImg, setAnnotatingImg] = useState<string | null>(null);
   const [annotatingCaptureId, setAnnotatingCaptureId] = useState<string | null>(null);
@@ -215,8 +230,11 @@ export default function FeedbackWidget() {
   const [settingsTab, setSettingsTab] = useState<'notifications' | 'diagnostics'>('notifications');
   const [confirmDeleteAudio, setConfirmDeleteAudio] = useState(false);
   const [confirmDeleteVideo, setConfirmDeleteVideo] = useState(false);
+  const [deliveryStatus, setDeliveryStatus] =
+    useState<FeedbackDeliveryStatus | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const selectDropdownRef = useRef<HTMLDivElement>(null);
 
   const videoRecorderRef = useRef<MediaRecorder | null>(null);
@@ -225,6 +243,27 @@ export default function FeedbackWidget() {
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!store.isOpen || deliveryStatus) return;
+    let active = true;
+
+    fetch('/api/feedback')
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Feedback status unavailable');
+        return response.json() as Promise<FeedbackDeliveryStatus>;
+      })
+      .then((status) => {
+        if (active) setDeliveryStatus(status);
+      })
+      .catch(() => {
+        // A transient status check should not hide a working submission path.
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [deliveryStatus, store.isOpen]);
 
   // ---- File handling ----
 
@@ -313,6 +352,13 @@ export default function FeedbackWidget() {
 
   // ---- Element Select ----
 
+  const startElementSelect = useCallback(() => {
+    setSelectDropdownOpen(false);
+    const s = useFeedbackStore.getState();
+    s.minimize();
+    s.setIsElementSelecting(true);
+  }, []);
+
   const startSelectTool = useCallback(() => {
     setSelectDropdownOpen(false);
     const s = useFeedbackStore.getState();
@@ -355,6 +401,7 @@ export default function FeedbackWidget() {
       info: `<${tag}${id}${classes}>`,
       dims,
       full: `<${tag}${id}${classes}> ${dims}${text ? ` — "${text}"` : ''}`,
+      html: el.outerHTML.slice(0, 50_000),
     };
   };
 
@@ -381,7 +428,15 @@ export default function FeedbackWidget() {
     }
     const d = describeElement(el);
     const rect = el.getBoundingClientRect();
-    const captureId = s.addCapture({ elementInfo: d.full, position: { x: Math.round(e.clientX), y: Math.round(e.clientY) } });
+    const captureId = s.addCapture({
+      elementInfo: d.full,
+      elementHtml: d.html,
+      position: { x: Math.round(e.clientX), y: Math.round(e.clientY) },
+    });
+    if (!hasMediaStorage || isMobile) {
+      s.restore();
+      return;
+    }
     await new Promise((r) => setTimeout(r, 200));
     try {
       const cropped = await withWidgetHidden(async () => {
@@ -405,7 +460,11 @@ export default function FeedbackWidget() {
     const clickY = e.clientY;
     const el = elementUnderPoint(clickX, clickY, 'feedback-pinpoint-overlay');
     const info = el ? describeElement(el).full : 'unknown';
-    const captureId = s.addCapture({ elementInfo: info, position: { x: Math.round(clickX), y: Math.round(clickY) } });
+    const captureId = s.addCapture({
+      elementInfo: info,
+      elementHtml: el ? describeElement(el).html : undefined,
+      position: { x: Math.round(clickX), y: Math.round(clickY) },
+    });
     s.setIsPinpointing(false);
     setPinpointCursor(null);
 
@@ -416,8 +475,10 @@ export default function FeedbackWidget() {
     document.body.appendChild(marker);
     await new Promise((r) => setTimeout(r, 200));
     try {
-      const base64 = await withWidgetHidden(() => captureNativeScreenshot());
-      s.addScreenshotToCapture(captureId, base64);
+      if (hasMediaStorage) {
+        const base64 = await withWidgetHidden(() => captureNativeScreenshot());
+        s.addScreenshotToCapture(captureId, base64);
+      }
     } catch {
       /* element info still captured */
     } finally {
@@ -600,7 +661,7 @@ export default function FeedbackWidget() {
   const buildDiagnostics = async (s: ReturnType<typeof useFeedbackStore.getState>) => {
     const diagnostics: Record<string, unknown> = {};
     if (s.includeMetadata) diagnostics.metadata = getBrowserMetadata();
-    if (s.includeConsole) {
+    if (hasMediaStorage && s.includeConsole) {
       const logs = getConsoleLogs()
         .filter((e) => {
           if (s.consoleLevel === 'error') return e.level === 'error';
@@ -615,7 +676,7 @@ export default function FeedbackWidget() {
         );
       }
     }
-    if (s.includeNetwork) {
+    if (hasMediaStorage && s.includeNetwork) {
       const logs = getNetworkLogs().slice(-s.networkLimit);
       if (logs.length) {
         diagnostics.networkUrl = await uploadFeedbackText(
@@ -624,9 +685,14 @@ export default function FeedbackWidget() {
         );
       }
     }
-    if (s.includeHtml) {
-      const scope = s.htmlScope === 'selections' ? 'viewport' : s.htmlScope;
-      const html = capturePageHtml(scope);
+    if (hasMediaStorage && s.includeHtml) {
+      const html =
+        s.htmlScope === 'selections'
+          ? s.captures
+              .map((capture) => capture.elementHtml)
+              .filter((value): value is string => Boolean(value))
+              .join('\n\n<!-- ---- -->\n\n')
+          : capturePageHtml(s.htmlScope);
       if (html) diagnostics.htmlUrl = await uploadFeedbackText(html, 'page-snapshot.txt');
     }
     return Object.keys(diagnostics).length ? diagnostics : undefined;
@@ -635,6 +701,7 @@ export default function FeedbackWidget() {
   const handleSubmit = async () => {
     const s = useFeedbackStore.getState();
     if (!s.title.trim()) return;
+    if (deliveryStatus?.configured === false) return;
     if (s.isRecording || s.isAudioRecording) {
       addToast({ title: 'Recording in progress', description: 'Stop the recording before submitting', variant: 'destructive' });
       return;
@@ -650,7 +717,7 @@ export default function FeedbackWidget() {
       const uploadedCaptures = await Promise.all(
         s.captures.map(async (c, i) => {
           let screenshotUrl: string | undefined;
-          if (c.screenshot) {
+          if (hasMediaStorage && c.screenshot) {
             const compressed = await compressImage(c.screenshot);
             screenshotUrl = await uploadFeedbackDataUrl(compressed, `capture-${i}.jpg`);
           }
@@ -660,17 +727,23 @@ export default function FeedbackWidget() {
 
       let videoUrl: string | undefined;
       let audioUrl: string | undefined;
-      if (s.videoBlob) videoUrl = await uploadFeedbackBlob(s.videoBlob, 'recording.webm', s.videoBlob.type);
-      if (s.audioBlob) audioUrl = await uploadFeedbackBlob(s.audioBlob, 'voice.webm', s.audioBlob.type);
+      if (hasMediaStorage && s.videoBlob) {
+        videoUrl = await uploadFeedbackBlob(s.videoBlob, 'recording.webm', s.videoBlob.type);
+      }
+      if (hasMediaStorage && s.audioBlob) {
+        audioUrl = await uploadFeedbackBlob(s.audioBlob, 'voice.webm', s.audioBlob.type);
+      }
 
-      const uploadedAttachments = await Promise.all(
-        s.attachments.map(async (a) => ({
-          name: a.name,
-          type: a.type,
-          size: a.size,
-          url: await uploadFeedbackDataUrl(a.dataUrl, a.name),
-        }))
-      );
+      const uploadedAttachments = hasMediaStorage
+        ? await Promise.all(
+            s.attachments.map(async (a) => ({
+              name: a.name,
+              type: a.type,
+              size: a.size,
+              url: await uploadFeedbackDataUrl(a.dataUrl, a.name),
+            }))
+          )
+        : [];
 
       const diagnostics = await buildDiagnostics(s);
       const email =
@@ -696,34 +769,36 @@ export default function FeedbackWidget() {
       });
       const result = await res.json();
 
-      // Hybrid: mirror to Firebase + fire notification (best-effort)
-      try {
-        const feedbackId = await submitFirebaseFeedback({
-          feedback: `${title}\n\n${description}`,
-          category,
-          userId: user?.uid || null,
-          userEmail: user?.email || null,
-          userName: user?.displayName || null,
-          userPhotoURL: user?.photoURL || null,
-          isAnonymous: user?.isAnonymous ?? true,
-          timestamp: new Date(),
-          url: currentUrl,
-          userAgent: navigator.userAgent,
-        });
-        await triggerFeedback({
-          id: feedbackId,
-          feedback: `${title}\n\n${description}`,
-          category,
-          userEmail: user?.email || undefined,
-          urgent:
-            description.toLowerCase().includes('urgent') ||
-            description.toLowerCase().includes('critical') ||
-            category === 'bug',
-          url: currentUrl,
-          pageTitle: document.title,
-        });
-      } catch (firebaseErr) {
-        console.error('Firebase feedback mirror failed:', firebaseErr);
+      // Mirror to Firebase and fire notifications when that optional backend exists.
+      if (isFirebaseConfigured) {
+        try {
+          const feedbackId = await submitFirebaseFeedback({
+            feedback: `${title}\n\n${description}`,
+            category,
+            userId: user?.uid || null,
+            userEmail: user?.email || null,
+            userName: user?.displayName || null,
+            userPhotoURL: user?.photoURL || null,
+            isAnonymous: user?.isAnonymous ?? true,
+            timestamp: new Date(),
+            url: currentUrl,
+            userAgent: navigator.userAgent,
+          });
+          await triggerFeedback({
+            id: feedbackId,
+            feedback: `${title}\n\n${description}`,
+            category,
+            userEmail: user?.email || undefined,
+            urgent:
+              description.toLowerCase().includes('urgent') ||
+              description.toLowerCase().includes('critical') ||
+              category === 'bug',
+            url: currentUrl,
+            pageTitle: document.title,
+          });
+        } catch (firebaseErr) {
+          console.error('Firebase feedback mirror failed:', firebaseErr);
+        }
       }
 
       if (result.success) {
@@ -732,6 +807,14 @@ export default function FeedbackWidget() {
         addToast({ title: 'Feedback submitted', description: 'Thank you for your feedback!', variant: 'success' });
         setTimeout(() => setSuccessUrl(null), 4000);
       } else {
+        if (result.code === 'setup_required') {
+          setDeliveryStatus({
+            configured: false,
+            issuesUrl:
+              result.issuesUrl ||
+              'https://github.com/alibad/systemdesigner/issues/new/choose',
+          });
+        }
         addToast({ title: 'Submission failed', description: result.error || 'Please try again', variant: 'destructive' });
       }
     } catch (error) {
@@ -911,15 +994,36 @@ export default function FeedbackWidget() {
         </div>
       )}
 
-      {/* Trigger button */}
+      {/* Unified learning and feedback launcher */}
       {!store.isOpen && !store.hideTrigger && !store.isRecording && (
-        <button
-          onClick={() => store.open()}
-          className="fixed bottom-6 right-6 z-50 w-12 h-12 bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 rounded-full shadow-lg hover:shadow-xl transition-all hover:scale-105 flex items-center justify-center"
-          title="Send feedback"
+        <div
+          className="fixed bottom-6 right-6 z-50 flex h-12 items-stretch overflow-hidden rounded-full border border-border bg-background/95 text-foreground shadow-lg backdrop-blur-md"
+          role="group"
+          aria-label="Learning assistance and feedback"
         >
-          <MessageSquare className="w-5 h-5" />
-        </button>
+          {onOpenAI && (
+            <button
+              type="button"
+              onClick={onOpenAI}
+              className="flex h-12 items-center gap-2 px-3 text-sm font-medium text-indigo-700 transition-colors hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+              title="Ask AI about this page or selected text"
+              aria-label="Ask AI about this page or selected text"
+            >
+              <Sparkles className="h-4 w-4" />
+              <span className="hidden sm:inline">Ask AI</span>
+            </button>
+          )}
+          {onOpenAI && <span className="my-2 w-px bg-border" aria-hidden="true" />}
+          <button
+            type="button"
+            onClick={() => store.open()}
+            className="flex h-12 w-12 items-center justify-center transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            title="Send feedback"
+            aria-label="Send feedback"
+          >
+            <MessageSquare className="h-4 w-4" />
+          </button>
+        </div>
       )}
 
       {/* Minimized pill */}
@@ -948,10 +1052,24 @@ export default function FeedbackWidget() {
             <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-200 dark:border-neutral-700 relative">
               <h2 className="text-base font-semibold text-neutral-900 dark:text-neutral-100">Send Feedback</h2>
               <div className="flex items-center gap-1">
+                {onOpenAI && (
+                  <button
+                    onClick={() => {
+                      store.minimize();
+                      onOpenAI();
+                    }}
+                    className="p-1.5 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-indigo-600 dark:text-indigo-300"
+                    title="Ask AI about this page"
+                    aria-label="Ask AI about this page"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                  </button>
+                )}
                 <button
                   onClick={() => setShowSettings((v) => !v)}
                   className="p-1.5 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500"
                   title="Settings"
+                  aria-label="Feedback settings"
                 >
                   <Settings className="w-4 h-4" />
                 </button>
@@ -960,6 +1078,7 @@ export default function FeedbackWidget() {
                     onClick={() => store.minimize()}
                     className="p-1.5 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500"
                     title="Minimize"
+                    aria-label="Minimize feedback"
                   >
                     <Minimize2 className="w-4 h-4" />
                   </button>
@@ -968,6 +1087,7 @@ export default function FeedbackWidget() {
                   onClick={() => store.close()}
                   className="p-1.5 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500"
                   title="Close"
+                  aria-label="Close feedback"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1017,72 +1137,82 @@ export default function FeedbackWidget() {
                             Browser metadata
                           </label>
 
-                          <div>
-                            <label className="flex items-center gap-2">
-                              <input type="checkbox" checked={store.includeConsole} onChange={(e) => store.setIncludeConsole(e.target.checked)} />
-                              Console logs
-                            </label>
-                            {store.includeConsole && (
-                              <div className="pl-6 pt-1.5 space-y-1">
-                                {(['error', 'warn', 'all'] as ConsoleLevel[]).map((lvl) => (
-                                  <label key={lvl} className="flex items-center gap-2 text-xs">
-                                    <input type="radio" name="consoleLevel" checked={store.consoleLevel === lvl} onChange={() => store.setConsoleLevel(lvl)} />
-                                    {lvl === 'error' ? 'Errors only' : lvl === 'warn' ? 'Warnings+' : 'All levels'}
+                          {hasMediaStorage && (
+                            <div>
+                              <label className="flex items-center gap-2">
+                                <input type="checkbox" checked={store.includeConsole} onChange={(e) => store.setIncludeConsole(e.target.checked)} />
+                                Console logs
+                              </label>
+                              {store.includeConsole && (
+                                <div className="pl-6 pt-1.5 space-y-1">
+                                  {(['error', 'warn', 'all'] as ConsoleLevel[]).map((lvl) => (
+                                    <label key={lvl} className="flex items-center gap-2 text-xs">
+                                      <input type="radio" name="consoleLevel" checked={store.consoleLevel === lvl} onChange={() => store.setConsoleLevel(lvl)} />
+                                      {lvl === 'error' ? 'Errors only' : lvl === 'warn' ? 'Warnings+' : 'All levels'}
+                                    </label>
+                                  ))}
+                                  <label className="flex items-center gap-1.5 text-xs">
+                                    Last
+                                    <input
+                                      type="number"
+                                      min={5}
+                                      max={100}
+                                      value={store.consoleLimit}
+                                      onChange={(e) => store.setConsoleLimit(Number(e.target.value))}
+                                      className="w-14 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
+                                    />
+                                    entries
                                   </label>
-                                ))}
-                                <label className="flex items-center gap-1.5 text-xs">
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {hasMediaStorage && (
+                            <div>
+                              <label className="flex items-center gap-2">
+                                <input type="checkbox" checked={store.includeNetwork} onChange={(e) => store.setIncludeNetwork(e.target.checked)} />
+                                Network requests
+                              </label>
+                              {store.includeNetwork && (
+                                <label className="flex items-center gap-1.5 text-xs pl-6 pt-1.5">
                                   Last
                                   <input
                                     type="number"
                                     min={5}
-                                    max={100}
-                                    value={store.consoleLimit}
-                                    onChange={(e) => store.setConsoleLimit(Number(e.target.value))}
+                                    max={50}
+                                    value={store.networkLimit}
+                                    onChange={(e) => store.setNetworkLimit(Number(e.target.value))}
                                     className="w-14 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
                                   />
                                   entries
                                 </label>
-                              </div>
-                            )}
-                          </div>
+                              )}
+                            </div>
+                          )}
 
-                          <div>
-                            <label className="flex items-center gap-2">
-                              <input type="checkbox" checked={store.includeNetwork} onChange={(e) => store.setIncludeNetwork(e.target.checked)} />
-                              Network requests
-                            </label>
-                            {store.includeNetwork && (
-                              <label className="flex items-center gap-1.5 text-xs pl-6 pt-1.5">
-                                Last
-                                <input
-                                  type="number"
-                                  min={5}
-                                  max={50}
-                                  value={store.networkLimit}
-                                  onChange={(e) => store.setNetworkLimit(Number(e.target.value))}
-                                  className="w-14 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
-                                />
-                                entries
+                          {hasMediaStorage && (
+                            <div>
+                              <label className="flex items-center gap-2">
+                                <input type="checkbox" checked={store.includeHtml} onChange={(e) => store.setIncludeHtml(e.target.checked)} />
+                                Page HTML
                               </label>
-                            )}
-                          </div>
-
-                          <div>
-                            <label className="flex items-center gap-2">
-                              <input type="checkbox" checked={store.includeHtml} onChange={(e) => store.setIncludeHtml(e.target.checked)} />
-                              Page HTML
-                            </label>
-                            {store.includeHtml && (
-                              <div className="pl-6 pt-1.5 space-y-1">
-                                {(['viewport', 'full'] as HtmlScope[]).map((sc) => (
-                                  <label key={sc} className="flex items-center gap-2 text-xs">
-                                    <input type="radio" name="htmlScope" checked={store.htmlScope === sc} onChange={() => store.setHtmlScope(sc)} />
-                                    {sc === 'viewport' ? 'Visible viewport' : 'Full page'}
-                                  </label>
-                                ))}
-                              </div>
-                            )}
-                          </div>
+                              {store.includeHtml && (
+                                <div className="pl-6 pt-1.5 space-y-1">
+                                  {(['selections', 'viewport', 'full'] as HtmlScope[]).map((sc) => (
+                                    <label key={sc} className="flex items-center gap-2 text-xs">
+                                      <input type="radio" name="htmlScope" checked={store.htmlScope === sc} onChange={() => store.setHtmlScope(sc)} />
+                                      {sc === 'selections'
+                                        ? 'Selected elements'
+                                        : sc === 'viewport'
+                                          ? 'Visible viewport'
+                                          : 'Full page'}
+                                    </label>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1093,6 +1223,26 @@ export default function FeedbackWidget() {
 
             {/* Body */}
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              {deliveryStatus?.configured === false && (
+                <div
+                  className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+                  role="status"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <p className="font-medium">In-app submission is not configured here.</p>
+                    <a
+                      href={deliveryStatus.issuesUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-1 inline-flex items-center gap-1 underline underline-offset-2"
+                    >
+                      Open the GitHub issue form
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  </div>
+                </div>
+              )}
               {/* Category pills */}
               <div>
                 <label className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2 block">Category</label>
@@ -1142,10 +1292,48 @@ export default function FeedbackWidget() {
 
               {/* Capture tools */}
               <div className="flex flex-wrap gap-2">
-                {isMobile ? (
-                  <button type="button" onClick={() => fileInputRef.current?.click()} className={`${toolBtn} w-full justify-center min-h-11`}>
-                    <ImagePlus className="w-4 h-4" /> Add Screenshot or Photo
+                {!hasMediaStorage ? (
+                  <button
+                    type="button"
+                    onClick={startElementSelect}
+                    className={`${toolBtn} ${isMobile ? 'w-full min-h-11 justify-center' : ''}`}
+                  >
+                    <MousePointer className="w-3.5 h-3.5" />
+                    Select element
                   </button>
+                ) : isMobile ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={startElementSelect}
+                      className={`${toolBtn} min-h-11 flex-1 justify-center`}
+                    >
+                      <MousePointer className="w-4 h-4" />
+                      Select element
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`${toolBtn} w-full justify-center min-h-11`}
+                    >
+                      <ImagePlus className="w-4 h-4" /> Add Screenshot or Photo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={store.isAudioRecording ? stopAudioRecording : startAudioRecording}
+                      className={`${toolBtn} min-h-11 flex-1 justify-center ${store.isAudioRecording ? 'ring-2 ring-red-500' : ''}`}
+                    >
+                      {store.isAudioRecording ? <Square className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                      {store.isAudioRecording ? `Stop ${fmtTime(store.recordingSeconds)}` : 'Voice'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => attachmentInputRef.current?.click()}
+                      className={`${toolBtn} min-h-11 flex-1 justify-center`}
+                    >
+                      <Paperclip className="w-3.5 h-3.5" /> Attach
+                    </button>
+                  </>
                 ) : (
                   <>
                     {/* Select / Pinpoint split button */}
@@ -1179,22 +1367,37 @@ export default function FeedbackWidget() {
                     <button type="button" onClick={startRecording} className={toolBtn}>
                       <Video className="w-3.5 h-3.5" /> Record
                     </button>
+                    <button
+                      type="button"
+                      onClick={store.isAudioRecording ? stopAudioRecording : startAudioRecording}
+                      className={`${toolBtn} ${store.isAudioRecording ? 'ring-2 ring-red-500' : ''}`}
+                    >
+                      {store.isAudioRecording ? <Square className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                      {store.isAudioRecording ? `Stop ${fmtTime(store.recordingSeconds)}` : 'Voice'}
+                    </button>
                   </>
                 )}
-                <button
-                  type="button"
-                  onClick={store.isAudioRecording ? stopAudioRecording : startAudioRecording}
-                  className={`${toolBtn} ${store.isAudioRecording ? 'ring-2 ring-red-500' : ''}`}
-                >
-                  {store.isAudioRecording ? <Square className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
-                  {store.isAudioRecording ? `Stop ${fmtTime(store.recordingSeconds)}` : 'Voice'}
-                </button>
-                {isMobile && (
-                  <button type="button" onClick={() => fileInputRef.current?.click()} className={toolBtn}>
-                    <Paperclip className="w-3.5 h-3.5" /> Attach
-                  </button>
+                {hasMediaStorage && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept={isMobile ? 'image/*' : '*/*'}
+                      multiple
+                      className="hidden"
+                      onChange={handleFileInput}
+                    />
+                    {isMobile && (
+                      <input
+                        ref={attachmentInputRef}
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={handleFileInput}
+                      />
+                    )}
+                  </>
                 )}
-                <input ref={fileInputRef} type="file" accept={isMobile ? 'image/*' : '*/*'} multiple className="hidden" onChange={handleFileInput} />
               </div>
 
               {/* Audio recording inline indicator */}
@@ -1243,7 +1446,7 @@ export default function FeedbackWidget() {
               )}
 
               {/* Drop zone (desktop) */}
-              {!isMobile && (
+              {!isMobile && hasMediaStorage && (
                 <div
                   className="border-2 border-dashed border-neutral-200 dark:border-neutral-700 rounded-lg p-3 text-center text-xs text-neutral-400 dark:text-neutral-500 cursor-pointer hover:border-blue-400"
                   onClick={() => fileInputRef.current?.click()}
@@ -1298,7 +1501,13 @@ export default function FeedbackWidget() {
               <Button
                 size="sm"
                 onClick={handleSubmit}
-                disabled={!store.title.trim() || store.isSubmitting || store.isRecording || store.isAudioRecording}
+                disabled={
+                  !store.title.trim() ||
+                  store.isSubmitting ||
+                  store.isRecording ||
+                  store.isAudioRecording ||
+                  deliveryStatus?.configured === false
+                }
               >
                 {store.isSubmitting ? (
                   <>

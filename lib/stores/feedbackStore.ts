@@ -11,6 +11,7 @@ export type HtmlScope = 'full' | 'viewport' | 'selections';
 export interface FeedbackCapture {
   id: string;
   elementInfo?: string;
+  elementHtml?: string;
   position?: { x: number; y: number };
   screenshot?: string; // base64 data URL (uploaded to storage at submit time)
 }
@@ -49,7 +50,7 @@ const DEFAULT_SETTINGS: FeedbackSettings = {
   consoleLimit: 50,
   includeNetwork: false,
   networkLimit: 25,
-  includeHtml: false,
+  includeHtml: true,
   htmlScope: 'selections',
 };
 
@@ -267,7 +268,14 @@ export const useFeedbackStore = create<FeedbackState>((set, get) => {
       set((state) => ({
         captures: state.captures
           .map((c) =>
-            c.id === id ? { ...c, elementInfo: undefined, position: undefined } : c
+            c.id === id
+              ? {
+                  ...c,
+                  elementInfo: undefined,
+                  elementHtml: undefined,
+                  position: undefined,
+                }
+              : c
           )
           .filter((c) => c.elementInfo || c.screenshot),
       })),

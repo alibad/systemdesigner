@@ -1,5 +1,11 @@
 # Agents Content Development Guidelines
 
+## Git Delivery Workflow
+- `main` is the official and default development branch for this repository.
+- Work directly on `main` unless the user explicitly requests a separate branch.
+- Do not create or switch to `codex/*` or other feature branches by default.
+- When the user explicitly requests a production push, validate the changes, commit them on `main`, and push `origin/main`.
+
 ## Core Learning Principles
 - Always introduce every technical concept with clear context before any deep dive: explain what it is, why it matters, core principles, then details.
 - Never assume prior knowledge. Even familiar topics must begin with a "What is [Concept]?" intro card and a plain-language summary that a beginner can follow in 15–30 seconds.

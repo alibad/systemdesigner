@@ -9,10 +9,8 @@ import {
   saveConversation,
   updateConversation,
   getPageConversation,
-  getPageConversations,
-  closeConversation,
   resetConversation,
-  AIMessage
+  isFirebaseConfigured,
 } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -63,7 +61,11 @@ export default function AIChat({
       const isMobileUA = mobileRegex.test(navigator.userAgent);
       const isIPad = (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
                      navigator.userAgent.includes('iPad');
-      const isMobileDevice = hasTouch && (isMobileUA || isIPad || window.innerWidth < 1024);
+      const isMobileDevice =
+        isMobileUA ||
+        isIPad ||
+        window.innerWidth < 640 ||
+        (hasTouch && window.innerWidth < 1024);
       setIsMobile(isMobileDevice);
     };
 
@@ -77,6 +79,19 @@ export default function AIChat({
     if (isOpen && !hasInitialized) {
       const initializeConversation = async () => {
         setIsInitializing(true);
+        if (!isFirebaseConfigured) {
+          setConversationId(null);
+          setMessages(
+            initialMessage
+              ? [{ role: 'assistant', content: initialMessage }]
+              : []
+          );
+          setInput('');
+          setIsLoading(false);
+          setHasInitialized(true);
+          setIsInitializing(false);
+          return;
+        }
         try {
           console.log('🔄 Initializing chat with initialMessage:', initialMessage?.substring(0, 50));
 
@@ -142,7 +157,13 @@ export default function AIChat({
     const messagesChanged = previousMessagesRef.current.length !== messages.length ||
                           previousMessagesRef.current.some((msg, i) => msg.content !== messages[i]?.content);
 
-    if (messages.length > 0 && hasInitialized && !isInitializing && messagesChanged) {
+    if (
+      isFirebaseConfigured &&
+      messages.length > 0 &&
+      hasInitialized &&
+      !isInitializing &&
+      messagesChanged
+    ) {
       const saveConversationAsync = async () => {
         try {
           // Build conversation data, filtering out undefined values (Firestore doesn't allow them)
@@ -205,10 +226,11 @@ export default function AIChat({
     }
   }, [isOpen, isMobile]);
 
-  const sendMessage = async () => {
-    if (!input.trim() || isLoading) return;
+  const sendMessage = async (prompt?: string) => {
+    const nextInput = prompt ?? input;
+    if (!nextInput.trim() || isLoading) return;
 
-    const userMessage = input.trim();
+    const userMessage = nextInput.trim();
     setInput('');
 
     // Add user message to chat
@@ -238,7 +260,12 @@ export default function AIChat({
       });
 
       if (!response.ok) {
-        throw new Error('Failed to get response');
+        const result = await response.json().catch(() => null);
+        throw new Error(
+          response.status === 503
+            ? 'AI assistance is not configured in this environment.'
+            : result?.error || 'The AI assistant could not respond. Please try again.'
+        );
       }
 
       // Read the stream
@@ -295,7 +322,10 @@ export default function AIChat({
         const updated = [...prev];
         updated[streamingMessageIndex] = {
           role: 'assistant',
-          content: 'Sorry, I encountered an error. Please try again.'
+          content:
+            error instanceof Error
+              ? error.message
+              : 'The AI assistant could not respond. Please try again.'
         };
         return updated;
       });
@@ -324,7 +354,7 @@ export default function AIChat({
     console.log('🔄 Chat cleared');
 
     // Archive in background (don't block UI)
-    if (messages.length > 0) {
+    if (isFirebaseConfigured && messages.length > 0) {
       resetConversation(pageUrl)
         .then(() => console.log('✅ Archived to history'))
         .catch((e) => console.error('⚠️ Archive failed (non-critical):', e));
@@ -371,6 +401,18 @@ export default function AIChat({
 
   if (!isOpen) return null;
 
+  const starterPrompts = selectedText
+    ? [
+        'Explain this selection in plain language.',
+        'Give me a concrete example of this idea.',
+        'What trade-off should I notice here?',
+      ]
+    : [
+        'Explain the core idea in plain language.',
+        'Show me a concrete system design example.',
+        'Quiz me on the important decisions from this page.',
+      ];
+
   return (
     <>
       {/* Backdrop */}
@@ -411,6 +453,7 @@ export default function AIChat({
                   onClick={handleExportPDF}
                   className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors"
                   title="Export conversation"
+                  aria-label="Export conversation"
                 >
                   <Download className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
                 </button>
@@ -418,6 +461,7 @@ export default function AIChat({
                   onClick={handleReset}
                   className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors"
                   title="Start new conversation"
+                  aria-label="Start new conversation"
                 >
                   <RotateCcw className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
                 </button>
@@ -428,6 +472,7 @@ export default function AIChat({
                 onClick={handleMinimize}
                 className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors"
                 title="Minimize"
+                aria-label="Minimize AI chat"
               >
                 <Minimize2 className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
               </button>
@@ -437,6 +482,7 @@ export default function AIChat({
                 onClick={() => setIsExpanded(!isExpanded)}
                 className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors"
                 title={isExpanded ? "Collapse" : "Expand"}
+                aria-label={isExpanded ? 'Collapse AI chat' : 'Expand AI chat'}
               >
                 {isExpanded ? (
                   <ChevronDown className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
@@ -449,6 +495,7 @@ export default function AIChat({
               onClick={handleClose}
               className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors"
               title="Close"
+              aria-label="Close AI chat"
             >
               <X className="w-5 h-5 text-neutral-500 dark:text-neutral-400" />
             </button>
@@ -463,11 +510,30 @@ export default function AIChat({
                 <Sparkles className="w-8 h-8 text-purple-600 dark:text-purple-400" />
               </div>
               <h4 className="text-lg font-semibold text-neutral-900 dark:text-white mb-2">
-                Ask me anything!
+                {selectedText ? 'Ask about your selection' : 'Ask about this page'}
               </h4>
               <p className="text-sm text-neutral-500 dark:text-neutral-400 max-w-sm">
-                I can help explain concepts from this page, answer questions, or discuss related topics.
+                I use the current lesson as context, so you can ask for an explanation, example, or practice question.
               </p>
+              {selectedText && (
+                <blockquote className="mt-4 max-w-sm border-l-2 border-indigo-400 pl-3 text-left text-xs leading-5 text-neutral-600 dark:text-neutral-300">
+                  {selectedText.length > 240
+                    ? `${selectedText.slice(0, 240)}...`
+                    : selectedText}
+                </blockquote>
+              )}
+              <div className="mt-5 grid w-full max-w-sm gap-2">
+                {starterPrompts.map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => sendMessage(prompt)}
+                    className="min-h-11 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-left text-sm text-neutral-700 transition-colors hover:border-indigo-300 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:border-indigo-700 dark:hover:bg-indigo-950/30"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -549,10 +615,11 @@ export default function AIChat({
               disabled={isLoading}
             />
             <Button
-              onClick={sendMessage}
+              onClick={() => sendMessage()}
               disabled={!input.trim() || isLoading}
               size="icon"
               className="h-11 w-11 bg-purple-600 hover:bg-purple-700 text-white rounded-xl"
+              aria-label="Send message"
             >
               <Send className="w-5 h-5" />
             </Button>

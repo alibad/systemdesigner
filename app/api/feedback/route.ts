@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOctokit, GITHUB_OWNER, GITHUB_REPO } from '@/lib/github';
+import {
+  getOctokit,
+  GITHUB_OWNER,
+  GITHUB_REPO,
+  isGitHubAppConfigured,
+} from '@/lib/github';
 import { getContentByPath } from '@/lib/content-registry';
 
 export const runtime = 'nodejs';
@@ -8,9 +13,11 @@ const CATEGORY_LABELS: Record<string, string[]> = {
   bug: ['bug', 'feedback'],
   feature: ['enhancement', 'feedback'],
   ui: ['ui/ux', 'feedback'],
-  content: ['documentation', 'feedback'],
+  content: ['content', 'feedback'],
   general: ['feedback'],
 };
+
+const ISSUES_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/issues/new/choose`;
 
 interface Capture {
   elementInfo?: string;
@@ -161,6 +168,13 @@ function buildIssueBody(data: FeedbackPayload, pageName: string): string {
   return parts.join('\n');
 }
 
+export async function GET() {
+  return NextResponse.json({
+    configured: isGitHubAppConfigured(),
+    issuesUrl: ISSUES_URL,
+  });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as FeedbackPayload;
@@ -173,13 +187,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!isGitHubAppConfigured()) {
+      return NextResponse.json(
+        {
+          success: false,
+          code: 'setup_required',
+          error: 'In-app feedback is not configured in this environment.',
+          issuesUrl: ISSUES_URL,
+        },
+        { status: 503 }
+      );
+    }
+
     let octokit;
     try {
       octokit = getOctokit();
     } catch (err) {
-      console.error('Feedback: GitHub App not configured —', err);
+      console.error('Feedback: GitHub App initialization failed', err);
       return NextResponse.json(
-        { success: false, error: 'Feedback system not configured' },
+        {
+          success: false,
+          error: 'Feedback delivery is temporarily unavailable.',
+        },
         { status: 500 }
       );
     }

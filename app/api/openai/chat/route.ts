@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import { CONTENT_REGISTRY } from '@/lib/content-registry';
+import { CONTENT_REGISTRY, getContentByPath } from '@/lib/content-registry';
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -30,7 +30,6 @@ export async function POST(request: NextRequest) {
 
     // Check OpenAI API key
     if (!process.env.OPENAI_API_KEY) {
-      console.error('❌ OPENAI_API_KEY environment variable is not set');
       return NextResponse.json(
         { error: 'OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.' },
         { status: 503 }
@@ -42,37 +41,41 @@ export async function POST(request: NextRequest) {
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    // Extract context from URL and content registry
-    const pathSegments = pageUrl.split('/').filter(Boolean);
-    const section = pathSegments[pathSegments.length - 2] || 'general';
-    const topic = pathSegments[pathSegments.length - 1] || 'system-design';
-
-    // Find the current content in registry for more context
-    const currentContent = CONTENT_REGISTRY.find(
-      content => content.path === `/${pathSegments.join('/')}`
-    );
+    let pagePath = pageUrl;
+    try {
+      pagePath = new URL(pageUrl).pathname;
+    } catch {
+      // Relative paths are already suitable for registry lookup.
+    }
+    const currentContent = getContentByPath(pagePath);
 
     const contentLevel = currentContent?.level || 'intermediate';
     const contentTags = currentContent?.tags?.slice(0, 5).join(', ') || 'system design';
-    const relatedTopics = currentContent?.related?.slice(0, 3)
+    const relatedTopics = currentContent?.related
+      ?.slice(0, 3)
       .map(id => CONTENT_REGISTRY.find(c => c.id === id)?.title)
       .filter(Boolean)
       .join(', ') || '';
+    const normalizedPageContent = pageContent
+      ?.replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 12_000);
 
-    // Create concise context-aware system prompt
-    const systemPrompt = `You are a system design educator helping a ${contentLevel}-level learner.
+    const systemPrompt = `You are a precise, practical system design educator helping a ${contentLevel}-level learner.
 
-Context: "${pageTitle}" - ${contentTags}${selectedText ? `\nDiscussing: "${selectedText}"` : ''}
+Current page: "${currentContent?.title || pageTitle}"
+Topic tags: ${contentTags}
+${relatedTopics ? `Related lessons: ${relatedTopics}` : ''}
+${selectedText ? `\nThe learner selected this passage:\n"${selectedText}"` : ''}
 
-${pageContent ? `\nPage content:\n${pageContent.slice(0, 2000)}${pageContent.length > 2000 ? '...' : ''}` : ''}
+${normalizedPageContent ? `\nLesson content:\n${normalizedPageContent}` : ''}
 
-Be conversational and concise (2-5 sentences). Use examples from the page content when relevant.`;
+Use the lesson as the primary source of context. Answer the learner's actual question first, explain unfamiliar terms, and connect details to concrete architecture decisions or failure modes. If the lesson does not support a claim, say so instead of inventing specifics. Stay concise by default, but use short bullets or a worked example when that makes the answer clearer.`;
 
     console.log(`💬 Processing chat message for: ${pageTitle}`);
 
-    // Generate streaming response using GPT-4
     const stream = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini',
       messages: [
         {
           role: 'system',

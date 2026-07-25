@@ -17,7 +17,7 @@
   - Regular: `"📝 New [category] feedback from user"`
   - Urgent: `"🚨 URGENT: URGENT [category] feedback needs attention"` (if contains "bug", "error", "broken", "urgent", "critical")
 - **Priority**: Medium (Urgent if keywords detected)
-- **Connected In**: `components/FeedbackButton.tsx:69`
+- **Connected In**: `components/feedback/FeedbackWidget.tsx`
 - **Trigger**: On form submission
 
 ### 3. **Lesson Completion Milestones** ✅ ACTIVE + EMAIL

@@ -1,7 +1,6 @@
 import './globals.css';
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
-import { FeedbackProvider } from '@/contexts/FeedbackContext';
 import { StorageProvider } from '@/contexts/StorageContext';
 import { GamificationProvider } from '@/contexts/GamificationContext';
 import { ScreenReaderProvider } from '@/components/accessibility/ScreenReaderAnnouncements';
@@ -106,7 +105,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className={`${inter.className} min-h-screen text-gray-900 dark:text-neutral-100 antialiased dark:bg-neutral-950`} suppressHydrationWarning> 
         <ScreenReaderProvider>
-        <FeedbackProvider>
         <StorageProvider>
         <GamificationProvider>
         <NavigationProvider>
@@ -150,11 +148,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </NavigationProvider>
         </GamificationProvider>
         </StorageProvider>
-        </FeedbackProvider>
         </ScreenReaderProvider>
       </body>
     </html>
   );
 }
-
 

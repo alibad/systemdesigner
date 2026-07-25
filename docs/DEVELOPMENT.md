@@ -93,7 +93,7 @@ Most contributors should skip this section. You do **not** need secrets to run t
 | Admin content editing (local) | Admin setup above; saves to the working tree |
 | Admin content editing (Vercel) | Admin setup + GitHub App credentials |
 | Feedback widget creating GitHub issues | GitHub App credentials |
-| Optional AI helpers / maintainer content tooling | `OPENAI_API_KEY` |
+| Optional reader AI / maintainer content tooling | `OPENAI_API_KEY` |
 | Production SEO verification | `GOOGLE_SITE_VERIFICATION` |
 
 When you do need env vars, copy the template and fill in only the feature you are working on:
@@ -141,8 +141,9 @@ When those six keys are absent, `lib/site-config.ts` uses an inert local Firebas
 | `GITHUB_APP_PRIVATE_KEY_PATH` | Optional | Alternative to the above for local dev: a path to the `.pem` file. | `./secrets/app.pem` |
 | `ADMIN_CONTENT_PERSISTENCE` | Optional | Force admin saves to `filesystem` or `github`; defaults to GitHub on Vercel and filesystem elsewhere. | `github` |
 | `GITHUB_CMS_DRAFT_BRANCH` | Optional | Dedicated branch for Content Studio drafts; must differ from the public content branch. | `cms-drafts` |
-| `OPENAI_API_KEY` | Optional | Maintainer-side content-generation tooling only. **Never required to run the app.** | `sk-...` |
+| `OPENAI_API_KEY` | Optional | Reader-facing AI and maintainer content-generation tooling. **Never required to run the app.** | `sk-...` |
 | `OPENAI_MODEL` | Optional | Model id for that tooling. | `gpt-5.5` |
+| `OPENAI_CHAT_MODEL` | Optional | Model id for the reader-facing "Ask AI" chat. Defaults to `gpt-4o-mini`. | `gpt-4o-mini` |
 | `GOOGLE_SITE_VERIFICATION` | Optional | Google Search Console verification token (SEO). | `abc123...` |
 
 > **Bottom line:** every variable above is optional. The app runs locally with **none** of them set.
@@ -208,7 +209,7 @@ Every lesson has an in-app feedback widget, and the admin area includes a Markdo
    GITHUB_CMS_DRAFT_BRANCH=cms-drafts              # optional; this is the default
    ```
 
-If the App isn't configured, nothing breaks for readers — feedback still records submissions, and Content Studio writes drafts and published content to the local working tree in local/self-hosted development. Local draft state and publish snapshots live under the ignored `.content-cms/` directory. Vercel content editing requires the App because its runtime filesystem is not durable. Keep the private key **server-side only**; never prefix it with `NEXT_PUBLIC_`, and never commit the `.pem`.
+If the App isn't configured, nothing breaks for readers: the feedback widget links to the repository's GitHub issue form instead of pretending an in-app submission succeeded. Content Studio writes drafts and published content to the local working tree in local/self-hosted development. Local draft state and publish snapshots live under the ignored `.content-cms/` directory. Vercel content editing requires the App because its runtime filesystem is not durable. Keep the private key **server-side only**; never prefix it with `NEXT_PUBLIC_`, and never commit the `.pem`.
 
 Content Studio is available at `/admin/content/editor`. It provides durable autosaved drafts, structured block and source editing, rendered preview, explicit publishing, conflict recovery, and revision restore. With GitHub persistence, drafts are isolated on `GITHUB_CMS_DRAFT_BRANCH` (default `cms-drafts`) and publishing writes validated Markdoc to `NEXT_PUBLIC_GITHUB_BRANCH` (default `main`). Every request presents the signed-in user's Firebase ID token to the server. The server resolves the Firebase account, requires a verified email in `NEXT_PUBLIC_ADMIN_EMAILS`, validates Markdoc, and refuses a publish if the public lesson changed after the draft was based on it.
 
