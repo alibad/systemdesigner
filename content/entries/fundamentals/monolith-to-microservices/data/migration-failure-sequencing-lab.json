@@ -1,0 +1,122 @@
+{
+  "title": "Move traffic without turning an incident into a rewrite",
+  "description": "Switch rollout states to trace the old and new paths, the evidence used for promotion, and the rollback behavior when the candidate fails.",
+  "nodes": [
+    {
+      "id": "shopper",
+      "label": "Shopper",
+      "eyebrow": "Eligible request",
+      "detail": "Sends a checkout request. A cohort rule keeps the customer on one implementation for the duration of the request and its follow-up work.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 22
+    },
+    {
+      "id": "router",
+      "label": "Migration router",
+      "eyebrow": "Cohort and rollback",
+      "detail": "Routes eligible traffic to the candidate, retains a fast switch back to the monolith, and records which version served each request.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 27,
+      "y": 22
+    },
+    {
+      "id": "monolith",
+      "label": "Monolith path",
+      "eyebrow": "Known-good path",
+      "detail": "Remains available while migration evidence is incomplete. It is a rollback target, not a second permanent write owner for the same fact.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 50,
+      "y": 12
+    },
+    {
+      "id": "candidate",
+      "label": "Fulfillment candidate",
+      "eyebrow": "New path",
+      "detail": "Serves a bounded cohort with deadlines, idempotency, a compatible data contract, and a declared fallback behavior.",
+      "kind": "service",
+      "tone": "green",
+      "x": 50,
+      "y": 42
+    },
+    {
+      "id": "inventory-db",
+      "label": "Inventory store",
+      "eyebrow": "New owner",
+      "detail": "Records stock and reservations for the candidate. Its saturation and reservation outcomes are rollout guardrails, not just infrastructure details.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 74,
+      "y": 42
+    },
+    {
+      "id": "telemetry",
+      "label": "Comparison telemetry",
+      "eyebrow": "Async evidence",
+      "detail": "Receives versioned latency, errors, fallback volume, and result comparison data without delaying a customer request.",
+      "kind": "analytics",
+      "tone": "violet",
+      "x": 74,
+      "y": 76
+    },
+    {
+      "id": "controller",
+      "label": "Rollout controller",
+      "eyebrow": "Stop or promote",
+      "detail": "Applies a declared observation window and guardrails. It pauses promotion or restores the previous path when evidence is missing or unhealthy.",
+      "kind": "allocator",
+      "tone": "rose",
+      "x": 93,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "shopper-router", "from": "shopper", "to": "router", "label": "checkout" },
+    { "id": "router-monolith", "from": "router", "to": "monolith", "label": "previous path" },
+    { "id": "router-candidate", "from": "router", "to": "candidate", "label": "canary cohort" },
+    { "id": "candidate-inventory", "from": "candidate", "to": "inventory-db", "label": "reserve stock" },
+    { "id": "monolith-telemetry", "from": "monolith", "to": "telemetry", "label": "baseline", "mode": "async", "via": { "x": 58, "y": 72 } },
+    { "id": "candidate-telemetry", "from": "candidate", "to": "telemetry", "label": "candidate signals", "mode": "async" },
+    { "id": "telemetry-controller", "from": "telemetry", "to": "controller", "label": "guardrail result", "mode": "async" },
+    { "id": "controller-router", "from": "controller", "to": "router", "label": "pause or restore", "via": { "x": 92, "y": 8 } }
+  ],
+  "scenarios": [
+    {
+      "id": "shadow-read",
+      "label": "Shadow compare",
+      "summary": "The monolith serves the customer response while the candidate processes an eligible read or dry-run command. Results are compared asynchronously before any customer is moved.",
+      "activeEdges": ["shopper-router", "router-monolith", "monolith-telemetry", "candidate-telemetry", "telemetry-controller"],
+      "focusNode": "telemetry",
+      "result": "Comparison exposes semantic differences early. A mismatch is a boundary or contract problem to fix before canary traffic, not a reason to add more retries."
+    },
+    {
+      "id": "healthy-canary",
+      "label": "Healthy canary",
+      "summary": "A small cohort reaches the candidate. Its domain result, latency, error rate, and inventory saturation remain within the promotion policy for the observation window.",
+      "activeEdges": ["shopper-router", "router-candidate", "candidate-inventory", "candidate-telemetry", "telemetry-controller"],
+      "focusNode": "candidate",
+      "result": "Promotion may continue only after evidence is healthy. Keep the prior path compatible and the cohort versioned so a rollback is immediate and explainable."
+    },
+    {
+      "id": "inventory-timeout",
+      "label": "Inventory timeout",
+      "summary": "The candidate reaches its inventory deadline. The router stops increasing the cohort while the controller records the breach and sends new eligible requests back to the prior path.",
+      "activeEdges": ["shopper-router", "router-candidate", "candidate-inventory", "candidate-telemetry", "telemetry-controller", "controller-router", "router-monolith"],
+      "degradedNodes": ["candidate", "inventory-db"],
+      "focusNode": "inventory-db",
+      "result": "Rollback protects new requests first. Reconcile in-flight reservations using their idempotency keys and event history; do not retry indefinitely against an already saturated store."
+    },
+    {
+      "id": "telemetry-loss",
+      "label": "Missing evidence",
+      "summary": "The candidate still answers requests, but comparison telemetry is unavailable. The team has lost the proof needed to expand the cohort safely.",
+      "activeEdges": ["shopper-router", "router-candidate", "candidate-inventory", "candidate-telemetry"],
+      "failedNodes": ["telemetry"],
+      "focusNode": "telemetry",
+      "result": "Freeze promotion or restore the previous path. Serving traffic is not sufficient evidence that correctness, saturation, and customer outcomes remain healthy."
+    }
+  ]
+}

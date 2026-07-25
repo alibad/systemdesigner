@@ -1,0 +1,304 @@
+---
+title: "Model Serving Patterns"
+section: genai
+level: advanced
+duration: 75 min
+description: "Design production model serving systems with explicit admission, batching, routing, caching, autoscaling, reliability, and operational contracts."
+registryId: model-serving-patterns
+---
+
+{% section-card tone="intro" %}
+## What are model serving patterns?
+
+**Model serving patterns** are reusable ways to turn trained model artifacts into dependable prediction services. They define how a request is admitted, queued, batched, routed to a compatible model replica, executed, observed, and either completed or rejected.
+
+In plain language: a model server does more than call `predict`. It protects scarce compute while keeping the product's latency, quality, isolation, and availability promises.
+
+The core invariant is **admit only work the fleet can finish inside an explicit contract**. Unbounded queues, blind retries, and cold replicas do not create capacity; they move failure later in the request path.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="SLO" label="Bound the wait" detail="Budget queue, execution, network, and post-processing latency together" tone="blue" /%}
+{% metric value="Goodput" label="Count useful work" detail="Measure completions inside the latency and quality contract, not raw throughput" tone="green" /%}
+{% metric value="Warm" label="Make capacity ready" detail="A scheduled process is not serving capacity until weights and caches are usable" tone="amber" /%}
+{% metric value="Versioned" label="Attribute every result" detail="Record model, runtime, policy, and feature versions for each response" tone="violet" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Start by choosing the request contract
+
+The serving shape follows the product deadline and response semantics. Do not select a framework before deciding whether callers wait online, poll later, consume a stream, or invoke a composed model graph.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Synchronous online" eyebrow="Caller waits" icon="clock" tone="blue" %}
+A gateway holds the connection until one prediction finishes. Tight tail latency, cancellation, bounded retries, and load shedding matter more than maximum batch size.
+{% /concept-card %}
+{% concept-card title="Asynchronous job" eyebrow="Caller polls or receives an event" icon="layers" tone="amber" %}
+Durable work can wait longer and form large batches. The contract needs job identity, deduplication, progress, result retention, and explicit expiry.
+{% /concept-card %}
+{% concept-card title="Streaming response" eyebrow="Partial output" icon="activity" tone="violet" %}
+The service emits incremental results. Time to first result, inter-result cadence, backpressure, disconnect propagation, and partial-failure semantics become first-class.
+{% /concept-card %}
+{% concept-card title="Composed inference" eyebrow="Several stages" icon="workflow" tone="green" %}
+Preprocessing, retrieval, models, and policy checks form a graph. Each stage needs its own deadline, ownership, observability, and fallback behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Write these fields before implementation
+
+- request and response schema, size limits, model or capability name, and version policy;
+- latency SLO, deadline propagation rule, priority class, and cancellation owner;
+- quality floor, abstention or fallback behavior, and any deterministic output checks;
+- tenant identity, authorization boundary, data-retention policy, and cache namespace;
+- retry eligibility, idempotency key, and the final error returned under overload.
+{% /section-card %}
+
+{% section-card %}
+## Trace the serving hot path
+
+Every online request crosses the same control boundaries even when products package them differently. Keep the control plane that deploys versions separate from the data plane that serves requests.
+
+{% system-flow title="A bounded online prediction" caption="The deadline travels with the request. Each stage either preserves enough budget for the next stage or stops work early." %}
+{% system-node title="Gateway" eyebrow="Validate" icon="shield" tone="blue" %}
+Authenticate, validate shape and size, attach tenant and request IDs, and reject impossible deadlines.
+{% /system-node %}
+{% system-node title="Admission queue" eyebrow="Protect" icon="layers" tone="amber" %}
+Reserve queue, memory, and accelerator capacity by priority before accepting expensive work.
+{% /system-node %}
+{% system-node title="Router and batcher" eyebrow="Shape" icon="route" tone="cyan" %}
+Choose a compatible warm replica and combine only requests whose deadlines and tensor shapes can coexist.
+{% /system-node %}
+{% system-node title="Model worker" eyebrow="Execute" icon="server" tone="violet" %}
+Run the pinned model and runtime version, honor cancellation, and return structured outputs.
+{% /system-node %}
+{% system-node title="Response gate" eyebrow="Verify" icon="activity" tone="green" %}
+Apply deterministic checks, record outcome evidence, and return or route to the declared fallback.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate the latency budget
+
+- **Ingress time:** authentication, validation, rate limits, and network transit.
+- **Queue time:** waiting for a compatible slot; this is the earliest overload signal.
+- **Batch delay:** intentional waiting to collect compatible requests.
+- **Execution time:** preprocessing, model runtime, transfer, and post-processing.
+- **Response time:** policy gates, serialization, streaming, and network delivery.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Balance admission, batching, and deadlines
+
+Batching can increase device efficiency, but every batching window spends latency before execution begins. More replicas add capacity only after model loading and warm-up. Admission policy decides whether excess requests wait, fail early, or use a declared fallback.
+
+Use the lab to change workload shape, batch window, batch size, replica count, and overload policy. The model is intentionally transparent: it is a planning aid to replace with measurements from the chosen model and hardware.
+{% /section-card %}
+
+{% interactive-block id="genai/model-serving-patterns-admission-batching-lab" dataFile="/api/content/genai/model-serving-patterns/data/admission-batching-scenarios.json" /%}
+
+{% section-card %}
+## Make overload a deterministic decision
+
+Queueing every request feels fair until expired work occupies the accelerator while newer viable requests wait. Admission must compare predicted completion against the caller's remaining budget.
+
+### A useful admission sequence
+
+1. Validate the request and reject unsupported shapes, versions, or sizes before queueing.
+2. Estimate queue, batch, execution, and response time from the matching workload slice.
+3. Reserve memory and concurrency, including model state and per-request runtime buffers.
+4. Admit only if the predicted finish time is before the deadline and the tenant budget allows it.
+5. Otherwise reject, defer to an asynchronous path, or route to an explicitly compatible fallback.
+
+{% code-block file="/api/content/genai/model-serving-patterns/code/admission-controller.py" language="python" title="Deadline-aware admission model" /%}
+
+NVIDIA Triton's maintained [dynamic batcher documentation](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html) exposes maximum queue delay, queue size, priority, and timeout controls. Its [rate limiter](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/rate_limiter.html) also models shared resources across model instances. The product names are optional; the capacity boundaries are not.
+{% /section-card %}
+
+{% section-card %}
+## Choose a pattern from workload shape
+
+{% concept-grid columns="2" %}
+{% concept-card title="Dedicated replica pool" eyebrow="One model, stable demand" icon="server" tone="blue" %}
+Each pool owns one version and a narrow workload. Isolation and debugging are simple, but low-volume models can strand expensive memory.
+{% /concept-card %}
+{% concept-card title="Multi-model worker" eyebrow="Many models, shared fleet" icon="boxes" tone="cyan" %}
+Workers load several artifacts or swap them from a model cache. Utilization improves when routing preserves locality, but cold loads and eviction become tail-latency risks.
+{% /concept-card %}
+{% concept-card title="Model ensemble" eyebrow="Fixed inference graph" icon="workflow" tone="violet" %}
+Several models or transforms execute as one declared graph. It simplifies the client contract while coupling stage deadlines, version compatibility, and failure behavior.
+{% /concept-card %}
+{% concept-card title="Specialized serving pools" eyebrow="Different resource phases" icon="git-branch" tone="green" %}
+Route preprocessing, embedding, prefill, decode, or policy work to different pools when their hardware and scheduling needs differ. Network transfer and cross-pool failure are the cost.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Match the scheduler to the execution shape
+
+- Stateless fixed-shape inference can use dynamic batches formed from requests waiting at the same time.
+- Stateful sequences need affinity or explicit state transfer; arbitrary rebatching can corrupt sequence state.
+- Autoregressive generation benefits from iteration-level scheduling because completed sequences can leave and new sequences can join between decode steps.
+- Heterogeneous requests may need length buckets, padding limits, or separate pools so one large request does not dominate a batch.
+
+The [Orca paper](https://www.usenix.org/conference/osdi22/presentation/yu) introduced iteration-level scheduling and selective batching for transformer serving. Treat those ideas as scheduler semantics to measure, not as a reason to assume every runtime behaves identically.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Route for warmth, balance, and recovery
+
+A least-loaded worker may not have the requested model in memory. A cache-aware route may preserve warmth while concentrating traffic. Autoscaling may request more replicas, but the fleet remains short until scheduling, artifact download, model load, and warm-up finish.
+
+Inject a steady workload, a long-tail model catalog, or a zone loss. Then compare routing policies, autoscaling signals, warm capacity, and fallback behavior.
+{% /section-card %}
+
+{% interactive-block id="genai/model-serving-patterns-routing-resilience-lab" dataFile="/api/content/genai/model-serving-patterns/data/routing-resilience-scenarios.json" /%}
+
+{% section-card %}
+## Treat caches as correctness boundaries
+
+Serving systems commonly use several unrelated caches. Name each one because its key, invalidation rule, and security boundary are different.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Artifact cache" eyebrow="Files near workers" icon="database" tone="blue" %}
+Stores immutable model files by digest. Verify integrity before activation and keep the version manifest separate from a mutable path or tag.
+{% /concept-card %}
+{% concept-card title="Resident model cache" eyebrow="Weights in accelerator memory" icon="server" tone="violet" %}
+Avoids model-load latency. Routing, eviction, pinning, and memory fragmentation determine whether a request reaches a warm worker.
+{% /concept-card %}
+{% concept-card title="Feature or embedding cache" eyebrow="Reusable inputs" icon="layers" tone="cyan" %}
+Keys need source version, transformation version, authorization scope, and expiry. Stale features can produce valid-looking but wrong predictions.
+{% /concept-card %}
+{% concept-card title="Prediction cache" eyebrow="Reusable outputs" icon="cache" tone="amber" %}
+Safe only for deterministic or explicitly reusable results. Include model, adapter, decoding parameters, policy version, tenant boundary, and normalized input in the key.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Never let cache reuse hide these changes
+
+- model, tokenizer, feature, adapter, or policy version;
+- tenant, authorization, consent, or data-residency boundary;
+- stochastic decoding parameters or nondeterministic preprocessing;
+- input normalization, locale, or response schema;
+- freshness requirements and deletion obligations.
+
+The [Clipper paper](https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/crankshaw) demonstrates that batching, caching, and adaptive model selection can be serving-system concerns. Production safety still depends on the key and invalidation contract chosen for the actual product.
+{% /section-card %}
+
+{% section-card %}
+## Design autoscaling as a delayed control loop
+
+CPU or GPU utilization describes current work, while queue age and reserved model memory often expose pressure earlier. A scaling rule must account for measurement delay, provisioning delay, model-load delay, and scale-down churn.
+
+{% process-flow %}
+{% process-step number="1" title="Observe pressure" label="Leading signals" %}
+Measure queue age, queued work units, active concurrency, deadline risk, cache misses, and accelerator memory by model and priority.
+{% /process-step %}
+{% process-step number="2" title="Compute desired capacity" label="Contract-aware target" %}
+Convert forecast demand into warm replicas or accelerator slots at a measured utilization target with failure headroom.
+{% /process-step %}
+{% process-step number="3" title="Provision and warm" label="Delayed actuator" %}
+Schedule hardware, fetch an immutable artifact, allocate runtime memory, run warm-up inputs, and pass readiness before routing traffic.
+{% /process-step %}
+{% process-step number="4" title="Drain deliberately" label="Stable scale-down" %}
+Stop new admission, finish or cancel bounded work, release model state, and preserve enough warm floor for the next burst.
+{% /process-step %}
+{% /process-flow %}
+
+KServe's maintained [control-plane API](https://kserve.github.io/website/docs/reference/crd-api) documents queue-depth and KV-cache-aware scaling options for inference workloads. The general lesson is to scale on the constrained work unit, not a convenient host metric that reacts too late.
+{% /section-card %}
+
+{% section-card %}
+## Separate readiness, liveness, and correctness
+
+- **Startup:** the process has loaded required artifacts and initialized the runtime; it is not yet proof that outputs are correct.
+- **Readiness:** the replica can accept new traffic for a specific model and version within its resource envelope.
+- **Liveness:** the process can still make progress; transient overload should usually remove readiness before it triggers a restart storm.
+- **Correctness:** a canary request, shadow evaluation, or release gate verifies output behavior independently of process health.
+
+The official [Kubernetes probe guidance](https://kubernetes.io/docs/concepts/workloads/pods/probes/) warns that incorrect liveness checks can create cascading failures under load. Keep readiness cheap, model-aware, and able to fail while the process remains alive for diagnosis or recovery.
+
+### Build the shutdown path too
+
+1. Mark the replica unavailable for new work.
+2. Stop admission and propagate cancellation to queued requests.
+3. Drain bounded in-flight work inside the termination budget.
+4. Fail or hand off stateful work according to its contract.
+5. Flush telemetry before releasing accelerator memory and exiting.
+
+Kubernetes documents the endpoint and graceful [Pod termination lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/). Verify the actual gateway and runtime drain behavior rather than assuming a grace period preserves requests automatically.
+{% /section-card %}
+
+{% section-card %}
+## Make routing policy executable
+
+This dependency-free example filters incompatible workers, preserves model locality, respects deadlines, and calculates a warm-replica target. Replace its constants with trace-derived service times and real provisioning measurements.
+
+{% code-block file="/api/content/genai/model-serving-patterns/code/routing-policy.py" language="python" title="Locality-aware routing and warm-capacity target" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate by request outcome and resource boundary
+
+### Request and queue evidence
+
+- arrival rate, accepted, rejected, deferred, fallback, cancelled, and completed requests by reason;
+- p50, p95, and p99 queue age, batch delay, execution time, and end-to-end latency;
+- deadline misses and useful goodput by model, version, tenant class, shape bucket, and priority;
+- retry amplification, duplicate work, disconnects, and abandoned accelerator time.
+
+### Worker and model evidence
+
+- ready, loading, draining, failed, and warm replicas by model and failure domain;
+- batch-size distribution, padding waste, scheduler occupancy, and per-replica concurrency;
+- accelerator utilization, memory allocation, model-cache hits, evictions, cold loads, and load duration;
+- output validity, task-quality slices, fallback rate, and version-attributed incidents.
+
+### Alerts need an action
+
+- Page on sustained SLO goodput loss, exhausted admission budget, or failure-domain capacity below the declared minimum.
+- Open an investigation on rising queue age, cold-load frequency, padding waste, or fallback use before users exhaust their deadline.
+- Record deployment, model, router, cache, and autoscaler changes on the same timeline as serving signals.
+- Prefer burn-rate or multi-window alerts over one noisy instantaneous threshold.
+
+The [Clockwork paper](https://www.usenix.org/conference/osdi20/presentation/gujarati) is a useful primary reference for deadline-aware scheduling and predictable inference. Its specific results are not universal capacity numbers; benchmark the selected model, runtime, hardware, and workload together.
+{% /section-card %}
+
+{% section-card %}
+## Select a platform by capabilities, not a logo
+
+Evaluate candidate runtimes and control planes against the service contract:
+
+- protocol and schema support, streaming, cancellation, deadlines, and idempotency;
+- supported model formats, hardware, parallelism, quantization, and custom operators;
+- dynamic or continuous batching, sequence state, priority, and queue policy;
+- model repositories, immutable version rollout, warm-up, cache control, and multi-model scheduling;
+- metrics, traces, request attribution, health semantics, and safe administrative APIs;
+- autoscaling inputs, failure-domain placement, disruption handling, and graceful drain;
+- security updates, project maintenance, portability, and operator skill.
+
+Run load tests with representative input shapes, bursts, versions, cancellations, cache states, and failures. A single unconstrained throughput number cannot prove the production contract.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recognize serving failures before saturation
+
+- **The queue becomes the product:** requests wait longer than their deadline while devices remain busy. Reject or defer before expired work consumes capacity.
+- **Batching hides tail latency:** average throughput rises while sparse or large requests wait behind preferred shapes. Track queue age by shape and cap batch delay.
+- **Autoscaling reacts after the deadline:** new replicas arrive only after the burst ends. Maintain a warm floor, forecast known events, and include model-load time in the control loop.
+- **Retries multiply overload:** gateways retry timed-out inference while original work continues. Propagate cancellation, bound retries, and use idempotency where side effects exist.
+- **Readiness lies about warmth:** the port opens before weights, runtime memory, or required adapters are usable. Make readiness model-version-aware and exercise a bounded warm-up.
+- **Cache locality defeats balance:** cache-aware routing overloads a few workers. Include queue pressure in the route score and replicate hot models deliberately.
+- **Fallback silently changes quality:** a cheaper model preserves availability but violates the task floor. Make fallback compatibility explicit and measure its outcomes separately.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [NVIDIA Triton Inference Server: dynamic batching](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html)
+- [NVIDIA Triton Inference Server: rate limiter](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/rate_limiter.html)
+- [KServe control-plane API and scaling contract](https://kserve.github.io/website/docs/reference/crd-api)
+- [Kubernetes liveness, readiness, and startup probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/)
+- [Orca: iteration-level scheduling for transformer serving](https://www.usenix.org/conference/osdi22/presentation/yu)
+- [Clockwork: predictable DNN serving](https://www.usenix.org/conference/osdi20/presentation/gujarati)
+- [Clipper: low-latency online prediction serving](https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/crankshaw)
+{% /section-card %}
+
+{% quiz title="Model Serving Decisions Review" questionsFile="/api/content/genai/model-serving-patterns/quiz/model-serving-patterns-review.json" lessonSlug="model-serving-patterns" /%}

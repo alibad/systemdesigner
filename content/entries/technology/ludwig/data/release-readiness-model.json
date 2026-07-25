@@ -1,0 +1,109 @@
+{
+  "kind": "ludwig-release-readiness",
+  "blockId": "technology/ludwig-release-readiness-lab",
+  "title": "Choose the safe response to release evidence",
+  "description": "Inject an artifact or data condition, then choose how the release should proceed. The path shows which evidence remains trustworthy and where promotion must stop.",
+  "defaults": {
+    "conditionId": "clean-candidate",
+    "actionId": "canary"
+  },
+  "stages": [
+    {
+      "id": "schema",
+      "label": "Input contract",
+      "detail": "Names, types, missing-value policy, and request availability match the candidate."
+    },
+    {
+      "id": "preprocess",
+      "label": "Preprocessing",
+      "detail": "The serving path loads the vocabulary, normalizer, and category metadata produced during training."
+    },
+    {
+      "id": "evaluate",
+      "label": "Evaluation",
+      "detail": "Held-out metrics, slice checks, and threshold behavior meet the release policy."
+    },
+    {
+      "id": "serve",
+      "label": "Serving canary",
+      "detail": "Representative requests pass schema, latency, and prediction smoke tests."
+    }
+  ],
+  "actions": [
+    {
+      "id": "full-release",
+      "label": "Release all traffic",
+      "detail": "Replace the current version immediately without a guarded observation window."
+    },
+    {
+      "id": "canary",
+      "label": "Canary the candidate",
+      "detail": "Send a bounded traffic slice, compare service and model metrics, then promote deliberately."
+    },
+    {
+      "id": "shadow",
+      "label": "Shadow and investigate",
+      "detail": "Run the candidate without affecting user decisions while collecting representative evidence."
+    },
+    {
+      "id": "rollback",
+      "label": "Block or roll back",
+      "detail": "Keep the last known-good artifact active and repair the candidate before retrying."
+    }
+  ],
+  "conditions": [
+    {
+      "id": "clean-candidate",
+      "label": "All release evidence passes",
+      "detail": "The candidate uses the versioned config and preprocessing metadata, passes held-out slice gates, and clears request smoke tests.",
+      "expectedActionId": "canary",
+      "failedStageIds": [],
+      "degradedStageIds": [],
+      "impact": "The candidate is eligible for bounded exposure, but offline evidence still does not justify an unobserved full rollout.",
+      "reason": "A canary limits blast radius and verifies latency, request validity, and live data behavior before broad promotion."
+    },
+    {
+      "id": "request-schema-drift",
+      "label": "A required feature disappears",
+      "detail": "The live producer stopped sending product_area, while the candidate still declares it as an input feature.",
+      "expectedActionId": "rollback",
+      "failedStageIds": [
+        "schema",
+        "serve"
+      ],
+      "degradedStageIds": [],
+      "impact": "Requests will fail validation or silently receive an unreviewed missing-value treatment.",
+      "reason": "Block promotion until the producer and model contract agree; do not use rollout traffic to discover a known schema break."
+    },
+    {
+      "id": "category-drift",
+      "label": "Unknown categories rise sharply",
+      "detail": "A new product launch sends category values that were rare or absent in the training metadata.",
+      "expectedActionId": "shadow",
+      "failedStageIds": [],
+      "degradedStageIds": [
+        "preprocess",
+        "evaluate",
+        "serve"
+      ],
+      "impact": "The request schema is valid, but production representation and slice quality are uncertain.",
+      "reason": "Shadow traffic reveals unknown-category rates and prediction behavior without making the candidate authoritative."
+    },
+    {
+      "id": "artifact-mismatch",
+      "label": "Model and preprocessing metadata diverge",
+      "detail": "The container includes the candidate weights but loads category metadata from the previous run.",
+      "expectedActionId": "rollback",
+      "failedStageIds": [
+        "preprocess",
+        "serve"
+      ],
+      "degradedStageIds": [
+        "evaluate"
+      ],
+      "impact": "Input values can map to different tensors than the model saw during training, invalidating offline evidence.",
+      "reason": "Weights and preprocessing metadata form one release artifact. Restore the last coherent bundle and rebuild the candidate."
+    }
+  ],
+  "notice": "The scenarios model release decisions. Set thresholds from measured service-level objectives, slice performance, and business cost; do not copy generic pass values into production."
+}

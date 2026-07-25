@@ -1,0 +1,91 @@
+{
+  "Comment": "Asynchronous Express event processor whose handler owns durable idempotency",
+  "StartAt": "RequireEventId",
+  "TimeoutSeconds": 240,
+  "States": {
+    "RequireEventId": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.eventId",
+          "IsPresent": true,
+          "Next": "RequireSupportedType"
+        }
+      ],
+      "Default": "InvalidEnvelope"
+    },
+    "RequireSupportedType": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {"Variable": "$.eventType", "StringEquals": "order.updated"},
+            {"Variable": "$.eventType", "StringEquals": "shipment.updated"},
+            {"Variable": "$.eventType", "StringEquals": "customer.updated"}
+          ],
+          "Next": "ProcessEventIdempotently"
+        }
+      ],
+      "Default": "UnsupportedEventType"
+    },
+    "ProcessEventIdempotently": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "TimeoutSeconds": 20,
+      "Parameters": {
+        "FunctionName": "${ProcessEventFunctionArn}",
+        "Payload": {
+          "eventId.$": "$.eventId",
+          "eventType.$": "$.eventType",
+          "occurredAt.$": "$.occurredAt",
+          "detail.$": "$.detail",
+          "idempotencyKey.$": "$.eventId"
+        }
+      },
+      "ResultSelector": {
+        "disposition.$": "$.Payload.disposition",
+        "outboxRecordId.$": "$.Payload.outboxRecordId"
+      },
+      "ResultPath": "$.processing",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 5,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.failure",
+          "Next": "TerminalProcessingFailure"
+        }
+      ],
+      "Next": "Processed"
+    },
+    "Processed": {"Type": "Succeed"},
+    "InvalidEnvelope": {
+      "Type": "Fail",
+      "Error": "InvalidEnvelope",
+      "Cause": "eventId is required"
+    },
+    "UnsupportedEventType": {
+      "Type": "Fail",
+      "Error": "UnsupportedEventType",
+      "Cause": "eventType is not routed by this state machine version"
+    },
+    "TerminalProcessingFailure": {
+      "Type": "Fail",
+      "Error": "EventProcessingFailed",
+      "Cause": "The idempotent handler exhausted transient retries"
+    }
+  }
+}

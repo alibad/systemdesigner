@@ -1,0 +1,123 @@
+{
+  "kind": "oozie-recovery-rerun",
+  "blockId": "technology/oozie-recovery-rerun-lab",
+  "title": "Choose the smallest safe replay boundary",
+  "description": "Diagnose the incident, select an Oozie retry or rerun operation, and satisfy the evidence gates that keep replay from duplicating external effects or deleting useful output.",
+  "defaults": {
+    "scenarioId": "late-input",
+    "actionId": "coordinator-refresh",
+    "patchDeployed": false,
+    "idempotentWrites": true,
+    "reconciledOutputs": true,
+    "preserveCoordinatorOutputs": true
+  },
+  "actions": [
+    {
+      "id": "action-retry",
+      "label": "Resume a manual-retry workflow",
+      "detail": "Resume the suspended workflow after diagnosing an action start or end error classified for manual retry.",
+      "command": "oozie job -oozie \"$OOZIE_URL\" -resume \"$WORKFLOW_ID\"",
+      "replayScope": "Suspended action",
+      "cleansCoordinatorOutputs": false,
+      "reevaluatesDependencies": false
+    },
+    {
+      "id": "workflow-failnodes",
+      "label": "Rerun failed workflow nodes",
+      "detail": "Create a workflow rerun that skips nodes whose prior transition was successful.",
+      "command": "oozie job -oozie \"$OOZIE_URL\" -rerun \"$WORKFLOW_ID\" -Doozie.wf.rerun.failnodes=true",
+      "replayScope": "Failed nodes",
+      "cleansCoordinatorOutputs": false,
+      "reevaluatesDependencies": false
+    },
+    {
+      "id": "coordinator-refresh",
+      "label": "Rerun coordinator action with refresh",
+      "detail": "Return the selected terminal action to WAITING and recalculate its data dependencies.",
+      "command": "oozie job -oozie \"$OOZIE_URL\" -rerun \"$COORDINATOR_ID\" -action 42 -refresh -nocleanup",
+      "replayScope": "One nominal slot",
+      "cleansCoordinatorOutputs": true,
+      "reevaluatesDependencies": true
+    },
+    {
+      "id": "reconcile-then-rerun",
+      "label": "Reconcile, then rerun failed nodes",
+      "detail": "Establish the external commit state before replaying an ambiguous action.",
+      "command": "oozie job -oozie \"$OOZIE_URL\" -rerun \"$WORKFLOW_ID\" -Doozie.wf.rerun.failnodes=true",
+      "replayScope": "Ambiguous effect",
+      "cleansCoordinatorOutputs": false,
+      "reevaluatesDependencies": false
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "late-input",
+      "label": "Late input timed out",
+      "detail": "The coordinator action reached TIMEDOUT before the input marker arrived.",
+      "symptom": "Action 42 is TIMEDOUT, but the producer has now committed the expected partition.",
+      "evidence": [
+        "The coordinator nominal time maps to the intended input URI.",
+        "The producer-owned completion marker exists and is newer than the partial files.",
+        "The previous action never submitted a workflow job."
+      ],
+      "requiredActionId": "coordinator-refresh",
+      "requiresPatch": false,
+      "requiresIdempotency": false,
+      "requiresReconciliation": true,
+      "safeResult": "Refresh re-evaluates the dataset dependency for the same nominal slot. Preserving output is safe only because reconciliation proved that no prior workflow committed it.",
+      "unsafeResult": "A workflow-level rerun cannot repair a coordinator action that never materialized the intended workflow."
+    },
+    {
+      "id": "transient-launch",
+      "label": "Transient action-start failure",
+      "detail": "A ResourceManager outage interrupted launch before business work began.",
+      "symptom": "The action is eligible for manual retry and has no downstream side effect.",
+      "evidence": [
+        "The action error code is classified as retryable in the deployed Oozie policy.",
+        "YARN confirms that no application reached RUNNING.",
+        "The workflow definition and input parameters are unchanged."
+      ],
+      "requiredActionId": "action-retry",
+      "requiresPatch": false,
+      "requiresIdempotency": false,
+      "requiresReconciliation": false,
+      "safeResult": "Retrying the existing action attempt keeps the replay boundary narrow and preserves the workflow graph state.",
+      "unsafeResult": "A broader rerun discards useful state without addressing a simple action-start retry."
+    },
+    {
+      "id": "definition-defect",
+      "label": "Deterministic workflow defect",
+      "detail": "A malformed query or path fails every attempt until the deployed application changes.",
+      "symptom": "The same action fails with the same deterministic error across attempts.",
+      "evidence": [
+        "The action log identifies a deterministic configuration or code defect.",
+        "Previously successful nodes produced versioned, reusable output.",
+        "The patched workflow definition validates before deployment."
+      ],
+      "requiredActionId": "workflow-failnodes",
+      "requiresPatch": true,
+      "requiresIdempotency": true,
+      "requiresReconciliation": false,
+      "safeResult": "The patched workflow reruns failed nodes while retaining successful transitions; idempotent destinations protect any retried external writes.",
+      "unsafeResult": "Retrying unchanged code repeats the deterministic failure, while a full replay needlessly repeats successful work."
+    },
+    {
+      "id": "ambiguous-commit",
+      "label": "Ambiguous external commit",
+      "detail": "The action lost acknowledgement after the destination may have committed.",
+      "symptom": "Oozie reports failure, but the remote billing write may already exist.",
+      "evidence": [
+        "The action log shows the request ID and the disconnect point.",
+        "The destination can be queried by the stable business operation ID.",
+        "Output counts and audit records can distinguish committed from missing effects."
+      ],
+      "requiredActionId": "reconcile-then-rerun",
+      "requiresPatch": false,
+      "requiresIdempotency": true,
+      "requiresReconciliation": true,
+      "safeResult": "Reconciliation establishes destination truth, and the stable operation ID makes replay converge instead of charging twice.",
+      "unsafeResult": "Blind replay can duplicate an already committed external business operation."
+    }
+  ],
+  "notice": "Oozie rerun operations change orchestration state; they do not make remote APIs or file publication exactly once. Capture logs and destination evidence before altering the failed job."
+}

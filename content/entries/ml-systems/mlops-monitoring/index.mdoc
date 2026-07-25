@@ -1,0 +1,147 @@
+---
+registryId: mlops-monitoring
+---
+
+{% section-card tone="intro" %}
+## What is MLOps monitoring?
+
+**MLOps monitoring is the continuous process of checking whether a deployed machine-learning system still serves users correctly, safely, and reliably.** It observes the serving service, incoming data, model behavior, and eventual product outcomes, then connects a credible problem to an owned response.
+
+In plain language, an API can return `200 OK` while the ML product is failing. Inputs may have changed, one user cohort may receive worse decisions, outcomes may be missing, or a feedback loop may be teaching the next model from biased evidence.
+
+{% callout variant="info" %}
+The core invariant is traceability: every actionable prediction should be attributable to a model version, compatible feature version, serving context, and eventual outcome when one exists. Collect only the telemetry that privacy, security, and retention policy permit.
+{% /callout %}
+
+This lesson builds on [Model Serving](/ml-systems/model-serving) for the online request path and [Data Distribution Shifts](/ml-systems/data-distribution-shifts) for drift concepts.
+{% /section-card %}
+
+{% section-card %}
+## Define health across four connected planes
+
+No single metric proves that an ML system is healthy. Start by writing the product promise, then choose signals that can disprove it across four planes.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Service health" eyebrow="Can it respond?" icon="server" tone="blue" %}
+Track request rate, errors, queue depth, dependency failures, saturation, and latency percentiles against the serving objective.
+{% /concept-card %}
+{% concept-card title="Data quality" eyebrow="Are inputs valid?" icon="database" tone="violet" %}
+Check schema, missingness, ranges, freshness, category growth, join coverage, and distribution change for important cohorts.
+{% /concept-card %}
+{% concept-card title="Model behavior" eyebrow="Are outputs useful?" icon="activity" tone="green" %}
+Measure output rates, confidence, calibration, delayed-label quality, safety invariants, and performance against the promoted baseline.
+{% /concept-card %}
+{% concept-card title="Product outcome" eyebrow="Did it help?" icon="gauge" tone="amber" %}
+Observe the downstream decision, realized value or cost, human overrides, user harm, and guardrails that must not regress.
+{% /concept-card %}
+{% /concept-grid %}
+
+A useful prediction event normally includes:
+
+- a stable prediction ID and event timestamp;
+- model, feature-view, and policy versions;
+- bounded input and output summaries needed for diagnosis;
+- cohort dimensions that are approved for quality and safety analysis;
+- the decision or action taken and a privacy-safe outcome join key.
+
+Keep request-level IDs in logs, traces, or an event store rather than metric labels. Each unique metric-attribute combination consumes aggregation state, so identifiers can create unbounded cardinality; see the current [OpenTelemetry metrics guidance](https://opentelemetry.io/docs/concepts/signals/metrics/).
+
+{% code-block file="/api/content/ml-systems/mlops-monitoring/code/emit-prediction-event.py" language="python" title="Emit a traceable, privacy-conscious prediction event" /%}
+{% /section-card %}
+
+{% section-card %}
+## Trace the signal path before choosing a dashboard
+
+Monitoring is a feedback system, not a collection of charts. Choose a scenario below, follow the active path, and inspect the component where evidence is lost or action begins.
+
+{% topology-lab dataFile="/api/content/ml-systems/mlops-monitoring/data/monitoring-control-loop.json" /%}
+
+The blind-telemetry scenario is the dangerous one to remember: serving can remain available while the team loses the evidence needed to measure quality or investigate a harmful prediction. Telemetry delivery therefore needs its own freshness, loss, and join-coverage signals.
+{% /section-card %}
+
+{% section-card %}
+## Separate change detection from harm detection
+
+Use the cheapest reliable check first, and escalate only when the evidence supports a product decision.
+
+1. **Validate the contract.** Reject or quarantine malformed records, stale features, missing joins, impossible values, and incompatible versions.
+2. **Compare distributions.** Select a reference that represents the intended operating regime, then compare enough observations within meaningful cohorts.
+3. **Measure labeled quality.** Join predictions to mature outcomes and report label coverage beside accuracy, calibration, ranking, or task-specific loss.
+4. **Confirm product impact.** Check whether the change affects user harm, human workload, cost, conversion, or another explicit guardrail.
+
+{% callout variant="warn" %}
+Drift is evidence that a population or relationship changed; it is not proof that the model became harmful. A statistically detectable difference may be operationally harmless, while a small aggregate change can hide a severe regression in one cohort.
+{% /callout %}
+
+For delayed outcomes, evaluate only cohorts old enough to have received labels and always publish coverage. The following dependency-free example refuses to grade an immature window and reduces exposure only when a mature window breaches a harm guardrail.
+
+{% code-block file="/api/content/ml-systems/mlops-monitoring/code/evaluate-mature-cohort.py" language="python" title="Evaluate quality without treating missing labels as errors" /%}
+{% /section-card %}
+
+{% section-card %}
+## Turn a credible signal into an owned response
+
+{% process-flow %}
+{% process-step number="1" title="Detect a sustained condition" label="Signal" %}
+Combine magnitude, persistence, sample size, affected cohort, and a comparison window that matches the product's seasonality and label delay.
+{% /process-step %}
+{% process-step number="2" title="Confirm impact and scope" label="Triage" %}
+Correlate the signal with model and feature versions, serving changes, product outcomes, and the population exposed to the decision.
+{% /process-step %}
+{% process-step number="3" title="Reduce exposure safely" label="Mitigate" %}
+Roll back, route to a known-safe fallback, change a decision threshold, disable a bad feature, or require human review according to the runbook.
+{% /process-step %}
+{% process-step number="4" title="Repair and prevent recurrence" label="Learn" %}
+Fix the source, replay validation, restore traffic gradually, and add a regression test, monitor, or runbook improvement tied to the failure.
+{% /process-step %}
+{% /process-flow %}
+
+Choose the notification from the required response:
+
+- **Page now** when serious user harm, correctness loss, or rapid service-objective exhaustion requires immediate mitigation.
+- **Open a ticket** when investigation can wait for normal working hours without allowing material harm.
+- **Record diagnostic evidence** when a signal helps future investigation but has no current action.
+
+Prometheus alert rules support a pending duration with `for` and runbook context in annotations; the current behavior is documented in [Prometheus alerting rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/).
+
+For service reliability, [Google's SRE Workbook](https://sre.google/workbook/alerting-on-slos/) explains why multi-window burn-rate alerts distinguish fast emergencies from slower budget consumption. ML quality alerts need the same response discipline, but their windows must also account for label maturity and cohort sample size.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Protect delayed labels and feedback loops
+
+A deployed model can influence the evidence later used to evaluate and retrain it. Recommenders change what people see, fraud systems block transactions before an outcome occurs, and human reviewers may inspect only the cases selected by the current policy.
+
+- Log **exposure** so analysts know which alternatives a person could actually observe.
+- Preserve a **control or exploration channel** where it is ethical and safe, rather than learning only from the current policy's choices.
+- Distinguish **prediction time**, **decision time**, and **outcome time** so incomplete recent cohorts are not compared with mature historical labels.
+- Monitor **selection rate, abstention, and review coverage** so excluded cases do not disappear from evaluation.
+- Treat missing outcomes as a separate observability problem; do not silently count them as correct or incorrect.
+- Prevent automatic retraining from promoting an artifact without independent data, quality, safety, and rollback gates.
+
+Retraining is a release, not an incident response. Detection should first bound harm and produce a reproducible investigation; a candidate trained on the latest data must still pass offline evaluation, compatibility checks, staged rollout, and post-deployment monitoring.
+{% /section-card %}
+
+{% section-card %}
+## Verify production monitoring readiness
+
+Use the checklist as a release review. Checking an item should mean that the evidence exists and the path has been exercised, not merely that a dashboard was created.
+
+{% interactive-checklist
+   checklistId="mlops-monitoring-readiness"
+   dataFile="/api/content/ml-systems/mlops-monitoring/data/monitoring-readiness.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Use current primary references
+
+- [OpenTelemetry signals](https://opentelemetry.io/docs/concepts/signals/): current definitions for traces, metrics, logs, and context propagation.
+- [Prometheus alerting rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/): rule state, persistence, labels, annotations, and Alertmanager handoff.
+- [Google SRE monitoring guidance](https://sre.google/workbook/monitoring/): connecting user-impact signals to diagnostic telemetry.
+- [MLflow Model Registry workflows](https://mlflow.org/docs/latest/ml/model-registry/workflow): current model aliases, tags, and version retrieval patterns.
+- [Grafana](/technology/grafana), [Prometheus](/technology/prometheus), [MLflow](/technology/mlflow), and [Apache Kafka](/technology/kafka) show implementation building blocks used by many monitoring stacks.
+
+Products and managed monitoring features evolve. Recheck vendor documentation before adopting a service-specific capability or lifecycle policy.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/mlops-monitoring/quiz/mlops-monitoring.json" lessonSlug="mlops-monitoring" /%}

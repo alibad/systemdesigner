@@ -1,0 +1,93 @@
+{
+  "title": "CockroachDB Production Design Review",
+  "questions": [
+    {
+      "question": "What is a CockroachDB range?",
+      "options": [
+        "A permanent primary node for the entire database",
+        "A contiguous slice of the ordered keyspace that is replicated as a unit",
+        "A client connection pool shared by every region",
+        "A backup file containing one SQL table"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CockroachDB divides its ordered keyspace into contiguous ranges. Each range has replicas and a leaseholder; a table or index can span many ranges."
+    },
+    {
+      "question": "Why can an increasing primary key become a write hotspot?",
+      "options": [
+        "Every insert targets the active tail key interval even when historical ranges are balanced",
+        "Sequential values disable Raft replication",
+        "CockroachDB sends every sequential write to every table",
+        "Increasing keys prevent secondary indexes from being created"
+      ],
+      "correctAnswer": 0,
+      "explanation": "New values cluster at the end of an ordered index. Older ranges can be evenly distributed while one active tail range receives most incoming writes."
+    },
+    {
+      "question": "What trade-off does a hash-sharded index make for a sequential logical key?",
+      "options": [
+        "It removes all replicas to improve write speed",
+        "It provides serializable transactions without retries",
+        "It spreads writes across bounded hash buckets but ordered scans may fan out across those buckets",
+        "It makes every table GLOBAL"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The computed bucket prefix creates several write fronts instead of one hot tail. Queries that need the original logical order can pay fan-out and merge work."
+    },
+    {
+      "question": "A serializable transaction returns SQLSTATE 40001. What should the client do?",
+      "options": [
+        "Retry only the final UPDATE using values from the failed attempt",
+        "Treat the business operation as committed",
+        "Disable constraints and submit the same COMMIT again",
+        "Back off and rerun the entire transaction against fresh state"
+      ],
+      "correctAnswer": 3,
+      "explanation": "The transaction could not join a valid serial order. The client must discard attempt-local state and replay the full transaction, with bounded backoff and idempotent external behavior."
+    },
+    {
+      "question": "Which table locality best fits a rarely updated tax-rule table that must be read quickly from every region?",
+      "options": [
+        "GLOBAL",
+        "REGIONAL BY ROW with every row homed in one region",
+        "REGIONAL BY TABLE in a distant region",
+        "A sequential hash-sharded table without replicas"
+      ],
+      "correctAnswer": 0,
+      "explanation": "GLOBAL tables optimize reads from all database regions. The trade-off is higher write cost, so they fit read-mostly reference data."
+    },
+    {
+      "question": "Which statement correctly separates table locality from a survival goal?",
+      "options": [
+        "Locality chooses the backup format; survival chooses the SQL dialect",
+        "Locality optimizes where data is accessed, while the survival goal defines the failure scope that retains availability",
+        "REGIONAL BY ROW automatically guarantees region survival",
+        "GLOBAL locality removes the need for a quorum"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Locality places table or row access near a home. The database survival goal separately defines whether zone or full-region loss must retain service."
+    },
+    {
+      "question": "Why does a region survival goal increase write latency compared with the default zone goal?",
+      "options": [
+        "It converts every UUID into a string",
+        "It disables local SQL gateways",
+        "A commit must coordinate replicas across region failure domains, adding at least inter-region network delay",
+        "It executes every transaction twice in the application"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Region survival uses replica placement and quorum requirements that keep committed data available after a region loss. That protection requires inter-region coordination on writes."
+    },
+    {
+      "question": "Why are backups still required when every range has replicas?",
+      "options": [
+        "Backups make primary keys random",
+        "Backups eliminate serializable retries",
+        "Backups make all reads local",
+        "Deletes, corruption, and bad application writes can propagate to all live replicas, while backups provide independent historical recovery"
+      ],
+      "correctAnswer": 3,
+      "explanation": "Replication protects against loss of a copy, not every logical failure. Tested backups and restore procedures recover an earlier valid state after damage reaches the live replica set."
+    }
+  ]
+}

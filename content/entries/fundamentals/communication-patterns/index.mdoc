@@ -1,0 +1,163 @@
+---
+registryId: communication-patterns
+---
+
+{% section-card tone="intro" %}
+## What is a communication pattern?
+
+A **communication pattern** defines how software components exchange requests, messages, and events. It answers four questions before a protocol or product is chosen:
+
+- Does the sender wait for an answer?
+- Does one consumer or many consumers receive the work?
+- Can the system buffer a traffic burst?
+- What happens when delivery or processing fails?
+
+The pattern is an architectural decision, not a library choice. HTTP can carry asynchronous callbacks, and Kafka can support request-reply, but those tools do not remove the need to choose latency, coupling, delivery, and consistency behavior deliberately.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Request-response" eyebrow="Caller waits" icon="repeat" tone="blue" %}
+Use when the caller needs an immediate result. The contract is direct, but downstream latency and failure become part of the caller's path.
+{% /concept-card %}
+{% concept-card title="Work queue" eyebrow="One worker" icon="workflow" tone="green" %}
+Use when work can finish later. The queue absorbs bursts and lets workers scale independently, but handlers must tolerate retries.
+{% /concept-card %}
+{% concept-card title="Event stream" eyebrow="Many consumers" icon="network" tone="violet" %}
+Use when several capabilities react to a fact that already happened. Replay and fan-out improve flexibility while making ordering and schema evolution explicit.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card %}
+## Start with the workload, not the technology
+
+A design becomes clearer when the requirements are expressed as decisions. An interactive price lookup needs a response in the current request. Thumbnail generation can be queued. An `OrderCreated` event can be retained and consumed by inventory, billing, analytics, and notifications.
+
+Change the constraints below and trace how the recommended path changes.
+
+{% interactive-block id="fundamentals/communication-pattern-explorer" /%}
+{% /section-card %}
+
+{% section-card %}
+## Understand the failure boundary
+
+Every remote interaction crosses a failure boundary. The sender can time out while the receiver still completes the operation, an acknowledgment can be lost, or a broker can redeliver a message after a consumer restarts.
+
+The central distinction is between **delivery** and **business effect**:
+
+- A transport can promise at-most-once or at-least-once delivery.
+- The application decides whether repeated delivery repeats the business operation.
+- An idempotency key lets several attempts converge on one durable effect.
+
+Use the lab to create duplicate deliveries and observe the result.
+
+{% interactive-block id="fundamentals/delivery-semantics-lab" /%}
+{% /section-card %}
+
+{% section-card %}
+## Compose patterns for real workflows
+
+Production systems rarely use one communication shape everywhere. They combine patterns so each step gets the behavior it needs.
+
+{% process-flow %}
+{% process-step number="1" title="Validate the order" label="Synchronous" %}
+Check price, inventory policy, and identity while the user is waiting. Return a clear success or rejection.
+{% /process-step %}
+{% process-step number="2" title="Commit intent and outbox" label="Atomic boundary" %}
+Store the order and an outgoing event record in one database transaction so state and communication cannot diverge.
+{% /process-step %}
+{% process-step number="3" title="Process durable work" label="Queue" %}
+Run payment capture, fulfillment, and email with bounded retries, idempotency keys, and dead-letter handling.
+{% /process-step %}
+{% process-step number="4" title="Publish business facts" label="Event stream" %}
+Let analytics, recommendations, and audit consumers react independently without joining the checkout latency budget.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Recognize the reusable messaging shapes
+
+{% concept-grid columns="2" %}
+{% concept-card title="Point-to-point queue" eyebrow="Competing consumers" icon="workflow" tone="green" %}
+Each work item is handled by one available consumer. Use it for image processing, email delivery, and other jobs where workers can share a backlog.
+{% /concept-card %}
+{% concept-card title="Publish-subscribe" eyebrow="Independent reactions" icon="network" tone="violet" %}
+Each subscriber receives the event through its own subscription. Use it when several domains react to the same business fact.
+{% /concept-card %}
+{% concept-card title="Request-reply with correlation" eyebrow="Async response" icon="repeat" tone="blue" %}
+A request and later response share a correlation ID. Use it for long-running work when the caller cannot keep a connection open.
+{% /concept-card %}
+{% concept-card title="Saga" eyebrow="Multi-step transaction" icon="route" tone="amber" %}
+Local transactions advance a workflow; compensating actions address partial failure. Use it when one database transaction cannot span every service.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Build resilience into the contract
+
+Retries, timeouts, and dead-letter queues are not generic switches. They change load and correctness, so each one needs a bounded policy.
+
+{% process-flow %}
+{% process-step number="1" title="Attempt" label="Process" %}
+Validate the message, check its idempotency key, and perform the smallest durable unit of work.
+{% /process-step %}
+{% process-step number="2" title="Back off" label="Transient failure" %}
+Retry only errors that can plausibly recover. Add jitter and cap both the delay and total attempts.
+{% /process-step %}
+{% process-step number="3" title="Quarantine" label="Persistent failure" %}
+Move exhausted messages to a dead-letter queue with the payload, error, attempt count, and correlation context.
+{% /process-step %}
+{% process-step number="4" title="Recover" label="Operator action" %}
+Fix the cause, replay deliberately, and verify that idempotency protects already completed effects.
+{% /process-step %}
+{% /process-flow %}
+
+### Guardrails that belong in the design
+
+- **Timeouts:** derive them from the end-to-end latency budget, not a framework default.
+- **Retry budgets:** prevent one dependency failure from multiplying traffic across the system.
+- **Circuit breakers:** stop calls that are unlikely to succeed and preserve capacity for recovery.
+- **Backpressure:** slow producers or shed optional work before queues grow without bound.
+- **Observability:** carry correlation and causation IDs across synchronous and asynchronous hops.
+{% /section-card %}
+
+{% section-card %}
+## Match technology to the chosen contract
+
+Choose the semantic shape first, then select a technology that supports its operational needs.
+
+{% concept-grid columns="3" %}
+{% concept-card title="HTTP or gRPC" eyebrow="Direct interaction" icon="route" tone="blue" %}
+Good for user-facing commands, service queries, and low-latency internal calls. Protect every dependency with deadlines and cancellation.
+{% /concept-card %}
+{% concept-card title="RabbitMQ or SQS" eyebrow="Durable work" icon="workflow" tone="green" %}
+Good for task queues, delayed processing, and competing consumers. Define acknowledgment, retry, and dead-letter behavior explicitly.
+{% /concept-card %}
+{% concept-card title="Kafka or Pulsar" eyebrow="Retained events" icon="network" tone="violet" %}
+Good for replayable event streams, high-throughput pipelines, and multiple consumer groups. Partitioning defines ordering and parallelism.
+{% /concept-card %}
+{% /concept-grid %}
+
+WebSockets and server-sent events solve a different problem: keeping a delivery channel open to a client. They are often fed by queues or streams behind the gateway rather than replacing them.
+{% /section-card %}
+
+{% section-card %}
+## Review the decision before implementation
+
+For every remote interaction, write down:
+
+1. The caller's latency budget and whether it can proceed without a result.
+2. The number of consumers and whether each needs its own copy.
+3. The ordering scope, retention period, and acceptable consistency delay.
+4. The timeout, retry budget, idempotency key, and poison-message policy.
+5. The overload behavior when consumers fall behind.
+6. The correlation fields and metrics needed to reconstruct one business operation.
+
+The strongest design is usually a deliberate combination: synchronous communication for the smallest immediate decision, a queue for durable work, and an event stream for independent reactions.
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/fundamentals/communication-patterns/quiz/communication-patterns.json"
+   lessonSlug="communication-patterns"
+   title="Communication Patterns Decision Check" /%}

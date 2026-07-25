@@ -1,0 +1,373 @@
+---
+registryId: replication-sharding
+---
+
+{% section-card tone="intro" %}
+## What are replication and sharding?
+
+**Replication** stores copies of the same data on multiple nodes. It improves
+availability, durability, and sometimes read capacity. **Partitioning** divides
+a dataset into non-overlapping pieces. **Sharding** usually means placing those
+partitions on independently scalable nodes.
+
+The distinction is the first invariant:
+
+- Replication gives another copy of one ownership range.
+- Sharding gives another ownership range.
+- A production database commonly combines them: every shard owns different
+  keys, and every shard has replicas.
+
+If one tenant overloads a shard, adding replicas does not divide that tenant's
+writes. If one shard is lost, other shards do not contain its records. The
+system needs both an ownership plan and a copy plan.
+{% /section-card %}
+
+{% section-card %}
+## See the two scaling axes
+
+A **shard** is an ownership boundary: one node or replica group is responsible
+for a subset of keys. A **replica set** is a copy boundary: several nodes hold
+the same subset.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Replication" eyebrow="Copy the same keys" icon="copy" tone="blue" %}
+Use replicas to survive node or zone loss, serve permitted reads closer to
+clients, and recover from a failed copy. The write protocol must decide which
+replicas acknowledge a commit and how lagging copies converge.
+{% /concept-card %}
+{% concept-card title="Sharding" eyebrow="Split different keys" icon="shard" tone="violet" %}
+Use shards when one node cannot hold the bytes or process the write workload.
+The routing layer must map every key to exactly one current owner and handle
+queries that span owners.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="A sharded and replicated write path" caption="The router chooses one shard; that shard's replication protocol copies the write." %}
+{% system-node title="Client" eyebrow="Request" icon="client" tone="neutral" %}
+Sends a key and mutation. The client should not need a hard-coded node list.
+{% /system-node %}
+{% system-node title="Shard router" eyebrow="Ownership" icon="route" tone="blue" %}
+Hashes the shard key or consults a versioned directory to find the current
+owner.
+{% /system-node %}
+{% system-node title="Shard primary" eyebrow="Write authority" icon="database" tone="violet" %}
+Orders the mutation for this shard, or coordinates a quorum in a leaderless
+design.
+{% /system-node %}
+{% system-node title="Shard replicas" eyebrow="Copies" icon="copy" tone="green" %}
+Apply the same mutation synchronously or asynchronously according to the
+durability contract.
+{% /system-node %}
+{% /system-flow %}
+
+Capacity scales only when traffic and data spread across ownership ranges.
+Availability improves only when a shard's copies occupy independent failure
+domains and the system can safely select a replacement.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose a shard key that matches the workload
+
+A **shard key** is the field, tuple, or derived value used to choose an owner.
+It is an architectural contract because it controls write concentration, read
+locality, transaction boundaries, and how data moves later.
+
+A strong key has five properties:
+
+- **High cardinality:** there are many possible key values, so the router has
+  enough units to distribute.
+- **Even activity:** the busiest values do not place most requests on one
+  owner. Measure request skew, not only row counts.
+- **Query locality:** common reads can name one shard or a small bounded set.
+- **Stable ownership:** the key does not change when mutable profile data
+  changes.
+- **Splittability:** an unexpectedly large tenant or time range can be divided
+  without rewriting the whole application contract.
+
+Common failure modes are easy to miss:
+
+- A monotonically increasing timestamp sends new writes to the active end of a
+  range layout.
+- `tenant_id` keeps tenant reads local, but one dominant tenant can own a
+  disproportionate share of traffic and bytes.
+- A low-cardinality field such as country or status creates only a few busy
+  owners.
+- Random hashing spreads point requests but destroys natural range locality.
+- Adding a bucket suffix spreads one logical key, but reads over that key must
+  fan out and merge.
+
+### Lab 1: expose skew instead of trusting the average
+
+Choose a key shape, then change shard count, peak writes, and the hottest
+logical key. Watch whether new shards reduce the maximum owner load or merely
+add idle capacity. Compare that benefit with point-read fan-out.
+
+{% interactive-block id="technology/replication-sharding-key-distribution-lab" dataFile="/api/content/technology/replication-sharding/data/key-distribution-model.json" /%}
+
+The correct target is not perfect uniformity. It is a distribution whose
+hottest expected owner remains below CPU, storage, connection, and I/O limits
+with failure and rebalance headroom.
+{% /section-card %}
+
+{% section-card %}
+## Compare partitioning strategies by what they preserve
+
+A **partitioning strategy** is the rule that turns a shard key into an owner.
+Each strategy preserves a different kind of locality.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Hash partitioning" eyebrow="Preserves distribution" icon="hash" tone="blue" %}
+A stable hash spreads many independent keys well. Point routing is direct, but
+ordered range scans scatter. Plain `hash(key) mod N` moves many keys when `N`
+changes; virtual buckets, consistent hashing, or a directory reduce movement.
+{% /concept-card %}
+{% concept-card title="Range partitioning" eyebrow="Preserves order" icon="range" tone="amber" %}
+Contiguous ranges keep ordered scans local and can split at explicit
+boundaries. Uneven value growth and append-heavy keys create active ranges that
+must split before they saturate.
+{% /concept-card %}
+{% concept-card title="Directory partitioning" eyebrow="Preserves control" icon="route" tone="green" %}
+A directory maps a tenant, bucket, or range to an owner. Placement and
+migration are flexible, but the directory becomes critical metadata that needs
+versioning, caching, availability, and atomic updates.
+{% /concept-card %}
+{% /concept-grid %}
+
+Virtual buckets separate the stable application key from physical ownership.
+For example, `hash(tenant_id) % 4096` can choose a logical bucket while a
+directory maps each bucket to a current shard. Operators can move buckets
+without changing the application's key function.
+
+See [Consistent Hashing](/technology/consistent-hashing) for a deeper treatment
+of bounded key movement. Review
+[Database Fundamentals](/fundamentals/database-fundamentals) first if indexes,
+transactions, and storage layouts are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Route writes and reads by different contracts
+
+**Routing** chooses the eligible replica for an operation. The shard key first
+selects a replica group; the consistency contract then selects which member can
+serve the request.
+
+### Write routing
+
+- In a primary-replica system, route writes to the current primary for that
+  shard. A topology epoch or lease prevents an old primary from continuing
+  after failover.
+- In a multi-primary system, multiple regions can accept writes. The data model
+  needs explicit conflict prevention or deterministic resolution.
+- In a leaderless system, a coordinator sends the mutation to the shard's
+  replicas and waits for the configured acknowledgement threshold.
+- A retry after timeout must be idempotent because some replicas may have
+  committed even when the client did not receive success.
+
+### Read routing
+
+- **Primary-only** reads favor current data but spend network latency and can
+  pause during primary promotion.
+- **Nearest-replica** reads favor latency and read scale but can return an older
+  version.
+- **Session-aware** reads carry a write position, version, or timestamp. A
+  router uses a replica only after it reaches that position, otherwise waits
+  briefly or falls back to the primary.
+- **Quorum** reads combine enough replica responses to meet a database-specific
+  consistency rule. Quorum overlap helps only under that protocol's assumptions;
+  it is not a universal promise of serializable transactions.
+
+The read policy belongs to the operation. A catalog browse can tolerate bounded
+staleness that a payment authorization after an account lock cannot.
+
+{% code-block file="/api/content/technology/replication-sharding/code/route-read-after-write.py" language="python" title="Route a session read using per-shard replica positions" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat replica lag as a correctness signal
+
+**Replica lag** is the distance between an authority's accepted position and a
+replica's applied position. Time lag is useful for humans, but log sequence,
+offset, or version position is the safer routing signal because apply rates
+change.
+
+Asynchronous replication creates a window in which:
+
+- a nearest-replica read can miss a completed write;
+- failover can lose acknowledged writes that never reached the promoted copy;
+- a long-running query may observe different versions on different shards;
+- schema changes or index maintenance can lag behind the base mutation;
+- replay pressure can compete with foreground reads and extend recovery.
+
+Track lag in both time and bytes or log positions. Alert on the oldest replica,
+not the average. A replica can be healthy at the process level while unsafe for
+a freshness-sensitive read.
+
+### Lab 2: route through lag and a region failure
+
+Choose replica placement, a request-level freshness contract, and a routing
+policy. Increase apply lag, inject a backlog, or remove the primary region.
+Observe latency, freshness, failover time, and the possible data-loss window
+together.
+
+{% interactive-block id="technology/replication-sharding-replica-routing-lab" dataFile="/api/content/technology/replication-sharding/data/replica-routing-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Rebalance without changing ownership twice
+
+**Rebalancing** moves a range or bucket from one replica group to another while
+requests continue. A safe move has one authoritative ownership epoch at every
+point, even though both groups temporarily store the bytes.
+
+{% process-flow %}
+{% process-step number="1" title="Copy a snapshot" label="Source remains owner" %}
+Copy a consistent base image to the destination and record the source log
+position. Keep normal reads and writes on the source.
+{% /process-step %}
+{% process-step number="2" title="Catch up changes" label="Replay" %}
+Stream mutations after the snapshot position until destination lag is inside a
+small, measured cutover budget.
+{% /process-step %}
+{% process-step number="3" title="Fence and cut over" label="New epoch" %}
+Prevent stale writers, atomically publish the new directory epoch, and make
+routers reject or refresh older ownership metadata.
+{% /process-step %}
+{% process-step number="4" title="Verify, then clean" label="Delayed deletion" %}
+Compare counts, checksums, and sampled reads. Retain the source through a
+rollback window before deleting old copies.
+{% /process-step %}
+{% /process-flow %}
+
+Throttle migration by destination disk, network, compaction, and replica-apply
+headroom. Moving data at maximum bandwidth can overload the same shard that the
+move is meant to protect.
+
+{% code-block file="/api/content/technology/replication-sharding/code/migrate-shard-safely.py" language="python" title="Checkpoint a resumable shard move before atomic cutover" /%}
+
+{% callout variant="warn" %}
+Dual ownership is not the same as safe dual writing. If both groups accept
+independent writes without one ordering authority, retries and network
+partitions can create divergent histories. Use forwarding, a shared log, or a
+fenced cutover protocol.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Recover the failed boundary, not just the failed node
+
+**Failure recovery** restores a shard's serving and durability contract after a
+copy, zone, region, or metadata service fails.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Replica loss" eyebrow="Copy still exists" icon="warning" tone="amber" %}
+Stop routing to the failed member, verify the remaining acknowledgement
+threshold, replace the copy, and stream or repair missing history. Capacity must
+support foreground traffic with one member absent.
+{% /concept-card %}
+{% concept-card title="Primary loss" eyebrow="Authority changes" icon="shield" tone="rose" %}
+Fence the old primary before promoting a caught-up replica. Publish a higher
+topology epoch, refresh routers, and make retries idempotent. Otherwise a
+partitioned old primary can create split brain.
+{% /concept-card %}
+{% concept-card title="Shard data loss" eyebrow="No valid copy remains" icon="database" tone="violet" %}
+Restore that shard from backup and replay durable logs. Replicas are not backups:
+accidental deletes, corruption, and bad application writes can replicate to
+every copy.
+{% /concept-card %}
+{% /concept-grid %}
+
+Test recovery at the ownership boundaries you actually operate:
+
+1. Lose one replica while the shard is near peak.
+2. Promote a replica with known lag and verify the measured recovery point.
+3. Remove a full zone or region and confirm quorum and placement assumptions.
+4. Restart a migration halfway through copy, replay, and cutover.
+5. Restore one shard from backup without overwriting healthy neighboring shards.
+6. Reconcile clients whose writes timed out during the incident.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Place global replicas from latency, RPO, and sovereignty
+
+**Global placement** decides which regions own write authority, which hold
+copies, and whether a write waits for another failure domain before success.
+
+- **Regional replicas across zones** usually provide low commit latency and
+  zone resilience, but a complete regional failure needs a remote recovery
+  path.
+- **Asynchronous remote replicas** provide low-latency local commits and nearby
+  global reads. Their lag is also the potential recovery-point window during
+  sudden primary loss.
+- **Synchronous cross-region commits** can protect acknowledged writes from a
+  region failure, but inter-region round trips raise write latency and a
+  partition can reduce write availability.
+- **Home-region ownership** keeps each tenant's writes in one region and routes
+  reads deliberately. It limits conflict scope but makes tenant moves an
+  explicit migration.
+- **Multi-primary placement** improves local write availability only when the
+  application can prevent conflicting ownership or reconcile concurrent
+  updates without breaking invariants.
+
+Keep regulated data, encryption keys, backups, change logs, and repair traffic
+inside allowed jurisdictions. A read replica in an approved region does not
+help if logs or snapshots leave that boundary.
+{% /section-card %}
+
+{% section-card %}
+## Apply the patterns to concrete workloads
+
+These examples show how one access pattern changes the key and copy plan:
+
+### Social profile service
+
+- Hash by `user_id` for direct profile reads and stable ownership.
+- Keep three replicas across zones for node and zone recovery.
+- Return a write position after profile update; route the next session read to
+  a caught-up replica or the primary.
+
+### High-volume tenant events
+
+- Use `(tenant_id, day, bucket)` so retention stays bounded and a dominant
+  tenant can use several write buckets.
+- Query a known day and merge a bounded number of buckets.
+- Split or move buckets before peak utilization consumes rebalance headroom.
+
+### Global order service
+
+- Assign each account a home region and keep an explicit directory epoch.
+- Commit inventory and payment invariants inside the owning shard when
+  possible; use a workflow for cross-shard steps.
+- Replicate to a remote region according to the business RPO, then test fencing
+  and promotion against that same objective.
+{% /section-card %}
+
+{% section-card %}
+## Operate the distribution as one system
+
+**Operational readiness** means detecting when ownership, copies, or routing no
+longer satisfy their contracts. Dashboards should preserve per-shard and
+per-replica dimensions instead of averaging them away.
+
+Monitor:
+
+- hottest-key and hottest-shard request rate, CPU, queueing, disk, and
+  connection pressure;
+- rows and bytes per shard, growth rate, free-space headroom, and large-key
+  outliers;
+- replica lag in positions, bytes, and time, plus replay and repair throughput;
+- stale-read, session fallback, quorum failure, timeout, and conflict rates;
+- cross-shard query fan-out, partial-result failures, and transaction retries;
+- rebalance bytes remaining, cutover epoch, throttling, verification failures,
+  and rollback age;
+- backup age, restore duration, failover RTO, measured RPO, and rejected stale
+  writers;
+- cross-region bandwidth, commit latency, egress cost, and placement-policy
+  violations.
+
+The trade-off is systemic: more shards increase routing, fan-out, migration,
+and metadata work; more replicas increase storage, write amplification, repair,
+and consistency work. Add either only for a named capacity, latency,
+availability, or recovery objective.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/replication-sharding/quiz/replication-sharding-production-design.json" lessonSlug="replication-sharding" title="Replication and Sharding Production Design Review" /%}

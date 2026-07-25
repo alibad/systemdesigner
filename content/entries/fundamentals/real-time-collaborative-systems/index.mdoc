@@ -1,0 +1,189 @@
+---
+registryId: real-time-collaborative-systems
+---
+
+{% section-card tone="intro" %}
+## What is a real-time collaborative system?
+
+**A real-time collaborative system lets several people change the same logical document while each person works against a local copy.** The client applies an edit immediately, exchanges a compact change with other replicas, and reconciles concurrent work using rules that make every replica reach the same valid state.
+
+The difficult part is not drawing another person's cursor. It is preserving accepted intent when messages are delayed, duplicated, reordered, or created while a participant is offline.
+
+{% callout variant="info" %}
+### Core invariant
+
+After every accepted durable change has arrived, all replicas must converge to the same valid document state. Transport latency may make replicas temporarily different; it must not make their final meaning depend on message arrival order.
+{% /callout %}
+
+This lesson builds on [consistency patterns](/fundamentals/consistency-patterns) and [communication patterns](/fundamentals/communication-patterns). Review them first if replicas, ordering, or bidirectional transports are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate the state users trust from the signals they merely see
+
+A collaborative session carries at least two classes of data. Durable document changes affect saved work and need identity, authorization, merge semantics, recovery, and auditability. Awareness signals such as cursor position, selection, and typing status may expire because they describe a live session rather than the document.
+
+{% system-flow title="One edit crosses two feedback loops" caption="The local replica provides immediate feedback. The synchronization path validates, records, merges, and redistributes durable changes. Presence uses a separate, lossy path." %}
+{% system-node title="Local replica" eyebrow="1. Respond" icon="braces" tone="cyan" %}
+Apply the user's edit optimistically, assign stable change identity, and keep unacknowledged work distinguishable from confirmed state.
+{% /system-node %}
+{% system-node title="Room authority or peer sync" eyebrow="2. Reconcile" icon="workflow" tone="violet" %}
+Authorize the actor and document, exchange missing changes, enforce the selected merge model, and make retries harmless.
+{% /system-node %}
+{% system-node title="Durable journal + checkpoint" eyebrow="3. Recover" icon="database" tone="blue" %}
+Persist enough ordered or mergeable history to rebuild a valid document after process loss, then compact it deliberately.
+{% /system-node %}
+{% system-node title="Other replicas" eyebrow="4. Converge" icon="users" tone="green" %}
+Apply every missing accepted change, rebase or merge local pending work, and replace temporary UI predictions with confirmed state.
+{% /system-node %}
+{% /system-flow %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Document state" eyebrow="Durable" icon="database" tone="blue" %}
+Text, shapes, tasks, comments, and permissions survive reconnects. Give changes stable identity and define conflict behavior at the application's real semantic boundary.
+{% /concept-card %}
+{% concept-card title="Awareness" eyebrow="Ephemeral" icon="activity" tone="cyan" %}
+Cursors, selections, typing indicators, and viewport hints should expire. Dropping an old cursor update is better than replaying stale presence after reconnect.
+{% /concept-card %}
+{% concept-card title="Transport" eyebrow="Delivery" icon="route" tone="violet" %}
+WebSocket provides a two-way message channel. The application protocol still owns authentication, authorization, operation identity, ordering, deduplication, backpressure, and resynchronization.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose merge semantics from the document model
+
+There is no universal "collaboration algorithm" switch. Choose the smallest semantic unit that users expect to edit independently, then define what concurrent changes to that unit mean.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Operational transformation" eyebrow="Transform against context" icon="repeat" tone="violet" %}
+Represent edits as operations relative to a document version. A coordinator orders them, and clients transform concurrent operations so each one applies to the intended logical position. OT can be efficient for text but requires complete, tested transformation rules.
+{% /concept-card %}
+{% concept-card title="CRDT document" eyebrow="Merge by datatype" icon="boxes" tone="green" %}
+Encode changes with identifiers and datatype-specific merge rules whose operations or states converge despite reordering and duplication. The library solves merge mechanics, not application authorization or semantic validation.
+{% /concept-card %}
+{% concept-card title="Authoritative domain commands" eyebrow="Validate on the server" icon="shield" tone="amber" %}
+For structured workflows, send commands such as "assign owner" or "move card." A room authority can reject invalid transitions and serialize contested fields while clients predict the likely result.
+{% /concept-card %}
+{% /concept-grid %}
+
+Whole-document last-writer-wins is sometimes valid for a single-value property. It is usually destructive for rich text or a board because unrelated work shares one overwrite boundary. Likewise, a CRDT can converge while producing an application state that violates a business invariant; schema and domain rules still need enforcement.
+
+### Lab 1: make concurrent edits arrive in opposite orders
+
+Select a collision, then compare a whole-snapshot overwrite, raw positional operations, and a typed merge with stable identities. The lab is a bounded teaching model, not an implementation of a production OT or CRDT library.
+
+{% interactive-block id="fundamentals/real-time-collaborative-systems-convergence-lab" dataFile="/api/content/fundamentals/real-time-collaborative-systems/data/convergence-scenarios.json" /%}
+
+Use the outcomes to distinguish three properties:
+
+- **Convergence:** replicas that receive the same accepted changes end in the same state.
+- **Intent preservation:** a converged value can still be wrong if one accepted edit silently disappears.
+- **Semantic validity:** preserving two values may require a visible review step when the domain has no automatic answer.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Size a room from edit fan-out, not registered users
+
+Collaboration load is concentrated by active document. One popular room can be harder to serve than thousands of idle documents because every edit and presence signal fans out to the other participants in that room.
+
+For a room with `N` active editors, `e` durable edits per editor per minute, and an encoded change size of `b` bytes:
+
+- durable changes per second = `N * e / 60`;
+- durable room egress per second = `changes/sec * (N - 1) * b`;
+- presence egress uses the same recipient fan-out but its own cadence and payload size;
+- reconnect catch-up depends on changes missed while offline, not on how long the socket handshake takes.
+
+### Lab 2: expose the room's durable and ephemeral traffic
+
+Change the active editors, edit rate, payload size, presence cadence, and offline window. Every result comes directly from the displayed fan-out assumptions; the lab does not invent a capacity score or vendor throughput limit.
+
+{% interactive-block id="fundamentals/real-time-collaborative-systems-calculator" dataFile="/api/content/fundamentals/real-time-collaborative-systems/data/session-fanout-model.json" /%}
+
+The estimate is an application-payload envelope. Production measurements must add protocol framing, acknowledgements, retries, compression behavior, encryption overhead, batching, and the actual number of subscribed recipients. A CRDT state-vector exchange may reduce reconnect data below a raw operation-count estimate; history growth and compaction policy can move it in the other direction.
+
+{% code-block file="/api/content/fundamentals/real-time-collaborative-systems/code/estimate-session-fanout.py" language="python" title="Calculate the same room fan-out model outside the UI" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Reconnect by proving what each replica is missing
+
+"Open the socket again" is not a recovery protocol. The client must identify its durable state, retain pending local changes, and exchange the minimum information required to reach the current document.
+
+{% process-flow %}
+{% process-step number="1" title="Restore a known local state" label="Load" %}
+Read a validated local snapshot plus pending changes. Never present unconfirmed edits as durably saved merely because they were rendered locally.
+{% /process-step %}
+{% process-step number="2" title="Reauthorize the session" label="Join" %}
+Authenticate the connection, authorize the specific document and operation class, validate the browser origin where applicable, and bind the session to a fresh lease.
+{% /process-step %}
+{% process-step number="3" title="Exchange progress" label="Diff" %}
+Send a server sequence, version, state vector, or library sync message. Return missing durable changes or a checkpoint when incremental catch-up is no longer safe or efficient.
+{% /process-step %}
+{% process-step number="4" title="Merge pending work" label="Reconcile" %}
+Apply or transform offline changes against the recovered state. Surface semantic conflicts that the datatype cannot decide honestly.
+{% /process-step %}
+{% process-step number="5" title="Resume live streams" label="Follow" %}
+Start incremental document updates and fresh awareness. Do not replay stale cursor history as if it were current presence.
+{% /process-step %}
+{% /process-flow %}
+
+Stable change identity makes retries idempotent. Progress metadata makes gaps detectable. Checkpoints bound replay time, while a journal or mergeable update store preserves changes newer than the checkpoint.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Keep the room service narrow and observable
+
+Partition room ownership by document ID so one authority or merge session owns the hot mutable state at a time. Route reconnecting clients to the current owner, but keep recovery data outside that process. A room process can disappear; accepted durable work must not disappear with it.
+
+{% code-block file="/api/content/fundamentals/real-time-collaborative-systems/code/collaboration-room-router.ts" language="typescript" title="Route durable updates and ephemeral awareness through different policies" /%}
+
+Measure the system at the document boundary:
+
+- active rooms, participants per room, hot-room fan-out, and per-room message rate;
+- local-to-confirmed latency and reconnect catch-up duration by document size;
+- rejected, duplicated, out-of-order, missing, transformed, and conflicted changes;
+- journal append latency, checkpoint age, replay depth, recovery time, and compaction work;
+- outbound queue depth, slow-consumer disconnects, reconnect storms, and dropped awareness;
+- authorization failures, origin rejections, permission changes during a session, and payload validation failures.
+
+Test partitions, duplicate delivery, opposite arrival orders, client clock skew, room-owner loss, stale permissions, reconnect storms, and one slow subscriber. Property-based tests are especially useful for convergence: generate concurrent operation histories, permute delivery order, and assert equal valid final states.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design the failure behavior before polishing cursors
+
+- **A client is slow:** bound its outbound queue, coalesce replaceable awareness, and disconnect or resynchronize before memory grows without limit.
+- **A durable append fails:** do not acknowledge the edit as saved. Keep its local pending state visible and retry with the same change identity.
+- **A room owner crashes:** load a checkpoint, replay newer durable changes, obtain ownership fencing, and then accept new writes.
+- **A permission changes mid-session:** recheck authorization for durable mutations and revoke the room lease; a long-lived socket is not permanent authority.
+- **A semantic conflict remains:** present the competing values and the affected object. Deterministic convergence is not permission to hide a business decision.
+- **Presence disappears:** expire it quietly and rebuild from live participants. Presence loss must not block durable editing.
+
+### Production readiness checklist
+
+- The merge unit matches user intent: character, list item, object property, or domain command.
+- Every durable change has stable identity and a documented acknowledgement point.
+- The reconnect protocol detects gaps and preserves unacknowledged local edits.
+- Presence and durable state use different retention, retry, and backpressure policies.
+- Room authorization is scoped to document, actor, action, and current permission state.
+- Recovery tests prove checkpoint plus replay reaches the last acknowledged state.
+- Convergence tests permute concurrent and duplicate delivery rather than testing one happy ordering.
+- Hot-room limits and slow-consumer behavior are explicit and visible to operators.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Read the implementation contracts, then test your product semantics
+
+- [RFC 6455: The WebSocket Protocol](https://datatracker.ietf.org/doc/html/rfc6455) defines the opening handshake, origin signal, message framing, two-way channel, and ping/pong control frames. It does not define a collaborative document protocol.
+- [Yjs document updates](https://docs.yjs.dev/api/document-updates) documents commutative, associative, idempotent updates and state-vector-based difference exchange.
+- [Yjs awareness](https://docs.yjs.dev/api/about-awareness) keeps presence separate from the document and expires remote clients that stop refreshing their state.
+- [Automerge conflict handling](https://automerge.org/docs/reference/documents/conflicts/) explains deterministic sequence merging and how concurrent writes to one property remain inspectable as conflicts.
+- [Figma's multiplayer architecture](https://www.figma.com/blog/how-figmas-multiplayer-technology-works/) is a useful primary-source example of choosing merge semantics around a structured object model instead of copying a text algorithm.
+- [Figma's reliability journal](https://www.figma.com/blog/making-multiplayer-more-reliable/) shows why an in-memory room authority still needs durable sequence-aware recovery.
+
+Libraries define merge and synchronization mechanics. Your product still defines authorization, acknowledgement, valid document states, conflict UX, storage boundaries, retention, and the user-visible meaning of "saved."
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/real-time-collaborative-systems/quiz/real-time-collaborative-systems.json" lessonSlug="real-time-collaborative-systems" title="Collaborative Systems Decisions" /%}

@@ -1,0 +1,245 @@
+{
+  "title": "Trace the user path, replication path, and recovery path",
+  "description": "Switch scenarios to see which edges remain active. The modeled ledger changes by 180 GiB/day and normally replicates asynchronously, so the interconnect is off the user write path.",
+  "nodes": [
+    {
+      "id": "users",
+      "label": "Users",
+      "eyebrow": "Request source",
+      "detail": "Users need a stable endpoint and a truthful result. Traffic steering can choose a healthy service, but it cannot decide which data copy is safe to promote.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 50
+    },
+    {
+      "id": "traffic",
+      "label": "Traffic director",
+      "eyebrow": "Routing",
+      "detail": "Applies health and recovery state to routing. It sends writes to the designated authority and changes targets only after the data promotion gate passes.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 30,
+      "y": 50
+    },
+    {
+      "id": "primary-api",
+      "label": "Primary API",
+      "eyebrow": "Cloud A",
+      "detail": "Owns the normal user path and writes only to the designated primary store. It emits stable operation identities so retries can be reconciled.",
+      "kind": "service",
+      "tone": "green",
+      "x": 51,
+      "y": 24
+    },
+    {
+      "id": "recovery-api",
+      "label": "Recovery API",
+      "eyebrow": "Cloud B",
+      "detail": "Runs the same service contract but stays out of the write path until data, credentials, dependencies, and traffic controls are ready.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 51,
+      "y": 76
+    },
+    {
+      "id": "primary-store",
+      "label": "Primary store",
+      "eyebrow": "Write authority",
+      "detail": "Protects order invariants and records the replication position. A timeout is reconciled here before a caller repeats a business operation.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 74,
+      "y": 24
+    },
+    {
+      "id": "recovery-store",
+      "label": "Recovery store",
+      "eyebrow": "Async copy",
+      "detail": "Applies the off-path change stream. Its last durable position defines the recovery point; copy existence alone does not prove promotability.",
+      "kind": "database",
+      "tone": "rose",
+      "x": 88,
+      "y": 76
+    },
+    {
+      "id": "orchestrator",
+      "label": "Orchestrator",
+      "eyebrow": "Control plane",
+      "detail": "Reconciles desired placement and policy. Existing workloads should keep serving when it is unavailable, while new placement and rollout changes pause.",
+      "kind": "allocator",
+      "tone": "neutral",
+      "x": 77,
+      "y": 50
+    }
+  ],
+  "edges": [
+    {
+      "id": "users-traffic",
+      "from": "users",
+      "to": "traffic",
+      "label": "request",
+      "mode": "sync"
+    },
+    {
+      "id": "traffic-primary",
+      "from": "traffic",
+      "to": "primary-api",
+      "label": "normal route",
+      "mode": "sync"
+    },
+    {
+      "id": "primary-write",
+      "from": "primary-api",
+      "to": "primary-store",
+      "label": "authoritative write",
+      "mode": "sync"
+    },
+    {
+      "id": "replicate",
+      "from": "primary-store",
+      "to": "recovery-store",
+      "label": "180 GiB/day",
+      "mode": "async",
+      "via": {
+        "x": 86,
+        "y": 47
+      }
+    },
+    {
+      "id": "traffic-recovery",
+      "from": "traffic",
+      "to": "recovery-api",
+      "label": "after promotion",
+      "mode": "sync"
+    },
+    {
+      "id": "recovery-write",
+      "from": "recovery-api",
+      "to": "recovery-store",
+      "label": "promoted write",
+      "mode": "sync"
+    },
+    {
+      "id": "orchestrate-primary",
+      "from": "orchestrator",
+      "to": "primary-api",
+      "label": "desired state",
+      "mode": "async",
+      "via": {
+        "x": 65,
+        "y": 42
+      }
+    },
+    {
+      "id": "orchestrate-recovery",
+      "from": "orchestrator",
+      "to": "recovery-api",
+      "label": "desired state",
+      "mode": "async",
+      "via": {
+        "x": 65,
+        "y": 58
+      }
+    },
+    {
+      "id": "synchronous-copy",
+      "from": "primary-store",
+      "to": "recovery-store",
+      "label": "WAN acknowledgement",
+      "mode": "sync",
+      "via": {
+        "x": 63,
+        "y": 50
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy",
+      "summary": "User writes stay inside Cloud A. Changed records move asynchronously to Cloud B at a modeled 180 GiB/day.",
+      "activeEdges": [
+        "users-traffic",
+        "traffic-primary",
+        "primary-write",
+        "replicate",
+        "orchestrate-primary",
+        "orchestrate-recovery"
+      ],
+      "focusNode": "primary-store",
+      "result": "The user path has no cross-cloud round trip. The recovery copy consumes outbound transfer and may lag, so monitoring must expose bytes sent, last applied position, age of the oldest unapplied record, and restore readiness."
+    },
+    {
+      "id": "link-down",
+      "label": "Interconnect down",
+      "summary": "Cloud A remains healthy, but the asynchronous replication link cannot reach Cloud B for two hours.",
+      "activeEdges": [
+        "users-traffic",
+        "traffic-primary",
+        "primary-write",
+        "orchestrate-primary"
+      ],
+      "degradedNodes": [
+        "recovery-store"
+      ],
+      "focusNode": "recovery-store",
+      "result": "Writes continue at the authority, but the recovery point ages and about 15 GiB of changed data accumulates at 180 GiB/day. When the link returns, catch-up traffic can exceed the normal egress rate; cap it so recovery does not saturate production."
+    },
+    {
+      "id": "primary-outage",
+      "label": "Primary cloud down",
+      "summary": "Cloud A and its store are unavailable. The recovery service is running, but traffic must wait for a safe data promotion decision.",
+      "activeEdges": [
+        "users-traffic",
+        "traffic-recovery",
+        "recovery-write",
+        "orchestrate-recovery"
+      ],
+      "failedNodes": [
+        "primary-api",
+        "primary-store"
+      ],
+      "degradedNodes": [
+        "recovery-store"
+      ],
+      "focusNode": "recovery-store",
+      "result": "Resume writes only after verifying the last applied position, integrity, credentials, dependencies, and fencing of the old authority. The recovery point is bounded by replication lag; global routing alone cannot make a stale replica authoritative."
+    },
+    {
+      "id": "control-plane-down",
+      "label": "Orchestrator down",
+      "summary": "The placement control plane is unavailable while both workload clusters and the replication path remain healthy.",
+      "activeEdges": [
+        "users-traffic",
+        "traffic-primary",
+        "primary-write",
+        "replicate"
+      ],
+      "failedNodes": [
+        "orchestrator"
+      ],
+      "focusNode": "orchestrator",
+      "result": "Existing data-plane workloads continue serving and replicating. New placements, policy changes, and automated recovery actions pause. This is why control-plane availability and workload availability need separate objectives and runbooks."
+    },
+    {
+      "id": "sync-wan",
+      "label": "WAN on write path",
+      "summary": "A design change requires Cloud B to acknowledge every write before Cloud A returns success.",
+      "activeEdges": [
+        "users-traffic",
+        "traffic-primary",
+        "primary-write",
+        "synchronous-copy",
+        "orchestrate-primary",
+        "orchestrate-recovery"
+      ],
+      "degradedNodes": [
+        "primary-store",
+        "recovery-store"
+      ],
+      "focusNode": "primary-store",
+      "result": "Each write now pays a cross-cloud round trip and outbound transfer. A link partition blocks safe writes in this two-site model: accepting on both sides risks divergence, while requiring both acknowledgements sacrifices write availability. Add a justified quorum design or keep WAN replication asynchronous."
+    }
+  ]
+}

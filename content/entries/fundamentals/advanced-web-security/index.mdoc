@@ -1,0 +1,257 @@
+---
+registryId: advanced-web-security
+---
+
+{% section-card tone="intro" %}
+## What is advanced web security?
+
+**Advanced web security is the design of explicit trust boundaries around identities, data, browser capabilities, code interpreters, dependencies, and state-changing operations.** It assumes that a valid-looking request can still be unauthorized, malicious, stale, cross-site, or unsafe for the context where it will be used.
+
+In plain language, every web request asks the application to trust several claims: who sent it, which object they may touch, what their input means, whether the browser intended the action, and which code may run in the page. Secure systems verify each claim at the boundary that owns the decision.
+
+{% callout variant="info" %}
+### Core invariant
+
+Treat every value crossing a trust boundary as untrusted until the specific operation validates its shape, authorizes its subject and resource, and safely interprets it. Authentication identifies a caller; it does not grant authority over every record or prove intent for every action.
+{% /callout %}
+
+This lesson assumes basic familiarity with HTTP requests, browser cookies, and database queries. It builds from those foundations into production access control, injection defense, browser policy, session security, dependency integrity, and incident response.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Threat-model assets, actors, and boundaries first
+
+A **web threat model** names what must be protected, who can influence each input, where trust changes, and what user-visible harm can occur. Start with the application you operate rather than treating a vulnerability list as the architecture.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Identity and authority" eyebrow="Who may act?" icon="key" tone="blue" %}
+Protect sessions, account recovery, tenant membership, privileged roles, service credentials, and every object-level decision. A valid session is only one input to authorization.
+{% /concept-card %}
+{% concept-card title="Data and privacy" eyebrow="What may be seen?" icon="database" tone="violet" %}
+Protect personal data, business records, secrets, tokens, uploaded files, caches, logs, exports, and backups across their complete lifecycle.
+{% /concept-card %}
+{% concept-card title="Code and interpretation" eyebrow="What may execute?" icon="code" tone="amber" %}
+Keep untrusted values from becoming SQL, shell syntax, HTML, JavaScript, template expressions, file paths, URLs, or serialized objects.
+{% /concept-card %}
+{% concept-card title="Availability and recovery" eyebrow="What must keep working?" icon="activity" tone="green" %}
+Protect expensive routes, login and recovery flows, dependencies, queues, and operational access from abuse, exceptional conditions, and cascading failure.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [OWASP Top 10:2025](https://owasp.org/Top10/2025/0x00_2025-Introduction/) groups common root causes around broken access control, security misconfiguration, software supply-chain failures, cryptographic failures, injection, insecure design, authentication failures, integrity failures, logging and alerting failures, and mishandled exceptional conditions. Use those categories as review prompts, then trace the concrete paths in your own application.
+
+### Inventory the attack surface
+
+- **Entry points:** routes, forms, APIs, webhooks, WebSockets, uploads, redirects, search fields, templates, and administrative tools.
+- **Principals:** anonymous users, customers, support staff, administrators, background jobs, third parties, and internal services.
+- **Trust transitions:** browser to edge, edge to application, application to data store, one tenant to another, build system to production, and operator to privileged control plane.
+- **Consequences:** disclosure, modification, deletion, account takeover, money movement, code execution, service exhaustion, and loss of evidence needed for recovery.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Put authority checks on the complete request path
+
+A protected route is not the same as a protected operation. The application must carry authenticated identity into a policy decision that includes the exact tenant, resource, action, current business state, and request intent.
+
+{% system-flow title="A request earns authority one boundary at a time" caption="Each stage narrows what the caller may do. A later service must not infer authority merely because an earlier middleware accepted the request." %}
+{% system-node title="Browser or API client" eyebrow="Untrusted request" icon="globe" tone="blue" %}
+Supplies route parameters, body fields, headers, cookies, origin context, and potentially attacker-controlled content.
+{% /system-node %}
+{% system-node title="Edge controls" eyebrow="Abuse boundary" icon="shield" tone="cyan" %}
+Enforce TLS, request-size limits, rate limits, coarse bot controls, and safe parsing before expensive application work.
+{% /system-node %}
+{% system-node title="Identity and policy" eyebrow="Authority boundary" icon="key" tone="green" %}
+Validate the session, then authorize the action against the loaded resource, tenant, relationship, limits, and current state.
+{% /system-node %}
+{% system-node title="Interpreter boundary" eyebrow="Meaning boundary" icon="code" tone="amber" %}
+Bind database and command parameters, constrain destinations, and encode values for the exact output context where they appear.
+{% /system-node %}
+{% system-node title="Data or side effect" eyebrow="Protected consequence" icon="database" tone="rose" %}
+Read, write, send, spend, or delete only after the operation has independent evidence for identity, authority, input meaning, and intent.
+{% /system-node %}
+{% /system-flow %}
+
+Use the lab to compare a valid session, a generic route guard, and operation-scoped enforcement. Change both the attack path and the posture; the decisive boundary changes with the operation.
+
+{% interactive-block id="fundamentals/advanced-web-security-calculator" dataFile="/api/content/fundamentals/advanced-web-security/data/request-boundary-scenarios.json" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Separate authentication, authorization, and interpretation
+
+These controls answer different questions and must remain independently testable.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Authenticate the principal" eyebrow="Who are you?" icon="user" tone="blue" %}
+Validate the session or token, issuer, audience, expiry, revocation state, and authentication strength. Do not accept algorithms, keys, or identity claims chosen by untrusted input.
+{% /concept-card %}
+{% concept-card title="Authorize the operation" eyebrow="May you do this?" icon="lock" tone="green" %}
+Check permission and object ownership or tenant membership on every request. Centralize policy logic, but evaluate it with the resource and business state at the point of use.
+{% /concept-card %}
+{% concept-card title="Constrain interpretation" eyebrow="What does input mean?" icon="braces" tone="amber" %}
+Use allowlisted types and ranges, parameterized queries, safe APIs, contextual output encoding, and restricted URL or file destinations. Validation alone does not make string-built code safe.
+{% /concept-card %}
+{% /concept-grid %}
+
+The executable model keeps object authorization and query binding separate. Change the principal, resource, or bound value to add tests for your own policy.
+
+{% code-block file="/api/content/fundamentals/advanced-web-security/code/enforce-request-boundaries.py" language="python" title="Operation-Scoped Request Boundaries" /%}
+
+### Match the defense to the interpreter
+
+- **SQL and NoSQL queries:** use parameter binding or safe query builders; constrain selectable fields and operators separately.
+- **HTML and DOM output:** encode for the destination context and prefer APIs such as `textContent`; URL, CSS, attribute, and JavaScript contexts need different handling.
+- **Operating-system commands:** avoid a shell when a direct process API works; allowlist executable and argument shapes when execution is necessary.
+- **Paths and uploads:** generate server-side names, normalize and constrain destinations, verify type by content, scan when required, and serve active content from an isolated origin.
+- **Outbound URLs:** parse with a real URL parser, resolve and constrain destinations, block private or metadata networks, and recheck redirects to reduce SSRF risk.
+
+{% callout variant="warn" %}
+Input sanitization is not a universal transformation that makes a value safe everywhere. Preserve the value as data, validate it for the business operation, and apply the correct control at the interpreter or output context that will consume it.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat the browser as a policy-enforcement boundary
+
+The browser automatically carries cookies, isolates origins, renders active content, and decides whether one page may read, execute, or embed another resource. Response headers and cookie attributes narrow those capabilities, but they do not replace server-side authorization.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Content Security Policy" eyebrow="Execution" icon="code" tone="violet" %}
+Use `script-src` with nonces or hashes to constrain script execution, restrict dangerous resource destinations, and collect violation evidence. Roll out with Report-Only before enforcement when compatibility is uncertain.
+{% /concept-card %}
+{% concept-card title="CORS" eyebrow="Cross-origin reads" icon="globe" tone="blue" %}
+Return an exact allowed origin for trusted browser integrations and opt into credentials deliberately. CORS controls browser access to a response; it is not authentication or authorization for the endpoint.
+{% /concept-card %}
+{% concept-card title="Cookie attributes" eyebrow="Ambient identity" icon="key" tone="amber" %}
+Use `Secure`, `HttpOnly`, a deliberate `SameSite` mode, narrow path and host scope, rotation, and bounded lifetime. `SameSite=None` also requires `Secure` in modern browsers.
+{% /concept-card %}
+{% concept-card title="Frame containment" eyebrow="Embedding" icon="layout" tone="green" %}
+Send CSP `frame-ancestors` as a response header to name which ancestors may embed a page. Use `'none'` for sensitive surfaces that never need framing.
+{% /concept-card %}
+{% /concept-grid %}
+
+The policy lab contains both legitimate and hostile flows. A strong configuration must block injected scripts, hostile frames, and forged state changes without silently breaking an approved partner API.
+
+{% interactive-block id="fundamentals/advanced-web-security-browser-policy-lab" dataFile="/api/content/fundamentals/advanced-web-security/data/browser-policy-scenarios.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Compose browser controls instead of trusting one header
+
+Browser controls overlap, but each protects a different decision. CSP reduces the impact of injected content; contextual output encoding prevents the injection from becoming active markup. `SameSite` reduces cross-site cookie delivery; CSRF tokens, Origin checks, or Fetch Metadata provide independent intent evidence. `frame-ancestors` prevents unwanted embedding; object-level authorization still protects every administrative action.
+
+{% code-block file="/api/content/fundamentals/advanced-web-security/code/evaluate-browser-policy.py" language="python" title="Browser Policy Decision Model" /%}
+
+### Deploy the policies deliberately
+
+- **CSP:** begin with a restrictive target policy in `Content-Security-Policy-Report-Only`, remove inline dependencies, classify reports, then enforce. A nonce must be unpredictable and generated per response.
+- **CORS:** compare the request origin against an exact server-side allowlist. Never reflect arbitrary origins, and never treat a successful preflight as resource authorization.
+- **CSRF:** keep state changes off safe methods, require a token or equivalent intent check, validate Origin or Fetch Metadata where appropriate, and treat `SameSite` as defense in depth.
+- **Iframes:** set `frame-ancestors` in the HTTP response because it is not supported in a CSP meta element and does not inherit from `default-src`.
+- **Cookies:** prefer host-only session cookies with `Secure`, `HttpOnly`, intentional `SameSite`, short expiry, rotation after privilege changes, and server-side invalidation.
+
+{% callout variant="info" %}
+An origin is scheme, host, and port. A site is based on the registrable domain. `SameSite` therefore does not provide the same boundary as same-origin policy; sibling subdomains may still be considered same-site.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design authentication as a lifecycle
+
+Secure login is only the beginning. Registration, verification, session issuance, privilege changes, recovery, revocation, and audit evidence all modify identity authority.
+
+{% process-flow %}
+{% process-step number="1" title="Establish identity" label="Enroll" %}
+Verify ownership of the chosen factor, protect registration and recovery from enumeration and abuse, and record the assurance level actually achieved.
+{% /process-step %}
+{% process-step number="2" title="Issue bounded sessions" label="Authenticate" %}
+Use established identity libraries or providers, memory-hard password hashing, phishing-resistant MFA where risk warrants it, and short-lived, purpose-bound credentials.
+{% /process-step %}
+{% process-step number="3" title="Recheck sensitive actions" label="Authorize" %}
+Require current policy, object-level checks, transaction limits, and fresh authentication or explicit confirmation for high-consequence operations.
+{% /process-step %}
+{% process-step number="4" title="Revoke and investigate" label="Recover" %}
+Rotate identifiers after login and privilege changes, revoke sessions on compromise, preserve minimized evidence, notify affected users, and verify recovery from a clean state.
+{% /process-step %}
+{% /process-flow %}
+
+### Protect the failure paths
+
+- Rate-limit login, MFA, password reset, invitation, verification, and recovery attempts by multiple signals without creating a trivial account-lockout denial of service.
+- Return consistent public responses for account lookup while keeping detailed internal reason codes and correlation IDs.
+- Store passwords with a current password-hashing function and calibrated work factor; never encrypt passwords for later recovery.
+- Keep session IDs out of URLs and logs, rotate them after authentication or privilege changes, and invalidate server-side state on logout and compromise.
+- Require stronger, recent evidence for payout, credential, recovery, permission, and destructive changes than for ordinary reads.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Secure dependencies, configuration, and exceptional paths
+
+Modern web risk includes the code and configuration that enter the product through build and deployment systems. A patched application can still fail through an untrusted package, exposed source map, permissive cloud role, default account, debug route, or exception that fails open.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Software supply chain" eyebrow="Provenance" icon="package" tone="violet" %}
+Pin dependencies, review lockfile changes, verify package and build provenance where available, scan reachable vulnerabilities, protect publishing credentials, and maintain an inventory for urgent response.
+{% /concept-card %}
+{% concept-card title="Secure configuration" eyebrow="Environment" icon="settings" tone="amber" %}
+Start from deny-by-default templates, isolate secrets, disable debug behavior, minimize service permissions, restrict administrative networks, and test the deployed response rather than only source files.
+{% /concept-card %}
+{% concept-card title="Exceptional conditions" eyebrow="Failure behavior" icon="warning" tone="rose" %}
+Define bounded parsing, timeouts, rollback, idempotency, and fail-closed behavior for malformed input, partial writes, dependency timeouts, exhausted resources, and ambiguous outcomes.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Make release evidence reproducible
+
+- Generate a software inventory and attach dependency, secret, static-analysis, and infrastructure-policy results to a versioned build.
+- Verify artifacts and configuration between build, staging, and production; do not rebuild an approved release from mutable inputs.
+- Test negative cases for unauthorized objects, malformed encodings, oversized bodies, alternate content types, duplicate requests, cross-origin behavior, and dependency failure.
+- Remove obsolete routes, packages, flags, credentials, and compatibility exceptions instead of allowing temporary exposure to become permanent.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Detect abuse and recover with evidence
+
+Security logging is useful only when it can trigger a bounded response. Record the decision context needed to investigate without writing passwords, session tokens, authorization headers, full payment data, or unnecessary personal content into logs.
+
+{% process-flow %}
+{% process-step number="1" title="Detect a boundary failure" label="Signal" %}
+Alert on denied cross-tenant access, repeated policy failures, impossible session changes, unusual privileged actions, CSP violations, dependency exposure, and rate-limit pressure.
+{% /process-step %}
+{% process-step number="2" title="Contain active authority" label="Stop" %}
+Revoke affected sessions and credentials, disable the vulnerable operation or dependency path, block confirmed indicators, and preserve unaffected service where possible.
+{% /process-step %}
+{% process-step number="3" title="Reconstruct the effect" label="Evidence" %}
+Correlate principal, tenant, request, policy decision, object, release, and side-effect IDs; verify what actually changed in the system of record.
+{% /process-step %}
+{% process-step number="4" title="Restore with a regression" label="Recover" %}
+Patch the failed boundary, remove persistence, rotate exposed secrets, repair data, add the exploit path to automated tests, and restore through a bounded canary.
+{% /process-step %}
+{% /process-flow %}
+
+### Instrument decisions, not only errors
+
+- Record authorization outcome, policy version, stable reason code, principal and tenant IDs, resource type, request ID, and release version.
+- Separate security evidence from application debug payloads and apply retention, access, integrity, and privacy controls to both.
+- Monitor successful high-risk actions as well as denials; account takeover often looks like valid traffic after authentication.
+- Test alerts and revocation paths in drills. A dashboard without an owner, threshold, and response action does not contain an incident.
+{% /section-card %}
+
+{% section-card %}
+## Review the production boundary map
+
+Before release, the team should be able to answer these questions with code, configuration, tests, and runtime evidence:
+
+- Does every operation authenticate the principal and independently authorize the exact tenant, object, action, and current state?
+- Can any untrusted value become SQL, shell syntax, HTML, JavaScript, a template expression, a file path, or an outbound URL without a context-specific boundary?
+- Do CSP, CORS, cookies, CSRF controls, and `frame-ancestors` match the product's real browser integrations in both enforce and failure states?
+- Are recovery, invitation, MFA, privilege-change, and administrative flows protected as strongly as ordinary login?
+- Can the team identify which release contains a vulnerable dependency and revoke its credentials or disable its path quickly?
+- Do malformed input, timeouts, duplicate requests, and partial failures preserve authorization and data invariants rather than fail open?
+- Can operators correlate a security decision to the principal, policy, object, release, and observed side effect without exposing secrets in logs?
+- Has every critical finding become a regression test, a monitored signal, and a rehearsed containment action?
+
+Current primary references for maintaining the design include the [OWASP Top 10:2025](https://owasp.org/Top10/2025/0x00_2025-Introduction/), the [OWASP CSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html), and the [W3C Content Security Policy Level 3 specification](https://www.w3.org/TR/CSP3/).
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/advanced-web-security/quiz/advanced-web-security.json" lessonSlug="advanced-web-security" title="Advanced Web Security Design Review" /%}

@@ -1,0 +1,274 @@
+---
+registryId: smart-text-completion
+---
+
+{% section-card tone="intro" %}
+## What is smart text completion?
+
+**Smart text completion** proposes a short continuation while a person is actively writing. It is a selective prediction product: the system may generate several candidates, but it shows text only when one candidate is useful, timely, current, and allowed by policy.
+
+This is different from a chatbot response. The writer already owns the document and can keep typing at any moment. A completion is a temporary proposal attached to one exact cursor state, not an instruction to replace user text.
+
+The feature matters because a weak suggestion consumes attention even when it is ignored. Product quality therefore depends on more than model accuracy:
+
+- **Control:** the writer chooses whether to accept, ignore, or partially use a suggestion.
+- **Restraint:** returning no suggestion is a normal, healthy outcome.
+- **Freshness:** a response for an old draft must never appear on a newer draft.
+- **Speed:** the complete path must fit inside the interaction budget, not only the model call.
+- **Trust:** context, personalization, safety, and feedback need explicit boundaries.
+
+**Core invariant: typing never waits for completion, and generated text never enters the document without an explicit user action.**
+
+Review [Prompt Engineering](/genai/prompt-engineering) first if context construction is unfamiliar. [Gmail Smart Compose Architecture](/genai/gmail-smart-compose-architecture) is the deeper product case study; this lesson focuses on the reusable decision system behind inline completion.
+{% /section-card %}
+
+{% section-card %}
+## Define the product contract before choosing a model
+
+Start with the interaction promise. It determines which requests are eligible, how long the service has, which context is justified, and what happens when the system is uncertain.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Trigger" eyebrow="When" icon="activity" tone="blue" %}
+Request a suggestion only after a meaningful prefix, stable cursor position, short debounce, and compatible editor state.
+{% /concept-card %}
+{% concept-card title="Proposal" eyebrow="What" icon="sparkles" tone="violet" %}
+Return a bounded continuation that preserves the writer's language, style, and current intent. Do not silently rewrite existing text.
+{% /concept-card %}
+{% concept-card title="Acceptance" eyebrow="Control" icon="check" tone="green" %}
+Use an explicit key, gesture, or selection. Keep ordinary typing, undo, screen-reader navigation, and input-method composition authoritative.
+{% /concept-card %}
+{% concept-card title="Abstention" eyebrow="Fallback" icon="shield" tone="amber" %}
+Suppress late, stale, unsafe, repetitive, or low-value candidates. The editor continues normally with no retry loop in the foreground.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Write measurable non-goals
+
+- Do not answer factual questions unless the product is explicitly designed and evaluated for that job.
+- Do not auto-send, auto-save, or execute actions from a completion.
+- Do not make document editing depend on model, ranking, policy, or telemetry availability.
+- Do not use context merely because it exists; every field needs purpose, scope, retention, and a fallback.
+- Do not optimize suggestion coverage as if more visible text were always better.
+{% /section-card %}
+
+{% system-flow title="A candidate crosses independent boundaries" caption="Each request is correlated with one draft version. The client may discard the response even after every server-side gate passes." %}
+{% system-node title="Eligible editor state" eyebrow="Client" icon="braces" tone="blue" %}
+Debounce input, capture cursor and draft versions, and build the smallest permitted context envelope.
+{% /system-node %}
+{% system-node title="Candidate set" eyebrow="Generate" icon="server" tone="violet" %}
+Choose a model tier, decode a bounded number of continuations, and stop when the deadline is no longer reachable.
+{% /system-node %}
+{% system-node title="Rank and gate" eyebrow="Decide" icon="scale" tone="amber" %}
+Combine relevance evidence with policy, repetition, language, freshness, and product thresholds.
+{% /system-node %}
+{% system-node title="Explicit acceptance" eyebrow="Render" icon="check" tone="green" %}
+Show ghost text only if the draft version still matches. Insert it only after the writer accepts.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Make request eligibility cheap and local
+
+The client should eliminate requests that cannot become useful suggestions. Local qualification protects privacy, saves capacity, and prevents a busy model service from becoming part of every keystroke.
+
+### Common eligibility checks
+
+1. Confirm the feature and any personalization mode are enabled for this account and surface.
+2. Require enough non-whitespace prefix to infer a continuation without guessing blindly.
+3. Exclude password, payment, secret, and other configured sensitive fields before network work.
+4. Pause during input-method composition, multi-cursor edits, selection replacement, or rapid cursor movement.
+5. Debounce recent typing and cancel work associated with superseded draft versions.
+6. Apply client backoff when the service reports overload or repeated deadline misses.
+
+Eligibility is a product policy, not a hard-coded model rule. Measure the percentage of editor states rejected by each reason so a client regression cannot silently multiply serving demand.
+{% /section-card %}
+
+{% interactive-block id="genai/smart-text-completion-candidate-release-lab" dataFile="/api/content/genai/smart-text-completion/data/candidate-release-model.json" /%}
+
+{% section-card %}
+## Build a bounded context and model path
+
+More context can improve relevance, but it also increases encoding time, privacy exposure, and the chance that old or unrelated text dominates the current prefix. Treat context construction as a versioned API contract.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Prefix core" eyebrow="Required" icon="braces" tone="blue" %}
+Send the bounded text before the cursor, language or syntax markers, document type, and an opaque draft version. Preserve exact normalization rules with the model version.
+{% /concept-card %}
+{% concept-card title="Nearby structure" eyebrow="Conditional" icon="network" tone="violet" %}
+Add a title, nearby paragraph, selected metadata, or retrieval result only when an evaluation slice proves that it improves the target task.
+{% /concept-card %}
+{% concept-card title="Personalization" eyebrow="Scoped" icon="shield" tone="amber" %}
+Keep account-specific style signals isolated, disableable, and replaceable by a generic path. Never make private context part of a cross-user cache key.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose a serving path by product need
+
+- **Cached or rules path:** useful for stable, non-sensitive phrases with strict scope and invalidation rules.
+- **Compact model:** maximizes responsiveness and capacity for common short continuations.
+- **Balanced model:** spends more time when richer context materially improves ranking.
+- **Fallback path:** returns no suggestion, or an already-approved simpler candidate, when the primary deadline cannot be met.
+
+Do not route every request to the largest model. Measure quality lift against complete-path latency, accelerator memory, queue growth, and the cost of a visible mistake.
+
+{% code-block file="/api/content/genai/smart-text-completion/code/candidate-release-policy.py" language="python" title="Versioned candidate ranking and independent release gates" /%}
+{% /section-card %}
+
+{% section-card %}
+## Budget the complete interaction path
+
+The 2019 [Gmail Smart Compose paper](https://research.google/pubs/gmail-smart-compose-real-time-assisted-writing/) reports a published p90 end-to-end requirement below **60 ms** for that system. That number is historical product evidence, not a universal target or a claim about Gmail's current private implementation.
+
+Set a budget from your editor, device, network, language, and user research. Then allocate it across every stage.
+
+{% metric-strip %}
+{% metric value="Client" label="Debounce and correlation" tone="blue" /%}
+{% metric value="Network" label="Regional round trip" tone="cyan" /%}
+{% metric value="Serving" label="Queue, encode, decode" tone="violet" /%}
+{% metric value="Release" label="Rank, policy, render" tone="green" /%}
+{% /metric-strip %}
+
+### Protect tail latency and freshness
+
+- Propagate an absolute deadline from the first server hop.
+- Reject work that cannot finish before its result becomes useful.
+- Bound dynamic-batch wait instead of hiding queue time inside model latency.
+- Cancel superseded requests, but still make every response safe for the client to discard.
+- Record queue age, context time, inference time, gate time, and client-visible render time separately.
+- Degrade by reducing request frequency, context, candidates, or model tier before queues become unbounded.
+{% /section-card %}
+
+{% section-card %}
+## Ranking must earn the right to interrupt
+
+Generation answers, "What continuations are plausible?" Ranking answers, "Which candidate, if any, is worth showing here?" Keep those responsibilities separate so policy and product thresholds can change without retraining the generator.
+
+### Combine evidence, then apply hard gates
+
+- **Relevance:** does the continuation follow the active prefix and nearby intent?
+- **Style fit:** does it match language, register, formatting, and account-scoped preferences?
+- **Utility:** does it save meaningful work instead of echoing one or two obvious characters?
+- **Repetition:** does it duplicate nearby text or loop a phrase?
+- **Safety:** is it allowed for this surface, audience, and context class?
+- **Freshness:** does it still belong to the current draft and cursor version?
+
+A weighted ranking score can order candidates, but it must not average away a failed hard gate. A high-relevance candidate that violates policy or belongs to an old draft is still suppressed.
+
+The reject option is a first-class model behavior. [SelectiveNet](https://proceedings.mlr.press/v97/geifman19a.html) formalizes selective prediction with an integrated reject option; completion products apply the same broad idea by optimizing useful coverage under an acceptable error and interruption budget.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the user loop, not just the language model
+
+Offline continuation scores are useful for iteration, but they cannot prove that ghost text helps people write. Build an evaluation portfolio that connects model behavior to the product contract.
+
+### Offline evidence
+
+- exact or prefix-aware continuation quality on time-separated data;
+- ranking quality and calibrated coverage at each release threshold;
+- repetition, language switch, formatting, sensitive-content, and unsafe-completion tests;
+- slices by language, locale, device class, document type, and context mode;
+- latency and memory benchmarks on the exact model, tokenizer, runtime, and hardware bundle.
+
+### Online evidence
+
+- suggestion coverage among eligible editor states;
+- accepted characters and retained text after later edits;
+- dismiss, overwrite, undo, disable, and negative-feedback behavior;
+- p50, p90, and p99 client-visible latency plus stale-response discard rate;
+- policy suppression, privacy-control, incident, and complaint rates by governed slice.
+
+Do not optimize acceptance rate alone. A system can inflate acceptance by showing only trivial punctuation, making suggestions too aggressive, or steering users toward text they later delete.
+{% /section-card %}
+
+{% interactive-block id="genai/smart-text-completion-rollout-control-lab" dataFile="/api/content/genai/smart-text-completion/data/rollout-control-model.json" /%}
+
+{% section-card %}
+## Roll out with reversible evidence gates
+
+A model, tokenizer, context schema, ranker, and release policy can fail independently. Version and deploy them as an observable bundle, but preserve the ability to pause or roll back each layer.
+
+{% process-flow %}
+{% process-step number="1" title="Qualify offline" label="Replay" %}
+Pass frozen regression sets, safety suites, slice metrics, latency envelopes, and data-lineage review before exposing users.
+{% /process-step %}
+{% process-step number="2" title="Observe in shadow" label="No render" %}
+Run the candidate path without showing suggestions. Compare latency, suppression, and model decisions against the current production bundle.
+{% /process-step %}
+{% process-step number="3" title="Canary by cohort" label="Limited" %}
+Assign stable users, languages, and regions. Keep exposure small enough to stop quickly and large enough to reveal the target slice.
+{% /process-step %}
+{% process-step number="4" title="Expand or reverse" label="Decision" %}
+Advance only when usefulness clears its evidence floor and every latency, safety, privacy, and reliability guardrail remains healthy.
+{% /process-step %}
+{% /process-flow %}
+
+### Every rollout needs explicit stop conditions
+
+- a deadline or stale-response regression;
+- a safety, privacy, or cross-account isolation failure;
+- a harmful language, locale, accessibility, or device slice;
+- a complaint or disable-rate increase beyond the approved budget;
+- queue growth or regional headroom below the failover requirement;
+- missing telemetry that prevents an accountable decision.
+{% /section-card %}
+
+{% section-card %}
+## Operate completion as an optional dependency
+
+The editor is the primary product. Completion infrastructure must fail without trapping the writer, corrupting a draft, or creating a retry storm.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Queue pressure" eyebrow="Shed" icon="gauge" tone="amber" %}
+Drop requests that cannot meet their deadline, dispatch partial batches, and tell clients to reduce request frequency.
+{% /concept-card %}
+{% concept-card title="Region loss" eyebrow="Contain" icon="network" tone="rose" %}
+Fail over only to policy-compatible capacity with enough latency headroom. Otherwise suppress suggestions for the affected cohort.
+{% /concept-card %}
+{% concept-card title="Model regression" eyebrow="Reverse" icon="server" tone="violet" %}
+Roll back the model bundle or route to an already evaluated compact path. Do not improvise an untested fallback during an incident.
+{% /concept-card %}
+{% concept-card title="Policy outage" eyebrow="Fail closed" icon="shield" tone="blue" %}
+Suppress candidates when a required release decision is unavailable. Keep ordinary editing available.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve decision evidence without retaining unnecessary text
+
+- Correlate eligibility, request, candidate, render, accept, and discard events with opaque identifiers.
+- Log model, tokenizer, context schema, ranker, policy, client, and experiment versions.
+- Store numeric scores and reason codes where possible instead of raw document content.
+- Set retention and access rules for any sampled text used in debugging or evaluation.
+- Monitor per-account and per-region limits, queue age, saturation, and failed-capacity headroom.
+- Exercise kill switches, rollback, region isolation, and telemetry-loss procedures before production incidents.
+
+{% code-block file="/api/content/genai/smart-text-completion/code/rollout-decision.py" language="python" title="Evidence-based expansion, hold, and rollback decisions" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production readiness checklist
+
+- The editor remains usable when every completion dependency is unavailable.
+- Draft and cursor versions make every stale response safe to discard.
+- Explicit acceptance is the only path that inserts generated text.
+- Eligibility, context fields, and personalization each have documented scope and user controls.
+- The latency objective covers the client-visible path and is measured by language, device, and region.
+- Ranking thresholds are calibrated against coverage, interruption, and safety, not acceptance alone.
+- Required policy failures suppress suggestions instead of bypassing checks.
+- Offline, shadow, canary, and expansion gates have named owners and stop conditions.
+- The deployed model, tokenizer, context schema, ranker, and policy can be traced and rolled back.
+- Incident telemetry avoids unnecessary raw text and still explains why a candidate was shown or suppressed.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [Gmail Smart Compose: Real-Time Assisted Writing](https://research.google/pubs/gmail-smart-compose-real-time-assisted-writing/) documents the published 2019 model-selection, evaluation, personalization, latency, and serving decisions behind an interactive writing system.
+- [Use Smart Compose in Gmail](https://support.google.com/mail/answer/9116836) documents current user-facing controls, explicit acceptance, generic and personalized modes, and the warning that suggestions may not be factually correct.
+- [SelectiveNet: A Deep Neural Network with an Integrated Reject Option](https://proceedings.mlr.press/v97/geifman19a.html) provides a primary research treatment of prediction with abstention.
+- [NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) provides current lifecycle guidance for governing, measuring, monitoring, and managing generative-AI risk.
+
+Published system details are attributed to their source and date. Product-help and risk-management guidance can change; the architecture patterns elsewhere in this lesson are design recommendations, not claims about any vendor's current private implementation.
+{% /section-card %}
+
+{% quiz title="Smart Text Completion Design Check" questionsFile="/api/content/genai/smart-text-completion/quiz/smart-text-completion-review.json" lessonSlug="smart-text-completion" /%}

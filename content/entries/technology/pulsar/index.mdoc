@@ -1,0 +1,256 @@
+---
+registryId: pulsar
+---
+
+{% section-card tone="intro" %}
+## What is Apache Pulsar?
+
+**Apache Pulsar is a distributed publish-and-subscribe platform for durable messaging
+and retained event streams.** Producers publish messages to topics. Consumers attach
+through named subscriptions, process messages, and acknowledge the subscription
+cursor after owned work succeeds.
+
+Pulsar matters when one platform must support many tenants, large topic counts,
+independent consumer applications, queue-style worker pools, long retention, or
+cross-region delivery. Its defining architectural choice is to separate **serving**
+from **storage**: brokers own client connections and topic dispatch, while Apache
+BookKeeper stores persistent ledger entries and subscription cursors.
+
+{% callout variant="info" %}
+The core invariant is **partitioning and subscription type solve different problems**.
+Partitions create producer-side topic lanes that can span brokers. A subscription
+decides which consumers receive each message and what ordering relationship they may
+assume.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one persistent message
+
+A persistent topic name has the form
+`persistent://tenant/namespace/topic`. The tenant and namespace define administrative
+and policy boundaries; the topic carries messages; each subscription owns an
+independent cursor over those messages.
+
+{% system-flow title="Pulsar persistent message path" caption="The broker serves the topic, BookKeeper stores the entry, and each subscription advances its own cursor." %}
+{% system-node title="Producer" eyebrow="Publish" icon="cloud" tone="blue" %}
+Look up the broker that owns the topic or partition, then send a keyed or unkeyed
+message using the selected routing policy.
+{% /system-node %}
+{% system-node title="Owner broker" eyebrow="Serve" icon="route" tone="violet" %}
+Accept the client connection, validate policy, append through the managed ledger, and
+dispatch available entries to subscriptions.
+{% /system-node %}
+{% system-node title="BookKeeper" eyebrow="Persist" icon="database" tone="green" %}
+Replicate append-only ledger entries across bookies. Persist subscription cursor state
+separately from the stateless serving broker.
+{% /system-node %}
+{% system-node title="Subscription" eyebrow="Deliver" icon="layers" tone="amber" %}
+Apply Exclusive, Failover, Shared, or Key_Shared delivery semantics. Advance the
+cursor only after the consumer acknowledges successful processing.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the policy hierarchy explicit
+
+- **Tenant:** the top-level isolation and authorization boundary.
+- **Namespace:** the policy unit for retention, backlog, persistence, quotas,
+  replication, and many other controls.
+- **Topic or partition:** one ordered message lane with one broker owner at a time.
+- **Subscription:** an independently named consumer position and delivery contract.
+
+The metadata store holds ownership, policy, and ledger metadata. Current Pulsar
+releases can use supported metadata backends such as ZooKeeper or Oxia depending on
+the deployment. Do not describe ZooKeeper as part of every possible modern Pulsar
+data path.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size partitions separately from consumers
+
+A non-partitioned topic has one broker owner, so adding consumers cannot remove a
+producer-side topic bottleneck. A partitioned topic is implemented as several internal
+topics that Pulsar can distribute across brokers. Producer routing chooses a
+partition; subscription type still controls consumer delivery.
+
+Use the lab to preserve two independent inequalities:
+
+- `partition count x measured publish capacity per partition >= peak publish rate`
+- `active consumers x measured service rate per consumer >= peak arrival rate`
+
+{% interactive-block id="technology/pulsar-cluster" dataFile="/api/content/technology/pulsar/data/partition-subscription-model.json" /%}
+
+The lab's rates are transparent planning assumptions, not universal Pulsar limits.
+Benchmark with the real payload size, batching, compression, persistence policy,
+network path, backlog reads, and handler behavior.
+
+{% code-block file="/api/content/technology/pulsar/code/partition-and-persistence-policy.sh" language="bash" title="Create partition lanes and an explicit persistence policy" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the subscription from the ordering invariant
+
+All four subscription types can be used with partitioned topics. They differ in
+consumer ownership and ordering, not in whether the topic is partitioned.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Exclusive" eyebrow="One attached consumer" icon="lock" tone="blue" %}
+Only one consumer may attach to the subscription. On a partitioned topic, that one
+consumer receives from all partitions.
+
+- Choose it when a single process must own the complete subscription.
+- Additional connection attempts are rejected; they are not standby consumers.
+{% /concept-card %}
+{% concept-card title="Failover" eyebrow="Active and standby" icon="repeat" tone="amber" %}
+Multiple consumers may attach, but one active consumer is selected for each partition.
+When an active consumer disconnects, another consumer takes over unacknowledged and
+subsequent messages.
+
+- Choose it when ordered active/standby processing is required.
+- Consumer parallelism is bounded by the partition count.
+{% /concept-card %}
+{% concept-card title="Shared" eyebrow="Independent parallel work" icon="users" tone="green" %}
+All attached consumers can receive. The broker distributes messages among them, and
+an unacknowledged message can be redelivered after a consumer disconnects.
+
+- Choose it for independent work with horizontal consumer scaling.
+- Do not assume message ordering.
+{% /concept-card %}
+{% concept-card title="Key_Shared" eyebrow="Parallelism across keys" icon="key" tone="violet" %}
+All attached consumers can receive, but messages with one key are assigned to one
+consumer at a time.
+
+- Choose a stable key for the smallest entity that needs order.
+- Use key-based producer batching or disable batching; default batching can mix keys
+  in a way that breaks the intended distribution semantics.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/pulsar/code/key-shared-consumer.java" language="java" title="Publish keyed messages and consume with Key_Shared" /%}
+
+{% callout variant="warn" %}
+Transport ordering is not business exactly-once execution. A consumer can commit an
+external side effect and crash before its acknowledgment reaches Pulsar. Use a stable
+operation ID and make the destination mutation idempotent.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Trace broker ownership and BookKeeper durability
+
+For a persistent topic, the broker is not the durable system of record. It appends
+through a managed ledger backed by BookKeeper. A persistence policy uses three related
+numbers:
+
+- **Ensemble size (E):** how many bookies participate in a ledger segment.
+- **Write quorum (W):** how many bookies receive each entry.
+- **Ack quorum (A):** how many durable writes must succeed before the broker
+  acknowledges the producer.
+- **Required relationship:** `E >= W >= A`.
+
+Change the policy and inject failures below. Watch the serving layer, storage layer,
+and metadata control plane fail independently.
+
+{% interactive-block id="technology/pulsar-failure-topology-lab" dataFile="/api/content/technology/pulsar/data/broker-storage-failure-model.json" /%}
+
+Lowering `A` may restore availability in the model, but it also lowers the number of
+confirmed durable copies at acknowledgment time. Treat quorum changes as a data-loss
+and recovery decision, not a generic latency tuning knob.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Separate backlog, retention, and tiered storage
+
+These controls answer different lifecycle questions:
+
+1. **Backlog** is unacknowledged data still required by a subscription cursor.
+2. **Retention** deliberately keeps acknowledged data for a configured time or size.
+3. **Tiered storage** offloads eligible closed ledger segments from BookKeeper to
+   lower-cost object storage while keeping them readable through Pulsar.
+4. **Expiry** can remove unacknowledged messages after a configured TTL; using it is a
+   product data-loss decision.
+
+{% code-block file="/api/content/technology/pulsar/code/tiered-storage-configuration.sh" language="bash" title="Set namespace offload policy and threshold" /%}
+
+### Design long retention from the read path backward
+
+- Measure replay throughput from offloaded segments, not only hot-cache dispatch.
+- Bound subscription backlog separately from acknowledged-message retention.
+- Alert on oldest backlog age and BookKeeper disk pressure before emergency offload.
+- Test object-store permissions, throttling, and restoration during a real replay.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Use geo-replication as an asynchronous data path
+
+Pulsar brokers can run replicators that read locally published entries and republish
+them to remote clusters. Applications normally use the local cluster service URL,
+while namespace or topic policy chooses the replication clusters.
+
+{% code-block file="/api/content/technology/pulsar/code/geo-replication-setup.sh" language="bash" title="Enable namespace geo-replication" /%}
+
+### State the regional contract before deployment
+
+- Define whether producers may write in one region or several.
+- Measure replication backlog and oldest replication delay per remote cluster.
+- Decide how consumers resume when a region fails and remote cursors differ.
+- Plan for duplicate or reordered business effects across asynchronous regional paths.
+- Keep tested recovery and backup controls; replication copies operational mistakes as
+  well as valid messages.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate each namespace as a workload boundary
+
+Pulsar supplies tenant and namespace controls, but teams still need explicit ownership
+and service objectives.
+
+{% metric-strip %}
+{% metric value="Rate" label="Publish and dispatch" detail="Messages and bytes by topic, namespace, and broker" tone="blue" /%}
+{% metric value="Age" label="Oldest backlog" detail="User-visible freshness risk for every subscription" tone="rose" /%}
+{% metric value="Store" label="BookKeeper health" detail="Add-entry latency, failed bookies, disk, and under-replicated fragments" tone="amber" /%}
+{% metric value="Replicate" label="Geo backlog" detail="Remote lag and recovery-point exposure" tone="violet" /%}
+{% /metric-strip %}
+
+### Production checklist
+
+- Set namespace publish, dispatch, backlog, and storage quotas from measured workload
+  envelopes.
+- Authenticate clients, authorize tenant and namespace actions, encrypt network paths,
+  and isolate administrative roles.
+- Version schemas and reject incompatible producer changes before they reach consumers.
+- Bound negative acknowledgments, acknowledgment timeouts, retry topics, and
+  dead-letter handling.
+- Exercise broker loss, bookie loss, metadata quorum loss, hot-key skew, replay from
+  offload, and regional replication lag.
+- Track ownership changes and ledger recovery time during broker rebalancing.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Know when Pulsar fits the system
+
+{% concept-grid columns="3" %}
+{% concept-card title="Choose Pulsar" eyebrow="Serving and storage scale apart" icon="check" tone="green" %}
+Use Pulsar when native multi-tenancy, high topic cardinality, independent subscriptions,
+mixed queue and stream semantics, long retention, or cross-cluster replication justify
+operating brokers, BookKeeper, and metadata as separate layers.
+{% /concept-card %}
+{% concept-card title="Choose Kafka" eyebrow="Log ecosystem first" icon="layers" tone="blue" %}
+Prefer Kafka when its partitioned-log model, operational experience, connector
+ecosystem, and surrounding stream-processing platform already match the workload.
+Compare current capabilities and measured operations instead of relying on historical
+feature lists.
+{% /concept-card %}
+{% concept-card title="Choose a managed queue" eyebrow="One worker owns each task" icon="route" tone="amber" %}
+Use a managed queue when the system primarily needs asynchronous task handoff and the
+team does not need retained multi-subscriber streams or to operate a separate broker,
+storage, and metadata stack.
+{% /concept-card %}
+{% /concept-grid %}
+
+The deciding question is not whether Pulsar can carry the messages. It is whether its
+independent serving and storage layers, subscription contracts, and policy hierarchy
+solve enough real requirements to justify their operational surface.
+{% /section-card %}
+
+{% quiz lessonSlug="pulsar" title="Apache Pulsar Production Design Review" questionsFile="/api/content/technology/pulsar/quiz/pulsar-production-decisions.json" /%}

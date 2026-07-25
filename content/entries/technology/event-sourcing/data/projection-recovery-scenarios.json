@@ -1,0 +1,1085 @@
+{
+  "title": "Choose a projection recovery path, then walk the cutover",
+  "description": "Select an incident and a runbook. Advance each stage to see which state remains authoritative, what readers observe, and what evidence is required before a rebuilt read model can take traffic.",
+  "defaultScenarioId": "corrupted-totals",
+  "lanes": [
+    {
+      "id": "event-store",
+      "label": "Event store",
+      "role": "Authoritative history"
+    },
+    {
+      "id": "current-projection",
+      "label": "Current projection",
+      "role": "Existing materialized view"
+    },
+    {
+      "id": "candidate-projection",
+      "label": "Candidate projection",
+      "role": "Isolated rebuild target"
+    },
+    {
+      "id": "read-alias",
+      "label": "Read alias",
+      "role": "Application query route"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "corrupted-totals",
+      "label": "A handler bug corrupted order totals",
+      "detail": "The event history is valid, but one deployed projector double-counted discounts in the current read model.",
+      "symptom": "Reconciliation finds order-summary totals that disagree with a fold over the authoritative order streams.",
+      "plans": [
+        {
+          "id": "shadow-rebuild",
+          "label": "Build a versioned projection beside the current one",
+          "detail": "Fix the handler, replay into a clean target, validate it, then switch the read alias.",
+          "fit": "best",
+          "verdict": "The corrupted model is replaced only after deterministic replay and business reconciliation prove the candidate.",
+          "stages": [
+            {
+              "id": "contain",
+              "label": "Contain",
+              "owner": "Incident lead",
+              "action": "Freeze projector v1, mark affected totals as degraded, and preserve its checkpoint and logs for diagnosis.",
+              "result": "The bad handler stops writing. Reads remain available but explicitly stale or degraded while the team prepares a clean target.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Validated order events remain immutable and readable."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "Known-wrong totals are quarantined from decisions that require correctness."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No candidate exists yet."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "The UI serves degraded data or disables total-dependent actions."
+                }
+              }
+            },
+            {
+              "id": "replay",
+              "label": "Replay",
+              "owner": "Projection owner",
+              "action": "Deploy fixed handler v2 into a new order-summary-v2 target and replay from the beginning with an independent checkpoint.",
+              "result": "The old projection is untouched. The candidate can restart from its own checkpoint without moving the production consumer position.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Historical and newly appended events feed the isolated v2 projector."
+                },
+                "current-projection": {
+                  "state": "paused",
+                  "detail": "The known-bad v1 target is preserved for comparison only."
+                },
+                "candidate-projection": {
+                  "state": "active",
+                  "detail": "v2 folds every event with the corrected discount rule."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Readers have not been switched to the incomplete candidate."
+                }
+              }
+            },
+            {
+              "id": "verify",
+              "label": "Verify",
+              "owner": "Domain owner",
+              "action": "Catch up to the live stream, compare event positions, reconcile sampled aggregates, and verify duplicate-event behavior.",
+              "result": "Matching checkpoints prove only completeness. Domain reconciliation is still required to prove that the new fold is correct.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The candidate checkpoint reaches the agreed high-water mark."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "v1 remains the known-bad comparison baseline."
+                },
+                "candidate-projection": {
+                  "state": "ready",
+                  "detail": "v2 is caught up and passes deterministic and business-level checks."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Traffic still waits for an explicit cutover decision."
+                }
+              }
+            },
+            {
+              "id": "cutover",
+              "label": "Cut over",
+              "owner": "Service owner",
+              "action": "Atomically point the read alias to v2, monitor correctness and lag, then retain v1 for a bounded rollback window.",
+              "result": "Readers move as one controlled release. The event store remains the recovery source if the candidate later fails.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Authoritative history is unchanged by the projection release."
+                },
+                "current-projection": {
+                  "state": "paused",
+                  "detail": "v1 is read-only and scheduled for retirement after the rollback window."
+                },
+                "candidate-projection": {
+                  "state": "healthy",
+                  "detail": "v2 continues from its verified checkpoint."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Queries now resolve to the corrected v2 model."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "Candidate checkpoint equals the agreed event-store high-water mark and continues advancing.",
+            "Representative order totals match an independent fold of the same event streams.",
+            "Replayed duplicate event IDs do not change totals or repeat external side effects.",
+            "The alias switch and bounded rollback procedure have both been exercised."
+          ]
+        },
+        {
+          "id": "rebuild-in-place",
+          "label": "Truncate and rebuild the production table",
+          "detail": "Reuse the existing target and checkpoint after taking the read model offline.",
+          "fit": "risky",
+          "verdict": "This can be valid only when the product accepts an outage or fully isolated maintenance window.",
+          "stages": [
+            {
+              "id": "stop",
+              "label": "Stop",
+              "owner": "Service owner",
+              "action": "Stop production reads and the v1 projector before changing the shared table.",
+              "result": "A hard availability decision is now part of the recovery plan.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Writes continue to append authoritative events."
+                },
+                "current-projection": {
+                  "state": "paused",
+                  "detail": "The only read target is offline."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No isolated candidate is created."
+                },
+                "read-alias": {
+                  "state": "paused",
+                  "detail": "Queries are unavailable or routed to a documented fallback."
+                }
+              }
+            },
+            {
+              "id": "truncate",
+              "label": "Clear",
+              "owner": "Database owner",
+              "action": "Archive evidence, truncate the shared projection, reset only its checkpoint, and deploy the corrected handler.",
+              "result": "The bad rows are gone, but there is no complete read model until replay finishes.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "History remains the rebuild source."
+                },
+                "current-projection": {
+                  "state": "active",
+                  "detail": "The empty production target begins replay."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "Isolation is intentionally not used."
+                },
+                "read-alias": {
+                  "state": "paused",
+                  "detail": "Serving a partially rebuilt table would expose incomplete results."
+                }
+              }
+            },
+            {
+              "id": "verify",
+              "label": "Verify",
+              "owner": "Domain owner",
+              "action": "Wait for catch-up, reconcile totals, and verify idempotency before restoring queries.",
+              "result": "The same correctness proof is required even though the target name did not change.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The projector reaches the selected high-water mark."
+                },
+                "current-projection": {
+                  "state": "ready",
+                  "detail": "The shared target is complete and verified."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "There is no alternate target for side-by-side comparison."
+                },
+                "read-alias": {
+                  "state": "paused",
+                  "detail": "Readers stay offline until validation completes."
+                }
+              }
+            },
+            {
+              "id": "resume",
+              "label": "Resume",
+              "owner": "Service owner",
+              "action": "Restore the read alias and monitor projection lag, correctness, and request errors.",
+              "result": "The model is repaired, but the recovery consumed the full read outage budget.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Event appends continue normally."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "The rebuilt table is live."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No parallel version exists."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Queries return only after the complete rebuild."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "The maintenance window explicitly covers the complete replay and verification period.",
+            "No reader can access a partially rebuilt target.",
+            "The rebuilt checkpoint and independent business reconciliation agree.",
+            "A restore or alternate read path exists if the in-place rebuild fails."
+          ]
+        },
+        {
+          "id": "resume-only",
+          "label": "Fix the handler and resume from its checkpoint",
+          "detail": "Continue processing new events without rebuilding rows already written by the buggy handler.",
+          "fit": "wrong",
+          "verdict": "New writes may be correct, but historical corruption remains in every affected row.",
+          "stages": [
+            {
+              "id": "patch",
+              "label": "Patch",
+              "owner": "Projection owner",
+              "action": "Deploy corrected code without changing the target or checkpoint.",
+              "result": "The handler bug is fixed only for events processed after the deployment.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The authoritative events were never damaged."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "Rows created by the old code retain incorrect totals."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No clean target is built."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Queries still expose historical corruption."
+                }
+              }
+            },
+            {
+              "id": "resume",
+              "label": "Resume",
+              "owner": "Projection owner",
+              "action": "Restart from the existing checkpoint and process only later events.",
+              "result": "Checkpoint continuity proves processing progress, not correctness of the existing rows.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "New events continue after the saved position."
+                },
+                "current-projection": {
+                  "state": "active",
+                  "detail": "Correct new deltas are applied to an incorrect base."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "There is still no clean comparison model."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Users see a mixture of old corruption and new correct handling."
+                }
+              }
+            },
+            {
+              "id": "observe",
+              "label": "Observe",
+              "owner": "Incident lead",
+              "action": "Watch lag return to normal while reconciliation still reports wrong totals.",
+              "result": "A healthy lag metric can coexist with a semantically incorrect read model.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The source remains complete."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "The model is caught up but still wrong."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No repair path exists."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Request health hides data-quality failure."
+                }
+              }
+            },
+            {
+              "id": "escalate",
+              "label": "Escalate",
+              "owner": "Domain owner",
+              "action": "Stop treating checkpoint progress as recovery and start a clean rebuild or explicit correction.",
+              "result": "The original plan never repaired the corrupted historical state.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "History can still power the correct recovery."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "The target remains unsuitable for trusted decisions."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "A clean target must still be created."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Degraded behavior must continue until a real repair completes."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "Historical rows are regenerated or corrected, not merely followed by correct new rows.",
+            "Business reconciliation passes independently of checkpoint and lag metrics.",
+            "The corrected handler is proven deterministic across a full replay."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "new-read-shape",
+      "label": "Product needs a new read-model shape",
+      "detail": "A new order-search experience needs different fields and indexes, while the existing read API must remain available.",
+      "symptom": "The current model is correct, but its schema cannot answer the new query without expensive joins and application-side assembly.",
+      "plans": [
+        {
+          "id": "parallel-v2",
+          "label": "Create projection v2 and cut over by alias",
+          "detail": "Replay history into the new shape while v1 continues serving production.",
+          "fit": "best",
+          "verdict": "The new query model ships as an independently verified release without turning schema migration into an outage.",
+          "stages": [
+            {
+              "id": "contract",
+              "label": "Contract",
+              "owner": "API owner",
+              "action": "Define the v2 query contract, ownership, indexes, checkpoint, and acceptance samples before starting replay.",
+              "result": "The target has a measurable purpose rather than becoming another accidental copy of domain state.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "History contains the facts needed for both read shapes."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "v1 continues serving its existing contract."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "v2 schema and handler are prepared in isolation."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Existing queries still resolve to v1."
+                }
+              }
+            },
+            {
+              "id": "replay",
+              "label": "Replay",
+              "owner": "Projection owner",
+              "action": "Build v2 from the event stream with its own checkpoint and catch up to live events.",
+              "result": "The candidate evolves without mutating v1 or resetting its consumer position.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "The same ordered history feeds v1 and v2 independently."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "v1 processes live events as before."
+                },
+                "candidate-projection": {
+                  "state": "active",
+                  "detail": "v2 replays history and then follows the live tail."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Production remains on v1 during replay."
+                }
+              }
+            },
+            {
+              "id": "shadow",
+              "label": "Shadow",
+              "owner": "Product owner",
+              "action": "Compare v1-compatible fields, verify new query results, and shadow representative requests against v2.",
+              "result": "Completeness, performance, and product semantics are tested before user traffic depends on v2.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Both projectors share the same high-water mark."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "v1 remains the production baseline."
+                },
+                "candidate-projection": {
+                  "state": "ready",
+                  "detail": "v2 passes contract and reconciliation checks."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Shadow traffic does not affect user responses."
+                }
+              }
+            },
+            {
+              "id": "release",
+              "label": "Release",
+              "owner": "Service owner",
+              "action": "Switch the query route to v2, observe the release, and retire v1 only after the rollback window.",
+              "result": "Projection versions become deployable artifacts with independent lifecycles.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "No event history is rewritten for the new view."
+                },
+                "current-projection": {
+                  "state": "paused",
+                  "detail": "v1 remains available for bounded rollback."
+                },
+                "candidate-projection": {
+                  "state": "healthy",
+                  "detail": "v2 serves the new and preserved query contracts."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Production queries now route to v2."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "v2 exposes a documented query contract and owner.",
+            "Its checkpoint catches the agreed event-store high-water mark.",
+            "Comparable v1 and v2 fields reconcile for sampled aggregates.",
+            "The alias can switch back to v1 inside the rollback window."
+          ]
+        },
+        {
+          "id": "mutate-v1",
+          "label": "Alter v1 in place during live traffic",
+          "detail": "Change the serving schema and handler without an isolated target.",
+          "fit": "risky",
+          "verdict": "This couples migration, replay, and serving into one failure boundary and needs a carefully bounded maintenance plan.",
+          "stages": [
+            {
+              "id": "alter",
+              "label": "Alter",
+              "owner": "Database owner",
+              "action": "Apply schema changes to the live projection while existing readers still use it.",
+              "result": "Old and new application versions can observe a transitional schema.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "History is unaffected."
+                },
+                "current-projection": {
+                  "state": "stale",
+                  "detail": "The live target is between contracts."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No isolated schema exists."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Readers must tolerate both shapes or stop."
+                }
+              }
+            },
+            {
+              "id": "backfill",
+              "label": "Backfill",
+              "owner": "Projection owner",
+              "action": "Populate new fields in the same table while live updates continue.",
+              "result": "Backfill and tail processing must coordinate without missing or overwriting changes.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Events continue to arrive."
+                },
+                "current-projection": {
+                  "state": "active",
+                  "detail": "One target handles serving, backfill, and live updates."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "There is no clean comparison target."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Some rows may not yet satisfy the new contract."
+                }
+              }
+            },
+            {
+              "id": "verify",
+              "label": "Verify",
+              "owner": "API owner",
+              "action": "Prove every row has the new fields and old readers remain compatible.",
+              "result": "Correctness depends on migration choreography rather than a simple target swap.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The source can still support a clean rebuild if needed."
+                },
+                "current-projection": {
+                  "state": "ready",
+                  "detail": "The in-place model appears complete."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No independent baseline exists."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Cutover is inseparable from the schema state."
+                }
+              }
+            },
+            {
+              "id": "complete",
+              "label": "Complete",
+              "owner": "Service owner",
+              "action": "Remove compatibility code after all readers and rows use the new contract.",
+              "result": "The migration can work, but rollback after destructive changes is harder than switching aliases.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "History remains the final recovery source."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "The original target now serves the new shape."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No versioned target was retained."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Queries use the migrated v1 target."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "Every reader supports the transitional and final schemas.",
+            "Backfill and live updates cannot overwrite each other.",
+            "Rollback is tested before destructive schema changes.",
+            "The maintenance and error budget includes the coupled migration risk."
+          ]
+        },
+        {
+          "id": "query-events",
+          "label": "Query raw event streams from the product API",
+          "detail": "Skip a projection and replay many aggregates for every user query.",
+          "fit": "wrong",
+          "verdict": "The product query now pays replay cost and couples clients to historical event versions.",
+          "stages": [
+            {
+              "id": "bypass",
+              "label": "Bypass",
+              "owner": "API owner",
+              "action": "Route search requests directly to event-stream reads.",
+              "result": "The event store is asked to serve a query model it was not designed to expose.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Interactive queries scan and fold many event streams."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "v1 remains available but cannot answer the new shape."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No purpose-built model is created."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "User latency now depends on unbounded replay work."
+                }
+              }
+            },
+            {
+              "id": "expand",
+              "label": "Expand",
+              "owner": "API owner",
+              "action": "Add handling for every historical event version inside the query path.",
+              "result": "Schema evolution logic and product serving are tightly coupled.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Historical versions must remain interpretable."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "Existing product queries still use v1."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "There is still no indexed query shape."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Query correctness depends on inline upcasting and replay."
+                }
+              }
+            },
+            {
+              "id": "pressure",
+              "label": "Pressure",
+              "owner": "Platform owner",
+              "action": "Observe product traffic competing with command rehydration and projection subscriptions.",
+              "result": "One new read feature expands the blast radius of the authoritative store.",
+              "lanes": {
+                "event-store": {
+                  "state": "stale",
+                  "detail": "Serving pressure threatens recovery and command workloads."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "v1 is not the source of the new pressure."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No decoupled read capacity exists."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Latency and availability depend on event-store load."
+                }
+              }
+            },
+            {
+              "id": "replace",
+              "label": "Replace",
+              "owner": "Architecture owner",
+              "action": "Stop direct product queries and build the missing versioned projection.",
+              "result": "The original plan never established a stable read contract.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The source returns to append, rehydration, and controlled replay duties."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "v1 continues serving known queries."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "v2 still needs to be designed and built."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "The new feature waits for a real query model."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "Product queries use a bounded, owned read contract.",
+            "Historical event-version handling stays out of the request critical path.",
+            "The event store retains capacity for commands, recovery, and subscriptions."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "subscription-outage",
+      "label": "The projector was offline but its checkpoint is healthy",
+      "detail": "No handler bug occurred. The subscription stopped during a database outage, and the sink remains internally correct up to its saved checkpoint.",
+      "symptom": "Projection lag grows while event-store appends remain healthy; reconciliation is correct through the durable checkpoint.",
+      "plans": [
+        {
+          "id": "resume-checkpoint",
+          "label": "Resume from the durable checkpoint",
+          "detail": "Repair the sink, restart the idempotent handler, and consume forward from the saved position.",
+          "fit": "best",
+          "verdict": "The projection catches up without replaying already verified history or resetting its correctness boundary.",
+          "stages": [
+            {
+              "id": "diagnose",
+              "label": "Diagnose",
+              "owner": "On-call engineer",
+              "action": "Confirm that the event store is healthy, the sink outage is repaired, and the saved checkpoint matches durable sink state.",
+              "result": "The incident is classified as missing later events, not corrupted earlier state.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Events continue beyond the consumer checkpoint."
+                },
+                "current-projection": {
+                  "state": "stale",
+                  "detail": "Rows are correct only through the saved position."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "A clean rebuild is not yet justified."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "The product exposes or tolerates bounded staleness."
+                }
+              }
+            },
+            {
+              "id": "resume",
+              "label": "Resume",
+              "owner": "Projection owner",
+              "action": "Restart the same handler from its durable checkpoint with bounded concurrency and idempotent writes.",
+              "result": "Only events after the verified position are applied.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "The subscription reads from the saved position."
+                },
+                "current-projection": {
+                  "state": "active",
+                  "detail": "The sink catches up without clearing correct rows."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No parallel target is needed."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Readers remain behind while backlog drains."
+                }
+              }
+            },
+            {
+              "id": "catch-up",
+              "label": "Catch up",
+              "owner": "On-call engineer",
+              "action": "Watch oldest-unprocessed event age and checkpoint progress rather than only events per second.",
+              "result": "Falling event age proves the consumer is gaining on the live tail.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Source append health remains stable."
+                },
+                "current-projection": {
+                  "state": "active",
+                  "detail": "Checkpoint and data rows advance together."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No duplicate rebuild workload is introduced."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Freshness improves as event age falls."
+                }
+              }
+            },
+            {
+              "id": "verify",
+              "label": "Verify",
+              "owner": "Domain owner",
+              "action": "Reach the live high-water mark, reconcile representative rows, and close degraded product behavior.",
+              "result": "Progress and correctness evidence agree before the incident is closed.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The source and consumer positions converge."
+                },
+                "current-projection": {
+                  "state": "healthy",
+                  "detail": "Rows are current and reconciliation passes."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No alternate target was required."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "The product returns to its freshness objective."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "The saved checkpoint and durable sink writes share a defined atomicity or idempotency contract.",
+            "Oldest-unprocessed event age returns inside the freshness objective.",
+            "Representative read rows reconcile after catch-up.",
+            "Duplicate delivery around the restart does not change outcomes."
+          ]
+        },
+        {
+          "id": "full-shadow-rebuild",
+          "label": "Start a full shadow rebuild",
+          "detail": "Replay all history into a second target even though the existing target is correct through its checkpoint.",
+          "fit": "risky",
+          "verdict": "The plan can recover, but it spends more source, sink, and operator capacity than the evidence requires.",
+          "stages": [
+            {
+              "id": "allocate",
+              "label": "Allocate",
+              "owner": "Platform owner",
+              "action": "Create a second target and an independent subscription from the beginning.",
+              "result": "The incident now includes a full historical replay.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Historical replay competes with live command reads and subscriptions."
+                },
+                "current-projection": {
+                  "state": "stale",
+                  "detail": "Correct rows through the old checkpoint remain unused for recovery."
+                },
+                "candidate-projection": {
+                  "state": "active",
+                  "detail": "The candidate starts from zero."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Freshness waits for a much longer rebuild."
+                }
+              }
+            },
+            {
+              "id": "replay",
+              "label": "Replay",
+              "owner": "Projection owner",
+              "action": "Process the entire history while live events continue to arrive.",
+              "result": "The candidate recomputes state that the current target had already proven.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Replay load must be bounded to protect production."
+                },
+                "current-projection": {
+                  "state": "stale",
+                  "detail": "The existing target stays behind."
+                },
+                "candidate-projection": {
+                  "state": "active",
+                  "detail": "The full rebuild advances toward the live tail."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Users still observe old data."
+                }
+              }
+            },
+            {
+              "id": "verify",
+              "label": "Verify",
+              "owner": "Domain owner",
+              "action": "Reconcile the candidate even though no handler or historical-data bug was observed.",
+              "result": "The same correctness proof remains necessary before cutover.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The candidate finally reaches the high-water mark."
+                },
+                "current-projection": {
+                  "state": "stale",
+                  "detail": "The old target remains a comparison source."
+                },
+                "candidate-projection": {
+                  "state": "ready",
+                  "detail": "The rebuilt target matches the correct existing data."
+                },
+                "read-alias": {
+                  "state": "stale",
+                  "detail": "Cutover has not yet occurred."
+                }
+              }
+            },
+            {
+              "id": "cutover",
+              "label": "Cut over",
+              "owner": "Service owner",
+              "action": "Switch to the candidate and retire the old checkpoint.",
+              "result": "Correctness returns, but recovery time and production load were unnecessarily high.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Historical replay ends."
+                },
+                "current-projection": {
+                  "state": "paused",
+                  "detail": "The old correct-through-checkpoint target is retired."
+                },
+                "candidate-projection": {
+                  "state": "healthy",
+                  "detail": "The rebuilt target becomes production."
+                },
+                "read-alias": {
+                  "state": "healthy",
+                  "detail": "Queries finally become current."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "Replay is rate-limited so it cannot damage event-store or sink SLOs.",
+            "The candidate is reconciled before cutover.",
+            "The longer recovery objective is explicitly accepted.",
+            "Operators document why a verified checkpoint was not reused."
+          ]
+        },
+        {
+          "id": "reset-and-resume",
+          "label": "Reset the checkpoint but keep existing rows",
+          "detail": "Replay history into the populated sink without proving every write is idempotent.",
+          "fit": "wrong",
+          "verdict": "The plan can double-count historical events and turn a lag incident into data corruption.",
+          "stages": [
+            {
+              "id": "reset",
+              "label": "Reset",
+              "owner": "On-call engineer",
+              "action": "Move the consumer position to the beginning while leaving current projection rows in place.",
+              "result": "Every historical event is now eligible for duplicate application.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The source correctly re-delivers history."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "Existing rows may receive every delta a second time."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No clean target isolates the replay."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Readers remain connected to the mutation target."
+                }
+              }
+            },
+            {
+              "id": "replay",
+              "label": "Replay",
+              "owner": "Projection owner",
+              "action": "Process old events through handlers that were designed only for forward progress.",
+              "result": "Counters, notifications, and non-idempotent updates can repeat.",
+              "lanes": {
+                "event-store": {
+                  "state": "active",
+                  "detail": "Historical delivery behaves as requested."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "Duplicate effects accumulate in the populated sink."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "There is no clean baseline."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "Users can observe drifting values during replay."
+                }
+              }
+            },
+            {
+              "id": "detect",
+              "label": "Detect",
+              "owner": "Domain owner",
+              "action": "Reconciliation discovers values exceeding any state derivable from the source events.",
+              "result": "The recovery action created a second, more severe incident.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "Authoritative history still contains each fact once."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "The sink contains duplicate derived effects."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "No trustworthy candidate exists."
+                },
+                "read-alias": {
+                  "state": "unsafe",
+                  "detail": "The projection must be withdrawn."
+                }
+              }
+            },
+            {
+              "id": "rebuild",
+              "label": "Rebuild",
+              "owner": "Incident lead",
+              "action": "Stop the replay and rebuild into a clean target or restore a verified checkpoint.",
+              "result": "The checkpoint reset was not a valid substitute for idempotent processing.",
+              "lanes": {
+                "event-store": {
+                  "state": "healthy",
+                  "detail": "The source can still power a clean recovery."
+                },
+                "current-projection": {
+                  "state": "unsafe",
+                  "detail": "The duplicate-mutated target is quarantined."
+                },
+                "candidate-projection": {
+                  "state": "paused",
+                  "detail": "A real recovery target must still be created."
+                },
+                "read-alias": {
+                  "state": "paused",
+                  "detail": "Queries remain unavailable or degraded."
+                }
+              }
+            }
+          ],
+          "verification": [
+            "Projection writes are idempotent by stable event identity or deterministic replacement.",
+            "Checkpoint movement cannot expose a populated sink to unsafe duplicate deltas.",
+            "Reconciliation compares derived state with the authoritative event history."
+          ]
+        }
+      ]
+    }
+  ]
+}

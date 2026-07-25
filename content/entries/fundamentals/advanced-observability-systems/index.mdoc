@@ -1,0 +1,178 @@
+---
+registryId: advanced-observability-systems
+---
+
+{% section-card tone="intro" %}
+## What is an advanced observability system?
+
+**An advanced observability system preserves enough connected evidence to explain what a distributed system did, why it did it, and which users were affected.** It collects telemetry such as metrics, logs, traces, profiles, and deployment events, then keeps common resource and request context so an operator can move from a symptom to the responsible operation.
+
+In plain language, monitoring tells you that checkout errors increased. Observability should let you select that change, find a representative failed request, follow it across services, inspect the matching structured logs, and identify the version and dependency involved.
+
+{% callout variant="info" %}
+### Core invariant
+
+Preserve the context that connects a user-visible outcome to its request path, service identity, operation, and change. More telemetry is not more understanding when signals use incompatible names, lose trace context, or retain only the easy requests.
+{% /callout %}
+
+This lesson builds on [performance metrics](/fundamentals/performance-metrics) and [communication patterns](/fundamentals/communication-patterns). Review those lessons first if percentiles, asynchronous boundaries, or request context are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build one evidence path, not separate telemetry silos
+
+OpenTelemetry defines APIs, SDK behavior, semantic conventions, and a protocol for telemetry. It does not make every signal useful automatically. Instrumentation still needs stable resource identity, request-context propagation, bounded attributes, and an explicit retention policy.
+
+{% system-flow title="One failed request should remain explainable" caption="A useful investigation crosses signal types through shared resource and trace context. The backend may store each signal differently, but the identifiers and semantics must still join." %}
+{% system-node title="Instrumented workload" eyebrow="1. Describe" icon="activity" tone="cyan" %}
+Emit spans, metrics, and structured logs with a stable `service.name`, operation names, result status, and other bounded attributes defined by semantic conventions.
+{% /system-node %}
+{% system-node title="Context propagation" eyebrow="2. Connect" icon="route" tone="blue" %}
+Carry W3C `traceparent` across HTTP and equivalent context across messaging boundaries. Child work must join or link to the request it represents.
+{% /system-node %}
+{% system-node title="Collector pipeline" eyebrow="3. Control" icon="workflow" tone="violet" %}
+Receive, enrich, batch, filter, sample, and export telemetry. Protect the application from slow destinations with bounded queues and observable drop behavior.
+{% /system-node %}
+{% system-node title="Investigation surface" eyebrow="4. Explain" icon="search" tone="green" %}
+Move from an objective breach to exemplars, representative traces, correlated logs, resource identity, and deployment context without guessing string matches.
+{% /system-node %}
+{% /system-flow %}
+
+The shared context has distinct jobs:
+
+- **Resource attributes** identify the entity producing telemetry. `service.name` is required by the OpenTelemetry service semantic conventions; `service.namespace`, `service.version`, and deployment attributes can remove ambiguity.
+- **Trace context** identifies one distributed request. W3C `traceparent` carries a trace ID, parent ID, and flags in a vendor-neutral format.
+- **Span context on logs** lets a log record point to the exact request and operation. The OpenTelemetry log data model defines optional `TraceId`, `SpanId`, and `TraceFlags` fields.
+- **Metric exemplars** may attach a trace or span identifier to an individual measurement, creating a concrete path from an aggregate change to request evidence.
+
+Do not put unbounded identities such as user IDs, order IDs, raw URLs, or stack traces into metric attributes. Keep high-cardinality request detail in traces or logs, then connect from bounded metric dimensions through exemplars and shared resource context.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Treat collection as a controlled pipeline
+
+Telemetry takes capacity from the same system it describes. Make every stage and failure mode observable instead of assuming the exporter is lossless.
+
+{% process-flow %}
+{% process-step number="1" title="Generate bounded signals" label="Instrument" %}
+Create useful spans, measurements, logs, and profiles at the workload. Use semantic conventions and remove secrets before data leaves the process.
+{% /process-step %}
+{% process-step number="2" title="Propagate request context" label="Correlate" %}
+Forward valid trace context through synchronous calls and explicitly carry or link it at queues, jobs, and other asynchronous boundaries.
+{% /process-step %}
+{% process-step number="3" title="Process with limits" label="Control" %}
+Use Collector receivers, processors, bounded queues, memory protection, batching, and routing. Export the Collector's own accepted, refused, failed, queued, and dropped work.
+{% /process-step %}
+{% process-step number="4" title="Retain evidence deliberately" label="Store" %}
+Choose aggregation, sampling, and retention by investigation need. Keep the policy and its effective rate visible so statistical analysis remains honest.
+{% /process-step %}
+{% /process-flow %}
+
+At each boundary, answer four questions:
+
+1. Which signal or context can be dropped, truncated, or transformed here?
+2. Which counter proves that happened?
+3. Does retry preserve order and avoid duplicating billable or alerting side effects?
+4. What evidence remains when this stage itself is unhealthy?
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Sampling changes which incidents remain debuggable
+
+Sampling is an evidence-retention policy, not a generic quality score. OpenTelemetry's trace SDK supports parent-based sampling and probability-based root decisions. A head decision can use only information available when the span starts, so it cannot know the final status or duration. A later Collector decision can consider completed trace data, but only if the pipeline has received the spans needed to evaluate it.
+
+{% metric-strip %}
+{% metric value="100%" label="Always-on" detail="Maximum trace evidence and maximum retained count" tone="blue" /%}
+{% metric value="p%" label="Head probability" detail="The same expected fraction of each disjoint request class" tone="violet" /%}
+{% metric value="100% incidents" label="Tail priority" detail="Retain modeled failures and slow traces; sample normal traces" tone="green" /%}
+{% metric value="Expected counts" label="Planning output" detail="Validate actual rates and complete-trace behavior in production" tone="amber" /%}
+{% /metric-strip %}
+
+{% code-block file="/api/content/fundamentals/advanced-observability-systems/code/model-sampling-policy.py" language="python" title="Calculate expected retained traces from explicit classes" /%}
+
+### Lab 1: choose which trace evidence survives
+
+Choose a workload and sampling policy, then change the observation window and baseline probability. The model uses disjoint normal, slow, and failed request classes, so every retained count is visible arithmetic rather than a vendor cost estimate or a fabricated MTTD claim.
+
+{% interactive-block id="fundamentals/advanced-observability-systems-calculator" dataFile="/api/content/fundamentals/advanced-observability-systems/data/sampling-evidence-model.json" /%}
+
+Read the result as an expected evidence envelope:
+
+- A `10%` head probability retains about `10%` of failures as well as `10%` of normal requests. The actual count varies because each root decision is probabilistic.
+- Tail-priority policies can retain completed failures and slow traces while sampling ordinary traces, but they need enough buffering and complete trace assembly to make that decision.
+- Parent-based behavior keeps a sampled distributed trace coherent by respecting the parent's sampled state. Independent per-service decisions can fragment the request path.
+- Record the effective probability when sampled data feeds rates or counts. Without it, a retained sample cannot be interpreted statistically.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Correlation succeeds only when every boundary preserves identity
+
+A dashboard can place two charts next to each other without proving they describe the same request. Reliable correlation needs compatible identifiers and resource semantics at the point where the telemetry is created.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Resource identity" eyebrow="Which producer?" icon="boxes" tone="cyan" %}
+Use stable service namespace and name, version, environment, and runtime or infrastructure identity. A fallback such as `unknown_service` is evidence that ownership is incomplete.
+{% /concept-card %}
+{% concept-card title="Request identity" eyebrow="Which execution?" icon="route" tone="violet" %}
+Propagate the trace ID and current parent across process boundaries. Use span links when work relates to one or more earlier contexts but is not a direct child operation.
+{% /concept-card %}
+{% concept-card title="Change identity" eyebrow="Which release?" icon="workflow" tone="green" %}
+Attach a stable service version and deployment or build marker. A timestamp coincidence is weaker evidence than an explicit version on the affected resource.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Lab 2: repair a broken investigation chain
+
+Select an incident, then choose one instrumentation repair. The evidence chain updates immediately. Notice that longer retention or another dashboard cannot recreate context that was never propagated or recorded.
+
+{% interactive-block id="fundamentals/advanced-observability-systems-correlation-lab" dataFile="/api/content/fundamentals/advanced-observability-systems/data/correlation-repair-model.json" /%}
+
+{% code-block file="/api/content/fundamentals/advanced-observability-systems/code/validate-telemetry-envelope.ts" language="typescript" title="Reject telemetry that cannot support the intended correlation" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design alerts around user outcomes and response ownership
+
+An alert should represent a condition that requires action. Start with a service-level objective or a concrete invariant, then select signals that distinguish demand, failures, delay, and saturation.
+
+- **Page on a sustained user impact:** use an error-budget burn, availability failure, or latency-objective breach with enough duration and volume to justify interruption.
+- **Ticket a developing risk:** storage growth, cardinality growth, queue pressure, instrumentation drift, or unsupported agent versions often need work but not an immediate page.
+- **Keep context in the notification:** name the affected service and objective, current value and window, relevant change, first investigation link, owner, and runbook.
+- **Test the response:** a detector is incomplete until the team can receive it, find representative evidence, choose a bounded action, and verify recovery.
+
+Automated anomaly detection may rank or group evidence, but it should not present a causal claim without a traceable chain. Treat generated root-cause suggestions as hypotheses. Show the contributing signals, time window, missing context, confidence limits, and the operator action required to verify them.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the observability system as production infrastructure
+
+The telemetry pipeline needs its own reliability, privacy, and cost controls. A healthy application with a blind collector is still an operational risk.
+
+### Measure the pipeline itself
+
+- Accepted, refused, retried, failed, queued, and dropped telemetry by receiver, processor, and exporter.
+- Queue utilization, batch age, export latency, memory-limiter actions, restarts, and destination throttling.
+- Missing or fallback resource identity, invalid trace context, orphan spans, and logs without expected trace fields.
+- Active series, attribute cardinality, trace completion, effective sampling probability, ingest volume, and retention by signal and tenant.
+
+### Preserve safety and evidence quality
+
+- Redact secrets and sensitive payloads as close to the source as possible; access and retention should follow the data's sensitivity.
+- Keep collector and backend credentials least-privileged, rotated, and separated by environment or tenant boundary.
+- Version semantic conventions and instrumentation libraries deliberately. Detect incompatible naming before a rollout breaks dashboards and alerts.
+- Test destination outage, queue saturation, collector restart, malformed attributes, traffic spikes, and a broken context boundary.
+
+### Use authoritative contracts
+
+- [OpenTelemetry tracing SDK specification](https://opentelemetry.io/docs/specs/otel/trace/sdk/) for recording, sampling, parent-based behavior, processors, and exporters.
+- [OpenTelemetry Collector tail-sampling processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/tailsamplingprocessor/README.md) for completed-trace policies, trace affinity, decision timing, and processor self-telemetry.
+- [OpenTelemetry logs data model](https://opentelemetry.io/docs/specs/otel/logs/data-model/) for timestamps, severity, resource, attributes, and trace-context fields.
+- [OpenTelemetry service semantic conventions](https://opentelemetry.io/docs/specs/semconv/resource/service/) for `service.name`, namespace, instance, and version identity.
+- [OpenTelemetry metrics data model](https://opentelemetry.io/docs/specs/otel/metrics/data-model/) for streams, temporality, aggregation, and exemplars.
+- [W3C Trace Context](https://www.w3.org/TR/trace-context/) for interoperable `traceparent` and `tracestate` propagation.
+- [Prometheus metric and label naming](https://prometheus.io/docs/practices/naming/) for dimensional metric naming and label discipline.
+
+Specifications define interoperable behavior; they do not choose your service objectives, retention window, privacy boundary, or incident response. Test those decisions against the real workload and record their operational consequences.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/advanced-observability-systems/quiz/advanced-observability-systems.json" lessonSlug="advanced-observability-systems" title="Observability Evidence Decisions" /%}

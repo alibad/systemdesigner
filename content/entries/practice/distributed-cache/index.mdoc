@@ -1,0 +1,560 @@
+---
+registryId: practice-distributed-cache
+---
+
+{% section-card tone="intro" %}
+## What is a distributed cache?
+
+**A distributed cache keeps frequently requested key-value data in memory across
+multiple machines.** It reduces latency and protects a slower source of truth when one
+machine cannot hold the working set or serve the request rate.
+
+Distribution creates the real design problem. Every key needs one known owner for the
+current cluster version, useful replicas must survive failures, and a cache miss must
+not become an unlimited request to the backing store. The core invariant is:
+
+> For one ring version, each key has deterministic primary ownership, and every miss,
+> retry, migration, and failover path has a strict work bound.
+
+This walkthrough designs a 2 TB, read-heavy cache at 1.5 million peak operations per
+second. Review [Caching Strategies](/reference/caching-strategies) for cache-aside and
+write policies, [Consistent Hashing](/technology/consistent-hashing) for the partitioning
+algorithm, and [CAP Theorem](/reference/cap-theorem) for partition trade-offs.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Route deterministically" eyebrow="Ownership" icon="route" tone="blue" %}
+Clients or proxies hash a key against one versioned ring and reach its primary shard
+without broadcasting to the cluster.
+{% /concept-card %}
+{% concept-card title="Bound the miss path" eyebrow="Protection" icon="shield" tone="green" %}
+Request coalescing, origin admission limits, TTL jitter, and stale-value policies keep
+cache loss from becoming a backing store outage.
+{% /concept-card %}
+{% concept-card title="Recover deliberately" eyebrow="Operations" icon="repeat" tone="amber" %}
+Replica promotion, fenced ownership, gradual range movement, and warm-up controls make
+membership changes observable and reversible.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+### Begin with the cache contract
+
+A distributed cache is not automatically authoritative storage. First establish which
+values may be stale or lost, which operations users observe, and what the application
+does when the cache is unavailable.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Core operations" eyebrow="Functional" icon="braces" tone="blue" %}
+- `GET(key)` returns a value, metadata, or a miss.
+- `SET(key, value, ttl, version)` stores a bounded value with expiration.
+- `DELETE(key, version)` invalidates a value without reviving an older write.
+- `MGET(keys)` groups independent lookups while preserving per-key results.
+{% /concept-card %}
+{% concept-card title="Service promises" eyebrow="Non-functional" icon="gauge" tone="green" %}
+- Sustain 1.5M operations/s peak with an 80/20 read-write mix.
+- Keep read P95 below 2 ms and write P95 below 4 ms inside a region.
+- Target 99.99% read availability and 99.9% write availability.
+- Recover one failed node without an unbounded backing store surge.
+{% /concept-card %}
+{% concept-card title="Correctness boundaries" eyebrow="Consistency" icon="shield" tone="violet" %}
+- Derived objects may be eventually consistent for up to 100 ms.
+- Session namespaces require read-your-writes within the serving region.
+- Versions and tombstones prevent delayed replicas from reviving old values.
+- Locks, balances, and durable counters remain outside the cache contract.
+{% /concept-card %}
+{% concept-card title="First-version boundary" eyebrow="Out of scope" icon="boxes" tone="neutral" %}
+- No arbitrary server-side queries or joins.
+- No cross-key transaction guarantee.
+- No promise that cache data survives a total regional loss.
+- No values above 1 MB; large objects belong in object storage or a CDN.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Questions that change the architecture
+
+1. **Is the cache disposable?** If a value is the only copy, the design is a database
+   and needs a different durability review.
+2. **What is the staleness budget by namespace?** Product catalogs may accept seconds;
+   authentication and session state may not.
+3. **What is the access distribution?** Averages hide hot keys, scans, and synchronized
+   expiration waves.
+4. **What is the failure unit?** Replicas on the same host, rack, or zone do not protect
+   against that shared failure.
+5. **What happens on a miss?** Define origin deadlines, retry budgets, stale serving,
+   admission limits, and user-visible degradation before choosing software.
+
+{% callout variant="tip" %}
+State one namespace contract in the interview: for example, product summaries use
+cache-aside with 60-second TTLs, versioned invalidation, asynchronous replicas, and a
+150K reads/s global origin fallback budget.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate scale and constraints" %}
+
+### Turn workload assumptions into coupled limits
+
+Use decimal units consistently and state every multiplier. The target is intentionally
+large enough that memory, throughput, replication, and fallback capacity all matter.
+
+{% metric-strip %}
+{% metric value="1.5M/s" label="Peak operations" detail="1.2M reads/s and 300K writes/s" tone="blue" /%}
+{% metric value="2 TB" label="Logical working set" detail="Before replicas and allocator headroom" tone="violet" /%}
+{% metric value="90%" label="Read hit target" detail="Still sends 120K reads/s to origin" tone="green" /%}
+{% metric value="150K/s" label="Origin read budget" detail="Hard admission limit during misses" tone="amber" /%}
+{% /metric-strip %}
+
+### Show the arithmetic
+
+- **Read traffic:** `1.5M x 0.80 = 1.2M reads/s`.
+- **Write traffic:** `1.5M x 0.20 = 300K writes/s`.
+- **Origin traffic at 90% hit rate:** `1.2M x 0.10 = 120K reads/s`.
+- **RF=2 footprint:** `2 TB x 2 = 4 TB` before headroom.
+- **Memory-only floor:** `4,000 GB / 48 GB usable per node = 84 nodes`, rounded up.
+- **Replication work:** RF=2 adds one replica write for each 300K logical writes/s.
+- **Replica bandwidth:** at a 1.5 KiB average value, one replica stream is about
+  `300K x 1.5 KiB x 8 = 3.7 Gbit/s` across the cluster before protocol overhead.
+
+The 84-node result is not a production fleet. It has no room for skew, a failed zone,
+rebalancing, allocator fragmentation, deployment overlap, or growth.
+
+### Exercise the capacity envelope
+
+{% interactive-block id="practice/distributed-cache-capacity-lab" /%}
+
+### Convert the model into a test plan
+
+- Benchmark representative `GET`, `SET`, expiration, and replication work with real
+  value-size distributions; do not use a vendor's maximum operation claim.
+- Measure P50, P95, and P99 latency while one node is rebuilding and one hot key is
+  active. Average latency cannot prove the target.
+- Load-test the source of truth at the explicit fallback ceiling. A cache that meets
+  steady-state hit rate but destroys its origin during restart is not reliable.
+- Recalculate when value size, TTL mix, hit rate, replication factor, or zone count
+  changes. Each one affects more than one resource.
+
+{% callout variant="warn" %}
+A higher hit rate reduces origin load but does not reduce the memory required for
+replicas. A higher replication factor improves failover options but increases memory,
+write amplification, and repair traffic.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### Sketch the critical paths first
+
+Use the design challenge before reading the reference design. Show the cache-hit path,
+the bounded cache-miss path, deterministic key routing, independently placed replicas,
+and the source of truth.
+
+{% design-challenge
+   challengeId="distributed-cache"
+   title="Design the distributed cache cluster"
+   prompt="A single cache node cannot hold the 2 TB working set or serve 1.5M operations per second. Connect clients, versioned key routing, cache shards and replicas, a cluster control plane, and the backing store. Show cache hits, bounded misses, node failure, and gradual ownership movement." /%}
+
+{% system-flow title="Regional request path" caption="Keep membership coordination off the per-request data path. The router uses a cached ring version and falls back to the source of truth only through an admitted miss path." %}
+{% system-node title="Application client" eyebrow="Caller" icon="users" tone="blue" %}
+Sets deadlines, namespaces, versions, and retry budgets.
+{% /system-node %}
+{% system-node title="Key router" eyebrow="Ownership" icon="route" tone="violet" %}
+Hashes the key against a versioned ring or slot map.
+{% /system-node %}
+{% system-node title="Primary cache shard" eyebrow="Fast path" icon="cache" tone="green" %}
+Serves the value or coordinates one bounded fill.
+{% /system-node %}
+{% system-node title="Replica set" eyebrow="Availability" icon="repeat" tone="cyan" %}
+Provides independent read capacity and failover copies.
+{% /system-node %}
+{% system-node title="Source of truth" eyebrow="Miss only" icon="database" tone="amber" %}
+Owns durable data and enforces a fallback admission ceiling.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate the data plane from the control plane
+
+{% concept-grid columns="2" %}
+{% concept-card title="Data plane" icon="speed" tone="blue" %}
+Clients, routers, cache nodes, replicas, and origin adapters serve `GET`, `SET`, and
+invalidation traffic. They continue using the last valid ring during a short control
+plane outage.
+{% /concept-card %}
+{% concept-card title="Control plane" icon="workflow" tone="violet" %}
+Membership, health, placement, ring epochs, configuration, and repair orchestration
+change slowly and durably. They never coordinate every cache operation.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Trace each operation
+
+- **Read hit**
+  - The router hashes `namespace:key` using ring epoch 42.
+  - The primary returns an unexpired value and its version.
+  - The client records latency, owner, and outcome without contacting the origin.
+- **Read miss**
+  - The primary elects one in-flight loader for the key.
+  - That loader consumes origin fallback capacity and reads with a deadline.
+  - The primary stores the versioned value with TTL jitter; waiting requests reuse it.
+- **Write or invalidation**
+  - The application commits the source of truth first for cache-aside data.
+  - It publishes a versioned invalidation or writes through according to the namespace.
+  - The cache rejects older versions and retains deletion tombstones for the lag window.
+
+### Choose the routing boundary
+
+Smart clients remove a proxy hop and can pool connections directly to shards, but every
+client library must implement ring refresh, retries, and observability correctly. A
+stateless proxy centralizes that logic and supports untrusted clients, but it adds a hop
+and must scale independently. A practical design can expose a proxy to external callers
+and use a shared smart-client library for trusted services.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-storage" title="4. Model data and choose storage" %}
+
+### Keep cache entries explicit
+
+A cache entry needs more than a value. A useful internal record contains:
+
+- `namespace` and `key` for policy and ownership.
+- `value_bytes` plus `encoding` and `schema_version`.
+- `write_version` or source sequence for stale-update rejection.
+- `expires_at` and optional `stale_until` for bounded stale serving.
+- `size_bytes`, access frequency estimate, and eviction-list metadata.
+- a tombstone flag when delayed replicas could otherwise revive deleted data.
+
+Hash the complete namespaced key, not a low-cardinality prefix such as tenant ID. Keep
+related policy in the namespace configuration rather than scanning key strings at
+runtime. Reject huge values because they block event loops, amplify network use, and
+make one eviction or repair disproportionately expensive.
+
+### Classify namespaces before choosing consistency
+
+{% concept-grid columns="3" %}
+{% concept-card title="Derived read model" eyebrow="Disposable" icon="database" tone="green" %}
+Use cache-aside, asynchronous replicas, TTL jitter, and versioned invalidation. Brief
+staleness is acceptable because the durable record remains authoritative.
+{% /concept-card %}
+{% concept-card title="Session snapshot" eyebrow="Read-your-writes" icon="users" tone="blue" %}
+Route a user's reads to the acknowledged primary or carry a minimum version token until
+replicas catch up. Keep a durable recovery source if losing the session is unacceptable.
+{% /concept-card %}
+{% concept-card title="Coordination state" eyebrow="Not a cache" icon="lock" tone="rose" %}
+Balances, locks, leases, and unique reservations need storage with explicit durability,
+consensus, and fencing semantics. Fast in-memory access does not make weak ownership safe.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Compare update policies
+
+{% tabs %}
+{% tab title="Cache-aside" %}
+The application reads the cache, loads the source of truth on a miss, and fills the
+cache. Writes commit durably and then invalidate. It is simple and resilient, but a
+failed invalidation can leave stale data until TTL or version repair.
+{% /tab %}
+{% tab title="Write-through" %}
+A cache service coordinates the cache and backing write before acknowledgement. Reads
+are warm and policy is centralized, but the cache tier now sits on the write path and
+must resolve partial failures explicitly.
+{% /tab %}
+{% tab title="Write-behind" %}
+The cache acknowledges first and persists later. This reduces apparent write latency
+but makes the cache a temporary system of record. Use it only with a durable log,
+idempotent replay, and a product-approved loss window.
+{% /tab %}
+{% /tabs %}
+
+### Select eviction and admission together
+
+- **LRU:** good when recent access predicts reuse, but a large one-time scan can evict
+  the useful working set.
+- **LFU with aging:** protects repeatedly hot values while allowing old popularity to
+  decay; it costs counters and tuning.
+- **TTL-first:** correct for data with a real freshness deadline, but synchronized TTLs
+  need jitter and background expiration limits.
+- **Admission policy:** rejects low-reuse or oversized values before they displace more
+  valuable entries. Eviction chooses what leaves; admission chooses what enters.
+
+Use a high memory watermark to begin normal eviction and a higher emergency watermark
+to shed writes or bypass large values. Never wait for allocation failure to discover
+that eviction cannot keep pace.
+
+### Make replication semantics visible
+
+Asynchronous replication is the default for disposable derived data because it keeps
+writes fast. A failover can briefly return an older value or lose an unreplicated cache
+write. Namespace-specific synchronous acknowledgement or primary reads can provide a
+stronger contract, but they add latency and reduce write availability during a partition.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dives" title="5. Deep-dive the critical components" %}
+
+### Distribute keys with a versioned ring
+
+Consistent hashing maps both keys and virtual-node tokens into the same hash space. A
+key belongs to the first token clockwise from its hash; replicas continue to the next
+independent physical nodes. Virtual nodes give each server many small ranges, reducing
+skew and allowing weighted placement.
+
+{% code-block
+   file="/api/content/practice/distributed-cache/code/consistent-hash-ring.js"
+   language="javascript"
+   title="Executable consistent-hash movement model" /%}
+
+The example asserts two important properties: adding a fifth node moves only the ranges
+that node claims, and removing one node moves only keys previously owned by that node.
+Production routing also needs a durable ring epoch, failure-domain-aware replica
+placement, collision-tested hashing, and a gradual migration protocol.
+
+### Exercise ownership and recovery
+
+{% interactive-block id="practice/distributed-cache-ring-recovery-lab" /%}
+
+### Prevent hot keys and stampedes from escaping the cache
+
+A hot key is a single key whose demand exceeds one owner's safe capacity. It can occur
+even when average utilization is low. Detect request rate by key or sampled heavy-hitter
+algorithms, then use a bounded combination of:
+
+- additional read replicas with one authoritative primary;
+- very short application L1 copies for immutable or versioned values;
+- request coalescing so concurrent misses share one fill;
+- stale-while-revalidate for product-approved namespaces;
+- per-key admission and tenant quotas to protect shared capacity;
+- key splitting only when the value can be partitioned without changing semantics.
+
+{% code-block
+   file="/api/content/practice/distributed-cache/code/cache-aside-single-flight.js"
+   language="javascript"
+   title="Executable cache-aside request coalescing" /%}
+
+The example turns 100 concurrent misses for one key into one origin read. Production
+code also needs deadlines, cancellation, bounded waiter counts, TTL jitter, negative
+caching for confirmed absence, and metrics for load duration and failure.
+
+### Resolve invalidation races with versions
+
+Consider a database write to version 18 followed by an invalidation while a slow miss
+still holds version 17. If the slow fill arrives last, a TTL alone can reintroduce stale
+data. Include the source version in fills and invalidations; a cache node must reject a
+write older than its recorded value or tombstone.
+
+For session read-your-writes, return the committed version to the caller. Subsequent
+reads either reach a copy at least that fresh or wait, retry another replica, or bypass
+according to a short deadline. Do not label asynchronous replica reads strongly
+consistent without such a mechanism.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability and reliability" %}
+
+### Scale without creating a cold-cache incident
+
+{% process-flow %}
+{% process-step number="1" title="Measure the pressure" label="Trigger" %}
+Use per-node memory, operations, queueing, hot-key concentration, and error-budget burn.
+Do not scale from cluster averages alone.
+{% /process-step %}
+{% process-step number="2" title="Join empty capacity" label="Place" %}
+Add healthy nodes across failure domains and assign small virtual-node ranges under a
+new ring epoch.
+{% /process-step %}
+{% process-step number="3" title="Copy and verify ranges" label="Migrate" %}
+Rate-limit transfer, retain the old copy, compare versions or checksums, and protect
+foreground latency.
+{% /process-step %}
+{% process-step number="4" title="Publish one owner" label="Cut over" %}
+Activate the new ring version, monitor misses and tail latency, then retire old copies
+after clients and replicas have converged.
+{% /process-step %}
+{% /process-flow %}
+
+### Give every failure a terminating recovery path
+
+- **Cache node crash**
+  - Promote the next independently placed replica under a higher ring epoch.
+  - Reroute clients, restore the missing replica gradually, and watch origin fallback.
+- **Network partition**
+  - Require quorum for membership changes and fence the old owner from writes.
+  - Prefer temporary write unavailability to two primaries for a strict namespace.
+- **Zone loss**
+  - Keep replica placement and capacity headroom across at least three failure domains.
+  - Rate-limit rebuild work so surviving foreground traffic keeps its latency budget.
+- **Control plane outage**
+  - Continue serving with the last valid ring while freezing membership changes.
+  - Expire unsafe administrative leases and surface that failover automation is paused.
+- **Backing store slowdown**
+  - Serve bounded stale data where allowed, coalesce misses, and enforce admission.
+  - Return an explicit degraded result instead of retrying until both tiers fail.
+
+### Observe causes, not isolated metrics
+
+{% metric-strip %}
+{% metric value="P99" label="Tail latency" detail="By operation, outcome, node, and namespace" tone="blue" /%}
+{% metric value=">=90%" label="Hit-rate target" detail="Track by key class, not only cluster-wide" tone="green" /%}
+{% metric value="<100 ms" label="Replica lag" detail="Alert against each namespace budget" tone="violet" /%}
+{% metric value="<80%" label="Memory target" detail="Leave room for skew, repair, and deploys" tone="amber" /%}
+{% /metric-strip %}
+
+Correlate these signal groups:
+
+- Falling hit rate plus rising evictions and origin QPS indicates memory pressure,
+  expiration waves, cold starts, or migration churn.
+- Normal cluster utilization plus one node's queue growth indicates a hot key or uneven
+  virtual-node placement.
+- Rising replication lag plus version-rejection counts indicates a slow replica or
+  write burst that threatens the staleness budget.
+- Frequent ownership changes plus connection errors indicates control-plane flapping;
+  freeze automation before movement amplifies the incident.
+
+### Rehearse recovery before trusting it
+
+Run node, rack, zone, and origin-failure drills. Measure detection time, ring publication,
+client convergence, replica promotion, origin QPS, cache warming, and return to the
+desired replica count. Back up only durable control-plane state and any explicitly
+persistent namespace; verify restore procedures instead of assuming cache data itself
+is a backup.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+{% concept-grid columns="2" %}
+{% concept-card title="Smart client vs proxy router" icon="route" tone="blue" %}
+Smart clients remove a hop but distribute complex ring and retry logic. Proxies
+centralize policy and isolate untrusted callers but add latency and their own capacity
+and availability requirements.
+{% /concept-card %}
+{% concept-card title="Consistent ring vs fixed slots" icon="key" tone="violet" %}
+A ring with virtual nodes supports weighted, incremental ownership. Fixed slots are
+easier to inspect and migrate explicitly but require a slot map and movement tooling.
+{% /concept-card %}
+{% concept-card title="Async vs sync replication" icon="repeat" tone="green" %}
+Async copies preserve low write latency and availability with a staleness window. Sync
+acknowledgement narrows that window but waits for another failure domain and can reject
+writes during partitions.
+{% /concept-card %}
+{% concept-card title="RF=2 vs RF=3" icon="layers" tone="amber" %}
+Two copies reduce memory and write amplification. Three copies improve placement,
+maintenance, and concurrent-failure options but increase footprint and repair work by 50%.
+{% /concept-card %}
+{% concept-card title="LRU vs LFU with aging" icon="activity" tone="cyan" %}
+LRU is simpler and fits temporal locality. LFU with aging better protects stable hot
+sets from scans, at the cost of counters, sampling, and tuning.
+{% /concept-card %}
+{% concept-card title="Availability vs freshness" icon="scale" tone="rose" %}
+Serving stale data can preserve reads during dependency failure. Strict namespaces must
+prefer version checks, primary reads, or temporary rejection when stale results violate
+the product contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Alternatives rejected for this target
+
+- **Broadcast every key lookup:** avoids ownership metadata but turns one operation into
+  cluster-wide work and fails as the fleet grows.
+- **One central routing coordinator on every request:** simplifies clients but creates a
+  latency and availability bottleneck. Distribute cached ring metadata instead.
+- **Immediately rehash all keys after membership changes:** produces a cold miss storm
+  and unnecessary network movement. Move only claimed ranges under one version.
+- **Retry all misses until success:** transfers cache failure to the source of truth.
+  Bound retries, waiters, deadlines, and fallback admission.
+- **Use the cache as the only copy of critical state:** hidden durability requirements
+  eventually recreate a database without its recovery and correctness controls.
+
+### Record the decision by namespace
+
+A production review should name the owner, source of truth, routing strategy,
+replication factor, acknowledgement mode, read preference, staleness budget, TTL,
+eviction and admission policy, maximum value size, origin fallback ceiling, and degraded
+response. A single cluster default is rarely safe for every data class.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Wrap up, risks, and extensions" %}
+
+### Recommended design in one minute
+
+{% process-flow %}
+{% process-step number="1" title="Define namespace contracts" label="Requirements" %}
+Separate disposable derived data, session read-your-writes, and state that must remain
+in a durable coordination store.
+{% /process-step %}
+{% process-step number="2" title="Size the full envelope" label="Capacity" %}
+Couple hit rate, physical replicas, per-node benchmarks, zone-loss headroom, and origin
+fallback instead of sizing each metric independently.
+{% /process-step %}
+{% process-step number="3" title="Route by a versioned ring" label="Ownership" %}
+Hash namespaced keys to virtual-node ranges, place replicas across failure domains, and
+cache membership metadata outside the request-time control plane.
+{% /process-step %}
+{% process-step number="4" title="Bound fills and updates" label="Correctness" %}
+Coalesce misses, limit origin work, add TTL jitter, and use source versions plus
+tombstones to stop stale fills and invalidations from racing.
+{% /process-step %}
+{% process-step number="5" title="Move and fail over gradually" label="Reliability" %}
+Promote replicas with fencing, transfer only affected ranges, protect foreground
+latency, and restore redundancy in the background.
+{% /process-step %}
+{% process-step number="6" title="Operate the causal chain" label="Observability" %}
+Correlate latency, hit rate, evictions, hot keys, origin load, replication lag, and ring
+changes; rehearse the failures that join those signals.
+{% /process-step %}
+{% /process-flow %}
+
+### Highest risks
+
+1. A cold start, synchronized expiration, or mass eviction sends more than 150K reads/s
+   to the backing store.
+2. A partition creates two owners because promotion is not fenced by a ring epoch.
+3. One hot key saturates a shard while fleet-wide dashboards remain healthy.
+4. Rebalancing and replica repair consume the headroom needed for foreground traffic.
+5. Delayed fills or invalidations revive stale data after a newer source write.
+6. A namespace quietly becomes authoritative even though backup and recovery were
+   designed for a disposable cache.
+
+### Extensions worth rehearsing
+
+- **Multi-region reads**
+  - Define whether each region has independent cache ownership or follows a global
+    version stream.
+  - Keep regional cache failure from causing synchronized cross-region origin traffic.
+- **Multi-region writes**
+  - Choose one write owner, conflict-free data semantics, or a durable consensus layer;
+    cache replication alone cannot resolve arbitrary conflicts.
+  - Carry source versions through invalidations and failover.
+- **Tenant isolation**
+  - Add memory, QPS, connection, and fallback quotas so one tenant cannot evict or
+    overload another tenant's working set.
+  - Encrypt sensitive values and avoid exposing raw keys in high-cardinality telemetry.
+- **Tiered caching**
+  - Put tiny immutable values in application L1, the shared hot set in distributed RAM,
+    and large objects behind object storage or a CDN.
+  - Preserve version and invalidation semantics across every tier.
+- **Persistent restart acceleration**
+  - Treat snapshots or append logs as warm-up aids unless the product explicitly makes
+    the cache durable.
+  - Validate restored versions against the current source and ring epoch.
+
+{% callout variant="tip" %}
+Close the interview by tracing one hit, one miss, one write, and one node failure. Then
+name the metric that forces the next change: origin QPS, per-key concentration, memory
+headroom, replication lag, or error-budget burn.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/distributed-cache/quiz/distributed-cache-design-review.json"
+   lessonSlug="practice-distributed-cache"
+   title="Distributed Cache Design Review" /%}

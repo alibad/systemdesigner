@@ -1,0 +1,165 @@
+{
+  "title": "Decide whether a TensorFlow candidate may receive traffic",
+  "description": "Choose a change, collect its required evidence, set the rollout boundary, and inject a serving failure to test promotion and rollback decisions.",
+  "defaults": {
+    "changeId": "runtime-upgrade",
+    "topologyId": "isolated-canary",
+    "failureId": "none",
+    "canaryPercent": 5,
+    "completedGateIds": [
+      "artifact-reload",
+      "signature-contract",
+      "execution-parity",
+      "slice-evaluation",
+      "load-envelope",
+      "candidate-telemetry",
+      "migration-rehearsal",
+      "warm-rollback"
+    ]
+  },
+  "bounds": {
+    "canaryPercent": {
+      "min": 1,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "policy": {
+    "maxInitialCanaryPercent": 10,
+    "missingRollbackPenaltyMinutes": 8,
+    "sharedPoolPenaltyMinutes": 5
+  },
+  "changes": [
+    {
+      "id": "custom-layer-change",
+      "label": "Custom layer change",
+      "detail": "Alter variables, training behavior, or serialization in a subclassed layer.",
+      "requiredGateIds": [
+        "artifact-reload",
+        "signature-contract",
+        "execution-parity",
+        "slice-evaluation",
+        "migration-rehearsal",
+        "warm-rollback"
+      ]
+    },
+    {
+      "id": "runtime-upgrade",
+      "label": "TensorFlow or Keras upgrade",
+      "detail": "Move the runtime while keeping the same model and serving contract.",
+      "requiredGateIds": [
+        "artifact-reload",
+        "signature-contract",
+        "execution-parity",
+        "slice-evaluation",
+        "load-envelope",
+        "candidate-telemetry",
+        "migration-rehearsal",
+        "warm-rollback"
+      ]
+    },
+    {
+      "id": "input-contract-change",
+      "label": "Input signature change",
+      "detail": "Change tensor shape, dtype, feature name, or preprocessing behavior.",
+      "requiredGateIds": [
+        "artifact-reload",
+        "signature-contract",
+        "slice-evaluation",
+        "load-envelope",
+        "candidate-telemetry",
+        "warm-rollback"
+      ]
+    }
+  ],
+  "topologies": [
+    {
+      "id": "isolated-canary",
+      "label": "Isolated candidate pool",
+      "detail": "The candidate has separate workers, queue, and artifact version.",
+      "isolatesFailure": true
+    },
+    {
+      "id": "shared-in-place",
+      "label": "In-place shared pool",
+      "detail": "Candidate and reference versions share capacity and replacement order.",
+      "isolatesFailure": false
+    }
+  ],
+  "gates": [
+    {
+      "id": "artifact-reload",
+      "label": "Clean artifact reload",
+      "detail": "Load the exported artifact in a clean serving image without training code."
+    },
+    {
+      "id": "signature-contract",
+      "label": "Signature and schema contract",
+      "detail": "Verify names, dtypes, ranks, dimensions, output keys, and invalid-input behavior."
+    },
+    {
+      "id": "execution-parity",
+      "label": "Eager and graph parity",
+      "detail": "Compare bounded numerical outputs and state updates across execution modes."
+    },
+    {
+      "id": "slice-evaluation",
+      "label": "Evaluation slice floors",
+      "detail": "Meet aggregate and critical-slice quality, calibration, and safety thresholds."
+    },
+    {
+      "id": "load-envelope",
+      "label": "Serving load envelope",
+      "detail": "Meet latency, throughput, error, memory, and warmup targets under representative load."
+    },
+    {
+      "id": "candidate-telemetry",
+      "label": "Candidate telemetry",
+      "detail": "Confirm version labels, request metrics, saturation signals, and alert routing."
+    },
+    {
+      "id": "migration-rehearsal",
+      "label": "Migration rehearsal",
+      "detail": "Exercise checkpoint, custom-object, preprocessing, and runtime compatibility paths."
+    },
+    {
+      "id": "warm-rollback",
+      "label": "Warm rollback",
+      "detail": "Keep a known-good version loaded and prove traffic can return within the budget."
+    }
+  ],
+  "failures": [
+    {
+      "id": "none",
+      "label": "No failure",
+      "detail": "Evaluate the planned release with healthy candidate workers.",
+      "signal": "Candidate signals remain inside their release thresholds.",
+      "containment": "No containment action is active.",
+      "baseRecoveryMinutes": 0
+    },
+    {
+      "id": "signature-mismatch",
+      "label": "Signature mismatch",
+      "detail": "A client sends a required feature name that the candidate no longer accepts.",
+      "signal": "Invalid-argument errors rise only on the candidate version.",
+      "containment": "Stop candidate routing and restore the previous signature contract.",
+      "baseRecoveryMinutes": 3
+    },
+    {
+      "id": "latency-regression",
+      "label": "Tail-latency regression",
+      "detail": "The candidate passes correctness checks but exceeds its p99 latency gate.",
+      "signal": "Queue time and p99 latency rise while reference capacity remains healthy.",
+      "containment": "Abort promotion before retries and queue growth consume shared capacity.",
+      "baseRecoveryMinutes": 5
+    },
+    {
+      "id": "worker-oom",
+      "label": "Worker out of memory",
+      "detail": "A candidate loads successfully, then exhausts memory under production-shaped batches.",
+      "signal": "Candidate restarts and unavailable-version errors increase together.",
+      "containment": "Remove the failed candidate pool and retain the loaded reference version.",
+      "baseRecoveryMinutes": 7
+    }
+  ]
+}

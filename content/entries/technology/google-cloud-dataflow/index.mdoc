@@ -1,0 +1,289 @@
+---
+registryId: google-cloud-dataflow
+---
+
+{% section-card tone="intro" %}
+## What is Google Cloud Dataflow?
+
+Google Cloud Dataflow is a managed service that executes **Apache Beam pipelines**.
+Beam defines a portable data-processing graph; Dataflow provisions workers, schedules
+the graph, moves data between stages, replaces failed work, and exposes operational
+signals on Google Cloud.
+
+Use Dataflow when the team wants one Beam programming model for bounded batch data and
+unbounded streams without owning the processing cluster. The core invariant is simple:
+**Beam code defines the data semantics, while the Dataflow runner supplies distributed
+execution.** A managed runner does not choose correct windows, idempotent side effects,
+schemas, failure routes, or service-level objectives for you.
+
+The [Dataflow overview](https://cloud.google.com/dataflow/docs/overview) and the
+[Apache Beam programming guide](https://beam.apache.org/documentation/programming-guide/)
+are the primary references for the current service and model.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate the Beam model from the Dataflow runtime
+
+A Beam pipeline is a directed graph. Sources create `PCollection` values, transforms
+produce new collections, and sinks commit results. Dataflow turns that logical graph
+into executable stages and may fuse, split, retry, or redistribute work without
+changing the declared data contract.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Apache Beam" eyebrow="Programming model" icon="code" tone="blue" %}
+Defines sources, transforms, windows, triggers, state, timers, and sinks. The same
+pipeline can target different runners when its connectors and behavior are portable.
+{% /concept-card %}
+{% concept-card title="Dataflow runner" eyebrow="Managed execution" icon="activity" tone="violet" %}
+Builds an execution graph, provisions workers, coordinates shuffle, retries failed
+bundles, and can adjust worker count from runtime signals.
+{% /concept-card %}
+{% concept-card title="Your application" eyebrow="Business contract" icon="shield" tone="green" %}
+Owns event identity, schema compatibility, permissions, sink semantics, bad-record
+handling, replay policy, and the user-visible meaning of a result.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="One streaming result path" caption="Event time and identity enter with the record. Every later stage preserves or deliberately changes that contract." %}
+{% system-node title="Pub/Sub" eyebrow="Source" icon="network" tone="blue" %}
+Receives events with stable IDs and timestamps. Source behavior contributes to the
+pipeline watermark and replay semantics.
+{% /system-node %}
+{% system-node title="Parse + validate" eyebrow="Beam transform" icon="code" tone="violet" %}
+Turns bytes into a versioned schema. Invalid records branch to a repairable dead-letter
+path instead of disappearing in logs.
+{% /system-node %}
+{% system-node title="Window + aggregate" eyebrow="Stateful boundary" icon="timer" tone="amber" %}
+Groups by event time and key. Watermarks, triggers, accumulation, and allowed lateness
+decide when panes appear and how long state remains.
+{% /system-node %}
+{% system-node title="BigQuery" eyebrow="Sink" icon="database" tone="green" %}
+Commits rows under the selected connector write mode. Sink semantics must align with
+the pipeline's streaming mode and downstream deduplication contract.
+{% /system-node %}
+{% /system-flow %}
+
+This split matters during debugging. A wrong result can come from the Beam graph, the
+source timestamp, a hot key, a retrying side effect, a sink contract, or an execution
+limit. Calling all of them "a Dataflow problem" hides the owner of the fix.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Plan capacity from measured rates and binding limits
+
+Dataflow horizontal autoscaling uses runtime evidence such as backlog and worker
+utilization. For Streaming Engine jobs, the monitoring interface can align worker
+history, autoscaling rationale, CPU, and estimated backlog time. More workers still do
+not guarantee more useful throughput when work cannot be divided across enough keys or
+when a connector, quota, or external dependency is saturated.
+
+Use this transparent envelope before load testing:
+
+1. Measure the sustainable rate of one worker on the real pipeline, data distribution,
+   connector modes, machine family, and dependencies.
+2. Compare incoming rate with current measured capacity.
+3. Cap the potential worker count by both configuration and usable parallel work.
+4. Treat any predicted headroom as a hypothesis, then test scaling and recovery under
+   a representative spike.
+
+{% interactive-block id="technology/google-cloud-dataflow-resources" dataFile="/api/content/technology/google-cloud-dataflow/data/streaming-capacity-envelope.json" /%}
+
+{% code-block file="/api/content/technology/google-cloud-dataflow/code/backlog-capacity-envelope.py" language="python" title="Calculate the same explicit backlog envelope" /%}
+
+The [autoscaling metrics guide](https://cloud.google.com/dataflow/docs/guides/autoscaling-metrics)
+defines the runtime signals. Watch **backlog seconds**, not only record count: a million
+small records and a million large records can represent very different recovery work.
+
+### Diagnose a stage that does not scale
+
+- **Worker ceiling reached:** raise `maxNumWorkers` only after checking quotas, cost,
+  sink capacity, and whether additional workers improve the measured bottleneck.
+- **Insufficient key parallelism:** redistribute hot keys, add a fan-out stage where
+  semantics permit it, or change the aggregation design.
+- **External throttling:** bound concurrency, honor retry signals, and keep retries from
+  multiplying pressure on the dependency.
+- **Large side input or shuffle:** inspect the execution graph, bytes moved, stage
+  latency, and data distribution instead of tuning the whole job as one unit.
+- **Backlog without sustained pressure:** correlate autoscaling rationale, CPU,
+  watermark age, source backlog, and sink errors over the same time range.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Define time before aggregating a stream
+
+**Event time** is when the business event happened. **Processing time** is when a
+worker handles it. The difference is unavoidable: mobile devices disconnect, source
+partitions stall, networks retry, and upstream systems replay old records.
+
+A Beam window groups an unbounded collection into finite event-time regions. A
+**watermark** is the runner's estimate that earlier event times are substantially
+complete. A **trigger** decides when to emit a pane. **Allowed lateness** controls how
+long late events may still update retained window state.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Fixed window" eyebrow="Disjoint intervals" icon="timer" tone="blue" %}
+Each event belongs to one interval such as `[10:00, 10:01)`. Use it for non-overlapping
+per-minute totals, then define the lateness and update contract.
+{% /concept-card %}
+{% concept-card title="Sliding window" eyebrow="Overlapping intervals" icon="repeat" tone="violet" %}
+An event may contribute to several windows, such as a five-minute total emitted every
+minute. The overlap multiplies state and output work.
+{% /concept-card %}
+{% concept-card title="Session window" eyebrow="Keyed activity" icon="activity" tone="amber" %}
+Events for one key merge while gaps stay below a threshold. Different users can have
+different session boundaries and late arrivals can merge prior sessions.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% interactive-block id="technology/google-cloud-dataflow-windowing-lab" dataFile="/api/content/technology/google-cloud-dataflow/data/windowing-event-trace.json" /%}
+
+The trace is a teaching model, not a reproduction of a particular source watermark.
+The source determines watermark progress in a real job. Beam's
+[windowing and trigger guidance](https://beam.apache.org/documentation/programming-guide/#windowing)
+explains current fixed, sliding, and session behavior, watermarks, early panes, and late
+firings.
+
+### Choose a result contract
+
+- Use early panes when users benefit from a provisional answer and the downstream
+  system can distinguish or overwrite updates.
+- Use accumulating panes when each update should carry the total so far; use discarding
+  panes when consumers intentionally process only the new contribution.
+- Increase allowed lateness only when the completeness gain justifies longer-lived
+  state, more corrections, and downstream update work.
+- Put event timestamps on records at the source boundary. Assigning processing time
+  after delay destroys the distinction the window needs.
+- Monitor watermark age and system lag. Low worker CPU does not prove fresh results.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose delivery semantics across the whole path
+
+Dataflow batch jobs use exactly-once processing. Streaming jobs use exactly-once mode
+by default and can use at-least-once mode when duplicate records are acceptable.
+Exactly-once mode means committed results inside the pipeline are not duplicated; it
+does **not** mean a custom `DoFn` runs one time or that an arbitrary external side
+effect happens once.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Exactly-once streaming" eyebrow="Default mode" icon="shield" tone="green" %}
+Prefer it for aggregations and business-critical results that cannot tolerate duplicate
+pipeline effects. Deduplication and checkpointing consume resources.
+{% /concept-card %}
+{% concept-card title="At-least-once streaming" eyebrow="Duplicate-tolerant" icon="repeat" tone="amber" %}
+Consider it for map-only ingestion or a path that deduplicates downstream. Align the
+connector write mode and test the real cost and latency difference.
+{% /concept-card %}
+{% concept-card title="External side effect" eyebrow="Separate guarantee" icon="warning" tone="rose" %}
+A transform may run again after failure. Use stable operation IDs, idempotent APIs, or
+a transactional receipt before charging, emailing, or mutating another service.
+{% /concept-card %}
+{% /concept-grid %}
+
+The official [streaming-mode guide](https://cloud.google.com/dataflow/docs/guides/streaming-modes)
+describes the current modes and connector alignment. The
+[exactly-once guide](https://cloud.google.com/dataflow/docs/concepts/exactly-once)
+documents retries, committed outputs, late data, and side-effect boundaries.
+
+{% callout variant="warn" %}
+Exactly-once accuracy does not guarantee complete windows. An event that arrives after
+allowed lateness can be dropped even when every committed record is represented once.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement one observable streaming pipeline
+
+The example below keeps important boundaries explicit:
+
+- Parse bytes into a versioned record and preserve the source event timestamp.
+- Send malformed input to a dead-letter output with enough context to repair it.
+- Key before aggregation so ownership and hot-key risk are visible.
+- Use a fixed event-time window with early and late firings.
+- Accumulate corrections and write the successful path separately from bad records.
+
+{% code-block file="/api/content/technology/google-cloud-dataflow/code/streaming-orders-pipeline.py" language="python" title="Apache Beam event-time pipeline with a dead-letter branch" /%}
+
+The file runs locally without Beam to validate its parser. Passing `--run` constructs
+the cloud pipeline when Apache Beam and the required Dataflow options are installed.
+Production code should also declare schemas, table dispositions, temporary and staging
+locations, region, service account, network policy, encryption, labels, and deployment
+identity outside the transform logic.
+
+The [pipeline best-practices guide](https://cloud.google.com/dataflow/docs/guides/pipeline-best-practices)
+recommends pure deterministic transforms where practical and a branching dead-letter
+pattern instead of logging and dropping malformed elements.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make bad data and retries operable
+
+One poison record should not stop the healthy stream, but silently dropping it turns a
+data defect into an invisible business defect.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the failure" label="Transform" %}
+Separate malformed bytes, unsupported schema versions, failed business validation,
+transient dependency errors, and permanent authorization failures.
+{% /process-step %}
+{% process-step number="2" title="Preserve repair context" label="Dead letter" %}
+Store stable event identity, safe payload context, source location, schema version,
+error category, pipeline version, and first-seen time.
+{% /process-step %}
+{% process-step number="3" title="Alert on rate and age" label="Operations" %}
+Track both dead-letter volume and the oldest unresolved record. A small permanent queue
+can matter more than a large short-lived burst.
+{% /process-step %}
+{% process-step number="4" title="Replay through one gate" label="Recovery" %}
+Repair the cause, replay with the original identity, make the destination idempotent,
+and prove that the replay cannot double-apply business effects.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep retries bounded
+
+- Retry transient connector and service failures with bounded exponential backoff and
+  jitter; do not retry invalid data forever.
+- Protect external APIs with timeouts, concurrency limits, and idempotency keys.
+- Avoid irreversible side effects inside a `DoFn`; retries can execute transform code
+  more than once even under exactly-once streaming.
+- Record counters for validation categories and export the user-visible failure rate,
+  not just worker exceptions.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Deploy, update, and monitor the pipeline as a service
+
+Use a template when operators need a repeatable deployment contract. Flex Templates
+package the pipeline as a container image and separate build-time dependencies from
+runtime parameters. Keep immutable pipeline code and controlled parameters under
+versioned release management.
+
+{% metric-strip %}
+{% metric label="Freshness" value="watermark age" detail="Correlate source lag, system lag, and user-visible result time" tone="violet" /%}
+{% metric label="Pressure" value="backlog seconds" detail="Compare arrivals, processing rate, worker history, and scaling rationale" tone="amber" /%}
+{% metric label="Correctness" value="valid / dead letter" detail="Split parsing, schema, business, connector, and replay outcomes" tone="rose" /%}
+{% metric label="Recovery" value="drain / replay / rollback" detail="Measure replacement jobs, snapshots, sink effects, and catch-up duration" tone="cyan" /%}
+{% /metric-strip %}
+
+### Production review
+
+- Grant the worker service account only the source, sink, staging, logging, and
+  encryption permissions the job needs.
+- Keep sources, sinks, staging buckets, worker region, network path, and data-residency
+  policy compatible before launch.
+- Load test realistic key skew, payload sizes, windows, connector modes, side inputs,
+  and failure rates rather than synthetic uniform records.
+- Alert on backlog time, watermark age, failed bundles, dead-letter age, sink errors,
+  worker ceiling, quota pressure, and cost together.
+- Rehearse a draining replacement, cancellation, replay, bad deployment rollback,
+  source outage, sink throttling, hot key, and expired credentials.
+- Verify output invariants after recovery. A green job status does not prove complete or
+  duplicate-free business results.
+
+The design is ready when the team can explain where event time enters, what makes a
+record complete enough to publish, which boundary owns deduplication, why backlog can
+grow, and how operators repair bad data without replaying a business effect twice.
+{% /section-card %}
+
+{% quiz quizId="google-cloud-dataflow" lessonSlug="google-cloud-dataflow" title="Google Cloud Dataflow Production Design Review" questionsFile="/api/content/technology/google-cloud-dataflow/quiz/google-cloud-dataflow-production.json" /%}

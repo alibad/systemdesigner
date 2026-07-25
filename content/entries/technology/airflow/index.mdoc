@@ -1,0 +1,157 @@
+---
+registryId: airflow
+---
+
+{% section-card tone="intro" %}
+## What is Apache Airflow?
+
+**Apache Airflow is a workflow orchestrator for finite, dependency-driven jobs.** A
+workflow is declared as Python code, represented as a Directed Acyclic Graph (DAG),
+and instantiated as a separate DAG run for each scheduled or manually triggered data
+interval.
+
+Airflow decides **when work is ready, where it should run, and what state it reached**.
+The heavy computation should remain in databases, data warehouses, Spark clusters,
+containers, or other worker environments. This separation makes pipelines observable
+and recoverable without turning the orchestrator into the data-processing engine.
+
+{% callout variant="info" %}
+The core invariant is interval ownership: a scheduled DAG run should read and write the
+data assigned to its data interval, not whatever happens to be current when the task
+starts. That makes reruns and backfills predictable.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace the Airflow control plane
+
+The scheduler creates task instances after their dependencies and timing constraints
+are satisfied. The executor dispatches those instances; workers perform the task code;
+the metadata database preserves orchestration state for the UI and recovery tools.
+
+{% system-flow title="From DAG definition to task result" caption="Control state moves through Airflow while the workload executes in the selected worker environment." %}
+{% system-node title="DAG definition" eyebrow="Declare" icon="braces" tone="blue" %}
+Describe tasks, dependencies, schedule, retries, ownership, and concurrency limits as
+versioned Python code.
+{% /system-node %}
+{% system-node title="Scheduler" eyebrow="Decide" icon="timer" tone="violet" %}
+Create DAG runs, evaluate dependencies, and queue task instances that are ready.
+{% /system-node %}
+{% system-node title="Executor + workers" eyebrow="Run" icon="server" tone="cyan" %}
+Launch tasks in local processes, distributed workers, or isolated containers.
+{% /system-node %}
+{% system-node title="Metadata database" eyebrow="Record" icon="database" tone="green" %}
+Persist run state, task attempts, configuration references, and operational history.
+{% /system-node %}
+{% /system-flow %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="DAG" eyebrow="Definition" icon="network" tone="blue" %}
+Acyclic task dependencies describe valid execution order. The DAG is a reusable
+definition, not one execution.
+{% /concept-card %}
+{% concept-card title="DAG run" eyebrow="Interval" icon="calendar" tone="violet" %}
+One instantiation of the DAG owns one data interval and has an independent lifecycle.
+{% /concept-card %}
+{% concept-card title="Task instance" eyebrow="Attempted work" icon="check" tone="green" %}
+One task inside one DAG run moves through scheduled, queued, running, retry, and
+terminal states.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% interactive-block id="technology/airflow-schedule-lab" /%}
+
+{% section-card accent="violet" %}
+## Write interval-aware DAGs
+
+A daily schedule normally creates a run after its daily interval ends. The logical
+date identifies that interval; it is not a promise that the task started at that wall
+clock time. Template paths and queries from `data_interval_start` and
+`data_interval_end` so a late run, retry, or backfill still addresses the same data.
+
+{% process-flow %}
+{% process-step number="1" title="Define the interval" label="Schedule" %}
+Choose a timetable and timezone that match the source data's partition boundaries.
+{% /process-step %}
+{% process-step number="2" title="Read only that window" label="Input" %}
+Pass interval boundaries into source queries instead of using the worker's current
+time.
+{% /process-step %}
+{% process-step number="3" title="Write idempotently" label="Output" %}
+Use a stable partition or operation key so rerunning the interval replaces or merges
+the intended output.
+{% /process-step %}
+{% process-step number="4" title="Publish after validation" label="Commit" %}
+Expose the partition only after checks succeed; keep partial output from consumers.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/airflow/code/dags-directed-acyclic-graphs.py" language="python" title="A daily DAG scoped to its data interval" /%}
+{% /section-card %}
+
+{% interactive-block id="technology/airflow-retry-lab" /%}
+
+{% section-card accent="amber" %}
+## Choose execution and waiting models deliberately
+
+The executor controls where task instances run; an operator defines the work; a sensor
+waits for an external condition. Select each mechanism from workload isolation and
+resource behavior rather than from DAG size alone.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Local execution" eyebrow="Simple deployment" icon="server" tone="blue" %}
+Use local processes for bounded workloads that fit one scheduler environment. It has
+fewer moving parts but shares one machine's capacity and failure domain.
+{% /concept-card %}
+{% concept-card title="Distributed or isolated execution" eyebrow="Scale + isolation" icon="boxes" tone="violet" %}
+Use a distributed queue or per-task containers when workloads need horizontal worker
+capacity, dependency isolation, or task-specific resources.
+{% /concept-card %}
+{% concept-card title="Deferrable waiting" eyebrow="Release worker slots" icon="timer" tone="green" %}
+Prefer deferrable operators or suitable sensor modes for long waits. A polling task
+that occupies a worker slot can starve runnable work.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep data products outside Airflow metadata
+
+- Use **connections and hooks** to centralize service credentials and client behavior.
+- Use **XCom** for small control values such as a partition URI, row count, or model ID.
+- Put large datasets in object storage, a warehouse, or another data system; pass only
+  their location between tasks.
+- Bound task and DAG concurrency against the capacity of downstream systems, not only
+  against available Airflow workers.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate DAGs as replayable production programs
+
+Airflow is a strong fit for scheduled ETL/ELT, ML workflow orchestration, data-quality
+checks, and finite infrastructure jobs. It is not a stream processor, a
+millisecond-latency request path, or the place to perform unbounded computation inside
+the scheduler.
+
+Before enabling a production schedule:
+
+- Make every task's input and output interval explicit.
+- Test a normal run, a task retry, a cleared task, and a multi-interval backfill.
+- Classify failures as transient, permanent, or ambiguous before assigning retries.
+- Make external writes idempotent and prevent overlapping runs from corrupting output.
+- Set timeouts, retry limits, backoff, pools, and concurrency limits from dependency
+  budgets.
+- Alert on failed or late data intervals, not merely on whether scheduler processes are
+  alive.
+- Keep DAG parsing lightweight and store secrets in a managed backend rather than in
+  DAG source.
+
+{% callout variant="tip" %}
+Backfill with a small concurrency limit first. Observe warehouse load, API quotas, and
+task duration before increasing parallel runs.
+{% /callout %}
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/airflow/quiz/airflow-operations.json"
+   lessonSlug="airflow"
+   title="Airflow Scheduling and Recovery Review" /%}

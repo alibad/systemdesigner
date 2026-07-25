@@ -1,0 +1,380 @@
+---
+registryId: temporal
+---
+
+{% section-card tone="intro" %}
+## What is Temporal?
+
+**Temporal is a durable execution platform for application processes that must keep
+making progress across crashes, retries, deployments, and long waits.** You write a
+Workflow as code. The Temporal Service stores the Workflow's ordered Event History,
+and your Worker processes use that history to rebuild state and continue.
+
+Temporal matters when a business process spans several unreliable steps: charging a
+payment, waiting days for approval, provisioning infrastructure, or coordinating a
+multi-service order. Without durable execution, application teams often invent status
+tables, polling loops, retry jobs, and recovery scripts that are difficult to keep
+consistent.
+
+{% callout variant="info" %}
+The core invariant is **same history, same Workflow decisions**. Workflow code must be
+deterministic so replay emits commands compatible with the recorded Event History.
+External I/O belongs in Activities, whose retries require an idempotency strategy.
+{% /callout %}
+
+Temporal preserves orchestration progress. It does **not** make an arbitrary payment,
+email, or database mutation exactly once.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build the durable execution mental model
+
+Temporal does not continuously snapshot a Worker's process memory. A Workflow Task
+runs code, emits Commands such as "schedule this Activity" or "start this Timer," and
+the Temporal Service turns outcomes into durable Events. If a Worker disappears, a
+later Worker re-executes the Workflow code against those Events to reconstruct state.
+
+{% system-flow title="Temporal execution path" caption="The Service owns durable orchestration state. Application Workers own and execute Workflow and Activity code outside the Service." %}
+{% system-node title="Client" eyebrow="Start or message" icon="activity" tone="blue" %}
+Starts a Workflow with a stable Workflow ID, then sends Signals or Updates and reads
+state with Queries.
+{% /system-node %}
+{% system-node title="Temporal Service" eyebrow="History + routing" icon="database" tone="violet" %}
+Persists Event History, timers, retry state, and task routing. It does not run your
+business code.
+{% /system-node %}
+{% system-node title="Workflow Worker" eyebrow="Replay + decide" icon="workflow" tone="cyan" %}
+Polls a Task Queue, rebuilds Workflow state from history, and emits the next
+deterministic Commands.
+{% /system-node %}
+{% system-node title="Activity Worker" eyebrow="Perform I/O" icon="server" tone="green" %}
+Calls databases, APIs, files, or models. The Activity result or failure is reported to
+the Service and becomes part of the Workflow's progress.
+{% /system-node %}
+{% /system-flow %}
+
+### What replay does and does not repeat
+
+- Workflow code can run many times while rebuilding state.
+- A recorded timer does not wait again during replay.
+- A recorded Activity result is returned from history; replay does not call the
+  Activity implementation again.
+- An Activity attempt can still run again when its external result succeeded but
+  Temporal did not record completion before a timeout or Worker loss.
+- Direct network calls, wall-clock APIs, random branching, and mutable global state in
+  Workflow code can produce non-deterministic decisions.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate Workflows from Activities
+
+The cleanest beginner rule is: **a Workflow decides; an Activity does**. Keep durable
+business state and ordering in the Workflow. Put failure-prone interaction with the
+outside world in Activities.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Workflow" eyebrow="Durable coordinator" icon="workflow" tone="blue" %}
+Models business state, branching, timers, retries, compensation, messages, and child
+coordination. It must use replay-safe SDK APIs and remain deterministic.
+{% /concept-card %}
+{% concept-card title="Activity" eyebrow="External operation" icon="activity" tone="amber" %}
+Performs one well-defined unit of I/O. It can use normal libraries, but must tolerate
+timeouts, cancellation, and execution by more than one attempt.
+{% /concept-card %}
+{% concept-card title="Worker" eyebrow="Your runtime" icon="server" tone="green" %}
+Hosts Workflow and Activity implementations and polls Task Queues. Scale Workers by
+measured task arrival, execution time, resource needs, and queue latency.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use a regular function for pure code organization inside one Workflow. Use an Activity
+for an external operation. Use a Child Workflow only when the child needs its own
+durable lifecycle, Event History, task routing, or independent cancellation policy.
+
+{% code-block file="/api/content/technology/temporal/code/order-workflow.ts" language="typescript" title="A deterministic order Workflow with messages and a Child Workflow" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace replay through a failure
+
+The critical boundary is not "did my function run?" It is "what did the Temporal
+Service record, and what did the external system commit?" Select an incident, move
+through the Event History, then change the replay and side-effect contracts.
+
+{% interactive-block id="technology/temporal-replay-lab" dataFile="/api/content/technology/temporal/data/replay-scenarios.json" /%}
+
+{% callout variant="warn" %}
+An Activity is commonly **at least once** across attempts. Pass a stable business
+operation ID to the external system, store the first result, and make later attempts
+return that result or become a no-op. Reconciliation is still required when the
+external system cannot enforce idempotency.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Route Tasks to capable Workers
+
+A Task Queue is a logical routing name polled by Workers. Workflow Tasks advance
+orchestration state; Activity Tasks execute external work. The Temporal Service keeps
+durable Workflow state while Worker processes remain replaceable.
+
+{% process-flow %}
+{% process-step number="1" title="Name the capability" label="Queue contract" %}
+Use a stable Task Queue name for a compatible Worker capability, such as
+`orders-workflow-v1`, `payments`, or `gpu-transcode`.
+{% /process-step %}
+{% process-step number="2" title="Register implementations" label="Worker code" %}
+A Worker polling that queue must contain the Workflow or Activity types that tasks on
+the queue can request, plus the credentials and network access those Activities need.
+{% /process-step %}
+{% process-step number="3" title="Measure pickup delay" label="Capacity" %}
+Watch schedule-to-start latency, task throughput, poller count, Worker saturation, and
+backlog age. A growing queue usually means arrival exceeds available execution
+capacity.
+{% /process-step %}
+{% process-step number="4" title="Scale or isolate" label="Operations" %}
+Add Workers, reduce per-task cost, apply Worker tuning, or split resource-incompatible
+Activities. Do not use queue proliferation as a substitute for clear ownership.
+{% /process-step %}
+{% /process-flow %}
+
+If queue delivery and worker-pool concepts are new, review
+[Message Queues](/reference/message-queues) before tuning production Task Queues.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Bound failure with retries, timeouts, heartbeats, and cancellation
+
+These controls answer different questions. Configure them from the business operation,
+not from one global default.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Retry Policy" eyebrow="Should another attempt run?" icon="repeat" tone="violet" %}
+Use backoff for transient failures, cap delay and attempts when the business deadline
+requires it, and mark validation or authorization failures non-retryable.
+{% /concept-card %}
+{% concept-card title="Start-to-Close" eyebrow="Is one attempt stuck?" icon="timer" tone="amber" %}
+Bounds one Activity Task attempt. Set it longer than a healthy attempt but short enough
+to detect a crashed or wedged Worker.
+{% /concept-card %}
+{% concept-card title="Schedule-to-Close" eyebrow="Is the operation too old?" icon="timer" tone="rose" %}
+Bounds the entire Activity Execution across queueing, attempts, and retry backoff. It
+expresses the overall business time budget.
+{% /concept-card %}
+{% concept-card title="Heartbeat Timeout" eyebrow="Is long work progressing?" icon="activity" tone="green" %}
+Detects missing progress for a long Activity. Heartbeat details can checkpoint
+application progress for the next attempt.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Cancellation is cooperative
+
+- A Workflow receives cancellation through SDK cancellation scopes and should decide
+  which cleanup or compensation must still run.
+- A long Activity must heartbeat to receive cancellation promptly.
+- A request to cancel does not prove an external system rolled back work already
+  committed.
+- Compensation is a new business action, not time travel. It needs its own retries,
+  idempotency, audit record, and manual-repair path.
+
+{% code-block file="/api/content/technology/temporal/code/payment-activities.ts" language="typescript" title="Idempotent payment and heartbeat checkpoint Activities" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make every external side effect replay-safe
+
+Temporal records orchestration, but the Activity-to-external-system boundary can be
+ambiguous. A Worker may commit a charge and fail before reporting completion. The
+Service eventually times out that attempt and dispatches another.
+
+Use all applicable controls:
+
+- Derive an idempotency key from durable business identity, such as
+  `workflowId + operationName + operationVersion`, not from an attempt number.
+- Ask the destination to enforce that key and return the original result on duplicate
+  requests.
+- When you own the database, commit the business mutation and idempotency receipt in
+  one transaction with a unique constraint.
+- Record provider IDs and reconcile unknown outcomes instead of blindly retrying a
+  non-idempotent call.
+- Design compensations for committed work that cannot be deduplicated or reversed
+  atomically.
+- Keep attempt-local logs distinct from business-success metrics so retries do not
+  inflate completed-order counts.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Communicate with running Workflows
+
+Treat a Workflow as a durable stateful service with a stable identity. Signals, Queries,
+and Updates have different acceptance and response contracts.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Signal" eyebrow="Asynchronous write" icon="route" tone="blue" %}
+Delivers a message that can change Workflow state. The sender does not wait for a
+handler result. Use it for notifications, approvals, or eventual commands.
+{% /concept-card %}
+{% concept-card title="Query" eyebrow="Read current state" icon="search" tone="cyan" %}
+Reads Workflow state without adding an Event History entry. Query handlers must not
+mutate state or block while waiting for a future condition.
+{% /concept-card %}
+{% concept-card title="Update" eyebrow="Tracked write with result" icon="check" tone="green" %}
+Validates and changes Workflow state while allowing the caller to wait for a result or
+failure. Accepted Updates add durable history.
+{% /concept-card %}
+{% /concept-grid %}
+
+Message handlers can interleave with the main Workflow and with one another. Validate
+state transitions, keep handlers short, await unfinished handlers before completing or
+continuing as new, and use message IDs when clients may retry submission.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Split lifecycles and control Event History growth
+
+Start with one Workflow when the process is bounded. More Workflow boundaries add
+separate histories, IDs, message paths, cancellation behavior, and operational
+ownership.
+
+{% concept-grid columns="3" %}
+{% concept-card title="One Workflow" eyebrow="Default" icon="workflow" tone="blue" %}
+Best for a bounded process whose Activities and messages share one business lifecycle.
+Regular functions can organize code without introducing distributed coordination.
+{% /concept-card %}
+{% concept-card title="Child Workflow" eyebrow="Independent durable lifecycle" icon="layers" tone="violet" %}
+Use when a child needs separate routing, history, retries, identity, or parent-close
+behavior. A Child is not merely a helper function.
+{% /concept-card %}
+{% concept-card title="Continue-As-New" eyebrow="Fresh run, same chain" icon="repeat" tone="green" %}
+Closes the current run successfully and starts a new run with the same Workflow ID, a
+new Run ID, passed-forward state, and a fresh Event History.
+{% /concept-card %}
+{% /concept-grid %}
+
+History grows with Activities, timers, Signals, Updates, retries, and children. Watch
+history length and size before platform limits become an incident. Use the SDK's
+continue-as-new suggestion, pass only the state needed by the next run, and wait for
+message handlers to finish. Ongoing Child Workflows do not automatically move into a
+parent's new run; choose the Parent Close Policy and handoff deliberately.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Deploy Workflow code without breaking replay
+
+Activity implementation changes usually affect the next Activity attempt. Workflow
+code changes are more sensitive because open executions can replay histories produced
+by older code.
+
+{% process-flow %}
+{% process-step number="1" title="Replay representative histories" label="Pre-merge" %}
+Export scrubbed histories from realistic executions and run the new Workflow code
+against them in CI. A passing unit test does not prove replay compatibility.
+{% /process-step %}
+{% process-step number="2" title="Version the Worker deployment" label="Routing" %}
+Prefer Worker Versioning so pinned Workflows stay on compatible code while approved
+auto-upgrade Workflows move through ramping and current deployment versions.
+{% /process-step %}
+{% process-step number="3" title="Patch unavoidable branches" label="Compatibility" %}
+When Worker Versioning is unavailable or an in-code migration is required, use the
+SDK's versioning or patch APIs so old histories and new executions choose recorded,
+deterministic branches.
+{% /process-step %}
+{% process-step number="4" title="Drain with evidence" label="Rollout" %}
+Observe replay failures, Workflow Task failures, task pickup latency, error rates, and
+old-version execution counts before retiring compatible Workers.
+{% /process-step %}
+{% /process-flow %}
+
+Deploy Workers as independently scalable application processes with graceful shutdown.
+The Temporal Service or Temporal Cloud coordinates them but does not ship or execute
+your Workflow and Activity code.
+
+{% code-block file="/api/content/technology/temporal/code/worker.ts" language="typescript" title="A Worker process with explicit routing and shutdown" /%}
+{% code-block file="/api/content/technology/temporal/code/production-policy.yaml" language="yaml" title="Application-owned production policy, not Temporal server configuration" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate recovery as a measured control loop
+
+Choose an incident, then change Worker capacity and recovery controls. The model keeps
+four concerns separate: queue pressure, failure detection, side-effect safety, and
+history or deployment compatibility.
+
+{% interactive-block id="technology/temporal-operations-lab" dataFile="/api/content/technology/temporal/data/operations-scenarios.json" /%}
+
+The numbers in this lab are planning inputs for the example system, not Temporal
+product limits. Benchmark your Worker code and set an internal Event History budget
+below the current service limits for your deployment.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design visibility and namespace boundaries
+
+Visibility lets operators list, filter, count, and search Workflow Executions. Add
+Search Attributes for stable operational dimensions such as customer tier, region,
+order status, or incident cohort. Do not put unbounded, secret, or high-cardinality
+payload data into searchable metadata.
+
+### Monitor the path users depend on
+
+- Workflow completion latency, failure, cancellation, termination, and stuck-state age.
+- Workflow Task and Activity Task schedule-to-start latency, execution latency,
+  timeouts, retry attempts, and task failures.
+- Poller presence, Worker saturation, sticky-cache behavior, graceful shutdown, and
+  deployment-version adoption.
+- Event History length and size, Continue-As-New rate, Signal and Update volume, and
+  child counts.
+- External business outcomes, idempotency conflicts, compensation failures, and
+  reconciliation backlog.
+
+A Namespace is a unit of isolation for Workflow IDs, Task Queues, retention, archival,
+and operational configuration. Choose Namespaces for meaningful environment,
+ownership, security, compliance, or failure-isolation boundaries. A Namespace can
+still contain many applications, so teams sharing one must coordinate Workflow IDs,
+Task Queue names, Search Attributes, quotas, and access.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Test recovery before production needs it
+
+Use a test pyramid that exercises Temporal behavior rather than only pure functions.
+
+- Unit-test pure decision code and Activity adapters.
+- Test Activities with mocked context, including heartbeat details, cancellation,
+  idempotency conflicts, provider timeouts, and non-retryable errors.
+- Run Workflow integration tests with mocked Activities and time skipping for timers,
+  retry windows, escalation, cancellation, Signals, Queries, and Updates.
+- Replay saved Event Histories against every Workflow-code change.
+- Run end-to-end tests with a test server, real Workers, and controlled external
+  sandboxes.
+- In staging, kill Workers during Activity execution, remove all pollers from a Task
+  Queue, delay dependencies, interrupt deployments, and force Continue-As-New.
+- Practice operational repair: reset or terminate only with a written decision,
+  preserve audit evidence, reconcile external effects, and verify the user-visible
+  outcome.
+
+{% callout variant="tip" %}
+Recovery is successful only when durable Workflow state and external business state
+agree. A green Workflow status can still hide a duplicate charge, missing email, or
+unreconciled provider result.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read the primary Temporal references
+
+- [Workflows and replay](https://docs.temporal.io/workflows)
+- [Activities](https://docs.temporal.io/activities)
+- [Event History](https://docs.temporal.io/encyclopedia/event-history)
+- [Retries, Activity timeouts, and Heartbeats](https://docs.temporal.io/encyclopedia/detecting-activity-failures)
+- [Signals, Queries, and Updates](https://docs.temporal.io/encyclopedia/workflow-message-passing)
+- [Child Workflows](https://docs.temporal.io/child-workflows)
+- [Continue-As-New for the TypeScript SDK](https://docs.temporal.io/develop/typescript/workflows/continue-as-new)
+- [Safe deployments and replay testing](https://docs.temporal.io/develop/safe-deployments)
+- [Worker deployments and Worker Versioning](https://docs.temporal.io/production-deployment/worker-deployments)
+- [Visibility](https://docs.temporal.io/visibility)
+- [Namespaces](https://docs.temporal.io/namespaces)
+- [TypeScript testing guidance](https://docs.temporal.io/develop/typescript/best-practices/testing-suite)
+{% /section-card %}
+
+{% quiz quizId="temporal" lessonSlug="temporal" title="Temporal Production Design Review" questionsFile="/api/content/technology/temporal/quiz/temporal-production-design.json" /%}

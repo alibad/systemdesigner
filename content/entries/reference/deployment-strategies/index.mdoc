@@ -1,0 +1,167 @@
+---
+registryId: reference-deployment-strategies
+---
+
+{% section-card tone="intro" %}
+## What is a deployment strategy?
+
+A **deployment strategy** is the plan for moving a running system from one software version to another. It specifies who receives the new version, how the team decides it is healthy, and how traffic returns to the previous version if the change causes harm.
+
+The important idea is not the pattern name. A safe release keeps a known-good path available long enough to observe the new path. That gives the team a bounded blast radius, a stop rule, and a recovery action instead of a hopeful one-way change.
+{% /section-card %}
+
+{% section-card %}
+## Treat every release as a controlled experiment
+
+The release invariant is: **do not increase exposure until the version is observable, compatible with the old version, and reversible at the traffic boundary.** A deployment can be fast, but it cannot skip that decision loop.
+
+{% process-flow %}
+{% process-step number="1" title="Set the exposure" label="Who can be affected" %}
+Choose the first cohort, the maximum traffic share, and whether a maintenance window is acceptable.
+{% /process-step %}
+{% process-step number="2" title="Keep versions compatible" label="What can coexist" %}
+Ensure old and new applications, jobs, clients, APIs, and schema reads can run together during the transition.
+{% /process-step %}
+{% process-step number="3" title="Evaluate a gate" label="What proves health" %}
+Compare error rate, latency, saturation, and one customer outcome against named thresholds over an observation window.
+{% /process-step %}
+{% process-step number="4" title="Promote or recover" label="What happens next" %}
+Increase traffic only after the gate passes. On a breach, freeze exposure and restore traffic before investigating the code.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose from the governing constraint
+
+Start with the constraint that would make a bad release unacceptable. Select one below, then inspect the path and result. The recommendation is a starting point; it still needs compatible data changes and an owned rollback procedure.
+
+{% topology-lab dataFile="/api/content/reference/deployment-strategies/data/rollout-constraint-chooser.json" /%}
+
+### The four useful default choices
+
+- **Recreate:** Stop the old version and start the new one. Use it for development, isolated batch workers, or a planned maintenance window. Its low machinery cost is paid in downtime and a broad blast radius.
+- **Rolling update:** Replace healthy instances in batches while both versions serve traffic. It works when spare capacity is limited, but demands backward-compatible behavior because the fleet is mixed.
+- **Blue-green:** Keep a complete standby environment and switch the router between environments. It makes traffic rollback fast, but doubles much of the runtime footprint and does not undo an unsafe data migration.
+- **Canary or shadow:** Send a small real cohort to the candidate, or mirror requests without changing customer responses. Use them when production behavior is uncertain and the team can measure a meaningful difference.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Move traffic in stages, with a real stop rule
+
+A progressive rollout is not a timer that eventually reaches 100%. Each stage is a new decision: the candidate receives a larger share only after the prior cohort has been healthy for the agreed observation window.
+
+{% topology-lab dataFile="/api/content/reference/deployment-strategies/data/progressive-rollback-lab.json" /%}
+
+### What the lab should make you notice
+
+- **Shadow traffic answers a comparison question.** The stable version still owns the customer response; the candidate's response, error, and resource use are observed separately. Do not mirror writes unless they are isolated or idempotent.
+- **A canary answers an outcome question.** A small, identifiable cohort sees the candidate. Compare its error rate and latency with the stable cohort, then also check a domain signal such as completed checkout, successful upload, or valid recommendation.
+- **Rollback begins with routing.** Stop the next promotion, route new requests to the stable version, and preserve evidence. A rollback that waits for a code fix leaves more users on a known-bad path.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make the mixed-version window safe
+
+Traffic rollback only works when the older version can still handle the state created by the newer one. Plan the compatibility window before deploying application code.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Expand first" eyebrow="Schema and contracts" icon="database" tone="blue" %}
+Add nullable columns, additive fields, or new endpoints before any writer depends on them. Old readers must ignore what they do not understand.
+{% /concept-card %}
+{% concept-card title="Migrate while both run" eyebrow="Dual compatibility" icon="refresh-cw" tone="violet" %}
+Deploy code that can read old and new forms, backfill in bounded batches, and make retries idempotent. Version background jobs too.
+{% /concept-card %}
+{% concept-card title="Contract last" eyebrow="After retirement" icon="scissors" tone="amber" %}
+Remove the old field, behavior, or environment only after no old binaries, delayed jobs, replay consumers, or rollback window need it.
+{% /concept-card %}
+{% /concept-grid %}
+
+Feature flags solve a different problem from deployment routing. A flag can activate a deployed capability for a cohort, while routing decides which binary serves the request. Use both when needed, but give each one an owner, expiry date, and emergency-off behavior.
+
+{% callout variant="warn" %}
+### A database rollback is often a forward fix
+
+Do not drop or rename a populated column in the same release that starts writing its replacement. If the new writer has already produced data the old code cannot read, route traffic back first and repair forward with a compatible migration or reconciliation job.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Write the gate before the deployment
+
+The policy below turns a vague canary into an executable operating decision. The exact values vary by service; the discipline does not. Every threshold needs an owner, a dashboard, and a response that is safe to execute under pressure.
+
+{% code-block file="/api/content/reference/deployment-strategies/code/progressive-rollout-policy.yaml" language="yaml" title="Example progressive-delivery gate" /%}
+
+{% metric-strip %}
+{% metric value="1%" label="First exposure" detail="A bounded, identifiable cohort" tone="blue" /%}
+{% metric value="10 min" label="Observation window" detail="Long enough for the failure signal" tone="violet" /%}
+{% metric value="0.5 pp" label="Error budget delta" detail="Candidate versus stable cohort" tone="rose" /%}
+{% metric value="1 action" label="On breach" detail="Freeze and route back" tone="amber" /%}
+{% /metric-strip %}
+
+For a payment path, the business gate might be authorization success or duplicate-charge rate. For a search ranking change, it might be empty-result rate or query reformulation. A CPU graph alone cannot tell you whether the release is acceptable.
+{% /section-card %}
+
+{% section-card %}
+## Compare strategies at the decision boundary
+
+{% accordion defaultOpen="rolling" %}
+{% accordion-item id="rolling" title="Rolling update: efficient capacity, mixed versions" %}
+
+Replace a batch of instances, wait for readiness and health checks, then continue. It is often the default for stateless services because the orchestrator can preserve availability without duplicating the whole environment.
+
+- **Use it when:** existing capacity can absorb one batch leaving service, and old and new versions share compatible APIs, caches, sessions, and schema behavior.
+- **Watch for:** a bad binary that reaches many instances before the metric reacts, or a mixed fleet that produces inconsistent behavior.
+- **Recover by:** pausing the rollout, restoring the prior replica template, and keeping capacity above the load target while replacement instances become ready.
+
+{% /accordion-item %}
+
+{% accordion-item id="blue-green" title="Blue-green: quick route reversal, costly standby" %}
+
+Run the candidate in a separate production-like environment, verify it, then switch the traffic entry point from blue to green. The inactive environment remains the immediate traffic fallback.
+
+- **Use it when:** a short recovery time matters more than duplicate runtime cost, and the router can switch traffic atomically or predictably.
+- **Watch for:** differences in secrets, queue consumers, cache warming, and data writes that make the standby environment only superficially equivalent.
+- **Recover by:** switching ingress back to the prior environment. Reconcile or forward-fix data before attempting another cutover.
+
+{% /accordion-item %}
+
+{% accordion-item id="canary-shadow" title="Canary and shadow: evidence before broad exposure" %}
+
+Canary traffic changes real customer responses for a small cohort. Shadow traffic mirrors eligible requests to the candidate but lets the stable version answer. They reduce different uncertainties and are frequently combined.
+
+- **Use a canary when:** you need to observe user-visible behavior, such as conversion, rendering correctness, or request success, under a limited blast radius.
+- **Use shadowing when:** production input diversity matters but the candidate is not ready to own the response. Exclude or isolate irreversible side effects.
+- **Watch for:** non-representative cohorts, aggregate metrics that hide a harmed slice, and duplicated writes or downstream work from mirrored requests.
+
+{% /accordion-item %}
+{% /accordion %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the release after it starts
+
+The deployment is an operations event, not just a CI job. Before the first traffic shift, name the people and signals that turn an alert into a decision.
+
+- **Release owner:** owns the promotion, pause, and rollback command. This person should not need to guess which dashboard or flag controls traffic.
+- **Guardrails:** track request success, p95 or p99 latency, saturation, and one domain outcome by version and cohort. Keep the stable baseline visible beside the candidate.
+- **Recovery data:** retain version labels, cohort assignment, request correlation IDs, migration state, and logs long enough to compare and diagnose after traffic returns.
+- **Dependencies and jobs:** decide whether consumers, schedulers, queues, and retries are paused, versioned, or drained. A web rollback does not stop a new background worker from mutating data.
+- **Practice:** rehearse the route-back command and a failed migration in a non-production environment. Measure the time from a breached gate to restored traffic.
+
+{% callout variant="tip" %}
+The best rollback is boring: one authorized action changes the routing or flag state, verification confirms the stable path is serving traffic, and a separate incident workflow investigates the candidate.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [Load Balancing](/reference/load-balancing): Learn how routers distribute a cohort across healthy instances.
+- [Feature Flags](/reference/feature-flags): Separate code deployment from controlled feature activation.
+- [Database Migrations](/fundamentals/database-migrations): Apply expand, migrate, and contract changes without breaking compatible versions.
+- [Monitoring Metrics](/reference/monitoring-metrics): Define the latency, error, saturation, and outcome signals used by release gates.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/deployment-strategies/quiz/deployment-strategies-review.json" lessonSlug="deployment-strategies" title="Deployment Strategy Decision Review" /%}

@@ -1,0 +1,122 @@
+{
+  "title": "API failure behavior lab",
+  "description": "Switch scenarios to trace the contract guards that keep paging, retried writes, and representation changes understandable to a client.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Client",
+      "eyebrow": "Continues or retries",
+      "detail": "Holds a cursor from a prior page, a request ID, and an idempotency key for one logical write. It must not guess server state after a timeout.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 47
+    },
+    {
+      "id": "api-edge",
+      "label": "API boundary",
+      "eyebrow": "Contract gate",
+      "detail": "Checks authentication, version negotiation, request shape, rate limits, and the request ID before routing to pagination or a domain write.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 26,
+      "y": 47
+    },
+    {
+      "id": "pagination",
+      "label": "Pagination layer",
+      "eyebrow": "Ordered continuation",
+      "detail": "Validates an opaque cursor and resumes after its deterministic sort position. It caps page size and returns a next cursor only when another page exists.",
+      "kind": "service",
+      "tone": "green",
+      "x": 48,
+      "y": 18
+    },
+    {
+      "id": "idempotency-store",
+      "label": "Idempotency record",
+      "eyebrow": "One logical write",
+      "detail": "Associates one authenticated caller and request fingerprint with a processing state and final response. It detects a replay versus an unsafe key reuse.",
+      "kind": "cache",
+      "tone": "violet",
+      "x": 48,
+      "y": 72
+    },
+    {
+      "id": "order-service",
+      "label": "Order service",
+      "eyebrow": "Applies policy",
+      "detail": "Owns the domain transition and coordinates a durable order write with its idempotency outcome. It should not repeat an already-committed effect blindly.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 71,
+      "y": 47
+    },
+    {
+      "id": "version-adapter",
+      "label": "Compatibility adapter",
+      "eyebrow": "Old + new shape",
+      "detail": "Preserves a supported representation or routes a client to an explicitly versioned contract. It is where deprecation signals and migration guidance stay observable.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 71,
+      "y": 82
+    },
+    {
+      "id": "order-store",
+      "label": "Order store",
+      "eyebrow": "Deterministic order",
+      "detail": "Stores authoritative order facts and supplies a stable ordering key for cursor pagination. New writes may change the collection while a client is paging.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 92,
+      "y": 28
+    }
+  ],
+  "edges": [
+    { "id": "client-edge", "from": "client", "to": "api-edge", "label": "request" },
+    { "id": "edge-pagination", "from": "api-edge", "to": "pagination", "label": "GET page" },
+    { "id": "pagination-store", "from": "pagination", "to": "order-store", "label": "ordered read" },
+    { "id": "edge-idempotency", "from": "api-edge", "to": "idempotency-store", "label": "POST + key" },
+    { "id": "idempotency-service", "from": "idempotency-store", "to": "order-service", "label": "first write" },
+    { "id": "service-store", "from": "order-service", "to": "order-store", "label": "commit order" },
+    { "id": "service-version", "from": "order-service", "to": "version-adapter", "label": "render version" },
+    { "id": "version-client", "from": "version-adapter", "to": "client", "label": "compatible response", "via": { "x": 42, "y": 94 } }
+  ],
+  "scenarios": [
+    {
+      "id": "stable-cursor",
+      "label": "Stable cursor page",
+      "summary": "A client asks for the next page after the last observed order. New orders arrive at the front of the collection, but the cursor resumes after the previous deterministic position.",
+      "activeEdges": ["client-edge", "edge-pagination", "pagination-store"],
+      "focusNode": "pagination",
+      "result": "The client receives the next records without treating a moving offset as a stable position. The contract still needs cursor expiry and a documented response for an invalid token."
+    },
+    {
+      "id": "offset-drift",
+      "label": "Offset drift",
+      "summary": "A client uses offset=50 while new orders are inserted before that offset. The database can answer the query, but the offset no longer describes the same logical boundary.",
+      "activeEdges": ["client-edge", "edge-pagination", "pagination-store"],
+      "degradedNodes": ["pagination", "order-store"],
+      "focusNode": "order-store",
+      "result": "Duplicates or skipped orders are a contract failure for a reconcilable feed, not merely a UI inconvenience. Use a deterministic cursor or an explicit snapshot/export job."
+    },
+    {
+      "id": "retry-after-timeout",
+      "label": "Retry after timeout",
+      "summary": "The first POST committed but its response was lost. The client retries with the same key and matching body, so the idempotency record returns the original result instead of reaching a second write.",
+      "activeEdges": ["client-edge", "edge-idempotency", "idempotency-service", "service-store"],
+      "focusNode": "idempotency-store",
+      "result": "One idempotency key identifies one logical operation. Keep the stored result for the published retry window, and reject the same key with different parameters as a conflict."
+    },
+    {
+      "id": "breaking-response",
+      "label": "Breaking response change",
+      "summary": "A deployment renames a required response field for existing clients. The underlying write still succeeds, but an old client cannot interpret the new representation without a compatibility path.",
+      "activeEdges": ["client-edge", "edge-idempotency", "idempotency-service", "service-store", "service-version", "version-client"],
+      "degradedNodes": ["version-adapter"],
+      "focusNode": "version-adapter",
+      "result": "A server-side success is not a client-compatible success. Add the new field first, preserve the old representation during migration, or publish a clearly versioned breaking contract with a deprecation plan."
+    }
+  ]
+}

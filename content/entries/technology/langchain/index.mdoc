@@ -1,0 +1,257 @@
+---
+registryId: langchain-tech
+---
+
+{% section-card tone="intro" %}
+## What is LangChain?
+
+**LangChain is an open-source framework for building model-powered applications from a standard model interface, tools, agent state, and middleware.** Its current high-level agent API, `create_agent`, wraps a model loop in a configurable harness and runs on LangGraph.
+
+In plain language, LangChain helps application code connect a model to typed inputs, trusted context, and controlled actions without hardwiring the whole system to one provider.
+
+The core invariant is **the application owns the contract**. LangChain can route messages and tool calls, but your code must still decide what context is trusted, which actions are allowed, how results are validated, and what happens after failure.
+{% /section-card %}
+
+{% section-card %}
+## Start with the smallest execution model
+
+Not every model-powered feature needs an agent. More autonomy adds more runtime choices, state, failure paths, and evaluation work.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Direct model call" eyebrow="One bounded transformation" icon="sparkles" tone="blue" %}
+Use a standalone model for classification, extraction, rewriting, or generation when application code already knows the single next step. Prefer typed output when another program consumes the result.
+{% /concept-card %}
+{% concept-card title="Deterministic workflow" eyebrow="Application chooses the path" icon="route" tone="cyan" %}
+Use a fixed sequence when retrieval, validation, and business actions must happen in a known order. Branch in application code or an explicit graph, not in an unrestricted prompt.
+{% /concept-card %}
+{% concept-card title="Agent loop" eyebrow="Model chooses the next step" icon="workflow" tone="amber" %}
+Use `create_agent` when the model genuinely needs to select among allowed tools, inspect results, and decide whether to continue or finish.
+{% /concept-card %}
+{% /concept-grid %}
+
+An agent is useful only when runtime choice is part of the requirement. If the path is known, keeping it deterministic usually makes latency, cost, testing, and recovery easier to reason about.
+{% /section-card %}
+
+{% section-card %}
+## See what the agent harness actually does
+
+LangChain describes an agent as a model plus a harness. The harness owns the loop around the model: messages enter state, the model proposes a tool call or final answer, application code executes an allowed tool, and the result returns to the model.
+
+{% system-flow title="One LangChain agent turn" caption="The model proposes; the application validates, authorizes, and executes." %}
+{% system-node title="Application" eyebrow="Input and runtime context" icon="users" tone="blue" %}
+Supplies messages, immutable user or tenant context, thread identity, limits, and the tools this invocation may expose.
+{% /system-node %}
+{% system-node title="Agent harness" eyebrow="LangChain on LangGraph" icon="workflow" tone="violet" %}
+Runs the model loop, carries state, invokes middleware, and pauses or resumes when the execution contract allows it.
+{% /system-node %}
+{% system-node title="Model" eyebrow="Proposal" icon="sparkles" tone="cyan" %}
+Returns content, structured data, or a request to call one of the schemas currently visible to it.
+{% /system-node %}
+{% system-node title="Tool boundary" eyebrow="Application authority" icon="shield" tone="amber" %}
+Validates arguments, identity, ownership, policy, idempotency, and approval before touching an external dependency.
+{% /system-node %}
+{% /system-flow %}
+
+A valid tool call is not automatically an authorized tool call. Schema validation proves shape; application policy proves whether this caller may perform this action now.
+{% /section-card %}
+
+{% section-card %}
+## Compose an execution pattern before writing code
+
+Choose a workload and compare a direct call, deterministic workflow, and agent loop. Then change the output and state contracts to see when a design is incomplete or unnecessarily wide.
+
+{% interactive-block id="technology/langchain-execution-pattern-lab" dataFile="/api/content/technology/langchain/data/execution-patterns.json" /%}
+
+The goal is not to maximize framework features. It is to make each model call, retrieval, state transition, and side effect explicit enough to test and operate.
+{% /section-card %}
+
+{% section-card %}
+## Keep model, message, tool, and state boundaries distinct
+
+The main primitives solve different problems. Mixing their responsibilities is a common source of accidental complexity.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Models and messages" eyebrow="Inference contract" icon="message" tone="blue" %}
+The standard model interface supports invocation, streaming, batching, tool calling, and structured output across provider integrations. Messages carry instructions, user content, model content, and tool results.
+{% /concept-card %}
+{% concept-card title="Tools" eyebrow="Action contract" icon="workflow" tone="amber" %}
+A tool is a callable with a name, description, and input schema. Keep schemas narrow, return bounded results, and inject trusted runtime context outside the model-visible arguments.
+{% /concept-card %}
+{% concept-card title="State" eyebrow="Current thread" icon="database" tone="violet" %}
+Agent state holds messages and other mutable values for the current conversation. A checkpointer persists state so a thread can resume between invocations.
+{% /concept-card %}
+{% concept-card title="Middleware" eyebrow="Cross-cutting control" icon="shield" tone="green" %}
+Middleware can trim context, filter tools, apply retries or limits, redact sensitive data, require approval, select models, and record behavior around model and tool calls.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use runtime context for immutable invocation facts such as user ID, role, locale, or tenant. Use state for mutable thread facts. Use a long-term store only for information that should survive across threads.
+{% /section-card %}
+
+{% section-card %}
+## Make machine-consumed output typed
+
+Free-form text is appropriate when the user is the consumer. When application code will branch, store, or call another service, ask the model for a schema and validate the result before use.
+
+### A typed boundary gives you
+
+- A finite set of fields and allowed values.
+- A validation failure instead of silent string parsing.
+- A stable object for tests, metrics, and downstream routing.
+- A place to enforce length, range, and optionality constraints.
+
+### A typed boundary does not give you
+
+- Proof that a classification or extracted fact is correct.
+- Authorization to read or change a business resource.
+- Idempotency for a downstream write.
+- Protection from an unsafe or irrelevant input.
+
+{% code-block file="/api/content/technology/langchain/code/structured-ticket-routing.py" language="python" title="Route a ticket with a structured model response" /%}
+
+The example uses `init_chat_model` and `with_structured_output` for one bounded transformation. It deliberately does not introduce an agent or persistent state.
+{% /section-card %}
+
+{% section-card %}
+## Add retrieval as a bounded context step
+
+Retrieval does not automatically require an agent. First choose who controls when retrieval happens.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Two-step retrieval" eyebrow="Predictable path" icon="search" tone="cyan" %}
+Application code retrieves relevant documents first, then gives bounded passages to the model. This is a strong default for policy answers, documentation assistants, and citation-heavy responses.
+{% /concept-card %}
+{% concept-card title="Agentic retrieval" eyebrow="Dynamic path" icon="workflow" tone="violet" %}
+Expose retrieval as a tool when the model must decide whether to search, reformulate, or inspect multiple sources. Add call limits and evaluate the complete search trajectory.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve the context contract
+
+- Treat retrieved text as untrusted data, not as new system instructions.
+- Attach source identity, version, access scope, and chunk location to every passage.
+- Filter by tenant and permissions before content reaches the model.
+- Measure retrieval relevance separately from answer quality.
+- Return citations that map to the exact evidence used.
+
+The [official retrieval guide](https://docs.langchain.com/oss/python/langchain/retrieval) distinguishes deterministic two-step RAG from agentic retrieval and hybrid designs.
+{% /section-card %}
+
+{% section-card %}
+## Give state a lifetime and an owner
+
+LangChain agents keep short-term memory in their graph state. A checkpointer saves that state by thread so later invocations can resume it. Persistence is useful, but it creates a data contract that needs retention, isolation, and migration rules.
+
+{% process-flow %}
+{% process-step number="1" title="Identify the thread" label="Scope" %}
+Bind state to an authenticated thread identifier and tenant. Do not use a model-provided value as proof of identity.
+{% /process-step %}
+{% process-step number="2" title="Load bounded state" label="Read" %}
+Restore recent messages and explicit fields. Trim or summarize stale history before it degrades relevance, latency, and cost.
+{% /process-step %}
+{% process-step number="3" title="Run one transition" label="Execute" %}
+Call the model and tools through the same policy boundary. Persist checkpoints at meaningful interruption and recovery points.
+{% /process-step %}
+{% process-step number="4" title="Retain deliberately" label="Govern" %}
+Expire, delete, encrypt, and migrate state according to product and compliance requirements. Keep long-term user memory in a separately governed store.
+{% /process-step %}
+{% /process-flow %}
+
+Long conversation history is not free memory. Even when it fits the model context window, stale messages can reduce quality while increasing latency and spend. The [short-term memory guide](https://docs.langchain.com/oss/python/langchain/short-term-memory) documents checkpointers, trimming, deletion, and summarization patterns.
+{% /section-card %}
+
+{% section-card %}
+## Put policy around every tool loop
+
+An agent loop can amplify a small mistake because the model may call tools repeatedly or combine untrusted context with an allowed action. Inject an incident and compare control profiles before choosing a retry policy.
+
+{% interactive-block id="technology/langchain-tool-policy-lab" dataFile="/api/content/technology/langchain/data/tool-policy-incidents.json" /%}
+
+### The important boundaries are outside the prompt
+
+- Filter tools from authenticated runtime context and current permissions.
+- Validate arguments and business invariants again inside the tool.
+- Require human review for consequential writes.
+- Give writes caller-scoped idempotency keys and reconcile ambiguous outcomes.
+- Limit model and tool calls so a non-converging loop terminates explicitly.
+- Redact sensitive values before exporting traces or feedback.
+
+Middleware runs inside the compiled agent graph, so controls such as human approval, tool-call limits, retries, redaction, and summarization can travel with the agent when it is composed into a larger workflow.
+{% /section-card %}
+
+{% section-card %}
+## Build a narrow guarded agent
+
+The example below exposes one read tool and one write tool. It caps tool calls, keeps thread state in a checkpointer, and interrupts before the refund tool executes.
+
+{% code-block file="/api/content/technology/langchain/code/guarded-refund-agent.py" language="python" title="Require approval before a refund tool runs" /%}
+
+For local learning, `InMemorySaver` makes the interruption contract easy to see. In production, use a durable checkpointer and persist the interrupt before returning an approval request to the user.
+
+{% callout variant="warn" %}
+Human approval is not a substitute for authorization. Build the review from trusted identity, current resource state, validated arguments, and an understandable description of the side effect.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate traces as evidence, not decoration
+
+Final answer quality is only one part of an agent system. A production trace should reveal which model ran, what context it received, which tools were exposed, each tool argument and result boundary, retries, latency, token usage, errors, and the final disposition.
+
+{% process-flow %}
+{% process-step number="1" title="Define success" label="Contract" %}
+Create examples for correct final answers, structured fields, retrieval evidence, tool selection, tool arguments, refusal, and side-effect policy.
+{% /process-step %}
+{% process-step number="2" title="Evaluate before release" label="Offline" %}
+Run representative datasets against each prompt, model, tool, or middleware change. Compare quality, trajectory, latency, and cost.
+{% /process-step %}
+{% process-step number="3" title="Observe real behavior" label="Online" %}
+Trace production runs with privacy controls, sample intentionally, and alert on policy failures, loops, latency, errors, and quality signals.
+{% /process-step %}
+{% process-step number="4" title="Close the loop" label="Regression" %}
+Turn important failing traces into reviewed offline cases, prove the fix, then confirm the production signal recovers.
+{% /process-step %}
+{% /process-flow %}
+
+LangSmith can provide tracing and evaluation for LangChain applications, but it is optional infrastructure rather than proof of quality. The evidence comes from well-defined evaluators, reviewed datasets, and operational decisions tied to trace data.
+{% /section-card %}
+
+{% section-card %}
+## Review the production contract
+
+### Execution and state
+
+- Choose direct call, deterministic workflow, or agent from the workload rather than fashion.
+- Bound model calls, tool calls, context size, wall-clock time, and spend per request.
+- Persist only state that must survive and define tenant isolation, retention, deletion, and schema migration.
+
+### Tools and authority
+
+- Expose the smallest tool set for the authenticated user and current stage.
+- Validate schema, permissions, ownership, business rules, and approval before every side effect.
+- Reconcile ambiguous writes before retrying and make repeatable operations idempotent where possible.
+
+### Quality and recovery
+
+- Version prompts, schemas, tools, middleware configuration, and evaluation datasets together.
+- Trace the complete trajectory while redacting sensitive content.
+- Test provider errors, tool timeouts, malformed results, non-converging loops, interrupted approvals, and checkpoint recovery.
+- Define an explicit incomplete or escalated outcome instead of forcing every run to produce a confident answer.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+LangChain APIs and recommended architecture continue to evolve. This lesson follows the current official Python documentation while authoring and avoids older imports such as `LLMChain`, `ConversationBufferMemory`, and `RetrievalQA` that appeared in the previous page.
+
+- [LangChain overview and `create_agent`](https://docs.langchain.com/oss/python/langchain/overview)
+- [Models and the standard model interface](https://docs.langchain.com/oss/python/langchain/models)
+- [Agents, tools, state, and structured output](https://docs.langchain.com/oss/python/langchain/agents)
+- [Tool runtime context](https://docs.langchain.com/oss/python/langchain/tools)
+- [Middleware and the agent loop](https://docs.langchain.com/oss/python/langchain/middleware/overview)
+- [Prebuilt middleware controls](https://docs.langchain.com/oss/python/langchain/middleware/built-in)
+- [Short-term memory and production checkpointers](https://docs.langchain.com/oss/python/langchain/short-term-memory)
+- [LangSmith evaluation concepts](https://docs.langchain.com/langsmith/evaluation-concepts)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/langchain/quiz/langchain-architecture.json" lessonSlug="langchain" title="LangChain Architecture Review" /%}

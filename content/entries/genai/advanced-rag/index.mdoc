@@ -1,0 +1,228 @@
+---
+registryId: advanced-rag
+---
+
+{% section-card tone="intro" %}
+## What are advanced RAG patterns?
+
+**Advanced retrieval-augmented generation (RAG) patterns** add a deliberate planning, representation, fusion, hierarchy, or evidence-checking stage when one bounded retrieval pass repeatedly misses the evidence a question needs.
+
+In plain language: basic RAG searches once. An advanced pipeline may rewrite a difficult question, search several ranked views, traverse a document hierarchy, or choose a retrieval branch per request. These stages do not make an answer trustworthy by themselves. They only change how candidate evidence is found and selected.
+
+The core invariant is **complexity must answer a measured retrieval failure**. A fluent model, a larger context window, or more search calls cannot replace authorized, current, answer-bearing evidence.
+{% /section-card %}
+
+{% section-card %}
+## Start from the failure, not the pattern name
+
+Advanced RAG is not a maturity ladder where every system should eventually become adaptive or agentic. Begin with a reproducible single-query baseline, slice its failures, and add the smallest mechanism that addresses one persistent gap.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Vocabulary mismatch" eyebrow="Different language" icon="search" tone="blue" %}
+The query and source describe the same idea with different terms. Dense retrieval, a bounded reformulation, or HyDE may bridge the language gap.
+{% /concept-card %}
+{% concept-card title="Multi-part evidence" eyebrow="Several facts" icon="workflow" tone="cyan" %}
+One question requires evidence from several clauses or sources. Decomposition and rank fusion can keep each sub-intent visible.
+{% /concept-card %}
+{% concept-card title="Long document structure" eyebrow="Parent and leaf" icon="network" tone="violet" %}
+A matching paragraph is ambiguous without its section or document context. Hierarchical retrieval preserves that structure and narrows the leaf search.
+{% /concept-card %}
+{% concept-card title="Mixed query workload" eyebrow="Different routes" icon="route" tone="amber" %}
+Identifiers, broad research questions, and policy comparisons need different work. A bounded router can select a branch and abstain when evidence remains incomplete.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Name the baseline before changing it
+
+- Record the query, identity scope, index version, filters, candidate IDs, and selected evidence.
+- Label the expected source IDs or required facts for a representative evaluation set.
+- Measure retrieval recall and evidence coverage separately from answer quality.
+- Slice results by query shape; a global average can hide a broken low-volume route.
+- Preserve a simple branch as a control so additional calls must prove their value.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Match the retrieval pattern to the missing capability
+
+Choose a synthetic query and a candidate pattern. The lab exposes the required capabilities, exact number of search lists under its stated assumptions, model decisions, bounded retry count, and new failure surface. Coverage means the design is worth evaluating; it is not a predicted accuracy score.
+
+{% interactive-block id="genai/advanced-rag" dataFile="/api/content/genai/advanced-rag/data/strategy-escalation-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Understand what each pattern actually changes
+
+{% process-flow %}
+{% process-step number="1" title="Represent the intent" label="Query" %}
+Keep the original question, then create only the bounded decomposition, reformulation, or hypothetical representation the selected pattern requires.
+{% /process-step %}
+{% process-step number="2" title="Retrieve independent lists" label="Recall" %}
+Run policy-filtered lexical, dense, summary-level, or leaf-level searches. Each list has its own ranking contract.
+{% /process-step %}
+{% process-step number="3" title="Fuse and select evidence" label="Precision" %}
+Merge ranks, deduplicate lineage, attach bounded parent context, and reserve room for independently useful sources.
+{% /process-step %}
+{% process-step number="4" title="Release, retry once, or stop" label="Control" %}
+Check required facts, authority, freshness, and contradictions. A typed abstention is safer than an unbounded search loop.
+{% /process-step %}
+{% /process-flow %}
+
+### Four useful pattern families
+
+1. **Multi-query fusion** creates a small set of query variants or subqueries, retrieves for each, and combines the resulting ranks.
+2. **Hierarchical retrieval** first selects a document or section, then retrieves detailed passages inside the selected parents.
+3. **HyDE** generates a hypothetical answer-shaped passage as a search representation, embeds it, and retrieves real corpus documents near that representation.
+4. **Adaptive retrieval** classifies the request, chooses a bounded branch, evaluates the evidence contract, and either runs one defined fallback or abstains.
+
+These families can be composed, but every composition multiplies the trace, evaluation, and failure states an operator must understand.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Fuse rankings without comparing incompatible scores
+
+Lexical rankers, vector indexes, and query reformulations can produce scores with different meanings and ranges. **Reciprocal rank fusion (RRF)** ignores those raw magnitudes and adds a contribution based on each document's position in each ranked list.
+
+The lab fixes the constant at `60` and computes `score(document) = Σ 1 / (60 + rank)`. Turn lists on and off, then change the contributing depth. A document outside every active top list contributes nothing, regardless of how good the downstream reranker is.
+
+{% interactive-block id="genai/advanced-rag-rank-fusion-lab" dataFile="/api/content/genai/advanced-rag/data/rank-fusion-scenarios.json" /%}
+
+### Read the fused list correctly
+
+- A high RRF score means the document ranked well across the active inputs; it is not a probability of relevance.
+- A deeper contributing window can recover a needed source, but it can also add distractors and reranking work.
+- Query variants need relevance checks because an off-topic reformulation can retrieve a coherent but wrong neighborhood.
+- Fusion cannot repair authorization, staleness, poisoning, or a source that no input retriever found.
+
+{% code-block file="/api/content/genai/advanced-rag/code/reciprocal-rank-fusion.py" language="python" title="Transparent Reciprocal Rank Fusion" /%}
+{% /section-card %}
+
+{% section-card %}
+## Preserve document hierarchy without flooding context
+
+Long documents contain relationships that flat chunks erase: a paragraph belongs to a section, an exception modifies a rule, and a definition may govern many later clauses. Hierarchical retrieval makes those relationships queryable.
+
+{% system-flow title="Retrieve a leaf through its parent" caption="Evaluate recall at every narrowing step. A missed parent makes every relevant child below it unreachable." %}
+{% system-node title="Document summaries" eyebrow="Route" icon="database" tone="blue" %}
+Search stable document-level representations to identify likely source families.
+{% /system-node %}
+{% system-node title="Section candidates" eyebrow="Narrow" icon="layers" tone="violet" %}
+Search headings or section summaries only inside the selected documents.
+{% /system-node %}
+{% system-node title="Leaf evidence" eyebrow="Retrieve" icon="search" tone="cyan" %}
+Retrieve answer-bearing paragraphs, tables, or code blocks inside the selected sections.
+{% /system-node %}
+{% system-node title="Bounded parent context" eyebrow="Assemble" icon="braces" tone="amber" %}
+Attach only the heading path or neighboring text needed to interpret each leaf.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep hierarchy observable
+
+- Store stable document, section, and leaf IDs with explicit parent links.
+- Version summaries with the source snapshot and treat generated summaries as derived data, not source evidence.
+- Measure parent recall, leaf recall, and final evidence coverage separately.
+- Permit a controlled broad-search fallback when parent routing confidence is low.
+- Cite the real source span, not only the generated summary that helped route retrieval.
+
+Tree-organized methods such as RAPTOR show one way to retrieve across levels of abstraction. They are design evidence, not a universal instruction to summarize every corpus into a tree.
+{% /section-card %}
+
+{% section-card %}
+## Use generated representations as search hints, never as evidence
+
+HyDE and contextual retrieval both change the text used for retrieval, but they make different trust promises.
+
+{% concept-grid columns="2" %}
+{% concept-card title="HyDE" eyebrow="Query-side representation" icon="sparkles" tone="violet" %}
+Generate a hypothetical document that resembles a possible answer, embed it, and search the real corpus. The hypothetical text may contain false details and must never be cited or passed off as evidence.
+{% /concept-card %}
+{% concept-card title="Contextual retrieval" eyebrow="Index-side representation" icon="layers" tone="cyan" %}
+Add concise document context to a chunk before building its dense and lexical representations. Preserve the original source span separately for display, citation, deletion, and audit.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use either technique only after evaluation demonstrates a persistent representation gap. Generated context can improve matching while also introducing model cost, nondeterminism, stale derived text, and a new artifact that must be versioned.
+{% /section-card %}
+
+{% section-card %}
+## Bound adaptive retrieval as a state machine
+
+An adaptive pipeline should not be an open-ended agent that keeps searching until a model feels confident. Define routes, budgets, evidence requirements, and terminal outcomes in application code.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the query" label="Route" %}
+Choose from a closed set such as exact lookup, hybrid search, multi-query fusion, hierarchy, or HyDE. Record the reason and router version.
+{% /process-step %}
+{% process-step number="2" title="Run one branch" label="Budget" %}
+Apply authorization first, then enforce maximum query variants, candidate counts, retrieval calls, and elapsed time.
+{% /process-step %}
+{% process-step number="3" title="Evaluate the evidence" label="Gate" %}
+Check required-fact coverage, source authority, freshness, contradictions, and citation spans without asking generation to repair missing evidence.
+{% /process-step %}
+{% process-step number="4" title="Terminate deliberately" label="Outcome" %}
+Answer, ask a clarifying question, run one named fallback, or return a typed insufficient-evidence result.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/genai/advanced-rag/code/adaptive-retrieval.py" language="python" title="A Bounded Adaptive Retrieval Contract" /%}
+
+{% callout variant="warn" %}
+Self-reflection is not an authorization or correctness boundary. Deterministic application logic must still enforce source access, search budgets, evidence sufficiency, and terminal retry limits.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the extra stage that you added
+
+An end-to-end answer score cannot tell whether a new pattern fixed retrieval or merely changed the model's prose. Keep a frozen baseline and compare the advanced branch on the query slice it was designed to improve.
+
+### Retrieval evidence
+
+- **Candidate recall:** did any active list retrieve every acceptable source or required fact?
+- **Parent recall:** did hierarchical routing keep the correct document and section reachable?
+- **Fusion contribution:** which ranked list promoted each selected document?
+- **Evidence coverage:** does the final packet contain every fact needed to answer?
+- **Source diversity:** did duplicate chunks displace an independently useful source?
+
+### Operational evidence
+
+- Search executions, model calls, reranker pairs, input and output tokens, and elapsed time by stage.
+- Router distribution, fallback rate, abstention reasons, and budget-exhaustion rate by query class.
+- Index, embedding, query-rewriter, router, reranker, generator, and policy versions.
+- Authorization failures, stale-source selections, contradictory evidence, and citation mismatches.
+
+### Release discipline
+
+1. Replay the same labeled queries through the simple and advanced branches.
+2. Compare the target slice and guardrail slices, not only an overall average.
+3. Inspect regressions caused by off-topic rewrites, missed parents, or router mistakes.
+4. Canary the new route with kill switches and a known-good fallback.
+5. Remove the stage when it adds work without durable, measured benefit.
+{% /section-card %}
+
+{% section-card %}
+## Operate advanced RAG for replay, rollback, and refusal
+
+- Log the original query fingerprint, generated variants, route decision, filters, ranked lists, fusion contributions, selected evidence, and gate verdict.
+- Keep derived summaries, contextualized chunks, and hypothetical representations versioned and linked to their source snapshot.
+- Bound fan-out, candidate depth, reranking, model calls, retries, context tokens, and total request time.
+- Define degradation per route: skip an optional reranker, fall back to a simple retriever, or return search results without generation.
+- Test prompt injection, poisoned summaries, cross-tenant retrieval, stale parents, duplicate evidence, and contradictory sources.
+- Return the missing evidence class to the caller when the release gate fails; do not hide abstention behind a generic model error.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources behind the patterns
+
+- [RAG-Fusion](https://arxiv.org/abs/2402.03367) describes multi-query generation followed by reciprocal rank fusion and also reports that weak query variants can drift off topic.
+- [Azure AI Search RRF documentation](https://learn.microsoft.com/en-us/azure/search/hybrid-search-ranking) documents rank-based fusion as `1 / (rank + k)` and keeps fused scores separate from semantic reranker scores.
+- [HyDE](https://arxiv.org/abs/2212.10496) defines the hypothetical-document retrieval pivot and explicitly treats the generated document as unreal rather than evidence.
+- [RAPTOR](https://arxiv.org/abs/2401.18059) presents tree-organized retrieval across different levels of abstraction.
+- [Self-RAG](https://arxiv.org/abs/2310.11511) studies adaptive retrieval and reflection rather than indiscriminately retrieving a fixed number of passages.
+- [Anthropic's contextual retrieval write-up](https://www.anthropic.com/engineering/contextual-retrieval) describes adding chunk-specific context to both embedding and lexical representations.
+- [Lost in the Middle](https://arxiv.org/abs/2307.03172) shows why merely supplying a longer context does not guarantee robust use of relevant evidence.
+
+Research results are workload-specific. Reproduce the relevant comparison on your corpus, identities, query distribution, and release policy before adopting a pattern.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/advanced-rag/quiz/advanced-rag-patterns.json" lessonSlug="advanced-rag" /%}

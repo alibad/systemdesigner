@@ -1,0 +1,136 @@
+---
+registryId: pandas-ml
+---
+
+{% section-card tone="intro" %}
+## What is pandas used for in machine learning?
+
+pandas is a Python library for inspecting and transforming table-shaped data with `DataFrame` and `Series` objects. In an ML system it is especially useful for exploration, feature prototyping, validation, and moderate-scale preprocessing before data is passed to a training library.
+
+The important boundary is what pandas does **not** guarantee. It will execute a transformation, but it cannot know whether a feature leaks the future, a merge duplicated examples, a dtype changed across environments, or serving code reproduces the training result. Those are data-contract decisions the system must make explicit.
+{% /section-card %}
+
+{% section-card %}
+## Give each transformation a contract
+
+{% concept-grid columns="4" %}
+{% concept-card title="Inputs" eyebrow="Know the table" icon="database" tone="blue" %}
+Declare required columns, key uniqueness, dtypes, null policy, timestamp meaning, and the source snapshot.
+{% /concept-card %}
+{% concept-card title="Boundary" eyebrow="Protect evaluation" icon="shield-check" tone="green" %}
+Split before learning imputation, scaling, vocabularies, encodings, selection thresholds, or any other data-dependent state.
+{% /concept-card %}
+{% concept-card title="Output" eyebrow="Freeze the shape" icon="table" tone="violet" %}
+Version ordered feature names, dtypes, units, category handling, and missing-value behavior.
+{% /concept-card %}
+{% concept-card title="Evidence" eyebrow="Prove parity" icon="scan-search" tone="amber" %}
+Use shared fixtures to compare training, validation, and serving transformations on normal and adversarial rows.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Build leakage-resistant features
+
+{% process-flow %}
+{% process-step number="1" title="Define prediction time" label="Frame" %}
+State the entity, target, decision time, prediction horizon, and which facts are observable before that decision.
+{% /process-step %}
+{% process-step number="2" title="Split by the deployment boundary" label="Separate" %}
+Use entity-held-out or forward-time partitions when random rows would place related or future observations on both sides.
+{% /process-step %}
+{% process-step number="3" title="Fit transformation state once" label="Learn" %}
+Learn imputation values, category vocabularies, scaling statistics, and encodings from training rows only.
+{% /process-step %}
+{% process-step number="4" title="Apply and verify the frozen contract" label="Reproduce" %}
+Transform evaluation and serving rows with the same state, ordered columns, dtypes, and edge-case behavior.
+{% /process-step %}
+{% /process-flow %}
+
+{% interactive-block id="ml-systems/pandas-ml-leakage-contract-lab" dataFile="/api/content/ml-systems/pandas-ml/data/leakage-contract-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Make time windows point backward
+
+Time-series correctness starts with an explicit clock. Event time describes when something happened; ingestion time describes when the system observed it. Late arrivals can make those orders disagree, so relying on current row order is unsafe.
+
+- Parse timestamps deliberately and normalize time zones.
+- Sort by entity and event time before `shift`, `rolling`, or expanding operations.
+- End windows before the prediction event; the current outcome must not contribute to its own feature.
+- Record late-data and correction policy instead of silently rebuilding history.
+- Backtest with forward-moving periods that resemble deployment.
+
+{% code-block file="/api/content/ml-systems/pandas-ml/code/build-training-features.py" language="python" title="Build past-only features with an explicit cutoff" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat joins as model logic
+
+A merge can change the statistical weight of the training set. Use `validate=` to assert expected cardinality, compare row counts, measure unmatched keys, and sample rejected records. Handle null keys explicitly: pandas documents that null keys can match each other, which differs from usual SQL join behavior.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Dimension lookup" eyebrow="Many to one" icon="link" tone="blue" %}
+Attach one customer or product record to each example and reject duplicate dimension
+keys before they multiply rows.
+{% /concept-card %}
+{% concept-card title="Point-in-time join" eyebrow="Latest known fact" icon="clock" tone="violet" %}
+Choose the latest fact available before prediction with explicit event-time ordering
+and a freshness policy.
+{% /concept-card %}
+{% concept-card title="Relationship expansion" eyebrow="Many to many" icon="network" tone="amber" %}
+Model memberships or interactions explicitly, then aggregate or weight the expansion
+intentionally before training.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/ml-systems/pandas-ml/code/validate-feature-join.py" language="python" title="Validate join cardinality, null policy, and coverage" /%}
+{% /section-card %}
+
+{% section-card %}
+## Plan peak memory before the job fails
+
+`DataFrame.memory_usage(deep=True)` measures the current frame, not the peak of a transformation. Sorts, merges, casts, group operations, indexes, Python objects, and intermediate arrays can temporarily require multiples of the visible payload.
+
+{% interactive-block id="ml-systems/pandas-ml-calculator" dataFile="/api/content/ml-systems/pandas-ml/data/dataframe-memory-model.json" /%}
+
+{% code-block file="/api/content/ml-systems/pandas-ml/code/profile-dataframe-memory.py" language="python" title="Measure deep per-column memory before transforming" /%}
+{% /section-card %}
+
+{% section-card %}
+## Scale the algorithm, not only the worker count
+
+{% metric-strip %}
+{% metric value="Rows" label="Filter early" detail="Read only the records needed by this feature job" tone="blue" /%}
+{% metric value="Columns" label="Project early" detail="Avoid materializing unused payloads" tone="violet" /%}
+{% metric value="Dtypes" label="Store deliberately" detail="Measure nullable, categorical, string, and Arrow-backed choices" tone="green" /%}
+{% metric value="Chunks" label="Bound local state" detail="Use incremental reductions only when chunk boundaries are valid" tone="amber" /%}
+{% /metric-strip %}
+
+Parallel execution is not automatically faster. Serialization, inter-process copies, task startup, and duplicated indexes can cost more than the work in each partition. Profile vectorization and representation first. Move to a query engine or distributed framework when the algorithm requires global state, the working set cannot fit reliably, or operational retries and spill must be owned by the execution engine.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Review version-sensitive behavior
+
+pandas 3 introduced Copy-on-Write as the default execution model. Code that depended on chained assignment or accidental view mutation needs explicit `.loc` updates and version-specific tests. Pin the runtime environment, capture dependency versions, and assert output columns, dtypes, null behavior, category handling, ordering, and representative values.
+
+- Do not silence assignment warnings globally.
+- Avoid repeated concatenation in a loop; collect partitions and concatenate once.
+- Preserve stable row identifiers through filters, joins, and shuffles.
+- Fail on unexpected schema drift rather than coercing everything to strings.
+- Publish the source snapshot, split manifest, transform state, and feature schema with the model.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [pandas: Scaling to large datasets](https://pandas.pydata.org/pandas-docs/stable/user_guide/scale.html)
+- [pandas.merge API and validation behavior](https://pandas.pydata.org/docs/reference/api/pandas.merge.html)
+- [pandas: Time series and date functionality](https://pandas.pydata.org/docs/user_guide/timeseries.html)
+- [pandas: Group by operations](https://pandas.pydata.org/pandas-docs/stable/user_guide/groupby.html)
+- [scikit-learn: Common pitfalls and data leakage](https://scikit-learn.org/stable/common_pitfalls.html)
+- [scikit-learn: Pipelines and composite estimators](https://scikit-learn.org/stable/modules/compose.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/pandas-ml/quiz/pandas-ml.json" lessonSlug="pandas-ml" /%}

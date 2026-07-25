@@ -1,0 +1,167 @@
+---
+registryId: serverless-mlops
+---
+
+{% section-card tone="intro" %}
+## What is Serverless MLOps?
+
+**Serverless MLOps** uses short-lived, automatically scaled compute to react to ML events: a new dataset arrives, a schedule fires, an inference request appears, or a monitoring rule requests evaluation. The function usually validates and coordinates work; durable managed services store data, run long jobs, register artifacts, and serve models.
+
+It is useful when demand is bursty and operations fit bounded runtime, memory, payload, and concurrency limits. It is a poor default for long training inside a function, very large model artifacts, strict cold-start deadlines, or sustained traffic whose pay-per-use cost exceeds a dedicated serving pool.
+
+### The invariant to remember
+
+**Every accepted event must resolve to one durable, reviewable ML workflow outcome, even when delivery repeats or compute disappears.** Scale-to-zero is an execution choice; it is not a substitute for workflow state, idempotency, evidence, or recovery.
+
+Review [MLOps](/ml-systems/mlops) first if model registries, promotion gates, and production monitoring are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Separate the control plane from ML compute
+
+The handler on an event path should finish quickly enough to retry safely. It validates identity and policy, claims the event, starts durable work, records the workflow ID, and acknowledges only after that state is recoverable.
+
+{% process-flow %}
+{% process-step number="1" title="Receive a versioned event" label="Trigger" %}
+Carry a stable event ID, producer, schema version, dataset or model version, timestamp, and trace context.
+{% /process-step %}
+{% process-step number="2" title="Validate and claim" label="Function" %}
+Authenticate the producer, validate the payload, enforce policy, and atomically map the event ID to one workflow ID.
+{% /process-step %}
+{% process-step number="3" title="Launch durable work" label="Managed compute" %}
+Submit data preparation, training, evaluation, or inference to compute whose lifetime and resources fit the job.
+{% /process-step %}
+{% process-step number="4" title="Record evidence" label="Registry" %}
+Bind inputs, code, configuration, artifacts, metrics, approvals, and terminal state to the workflow identity.
+{% /process-step %}
+{% process-step number="5" title="Promote or quarantine" label="Decision" %}
+Deploy only through an evidence gate; route poison events and failed jobs to an owned recovery path.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Decide whether serverless inference actually fits
+
+Start with a workload contract, not a cloud product. Name the request deadline, arrival distribution, model initialization time, warm execution time, payload, memory, downstream connection use, and approved regional concurrency.
+
+{% interactive-block id="ml-systems/serverless-mlops-calculator" /%}
+
+{% callout variant="warn" %}
+An average latency can hide a cold tail that violates the synchronous deadline. Measure warm execution and initialization separately, then test burst and regional recovery traffic.
+{% /callout %}
+
+{% code-block file="/api/content/ml-systems/serverless-mlops/code/fit-workload.py" language="python" title="Reject a workload that exceeds quota or the cold deadline" /%}
+{% /section-card %}
+
+{% section-card %}
+## Match the workload to the execution shape
+
+{% concept-grid columns="2" %}
+{% concept-card title="Synchronous function" eyebrow="Caller waits" icon="zap" tone="cyan" %}
+Use for small artifacts and bounded preprocessing when both warm and cold paths meet the deadline. Protect downstreams from automatic concurrency.
+{% /concept-card %}
+{% concept-card title="Queue-backed worker" eyebrow="Absorb bursts" icon="list" tone="violet" %}
+Use when completion can be asynchronous. Queue age, attempt count, idempotency, dead letters, and result identity become part of the contract.
+{% /concept-card %}
+{% concept-card title="Durable training job" eyebrow="Long-running compute" icon="cpu" tone="blue" %}
+Let the function submit a managed job with explicit input, image, resource, checkpoint, timeout, and output locations. Do not train inside the trigger.
+{% /concept-card %}
+{% concept-card title="Dedicated endpoint" eyebrow="Sustained service" icon="server" tone="green" %}
+Prefer an autoscaled serving fleet when utilization is continuous, artifacts are large, accelerators are required, or cold starts cannot meet the SLO.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Make retries converge instead of duplicate work
+
+Event systems commonly provide at-least-once delivery. A timeout can occur after the function started external work but before it acknowledged success. Retrying the entire handler without a durable claim can launch duplicate training, write repeated predictions, or promote the wrong artifact.
+
+{% interactive-block id="ml-systems/serverless-mlops-recovery-lab" dataFile="/api/content/ml-systems/serverless-mlops/data/retry-incidents.json" /%}
+
+{% code-block file="/api/content/ml-systems/serverless-mlops/code/claim-event.py" language="python" title="Map repeated delivery to the original workflow" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build a durable event-driven ML path
+
+{% system-flow title="Functions coordinate; durable services own state" caption="Each boundary has a distinct scaling and failure contract. Preserve identity and evidence across every transition." %}
+{% system-node title="Event bus or queue" eyebrow="Buffer and redeliver" icon="list" tone="violet" %}
+Retains versioned events, applies backpressure, exposes age and attempts, and moves exhausted poison messages to quarantine.
+{% /system-node %}
+{% system-node title="Function handler" eyebrow="Validate and claim" icon="zap" tone="cyan" %}
+Authenticates, authorizes, validates schema, claims idempotency, starts durable work, and returns within a bounded deadline.
+{% /system-node %}
+{% system-node title="Workflow and compute" eyebrow="Execute" icon="workflow" tone="blue" %}
+Owns steps, retries, checkpoints, resource allocation, cancellation, and terminal status for the long-running ML operation.
+{% /system-node %}
+{% system-node title="Artifact registry" eyebrow="Bind evidence" icon="database" tone="green" %}
+Links immutable input, code, environment, artifact, evaluation, approval, and deployment identities.
+{% /system-node %}
+{% system-node title="Serving and monitoring" eyebrow="Operate" icon="activity" tone="amber" %}
+Exposes latency, errors, cold starts, queue age, cost, quality, drift, and rollback triggers under one release version.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Define quotas and backpressure before automatic scaling
+
+{% metric-strip %}
+{% metric value="p99" label="Cold-path latency" detail="Measure runtime startup, dependency import, artifact download, model load, and first execution independently." tone="cyan" /%}
+{% metric value="C x t" label="Required concurrency" detail="Arrival rate multiplied by execution seconds estimates simultaneous work before burst and safety factors." tone="blue" /%}
+{% metric value="oldest" label="Queue age" detail="A growing oldest-message age reveals demand exceeding admitted worker and downstream capacity." tone="violet" /%}
+{% metric value="one ID" label="Workflow identity" detail="Retries, artifacts, metrics, promotion, and recovery must stay attached to one durable identity." tone="green" /%}
+{% /metric-strip %}
+
+### Protect the dependencies serverless compute can overwhelm
+
+- Reserve database and model-registry connections; do not let every concurrent function open an unbounded connection.
+- Cap worker concurrency below storage, API, accelerator, and quota envelopes.
+- Batch or coalesce replaceable work and expose queue age rather than hiding overload with retries.
+- Request quota increases before launch and test the rejected path when the regional limit is reached.
+- Define the utilization and cost point where traffic moves to dedicated serving.
+{% /section-card %}
+
+{% section-card %}
+## Release models with evidence, not mutable names
+
+{% tabs %}
+{% tab title="Build" %}
+Pin the source revision, dependency lock, runtime image, feature contract, and training configuration. Scan the artifact and emit provenance.
+{% /tab %}
+{% tab title="Evaluate" %}
+Run data-quality, model-quality, fairness, safety, latency, cold-start, memory, and cost checks against explicit thresholds.
+{% /tab %}
+{% tab title="Promote" %}
+Record the policy decision against one immutable artifact. Deploy a canary or shadow revision and compare it with the current baseline.
+{% /tab %}
+{% tab title="Recover" %}
+Retain the previous artifact and configuration, define automated rollback signals, and prove event replay does not create a second workflow.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card %}
+## Review the production checklist
+
+### Build these controls
+
+- Version event schemas and reject unsupported producers before side effects.
+- Store idempotency claims and workflow state outside ephemeral function memory.
+- Bound attempts, execution time, payload, concurrency, connections, and downstream rate.
+- Quarantine poison events with an owner and an explicit replay process.
+- Correlate event, workflow, job, artifact, deployment, prediction, and trace identities.
+- Alarm on queue age, throttling, cold starts, initialization failures, spend, quality, and stale models.
+
+### Avoid these traps
+
+- Running training or unbounded batch work inside a short-lived trigger.
+- Treating automatic scale-out as unlimited downstream capacity.
+- Promoting the newest artifact without evaluation and approval evidence.
+- Using mutable object paths or image tags as model identity.
+- Retrying deterministic failures forever or replaying dead letters into production blindly.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/serverless-mlops/quiz/serverless-mlops.json" lessonSlug="serverless-mlops" /%}

@@ -1,0 +1,211 @@
+{
+  "title": "What does one change force Docker to rebuild?",
+  "description": "Choose a Dockerfile structure and a changed input. The trace uses illustrative timings and sizes to expose cache invalidation and final-image boundaries; measure your own build before setting targets.",
+  "defaultDesignId": "multi-stage",
+  "defaultChangeId": "source-edit",
+  "changes": [
+    {
+      "id": "source-edit",
+      "label": "Application source changes",
+      "detail": "A frequently edited source file changes while dependency manifests and base images stay fixed."
+    },
+    {
+      "id": "lockfile-edit",
+      "label": "Dependency lockfile changes",
+      "detail": "The exact dependency graph changes, so install layers and their dependents need new outputs."
+    },
+    {
+      "id": "base-refresh",
+      "label": "Base image digest changes",
+      "detail": "The builder and runtime bases are refreshed to new immutable image content."
+    }
+  ],
+  "designs": [
+    {
+      "id": "single-stage",
+      "label": "Copy everything, then install",
+      "detail": "One stage copies the whole context before dependency installation and ships the build toolchain.",
+      "finalImageMb": 610,
+      "finalContents": [
+        "runtime",
+        "application source",
+        "production and development dependencies",
+        "compiler toolchain",
+        "build output"
+      ],
+      "buildOnlyContents": [
+        "none; every build artifact remains in the runtime image"
+      ],
+      "recommendation": "A source edit invalidates expensive dependency work and the runtime image carries build-only material",
+      "layers": [
+        {
+          "id": "single-base",
+          "label": "Resolve one base image",
+          "detail": "The same filesystem becomes both the build environment and the runtime base.",
+          "durationSeconds": 25,
+          "destination": "final-image"
+        },
+        {
+          "id": "single-copy",
+          "label": "Copy the entire build context",
+          "detail": "Source, manifests, tests, and any files not excluded by .dockerignore enter one layer.",
+          "durationSeconds": 3,
+          "destination": "final-image"
+        },
+        {
+          "id": "single-install",
+          "label": "Install all dependencies",
+          "detail": "Changing any earlier copied file changes this layer's parent and makes the install run again.",
+          "durationSeconds": 70,
+          "destination": "final-image"
+        },
+        {
+          "id": "single-compile",
+          "label": "Compile the application",
+          "detail": "Build tools and intermediate output stay in the same image history used at runtime.",
+          "durationSeconds": 45,
+          "destination": "final-image"
+        },
+        {
+          "id": "single-metadata",
+          "label": "Set runtime metadata",
+          "detail": "The final command and image configuration follow the mutable build steps.",
+          "durationSeconds": 1,
+          "destination": "final-image"
+        }
+      ],
+      "invalidations": {
+        "source-edit": [
+          "single-copy",
+          "single-install",
+          "single-compile",
+          "single-metadata"
+        ],
+        "lockfile-edit": [
+          "single-copy",
+          "single-install",
+          "single-compile",
+          "single-metadata"
+        ],
+        "base-refresh": [
+          "single-base",
+          "single-copy",
+          "single-install",
+          "single-compile",
+          "single-metadata"
+        ]
+      }
+    },
+    {
+      "id": "multi-stage",
+      "label": "Cache-aware multi-stage build",
+      "detail": "Stable manifests precede source, and the runtime stage copies only production dependencies and compiled output.",
+      "finalImageMb": 148,
+      "finalContents": [
+        "runtime",
+        "production dependencies",
+        "compiled application output"
+      ],
+      "buildOnlyContents": [
+        "source",
+        "development dependencies",
+        "compiler toolchain",
+        "package-manager cache"
+      ],
+      "recommendation": "Frequent source edits preserve dependency layers while multi-stage copying keeps build tools out of the final image",
+      "layers": [
+        {
+          "id": "builder-base",
+          "label": "Resolve builder base",
+          "detail": "The builder provides the complete toolchain but does not become the final runtime image.",
+          "durationSeconds": 25,
+          "destination": "build-only"
+        },
+        {
+          "id": "copy-manifests",
+          "label": "Copy dependency manifests",
+          "detail": "The lockfile is isolated from frequently changing application source.",
+          "durationSeconds": 1,
+          "destination": "build-only"
+        },
+        {
+          "id": "install-build",
+          "label": "Install build dependencies",
+          "detail": "A BuildKit cache mount can reuse downloaded packages even when the install instruction runs again.",
+          "durationSeconds": 70,
+          "destination": "build-only"
+        },
+        {
+          "id": "copy-source",
+          "label": "Copy application source",
+          "detail": "Source changes begin invalidation here instead of before dependency installation.",
+          "durationSeconds": 3,
+          "destination": "build-only"
+        },
+        {
+          "id": "compile",
+          "label": "Compile application output",
+          "detail": "The build stage produces the files required by the runtime stage.",
+          "durationSeconds": 45,
+          "destination": "build-only"
+        },
+        {
+          "id": "runtime-base",
+          "label": "Resolve minimal runtime base",
+          "detail": "The runtime stage begins from a separate image without the builder toolchain.",
+          "durationSeconds": 12,
+          "destination": "final-image"
+        },
+        {
+          "id": "install-runtime",
+          "label": "Install production dependencies",
+          "detail": "Only packages needed by the running process enter the final image.",
+          "durationSeconds": 22,
+          "destination": "final-image"
+        },
+        {
+          "id": "copy-artifact",
+          "label": "Copy compiled output",
+          "detail": "The runtime stage receives selected artifacts from the builder stage.",
+          "durationSeconds": 2,
+          "destination": "final-image"
+        },
+        {
+          "id": "runtime-metadata",
+          "label": "Set user and command",
+          "detail": "The image records an unprivileged runtime user and the application command.",
+          "durationSeconds": 1,
+          "destination": "final-image"
+        }
+      ],
+      "invalidations": {
+        "source-edit": [
+          "copy-source",
+          "compile",
+          "copy-artifact",
+          "runtime-metadata"
+        ],
+        "lockfile-edit": [
+          "copy-manifests",
+          "install-build",
+          "copy-source",
+          "compile",
+          "install-runtime",
+          "copy-artifact",
+          "runtime-metadata"
+        ],
+        "base-refresh": [
+          "builder-base",
+          "copy-manifests",
+          "install-build",
+          "copy-source",
+          "compile",
+          "runtime-base",
+          "install-runtime",
+          "copy-artifact",
+          "runtime-metadata"
+        ]
+      }
+    }
+  ]
+}

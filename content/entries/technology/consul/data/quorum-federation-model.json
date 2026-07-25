@@ -1,0 +1,132 @@
+{
+  "blockId": "technology/consul-quorum-federation-lab",
+  "title": "Keep failure detection separate from consensus recovery",
+  "description": "Select a server topology, inject an infrastructure event, and choose the read contract. The model shows which operations still have evidence-backed availability.",
+  "defaults": {
+    "topologyId": "three-server-dc",
+    "incidentId": "one-primary-voter-lost",
+    "readModeId": "default"
+  },
+  "topologies": [
+    {
+      "id": "three-server-dc",
+      "label": "One datacenter, 3 servers",
+      "detail": "The smallest recommended production voting set. It tolerates one failed server.",
+      "primaryServers": 3,
+      "secondaryServers": 0,
+      "federation": "None",
+      "boundary": "One independent Raft cluster"
+    },
+    {
+      "id": "five-server-dc",
+      "label": "One datacenter, 5 servers",
+      "detail": "A larger voting set that tolerates two failures, with more consensus work per write.",
+      "primaryServers": 5,
+      "secondaryServers": 0,
+      "federation": "None",
+      "boundary": "One independent Raft cluster"
+    },
+    {
+      "id": "federated-three-by-three",
+      "label": "Two datacenters, 3 + 3 servers",
+      "detail": "Two independent Raft clusters joined for cross-datacenter Consul features.",
+      "primaryServers": 3,
+      "secondaryServers": 3,
+      "federation": "WAN federation",
+      "boundary": "A quorum is evaluated inside each datacenter"
+    }
+  ],
+  "readModes": [
+    {
+      "id": "default",
+      "label": "Default read",
+      "detail": "Use the leader lease path used by most HTTP API reads.",
+      "requiresQuorum": true,
+      "availabilityNote": "Fast and authoritative enough for most reads, but unavailable when the datacenter cannot maintain leadership."
+    },
+    {
+      "id": "consistent",
+      "label": "Consistent read",
+      "detail": "Require the leader to confirm authority with a quorum.",
+      "requiresQuorum": true,
+      "availabilityNote": "Strongest read contract, with extra latency and no response without quorum."
+    },
+    {
+      "id": "stale",
+      "label": "Stale read",
+      "detail": "Allow any reachable server to answer from its local replicated state.",
+      "requiresQuorum": false,
+      "availabilityNote": "Can remain available without a leader, but freshness has no fixed upper bound unless the caller enforces one."
+    }
+  ],
+  "incidents": [
+    {
+      "id": "one-primary-voter-lost",
+      "label": "Lose one primary voter",
+      "detail": "One server is unavailable; the remaining peers can still communicate.",
+      "failedPrimary": 1,
+      "failedSecondary": 0,
+      "wanAvailable": true,
+      "overloaded": false,
+      "actionWithQuorum": "Confirm the remaining leader and voters, replace the failed server through the normal peer lifecycle, and verify snapshots before another failure.",
+      "actionWithoutQuorum": "Do not add random peers. Establish the actual surviving peer set and follow the documented outage-recovery procedure.",
+      "unsafeAction": "Restart every server at once or enable bootstrap mode on multiple servers.",
+      "evidence": [
+        "consul operator raft list-peers shows one leader and the expected voters",
+        "consul.autopilot.healthy and leader telemetry remain stable",
+        "Catalog writes and a synthetic registration still commit"
+      ]
+    },
+    {
+      "id": "two-primary-voters-lost",
+      "label": "Lose two primary voters",
+      "detail": "Two servers are unavailable. A five-server cluster still has quorum; a three-server cluster does not.",
+      "failedPrimary": 2,
+      "failedSecondary": 0,
+      "wanAvailable": true,
+      "overloaded": false,
+      "actionWithQuorum": "Replace one failed voter at a time and wait for the peer set and Autopilot health to stabilize before continuing.",
+      "actionWithoutQuorum": "Freeze topology changes, collect peer evidence, and use the documented manual recovery or a tested snapshot restore.",
+      "unsafeAction": "Treat gossip membership as proof that Raft can still commit writes.",
+      "evidence": [
+        "The number of alive voters still meets the calculated quorum",
+        "A current leader is visible in raft list-peers",
+        "The applied index advances when a controlled write is issued"
+      ]
+    },
+    {
+      "id": "wan-partition",
+      "label": "Partition the datacenters",
+      "detail": "Each datacenter can reach its local peers, but WAN federation traffic is interrupted.",
+      "failedPrimary": 0,
+      "failedSecondary": 0,
+      "wanAvailable": false,
+      "overloaded": false,
+      "actionWithQuorum": "Keep local discovery local, pause cross-datacenter changes, verify primary/secondary replication state, and restore the federation path before relying on remote services.",
+      "actionWithoutQuorum": "Recover the affected datacenter's local quorum first; WAN membership cannot substitute for local Raft consensus.",
+      "unsafeAction": "Assume federation automatically moves application traffic or merges conflicting writes.",
+      "evidence": [
+        "Local raft list-peers remains healthy in each datacenter",
+        "WAN members and gateway telemetry identify the broken federation path",
+        "Remote discovery and ACL or intention replication lag are measured explicitly"
+      ]
+    },
+    {
+      "id": "leader-overload",
+      "label": "Overload the leader path",
+      "detail": "The voters are alive, but disk sync, CPU, or request pressure delays Raft and leader-served reads.",
+      "failedPrimary": 0,
+      "failedSecondary": 0,
+      "wanAvailable": true,
+      "overloaded": true,
+      "actionWithQuorum": "Reduce abusive reads and writes, move eligible discovery traffic to stale or agent-cached paths, and scale server resources using telemetry evidence.",
+      "actionWithoutQuorum": "Remove overload before forcing recovery; a slow cluster can look failed while destructive topology changes make recovery harder.",
+      "unsafeAction": "Set max_stale aggressively so overloaded followers forward even more reads to the leader.",
+      "evidence": [
+        "raft leader last-contact, election, and commit latency remain within the runbook threshold",
+        "RPC rate-limit errors and server saturation are correlated with callers",
+        "Synthetic DNS, default-read, and write probes are measured separately"
+      ]
+    }
+  ]
+}

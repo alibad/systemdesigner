@@ -1,0 +1,323 @@
+---
+registryId: pig
+---
+
+{% section-card tone="intro" %}
+## What is Apache Pig?
+
+**Apache Pig is a batch dataflow system for Hadoop.** You describe a sequence of data
+transformations in its language, Pig Latin, and Pig compiles that logical pipeline into
+distributed work for an execution backend such as MapReduce or Apache Tez.
+
+Pig matters because `LOAD`, `FILTER`, `FOREACH`, `GROUP`, and `JOIN` express intent at a
+higher level than hand-written Java MapReduce. A reader can follow how one relation becomes
+the next while Pig handles task construction, serialization, partitioning, and job
+submission.
+
+{% callout variant="info" %}
+The core invariant is **every alias names a relation with a data contract**. A Pig Latin
+statement describes how to derive that relation; it does not mean the full dataset has
+already moved. `STORE`, `DUMP`, and some diagnostic commands cause Pig to execute the
+required dependency graph.
+{% /callout %}
+
+Pig is easier to understand after [HDFS](/technology/hadoop-hdfs) and
+[MapReduce](/technology/mapreduce). This lesson introduces the necessary terms, but those
+lessons explain storage blocks, map tasks, partitioning, and reducers in more depth.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read Pig Latin as a dataflow
+
+Pig Latin is procedural in the useful sense: each line names the next relation in a
+pipeline. It is not a row-by-row scripting loop, and an alias is not a mutable table.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Relation" eyebrow="Dataset view" icon="database" tone="blue" %}
+A bag of tuples. It may have a declared schema, a partially known schema, or fields that
+remain `bytearray` until an operation needs another type.
+{% /concept-card %}
+{% concept-card title="Alias" eyebrow="Logical name" icon="tag" tone="cyan" %}
+A case-sensitive name for the relation produced by one operator, such as `valid_events`
+or `by_region`.
+{% /concept-card %}
+{% concept-card title="Operator" eyebrow="Transformation" icon="workflow" tone="violet" %}
+A step such as `FILTER` or `GROUP`. Operators form a directed acyclic graph because later
+aliases depend on earlier aliases.
+{% /concept-card %}
+{% concept-card title="Sink" eyebrow="Execution" icon="storage" tone="green" %}
+`STORE` writes through a store function. `DUMP` is mainly a debugging action that prints
+results and should not be treated as a production sink.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Six operators form the working vocabulary
+
+- `LOAD` asks a load function to read records and, when provided, apply a schema.
+- `FILTER` keeps tuples whose predicate evaluates to true. False and null predicate
+  results do not pass.
+- `FOREACH ... GENERATE` projects fields, computes expressions, calls functions, and can
+  flatten nested values.
+- `GROUP` collects tuples from one relation into a bag per key. The output has a `group`
+  field and a bag named after the input alias.
+- `JOIN` performs key matching and emits a flat tuple containing fields from the joined
+  relations. A regular distributed join normally repartitions both sides.
+- `STORE` serializes a relation to a destination through a selected store function.
+
+{% code-block file="/api/content/technology/pig/code/typed-session-summary.pig" language="pig" title="A typed ETL pipeline with a replicated lookup join" /%}
+
+The example assumes `active_customers` is genuinely small enough for a replicated join.
+That is an operational requirement, not a property Pig can infer from the alias name.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat schemas, types, and nulls as production contracts
+
+Pig has scalar types including `int`, `long`, `float`, `double`, `chararray`, `bytearray`,
+`boolean`, `datetime`, `biginteger`, and `bigdecimal`. Its nested types are:
+
+- a **tuple**, which is an ordered set of fields such as `(customer_id, region)`;
+- a **bag**, which is a collection of tuples such as the tuples produced under one
+  `GROUP` key;
+- a **map**, whose keys are `chararray` values and whose values may have other types.
+
+Without an `AS` clause on `LOAD`, fields default to `bytearray`. Context-dependent casts
+can make a prototype appear to work while hiding bad records and inconsistent producer
+formats. Declare the narrowest honest schema at ingestion, then inspect the resulting
+relation with `DESCRIBE`.
+
+### Null does not mean empty, zero, or a matching key
+
+- Load-function behavior defines how source values become Pig nulls. `PigStorage` treats
+  missing fields and empty character fields as null.
+- If a declared field cannot be converted, a loader may produce null or report an error,
+  depending on the loader and failure.
+- Comparisons involving null produce null. Use `IS NULL` or `IS NOT NULL` when that is the
+  intended test.
+- A single-relation `GROUP` places null group keys together.
+- An inner `JOIN` does not match null keys, so filter or quarantine them before paying the
+  join cost.
+- `FLATTEN` has schema-sensitive behavior for null tuples and bags. Test the exact nested
+  schema instead of assuming SQL row semantics.
+
+{% callout variant="warn" %}
+A successful job is not proof of clean data. Count loaded, rejected, null-key, joined,
+unmatched, and written records. Reconcile those counts against source manifests and
+business invariants before publishing the output.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Separate the logical plan from physical execution
+
+The Pig Latin script is a logical graph. Pig validates names and types, applies
+backend-independent optimizations, translates logical operators into physical operators,
+and groups those operators into backend work.
+
+Choose a pipeline and backend below. The data volumes are deliberately transparent so you
+can see why early filtering and projection matter before a grouping or join boundary.
+
+{% interactive-block id="technology/pig-performance" dataFile="/api/content/technology/pig/data/execution-plan-model.json" /%}
+
+### MapReduce and Tez preserve the same data dependency
+
+In MapReduce mode, Pig groups physical operators into one or more jobs. A key-changing
+operation usually creates a map-side partition/sort path and reducer work. A later
+key-changing operation can require another job and an intermediate handoff.
+
+In Tez mode, Pig normally submits a directed acyclic graph with vertices and data-movement
+edges. Tez can reuse containers and keep related work in one DAG, but it does not make a
+required key shuffle free. Network transfer, serialization, sorting, spill, and hot
+partitions still exist.
+
+`EXPLAIN` is the authority for the selected Pig version, script, engine, and configuration.
+It shows the logical plan, physical plan, and MapReduce or Tez execution plan. Treat the
+number of source statements as neither a job count nor a performance forecast.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Budget shuffle bytes and key distribution together
+
+A shuffle changes ownership: records with the same key must reach the task responsible for
+that key. `GROUP`, regular `JOIN`, `COGROUP`, `DISTINCT`, and global ordering can introduce
+this boundary.
+
+The useful planning questions are:
+
+1. How many serialized bytes reach the boundary after filters and projections?
+2. How many distinct keys exist, and how are their frequencies distributed?
+3. Which partitioner assigns those keys to reduce tasks?
+4. Can the busiest task fit its sort, spill, bag, and UDF working set?
+5. Does a specialized join preserve correctness for this input layout?
+
+{% interactive-block id="technology/pig-shuffle-skew-lab" dataFile="/api/content/technology/pig/data/shuffle-skew-model.json" /%}
+
+### Choose a join from measured constraints
+
+{% concept-grid columns="3" %}
+{% concept-card title="Regular join" eyebrow="Hash partition" icon="network" tone="blue" %}
+Both inputs are partitioned by the join key. It is the general choice when neither input
+is safely replicated and key frequencies are not severely skewed.
+{% /concept-card %}
+{% concept-card title="Skewed join" eyebrow="Hot keys" icon="activity" tone="amber" %}
+Pig samples key frequencies and uses a specialized plan for hot keys. Sampling adds work,
+and observed skew should justify the strategy.
+{% /concept-card %}
+{% concept-card title="Replicated join" eyebrow="Map side" icon="copy" tone="green" %}
+Small relations are made available to map tasks. The large side avoids a reduce-side join,
+but all replicated inputs must fit both Pig's configured size limit and task memory.
+{% /concept-card %}
+{% /concept-grid %}
+
+Adding reducers lowers average bytes per reducer only when keys distribute across them.
+One dominant key still maps to one partition in a regular hash join. A custom partitioner
+can change which partition owns a key, but it cannot split one equality group without a
+correctness-preserving strategy such as skew handling or explicit key salting plus a
+matching aggregation design.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make UDF behavior visible to Pig and operators
+
+A user-defined function extends Pig when built-ins cannot express a domain transform.
+That flexibility also places arbitrary application code inside distributed tasks.
+
+Define the UDF contract before registering it:
+
+- accepted input schema and any permitted implicit casts;
+- output schema, including tuple, bag, and map field names;
+- behavior for null, malformed, oversized, and unexpected values;
+- deterministic versus non-deterministic behavior;
+- external side effects, network calls, credentials, and retry implications;
+- dependency versions and compatibility with the cluster runtime;
+- memory growth, accumulator cleanup, and static state under Tez container reuse;
+- error policy: fail the task, return null, emit a tagged reject, or increment a counter.
+
+Java UDFs can provide an output schema programmatically, and script UDFs use their
+language-specific schema declarations. Algebraic and accumulator interfaces can reduce
+memory or shuffle work for suitable aggregations, but only if their partial and final
+results are mathematically equivalent.
+
+{% callout variant="warn" %}
+Do not hide remote API calls or writes inside an evaluation UDF. Tasks can retry, speculate,
+and run concurrently. Keep transformation UDFs pure where possible, or design explicit
+idempotency and rate limits for unavoidable effects.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Prove the dataflow before scaling it
+
+Pig's diagnostic commands answer different questions:
+
+{% process-flow %}
+{% process-step number="1" title="DESCRIBE the alias" label="Contract" %}
+Check field names, scalar types, and nested bag or tuple shape after every risky loader,
+join, flatten, or UDF boundary.
+{% /process-step %}
+{% process-step number="2" title="ILLUSTRATE transformations" label="Examples" %}
+Trace a small generated or sampled dataset through the operators. Pig may synthesize
+example tuples so a filter or join does not leave the illustration empty.
+{% /process-step %}
+{% process-step number="3" title="EXPLAIN the plan" label="Execution" %}
+Inspect logical optimizations, physical operators, execution boundaries, partitioning,
+parallelism, and specialized joins without treating the output as a latency guarantee.
+{% /process-step %}
+{% process-step number="4" title="Measure a representative run" label="Evidence" %}
+Compare plan expectations with counters, bytes, records, task duration, spill, retries,
+skew, output files, and source-to-sink reconciliation.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/pig/code/quality-and-plan-checks.pig" language="pig" title="Separate curated and quarantined rows, then inspect the plan" /%}
+
+`ILLUSTRATE` is for understanding semantics on small examples. `EXPLAIN` is for inspecting
+plans. Neither replaces integration tests against representative formats, malformed
+records, skewed keys, nulls, duplicate keys, and the production UDF artifact.
+{% /section-card %}
+
+{% section-card %}
+## Operate Pig as a batch pipeline, not just a script
+
+### Establish run-level evidence
+
+- Version the script, UDF artifacts, parameters, property file, loader/store formats, and
+  input manifest together.
+- Write to a run-scoped temporary destination, validate it, then publish through an
+  atomic rename or a metastore-aware commit process supported by the storage layout.
+- Make reruns idempotent. A failed retry must not append duplicate business results or
+  publish two competing output directories.
+- Retain Pig, Hadoop, and engine logs plus counters long enough to diagnose late data,
+  task retries, skew, spill, and UDF failures.
+- Alert on missing partitions, source/output count divergence, null-key growth, rejected
+  rows, reducer tails, tiny-file growth, and stale output.
+
+### Tune from evidence, not folklore
+
+Pig can estimate reducer counts from input bytes, and `PARALLEL n` or
+`SET default_parallel` can override that choice. More parallelism increases task startup,
+open files, and output files; less parallelism increases per-task memory, spill, and tail
+time. Tez can adjust some vertex parallelism, subject to its execution constraints.
+
+{% code-block file="/api/content/technology/pig/code/pig-production.properties" language="properties" title="Versioned starting points for reducer and temporary-file behavior" /%}
+
+The property values are reviewable starting points, not universal defaults. If enabling
+temporary-file compression, benchmark the chosen codec and confirm it on every node. Turn
+on UDF profiling for bounded diagnosis rather than permanent high-cardinality counters,
+and record why reducer and split limits differ from the distribution defaults.
+
+### Drill predictable failures
+
+- a producer adds a field or changes a numeric representation;
+- a hot key moves most shuffle bytes to one task;
+- the replicated side crosses its configured or practical memory limit;
+- one UDF artifact is missing, incompatible, or returns an unexpected schema;
+- a retry encounters an existing partial output;
+- thousands of small files create excessive map-task and metadata overhead;
+- an engine or Hadoop upgrade changes compatibility, plan shape, or serialization.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Decide whether Pig still fits
+
+Apache released Pig 0.18.0 on September 15, 2025, adding support for Hadoop 3, Tez 0.10,
+Hive 3, Spark 3, HBase 2, and Python 3. That release followed Pig 0.17.0 from 2017. Pig is
+not listed as an Apache Attic project, but a new compatibility release after a long gap
+does not by itself imply a broad modern ecosystem.
+
+Pig remains a defensible choice when:
+
+- an organization owns important Pig Latin pipelines and has tested Pig 0.18.0 or a
+  supported vendor build against its Hadoop estate;
+- rewriting stable batch dataflows would add more migration risk than operational value;
+- the team has the UDF, scheduler, observability, security, and recovery knowledge to
+  operate those pipelines.
+
+Evaluate alternatives first when:
+
+- a new platform already standardizes on Spark, Flink, Beam, or a maintained SQL engine;
+- users need low-latency streaming, interactive serving, or transactional updates;
+- hiring, library support, governance tooling, and cloud-service integration matter more
+  than preserving Pig Latin;
+- the deployed distribution does not explicitly support the required Pig, Hadoop, Tez,
+  Hive, and Java combination.
+
+The practical decision is not whether Pig can process data. It can. The decision is
+whether keeping or introducing Pig minimizes total migration, compatibility, operations,
+and ownership risk for this specific estate.
+{% /section-card %}
+
+{% section-card %}
+## Continue with primary Apache references
+
+- [Apache Pig documentation overview](https://pig.apache.org/docs/latest/)
+- [Pig Latin types, nulls, and relational operators](https://pig.apache.org/docs/latest/basic.html)
+- [Performance, reducer estimation, and specialized joins](https://pig.apache.org/docs/latest/perf.html)
+- [EXPLAIN, ILLUSTRATE, and diagnostics](https://pig.apache.org/docs/latest/test.html)
+- [User-defined function contracts](https://pig.apache.org/docs/latest/udf.html)
+- [Apache Pig releases](https://pig.apache.org/releases.html)
+- [Apache Pig source repository](https://github.com/apache/pig)
+- [Apache Attic retired-project index](https://attic.apache.org/projects-index.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/pig/quiz/pig-production-design.json" lessonSlug="pig" title="Apache Pig Production Design" /%}

@@ -1,0 +1,181 @@
+---
+registryId: cloudfront
+---
+
+{% section-card tone="intro" %}
+## What is Amazon CloudFront?
+
+Amazon CloudFront is AWS's content delivery network. A **distribution** receives a
+viewer request, selects a matching **cache behavior**, checks CloudFront's cache
+layers, and forwards a miss to the configured **origin**. The origin might be Amazon
+S3, an Application Load Balancer, API Gateway, MediaPackage, or another HTTP server.
+
+CloudFront matters because network distance and repeated origin work are user-visible
+costs. Correct caching can shorten response time and protect an origin during a traffic
+spike. Incorrect caching can expose private content, serve stale data, or multiply
+origin traffic through unnecessary cache-key variants.
+
+{% callout variant="info" %}
+### Core invariant
+
+Two requests may share a cached response only when every input that
+can change that response is represented by the cache key or eliminated through safe
+normalization.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Distribution" eyebrow="Public entry" icon="globe" tone="blue" %}
+Owns the CloudFront hostname, certificates, behaviors, origins, logging, and optional
+edge-function associations.
+{% /concept-card %}
+{% concept-card title="Cache behavior" eyebrow="Route policy" icon="route" tone="violet" %}
+Matches a path pattern and chooses the origin, methods, protocol policy, cache policy,
+origin request policy, and response headers.
+{% /concept-card %}
+{% concept-card title="Cache key" eyebrow="Reuse identity" icon="key" tone="cyan" %}
+Starts with distribution domain and object path, then may include selected query
+strings, headers, and cookies that genuinely alter the response.
+{% /concept-card %}
+{% concept-card title="Origin" eyebrow="Source of truth" icon="database" tone="amber" %}
+Produces content on a miss. Its tested capacity and failure behavior remain part of the
+CDN design even when the average hit rate is high.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Budget the miss path before celebrating the hit rate
+
+The cache hit rate is an outcome, not a capacity plan. A 95% hit rate still sends
+5,000 requests per second to the origin during a 100,000 request-per-second event.
+The origin must also tolerate cold objects, invalidations, fragmented keys, and sudden
+traffic for uncached URLs.
+
+The lab separates four quantities:
+
+- **Viewer requests:** all requests entering the distribution.
+- **Edge misses:** viewer requests multiplied by one minus the edge hit rate.
+- **Duplicate misses:** simultaneous misses for the same object that a centralized
+  cache layer may consolidate.
+- **Origin pressure:** modeled origin requests divided by a measured, tested origin
+  capacity.
+
+{% interactive-block id="technology/cloudfront-performance" /%}
+
+This is a teaching model, not an AWS performance guarantee or price quote. Replace its
+inputs with `CacheHitRate`, origin request counts, origin latency, response classes,
+object popularity, and load-test evidence from your own distribution.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace the request that actually runs
+
+A request may end at the edge, reach a regional cache, pass through Origin Shield, or
+reach the origin. Viewer-request functions run before the cache lookup. Origin-facing
+Lambda@Edge triggers run only when CloudFront is going to the origin path. Select each
+scenario and inspect which components participate.
+
+{% topology-lab dataFile="/api/content/technology/cloudfront/data/request-path-scenarios.json" /%}
+
+The important distinction is **policy versus path**: configuring a component does not
+mean every request invokes it. A cache hit should not pay for origin work, and a failover
+origin should not receive traffic until the configured failure criteria are met.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design a cache key from response variance
+
+Start with the narrowest identity that remains correct. Add a request value only when
+the origin returns meaningfully different content because of that value.
+
+{% process-flow %}
+{% process-step number="1" title="Name the response" label="Path" %}
+Use a stable, versioned object path where possible. A changed immutable asset should
+receive a new name instead of relying on a broad invalidation.
+{% /process-step %}
+{% process-step number="2" title="List response inputs" label="Correctness" %}
+Record every query parameter, header, cookie, identity claim, locale, and device signal
+that can change status, body, or response headers.
+{% /process-step %}
+{% process-step number="3" title="Normalize noise" label="Reuse" %}
+Remove tracking values, order-insensitive differences, and defaults that do not alter
+the response. Normalize before the cache lookup.
+{% /process-step %}
+{% process-step number="4" title="Test isolation" label="Security" %}
+Prove that two users, tenants, or authorization states cannot receive each other's
+private response through a shared cache key.
+{% /process-step %}
+{% /process-flow %}
+
+### Common key decisions
+
+- Include a query string when it chooses the returned resource or representation.
+- Exclude analytics and campaign parameters when they do not alter the response.
+- Forward a value to the origin without caching on it only when the origin needs the
+  value but the response remains reusable.
+- Prefer signed URLs or signed cookies for private-content authorization rather than
+  inventing an unaudited token scheme.
+- Never cache an authenticated response merely because its path appears public.
+
+The official [cache-key guide](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-the-cache-key.html)
+explains the default key and how cache policies add request values.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Select the edge-compute boundary deliberately
+
+{% concept-grid columns="3" %}
+{% concept-card title="CloudFront Functions" eyebrow="Viewer events" icon="zap" tone="blue" %}
+Use lightweight JavaScript for redirects, URL rewrites, header changes, validation, and
+cache-key normalization at viewer request or viewer response time.
+{% /concept-card %}
+{% concept-card title="Lambda@Edge" eyebrow="Four event phases" icon="code" tone="violet" %}
+Use it when the logic needs an origin event, more execution resources, supported
+libraries, or capabilities outside the CloudFront Functions runtime.
+{% /concept-card %}
+{% concept-card title="Origin service" eyebrow="Business authority" icon="server" tone="amber" %}
+Keep database access, durable state changes, complex authorization, and business rules
+in a service with explicit ownership and observability.
+{% /concept-card %}
+{% /concept-grid %}
+
+This viewer-request function removes known tracking parameters while preserving values
+that may change the response. Treat the allowlist as an application contract and test
+it with representative URLs.
+
+{% code-block file="/api/content/technology/cloudfront/code/cache-key-normalizer.js" language="javascript" title="CloudFront Function: normalize a cacheable URL" /%}
+
+AWS documents the current runtime and event differences in its
+[edge-function comparison](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-functions-choosing.html).
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate freshness and failure as product behavior
+
+### Freshness controls
+
+- Use origin `Cache-Control` directives and a cache policy whose minimum, default, and
+  maximum TTLs preserve the product's freshness promise.
+- Version immutable assets so normal deployments do not depend on wildcard
+  invalidations.
+- Decide how errors are cached; a long error TTL can preserve an outage after the
+  origin recovers.
+- Separate content classes into behaviors instead of forcing one TTL and key policy on
+  every route.
+
+### Failure controls
+
+- Load-test the origin with the miss rate expected during a cache regression.
+- Use bounded timeouts and failover criteria that do not retry unsafe writes.
+- Protect private S3 origins with Origin Access Control rather than a public bucket.
+- Alarm on origin request rate, origin latency, error rate, cache hit rate, and
+  unexpected cache-key dimensions.
+- Keep logs sufficient to distinguish hit, miss, error, function failure, and origin
+  response behavior.
+
+Origin Shield adds another cache layer and can consolidate simultaneous misses for the
+same object. AWS's [Origin Shield documentation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-shield.html)
+describes where it sits and how it reduces origin load.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/cloudfront/quiz/cloudfront-production.json" lessonSlug="cloudfront" title="CloudFront Production Review" /%}

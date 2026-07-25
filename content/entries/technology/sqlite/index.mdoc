@@ -1,0 +1,164 @@
+---
+registryId: sqlite
+---
+
+{% section-card tone="intro" %}
+## What is SQLite?
+
+SQLite is an embedded relational database engine. The application links the SQLite
+library and reads or writes a database file directly instead of sending SQL over a
+network to a separate database server. Tables, indexes, views, triggers, and schema
+metadata live in a portable file format, with journal or write-ahead-log files used as
+needed for transaction safety.
+
+SQLite is a strong fit when one application or device owns local relational state:
+mobile and desktop applications, embedded devices, local caches, application file
+formats, test fixtures, and service-side stores whose write access is deliberately
+serialized. It is a poor fit when many machines need to write one database file
+directly or when database administration must be centralized across independent
+clients.
+
+{% callout variant="info" %}
+### Core invariant
+
+The database file has one serialized writer at a time. WAL mode
+allows readers to overlap a writer, but it does not turn one file into a multi-writer
+distributed database.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Embedded engine" eyebrow="No server hop" icon="database" tone="blue" %}
+SQL executes inside the application process. Deployment and failure ownership stay
+with that application rather than a separate database service.
+{% /concept-card %}
+{% concept-card title="Database file" eyebrow="Portable state" icon="file" tone="violet" %}
+The main file contains database pages in a stable format. Journal, WAL, and shared
+memory companions are part of safe operation, not disposable noise.
+{% /concept-card %}
+{% concept-card title="Pager" eyebrow="Transactions" icon="layers" tone="cyan" %}
+Coordinates page caching, locking, atomic commit, rollback, and durability through the
+operating-system storage interface.
+{% /concept-card %}
+{% concept-card title="Application owner" eyebrow="Concurrency boundary" icon="shield" tone="amber" %}
+The application controls connection count, transaction length, busy handling,
+checkpoints, backup, schema migration, and access to the file.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Budget the single-writer path
+
+The key capacity question is not a universal reads-per-second benchmark. It is how much
+serialized writer time the workload requires. If 100 transactions arrive each second
+and each holds the writer for 8 ms, the model already demands 800 ms of writer time per
+second before bursts, checkpoints, or storage variance.
+
+{% interactive-block id="technology/sqlite-performance" /%}
+
+Reduce writer pressure by grouping related statements into one short transaction,
+preparing work before `BEGIN`, indexing the predicates used by updates, avoiding
+network calls while a transaction is open, and funneling writes through a bounded
+owner. A longer busy timeout can absorb short contention; it cannot create capacity.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose rollback journal or WAL from failure behavior
+
+Rollback mode preserves original pages in a journal before the main database changes.
+WAL mode appends changed pages to a log and later checkpoints them into the database.
+Select scenarios to trace which files and locks participate.
+
+{% topology-lab dataFile="/api/content/technology/sqlite/data/journal-mode-scenarios.json" /%}
+
+WAL usually improves reader/writer overlap because readers use a stable snapshot while
+one writer appends. Important constraints remain:
+
+- only one writer appends at a time;
+- a long-running reader can prevent a checkpoint from completing;
+- the WAL and shared-memory state must be managed with the database;
+- all processes must be on the same host, so WAL is not a design for multiple machines
+  writing a database on a network filesystem;
+- durability and latency depend on synchronous settings and the storage system's
+  behavior.
+
+The official [WAL documentation](https://sqlite.org/wal.html) describes concurrency,
+checkpointing, and operational limitations.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Put SQLite behind the right ownership boundary
+
+{% concept-grid columns="3" %}
+{% concept-card title="Local application state" eyebrow="Excellent fit" icon="smartphone" tone="green" %}
+One installed application owns the file and needs transactions, offline access,
+searchable data, and schema evolution without a database server.
+{% /concept-card %}
+{% concept-card title="Application-specific service" eyebrow="Deliberate fit" icon="server" tone="blue" %}
+One service process accepts network requests, owns one or more local database files,
+and serializes writes. Clients never mount or open the files directly.
+{% /concept-card %}
+{% concept-card title="Shared enterprise repository" eyebrow="Use client/server" icon="network" tone="rose" %}
+Independent users or machines need concurrent writes, centralized access control,
+replication, remote administration, or horizontal database scaling.
+{% /concept-card %}
+{% /concept-grid %}
+
+SQLite's own [appropriate-use guide](https://www.sqlite.org/whentouse.html) frames this
+as a difference in problem ownership: SQLite provides local storage for an application
+or device, while client/server engines emphasize a shared, centralized repository.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Open, migrate, transact, and back up explicitly
+
+{% process-flow %}
+{% process-step number="1" title="Open with policy" label="Connection" %}
+Set a bounded busy timeout, enable foreign-key enforcement for each connection, and
+choose journal and synchronous modes deliberately rather than assuming defaults.
+{% /process-step %}
+{% process-step number="2" title="Migrate atomically" label="Schema" %}
+Read `PRAGMA user_version`, apply ordered migrations inside transactions where the
+operations permit it, and test upgrade and rollback behavior on real database copies.
+{% /process-step %}
+{% process-step number="3" title="Keep writes short" label="Transaction" %}
+Prepare input before acquiring write intent, use parameterized SQL, commit related
+changes together, and release the writer before calling another service.
+{% /process-step %}
+{% process-step number="4" title="Verify recovery" label="Operations" %}
+Use SQLite's backup API or a documented consistent-copy procedure, restore into a new
+location, run integrity checks, and exercise the application against the result.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/sqlite/code/local-task-store.py" language="python" title="A bounded local SQLite write path" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Test the states that corrupt assumptions
+
+### Correctness and recovery
+
+- terminate the process during a write and verify committed versus rolled-back state;
+- restore a backup and run `PRAGMA integrity_check` before declaring success;
+- enable and test foreign keys on every connection;
+- exercise schema migration from every supported application version;
+- test disk-full, read-only, permission, and unavailable-directory errors.
+
+### Contention and operations
+
+- measure writer lock duration and `SQLITE_BUSY` outcomes under representative bursts;
+- detect long readers and WAL growth;
+- choose an explicit checkpoint policy for sustained WAL workloads;
+- keep the database, `-wal`, and `-shm` files under the same ownership and lifecycle;
+- avoid copying a live database with a generic file copy unless the documented mode
+  makes that copy consistent;
+- do not place a write-active database on a filesystem whose locking semantics SQLite
+  cannot rely on.
+
+Use prepared statements for values, indexes for measured query paths, and transactions
+for related changes. Run `ANALYZE` or `PRAGMA optimize` according to the deployed SQLite
+version and workload evidence rather than scheduling indiscriminate maintenance.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/sqlite/quiz/sqlite-production.json" lessonSlug="sqlite" title="SQLite Production Review" /%}

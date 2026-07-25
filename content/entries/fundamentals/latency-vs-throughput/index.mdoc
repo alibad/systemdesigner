@@ -1,0 +1,140 @@
+---
+registryId: latency-vs-throughput
+---
+
+{% section-card tone="intro" %}
+## What is latency vs throughput?
+
+**Latency** is how long one operation takes from start to finish. A person feels it as the time between tapping "Search" and seeing results. **Throughput** is how many completed operations a system produces in a period, usually requests per second (RPS). It tells you how much work the system can sustain.
+
+They answer different questions. A service can complete thousands of slow requests at once, so it has high throughput and poor latency. A single fast worker can give one request low latency but still complete only a small number of requests per second. The design goal is to meet the user-facing latency target while keeping enough spare capacity that queues do not grow.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Latency" eyebrow="Time for one request" icon="timer" tone="blue" %}
+Measure the whole user path, including waiting, network hops, application work, and dependencies. Percentiles reveal slow requests that an average hides.
+{% /concept-card %}
+{% concept-card title="Throughput" eyebrow="Completed work per second" icon="gauge" tone="green" %}
+Count successful completions over time. Arrival rate is incoming work; sustainable throughput is the rate the system can keep completing without an ever-growing queue.
+{% /concept-card %}
+{% concept-card title="Concurrency" eyebrow="Work in flight" icon="layers" tone="violet" %}
+Run independent work at the same time to raise throughput. It helps only until a shared CPU, database pool, network link, or downstream service becomes the constraint.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="One request has both work and waiting" caption="Latency adds along the critical path. Throughput is set by the slowest bounded stage, not by the sum of every server's capacity." %}
+{% system-node title="Admission" eyebrow="Protect" icon="shield-check" tone="amber" %}
+Rate limits and bounded queues decide how much new work may enter without harming work already in progress.
+{% /system-node %}
+{% system-node title="Application" eyebrow="Compute" icon="server" tone="blue" %}
+Handlers use CPU, memory, and a limited number of workers or connections.
+{% /system-node %}
+{% system-node title="Dependency" eyebrow="Wait" icon="network" tone="violet" %}
+Remote calls add service time and failure risk. Their connection pools commonly become the shared constraint.
+{% /system-node %}
+{% system-node title="Storage" eyebrow="Complete" icon="database" tone="green" %}
+Queries, locks, cache misses, and I/O determine whether the request can finish within its deadline.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## The invariant: stable queues need spare capacity
+
+For a stable service, the arrival rate must remain below the capacity of its limiting stage: `arrival rate < sustainable capacity`. As utilization approaches 100%, even small bursts wait behind work already in progress. Once arrivals exceed completions, a queue grows until requests time out, are rejected, or users leave.
+
+Little's Law gives a useful first estimate: `concurrency = throughput x time in system`. At 200 RPS and 0.25 seconds of end-to-end latency, expect about 50 requests in flight on average. It does not say that 50 workers are sufficient; it gives a quantity to measure and investigate.
+
+Use an end-to-end deadline, then allocate a budget to each stage. A 300 ms API target might reserve 40 ms for network, 70 ms for application work, 120 ms for a database call, and 70 ms for queueing, retries, and margin. The budget is a contract: a faster app cannot compensate for a dependency that already uses the whole deadline.
+{% /section-card %}
+
+{% section-card %}
+## Lab 1: protect a latency budget from queue pressure
+
+This model has a 55 ms fixed path plus one bounded service gate. Change the incoming load, the gate's effective capacity, and the user-facing target. The queue estimate becomes steep near saturation because a request must wait for prior requests to leave the same gate.
+
+{% interactive-block id="fundamentals/latency-vs-throughput-queue-budget-lab" /%}
+
+The estimate assumes a steady workload and an exponential service-time distribution. Production systems need measured service-time distributions, burst tests, and separate limits for each dependency. The invariant still holds: operating close to the limit makes tail latency fragile.
+{% /section-card %}
+
+{% section-card %}
+## Read the right latency signal
+
+An average can look healthy while a small but important group of users waits far too long. Record a distribution for the same user path and workload shape:
+
+- **P50:** the middle request. It describes the typical experience.
+- **P95:** a warning that contention, cache misses, or a slow dependency is affecting a meaningful minority.
+- **P99:** the tail where retries, queueing, and shared-resource exhaustion become visible.
+- **Timeout and rejection rate:** the work the latency graph may omit because it never completed successfully.
+
+Pair those measurements with arrival rate, completed RPS, queue depth, connection-pool wait time, and utilization. A rise in queue depth with flat completed RPS is evidence that the service is accepting more work than its constraint can release.
+{% /section-card %}
+
+{% section-card %}
+## Failure behavior: do not turn waiting into an outage
+
+When a downstream dependency slows, unbounded waiting consumes the resources needed for healthy work. Design a controlled failure path:
+
+- Set a **deadline** shorter than the caller's deadline, so there is time to return a useful fallback or error.
+- Bound each **queue and connection pool**. Reject or shed low-priority work before memory, threads, and sockets are all consumed.
+- Use **retries sparingly**.
+  - Retry only failures that are transient and safe to repeat.
+  - Add jitter and a cap; retrying a saturated dependency multiplies its load.
+- Isolate optional work such as analytics, email, or recommendations from the checkout, payment, or write path that must remain responsive.
+
+{% callout variant="warn" %}
+**A longer timeout is not extra capacity.** Increasing a timeout can make a dashboard show fewer immediate errors while requests wait longer and hold more resources. First identify whether the dependency can actually complete more work per second.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Lab 2: choose batching and concurrency for the workload
+
+Batching amortizes a fixed cost such as a network round trip or disk flush across more items. It can raise throughput, but the first item waits while the batch fills and every item waits for the batch to run. Change the workload deadline, batch size, worker count, and arrival rate to see when a throughput improvement violates the latency contract.
+
+{% interactive-block id="fundamentals/latency-vs-throughput-batch-capacity-lab" /%}
+
+For an interactive request, a small batch or no batch may be correct even when it costs more per item. For a background job with a minutes-long deadline, a larger batch can be an efficient choice. Pick the workload's deadline first; do not label a higher RPS number as an automatic win.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Add concurrency" eyebrow="Parallel independent work" icon="git-branch" tone="blue" %}
+Use more workers or instances when work is independent and the dependency has spare capacity. Stop when contention, lock time, or downstream saturation rises faster than completions.
+{% /concept-card %}
+{% concept-card title="Batch deliberately" eyebrow="Amortize fixed work" icon="package" tone="violet" %}
+Combine compatible work when callers can wait. Put a maximum age on a batch so low traffic does not create an unlimited wait for the first item.
+{% /concept-card %}
+{% concept-card title="Move work off-path" eyebrow="Protect user deadline" icon="arrow-right-left" tone="green" %}
+Return after the durable user-visible action, then process email, indexing, analytics, or fan-out asynchronously with an observable queue and retry policy.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card %}
+## Make the trade-off explicit in architecture
+
+Start from the user action and make one path responsible for meeting its deadline. Keep the synchronous path short: validate input, read or write the minimum durable state, and return. Put non-critical fan-out behind a durable queue with an owner, maximum queue age, and dead-letter or replay plan.
+
+Common choices have different costs:
+
+- A **cache** can remove a dependency hop and improve both latency and throughput, but must define freshness and invalidation behavior.
+- A **read replica** can add read capacity, but replication lag may violate a read-after-write expectation.
+- **Horizontal scaling** raises application capacity, but cannot outscale a shared database, lock, partition, or third-party API.
+- **Load shedding** lowers accepted throughput during stress, but preserves a bounded latency and higher completion rate for the work that remains.
+
+The next lesson, [Bottleneck Analysis](/fundamentals/bottleneck-analysis), shows how to prove which resource is constraining the result before changing architecture.
+{% /section-card %}
+
+{% section-card %}
+## Operate to the boundary, not the average
+
+Use a load test that matches the production request mix, payload size, cache state, and burst pattern. Record a baseline before a change, then compare the same workload after it.
+
+- Alert on sustained high utilization, queue age or depth, P95/P99 latency, rejected work, and dependency-pool wait time.
+- Define a capacity trigger before the SLO is breached, such as adding capacity at 70-80% sustained utilization rather than waiting for 100%.
+- Review a deployment or incident with the actual arrival rate, completions, latency distribution, errors, and saturation signal together.
+- Test degraded modes: a slow database, a full queue, a depleted connection pool, and a failed worker should produce bounded, understandable behavior.
+
+Capacity is not a single server number. It is a tested promise about workload shape, latency target, error behavior, and the weakest shared resource.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/latency-vs-throughput/quiz/latency-vs-throughput.json" lessonSlug="latency-vs-throughput" title="Latency and Throughput Review" /%}

@@ -1,0 +1,146 @@
+{
+  "title": "Trace what changes when spatial confidence fails",
+  "description": "Select a runtime condition. Active routes show which measurements, transforms, maps, and remote systems can still support the user-visible result.",
+  "nodes": [
+    {
+      "id": "sensors",
+      "label": "Sensor suite",
+      "eyebrow": "Camera · IMU · depth",
+      "detail": "Produces timestamped observations with calibration identity, exposure, and uncertainty.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 7,
+      "y": 34
+    },
+    {
+      "id": "tracking",
+      "label": "Pose and mapping",
+      "eyebrow": "Local real-time authority",
+      "detail": "Fuses observations into a time-indexed device pose and local map. It must expose tracking quality and relocalization state.",
+      "kind": "edge",
+      "tone": "violet",
+      "x": 27,
+      "y": 34
+    },
+    {
+      "id": "scene",
+      "label": "Spatial scene state",
+      "eyebrow": "Frames · anchors · entities",
+      "detail": "Owns typed coordinate frames, entity versions, permissions, and the transform graph used by application logic.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 48,
+      "y": 34
+    },
+    {
+      "id": "renderer",
+      "label": "Renderer",
+      "eyebrow": "Predicted display pose",
+      "detail": "Builds the visible frame from a pose predicted for presentation time and degrades scene work to preserve the deadline.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 69,
+      "y": 34
+    },
+    {
+      "id": "display",
+      "label": "Display and input",
+      "eyebrow": "User-visible consequence",
+      "detail": "Presents world-locked or body-locked content and returns gaze, hand, controller, or voice intent.",
+      "kind": "client",
+      "tone": "green",
+      "x": 90,
+      "y": 34
+    },
+    {
+      "id": "anchor-store",
+      "label": "Anchor store",
+      "eyebrow": "Durable identity, not truth",
+      "detail": "Persists anchor identifiers and application metadata. A restored anchor still needs current localization and confidence.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 28,
+      "y": 78
+    },
+    {
+      "id": "edge-model",
+      "label": "Semantic inference",
+      "eyebrow": "Asynchronous enrichment",
+      "detail": "Labels objects or interprets a scene against a versioned capture, pose, map, and model. Stale results must be rejected.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 55,
+      "y": 78
+    },
+    {
+      "id": "shared-session",
+      "label": "Shared session",
+      "eyebrow": "Peer and cloud state",
+      "detail": "Exchanges anchor correspondences, entity changes, ownership, and conflict metadata without becoming the live pose authority.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 82,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "sensor-track", "from": "sensors", "to": "tracking", "label": "timestamped observations" },
+    { "id": "track-scene", "from": "tracking", "to": "scene", "label": "pose + confidence" },
+    { "id": "scene-render", "from": "scene", "to": "renderer", "label": "resolved transforms" },
+    { "id": "render-display", "from": "renderer", "to": "display", "label": "predicted frame" },
+    { "id": "display-scene", "from": "display", "to": "scene", "label": "user intent", "via": { "x": 69, "y": 13 } },
+    { "id": "scene-anchor", "from": "scene", "to": "anchor-store", "label": "persist identity", "mode": "async" },
+    { "id": "anchor-scene", "from": "anchor-store", "to": "scene", "label": "restore candidate", "mode": "async" },
+    { "id": "scene-model", "from": "scene", "to": "edge-model", "label": "versioned capture", "mode": "async" },
+    { "id": "model-scene", "from": "edge-model", "to": "scene", "label": "versioned label", "mode": "async" },
+    { "id": "scene-shared", "from": "scene", "to": "shared-session", "label": "entity operation", "mode": "async" },
+    { "id": "shared-scene", "from": "shared-session", "to": "scene", "label": "merged operation", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "live-frame",
+      "label": "Healthy live frame",
+      "summary": "Timestamped observations become a tracked pose, the scene resolves transforms, and the renderer predicts the pose for presentation time.",
+      "activeEdges": ["sensor-track", "track-scene", "scene-render", "render-display", "display-scene"],
+      "focusNode": "renderer",
+      "result": "The visible frame remains local and deadline-bound. Remote systems are not required to preserve head tracking or basic interaction."
+    },
+    {
+      "id": "semantic-offload",
+      "label": "Remote semantics",
+      "summary": "The live frame continues locally while a versioned scene capture is classified asynchronously. The response is accepted only if its map, pose, entity, and model versions still apply.",
+      "activeEdges": ["sensor-track", "track-scene", "scene-render", "render-display", "scene-model", "model-scene"],
+      "degradedNodes": ["edge-model"],
+      "focusNode": "edge-model",
+      "result": "Late labels may update a future frame; they never stall the current pose-to-display path."
+    },
+    {
+      "id": "tracking-loss",
+      "label": "Tracking lost",
+      "summary": "The runtime cannot currently locate the device in the world frame. A precise-looking world transform would be fabricated.",
+      "activeEdges": ["render-display"],
+      "failedNodes": ["tracking"],
+      "degradedNodes": ["scene", "renderer"],
+      "focusNode": "scene",
+      "result": "Pause placement and high-impact world-locked actions, preserve intent, and show body-locked recovery guidance until localization returns."
+    },
+    {
+      "id": "anchor-relocalization",
+      "label": "Restore an anchor",
+      "summary": "The application loads a durable anchor identity, but the current sensor map cannot yet establish a confident transform to it.",
+      "activeEdges": ["sensor-track", "anchor-scene", "track-scene"],
+      "degradedNodes": ["anchor-store", "tracking", "scene"],
+      "focusNode": "anchor-store",
+      "result": "Treat the restored anchor as unresolved. Keep content hidden or approximate until relocalization succeeds and expose replacement when the environment changed."
+    },
+    {
+      "id": "shared-conflict",
+      "label": "Shared edit conflict",
+      "summary": "Two participants move the same entity against different anchor correspondences. Transport delivery cannot decide physical authority.",
+      "activeEdges": ["scene-shared", "shared-scene", "scene-render", "render-display"],
+      "degradedNodes": ["scene", "shared-session"],
+      "focusNode": "shared-session",
+      "result": "Resolve ownership and operation order explicitly, preserve both versions for diagnosis, and rebase the winning entity into each participant's local frame."
+    }
+  ]
+}

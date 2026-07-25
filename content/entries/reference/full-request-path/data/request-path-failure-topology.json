@@ -1,0 +1,151 @@
+{
+  "title": "Trace a dynamic request through normal and degraded paths",
+  "description": "Select a scenario to see which work is required before the response, which failures are contained, and what the user experiences.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Browser or API client",
+      "eyebrow": "Caller deadline",
+      "detail": "Starts one request with a client-visible deadline and renders the returned result or explicit error.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 48
+    },
+    {
+      "id": "edge",
+      "label": "CDN edge",
+      "eyebrow": "Cache and policy",
+      "detail": "Terminates transport, applies coarse protection, serves safe cache hits, and routes misses to origin.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 25,
+      "y": 48
+    },
+    {
+      "id": "gateway",
+      "label": "API gateway",
+      "eyebrow": "Boundary",
+      "detail": "Enforces route policy, propagates the remaining deadline, and chooses the owning application service.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 43,
+      "y": 48
+    },
+    {
+      "id": "identity",
+      "label": "Identity provider",
+      "eyebrow": "Protected routes",
+      "detail": "Supplies remote identity or authorization evidence when local token verification is not sufficient.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 43,
+      "y": 78
+    },
+    {
+      "id": "application",
+      "label": "Order service",
+      "eyebrow": "Business read",
+      "detail": "Builds the response, owns bounded dependency calls, and returns a safe fallback or clear failure before its deadline expires.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 60,
+      "y": 48
+    },
+    {
+      "id": "cache",
+      "label": "Read cache",
+      "eyebrow": "Hot state",
+      "detail": "Serves reusable order-summary data quickly. A miss has bounded fallback to the authoritative database.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 77,
+      "y": 26
+    },
+    {
+      "id": "database",
+      "label": "Orders database",
+      "eyebrow": "Authoritative",
+      "detail": "Owns durable order state and must be protected from stampedes, long waits, and unbounded retries.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 92,
+      "y": 26
+    },
+    {
+      "id": "events",
+      "label": "Event stream",
+      "eyebrow": "Best effort",
+      "detail": "Accepts analytics and audit events outside the response path, with an explicit buffer-or-drop policy under pressure.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 76,
+      "y": 78
+    },
+    {
+      "id": "analytics",
+      "label": "Analytics worker",
+      "eyebrow": "Asynchronous",
+      "detail": "Consumes event data for reporting and must not delay the customer response when it is unavailable.",
+      "kind": "analytics",
+      "tone": "neutral",
+      "x": 92,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "client-edge", "from": "client", "to": "edge", "label": "HTTPS request" },
+    { "id": "edge-gateway", "from": "edge", "to": "gateway", "label": "cache miss" },
+    { "id": "gateway-identity", "from": "gateway", "to": "identity", "label": "authorize" },
+    { "id": "gateway-application", "from": "gateway", "to": "application", "label": "route" },
+    { "id": "application-cache", "from": "application", "to": "cache", "label": "read" },
+    { "id": "cache-database", "from": "cache", "to": "database", "label": "bounded miss" },
+    { "id": "application-events", "from": "application", "to": "events", "label": "emit event", "mode": "async" },
+    { "id": "events-analytics", "from": "events", "to": "analytics", "label": "consume", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "edge-hit",
+      "label": "Edge cache hit",
+      "summary": "A cacheable response ends at the edge. Origin, identity, and data capacity are not used for this request.",
+      "activeEdges": ["client-edge"],
+      "focusNode": "edge",
+      "result": "The user receives the cached response quickly. Cache freshness rules, invalidation, and authorization boundaries determine whether this shortcut is safe."
+    },
+    {
+      "id": "dynamic-cache-hit",
+      "label": "Dynamic cache hit",
+      "summary": "A protected request reaches origin, verifies authorization, and reads a hot summary from the cache. Telemetry leaves asynchronously.",
+      "activeEdges": ["client-edge", "edge-gateway", "gateway-identity", "gateway-application", "application-cache", "application-events", "events-analytics"],
+      "focusNode": "cache",
+      "result": "The response is dynamic but avoids database I/O. A slow analytics worker does not add to the critical path."
+    },
+    {
+      "id": "database-slow",
+      "label": "Database tail spike",
+      "summary": "The cache misses and the database becomes slow. The application and database are degraded while the deadline limits how long the caller waits.",
+      "activeEdges": ["client-edge", "edge-gateway", "gateway-identity", "gateway-application", "application-cache", "cache-database", "application-events"],
+      "degradedNodes": ["application", "database"],
+      "focusNode": "database",
+      "result": "Return a contractually safe cached or partial result when possible, otherwise fail before the caller deadline. Do not let retries multiply database load."
+    },
+    {
+      "id": "identity-outage",
+      "label": "Identity outage",
+      "summary": "Remote authorization evidence is unavailable, so the gateway never sends this protected request to the order service or database.",
+      "activeEdges": ["client-edge", "edge-gateway", "gateway-identity"],
+      "failedNodes": ["identity"],
+      "focusNode": "identity",
+      "result": "The request fails fast with a clear protected-route error. Keeping the downstream path inactive preserves order-service and database capacity."
+    },
+    {
+      "id": "analytics-outage",
+      "label": "Analytics outage",
+      "summary": "The customer response remains on the dynamic cache-hit path while the non-critical analytics worker is unavailable.",
+      "activeEdges": ["client-edge", "edge-gateway", "gateway-identity", "gateway-application", "application-cache", "application-events", "events-analytics"],
+      "failedNodes": ["analytics"],
+      "focusNode": "analytics",
+      "result": "The product response remains available. The event stream follows its explicit buffer, retry, or drop policy instead of turning a reporting outage into customer latency."
+    }
+  ]
+}

@@ -1,0 +1,349 @@
+---
+registryId: elasticsearch
+---
+
+{% section-card tone="intro" %}
+## What is Elasticsearch?
+
+**Elasticsearch is a distributed search and analytics engine that turns JSON documents
+into structures optimized for finding text, filtering records, and aggregating values.**
+It is built on Apache Lucene and exposes its indexing and search operations through
+network APIs.
+
+An application sends documents to an **index**, Elasticsearch routes each document to
+one **primary shard**, and Lucene builds searchable structures inside that shard.
+Queries fan out to the relevant shard copies and a coordinating node merges their
+partial results.
+
+{% callout variant="info" %}
+The core invariant is that every accepted document belongs to one primary shard, and
+search can only return the version represented by a refreshed searchable segment.
+Replicas improve availability and read capacity; they do not replace an independent
+backup or source of truth.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Index documents" eyebrow="Write model" icon="database" tone="blue" %}
+Map each field deliberately, analyze searchable text into terms, and route one document
+to one primary shard.
+{% /concept-card %}
+{% concept-card title="Retrieve evidence" eyebrow="Read model" icon="search" tone="cyan" %}
+Run full-text queries, exact filters, ranges, and aggregations against the field
+structures created at index time.
+{% /concept-card %}
+{% concept-card title="Operate copies" eyebrow="Distributed model" icon="network" tone="violet" %}
+Place primary and replica shard copies across nodes, monitor recovery, and retain enough
+capacity for growth and failure.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build the mental model from document to shard
+
+Elasticsearch names several layers that are easy to confuse:
+
+- **Document:** one JSON record with a stable `_id` and fields such as `title`, `price`,
+  or `created_at`.
+- **Index:** a logical collection with one mapping and a configured number of primary
+  shards.
+- **Primary shard:** the authoritative Lucene index for one partition of the documents.
+- **Replica shard:** another copy of one primary shard that can serve reads and be
+  promoted after a primary failure.
+- **Segment:** an immutable Lucene search structure created as indexed changes become
+  searchable; later merges combine smaller segments.
+- **Node:** one Elasticsearch process that may coordinate requests, hold shard copies,
+  or perform other cluster roles.
+
+{% metric-strip %}
+{% metric label="Document ownership" value="1 primary" detail="Routing chooses exactly one primary shard for each document" tone="blue" /%}
+{% metric label="Physical copies" value="1 + replicas" detail="Copies must be allocated on different nodes" tone="violet" /%}
+{% metric label="Search shape" value="Scatter + gather" detail="Shard results are merged by a coordinating node" tone="cyan" /%}
+{% metric label="Visibility" value="After refresh" detail="Durable acceptance and search visibility are different moments" tone="amber" /%}
+{% /metric-strip %}
+
+The primary-shard count is part of an index generation's physical design. You can add
+replicas later, but changing partitioning usually means creating another index through
+split, shrink, rollover, or reindex workflows.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Trace indexing and search as different paths
+
+### Indexing path
+
+{% process-flow %}
+{% process-step number="1" title="Route the document" label="Coordinator" %}
+Resolve the write alias, validate the request, and hash the routing value to one primary
+shard.
+{% /process-step %}
+{% process-step number="2" title="Apply on the primary" label="Write authority" %}
+Update Lucene and the shard's recovery history, then forward the operation to assigned
+replica copies.
+{% /process-step %}
+{% process-step number="3" title="Acknowledge the write" label="Durability contract" %}
+Return according to the request's active-copy and timeout contract. A timeout does not
+by itself prove whether the write committed.
+{% /process-step %}
+{% process-step number="4" title="Refresh for search" label="Near real time" %}
+Publish a searchable segment so later searches can see the indexed version. Refresh is
+not the same operation as a durable flush or snapshot.
+{% /process-step %}
+{% /process-flow %}
+
+### Search path
+
+{% system-flow title="Distributed query path" caption="Every participating shard performs local retrieval; the coordinator owns the final result contract." %}
+{% system-node title="Client query" eyebrow="Intent" icon="search" tone="blue" %}
+Send full-text clauses, exact filters, sorting, aggregations, a result limit, and a
+deadline.
+{% /system-node %}
+{% system-node title="Coordinating node" eyebrow="Scatter" icon="route" tone="violet" %}
+Choose one eligible copy of each target shard and send the shard-level request in
+parallel.
+{% /system-node %}
+{% system-node title="Lucene shard copies" eyebrow="Local work" icon="layers" tone="cyan" %}
+Match terms and filters, compute local scores or buckets, and return a bounded candidate
+set.
+{% /system-node %}
+{% system-node title="Merged response" eyebrow="Gather" icon="check" tone="green" %}
+Combine global top results or aggregation states, hydrate requested fields, and expose
+timeout or partial-result behavior.
+{% /system-node %}
+{% /system-flow %}
+
+Fan-out means one user query can create work on many shards. Measure shard requests,
+candidate counts, and tail latency, not only top-level request rate.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Map each field for the questions it must answer
+
+A mapping defines field types and the structures Elasticsearch builds. Field type is a
+query contract, not cosmetic schema documentation.
+
+{% concept-grid columns="4" %}
+{% concept-card title="text" eyebrow="Relevance" icon="search" tone="cyan" %}
+Analyze human language into terms for `match` and phrase queries. A plain `text` field is
+not the default choice for sorting or ordinary terms aggregations.
+{% /concept-card %}
+{% concept-card title="keyword" eyebrow="Exact value" icon="key" tone="blue" %}
+Keep a structured value as one term for filters, grouping, and sorting. Normalizers can
+standardize exact values without tokenizing them into words.
+{% /concept-card %}
+{% concept-card title="Multi-field" eyebrow="Two access paths" icon="layers" tone="violet" %}
+Index one source string as `text` for relevance and as a `keyword` subfield for exact
+facets or ordering.
+{% /concept-card %}
+{% concept-card title="Numeric and date" eyebrow="Typed range" icon="gauge" tone="amber" %}
+Use typed values for range queries, date math, sorting, and numeric aggregations instead
+of encoding them as strings.
+{% /concept-card %}
+{% /concept-grid %}
+
+Dynamic mapping is convenient for exploration, but uncontrolled field names can expand
+cluster state and produce accidental types. Production indexes should use explicit
+mappings, bounded templates, or a deliberate `flattened` representation for arbitrary
+key sets.
+
+{% interactive-block id="technology/elasticsearch-mapping-query-lab" dataFile="/api/content/technology/elasticsearch/data/mapping-query-model.json" /%}
+
+When an existing field has the wrong type or analyzer, plan a new index generation and
+reindex. Treat a mapping choice as hard to reverse even when a narrow parameter happens
+to be updatable.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Size shards from recovery and workload constraints
+
+Shard planning balances two opposing risks:
+
+- **Too many small shards:** more cluster metadata, per-shard memory, segment overhead,
+  and fan-out work.
+- **Too few large shards:** less parallelism, larger failure units, and longer relocation
+  or recovery.
+- **Too few nodes for copies:** replicas remain unassigned because a primary and its
+  replica cannot occupy the same node.
+- **Too little disk headroom:** allocation watermarks and recovery copies can prevent
+  the cluster from restoring redundancy.
+
+Current Elastic guidance gives roughly 10-50 GB and fewer than 200 million documents as
+useful starting points for many workloads, not universal guarantees. Benchmark real
+documents, mappings, queries, storage, merge pressure, and recovery on production-like
+hardware.
+
+{% interactive-block id="technology/elasticsearch-shard-capacity-lab" dataFile="/api/content/technology/elasticsearch/data/shard-capacity-model.json" /%}
+
+### Capacity equations
+
+- `future primary bytes = current primary bytes + daily growth * planning days`
+- `average primary shard bytes = future primary bytes / primary shard count`
+- `stored bytes = future primary bytes * (1 + replicas) * measured index overhead`
+- `average bytes per data node = stored bytes / data nodes`
+
+These averages reveal impossible plans, but they do not expose hot routing keys,
+uneven time-series rollover, merge bursts, or concurrent recovery. Keep measured
+headroom beyond the arithmetic minimum.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Treat Elasticsearch as a derived read model
+
+For application search, the transactional database or event log usually remains the
+system of record. Elasticsearch is a replaceable projection designed around retrieval.
+
+{% system-flow title="Replayable search indexing" caption="A durable change stream lets operators rebuild search without scraping an inconsistent live database." %}
+{% system-node title="System of record" eyebrow="Commit" icon="database" tone="blue" %}
+Persist the authoritative entity and a durable outbox event in one consistency boundary.
+{% /system-node %}
+{% system-node title="Change stream" eyebrow="Order" icon="workflow" tone="violet" %}
+Retain stable entity IDs, source versions, deletes, and enough history to replay a new
+index generation.
+{% /system-node %}
+{% system-node title="Index writer" eyebrow="Project" icon="repeat" tone="amber" %}
+Transform the event, reject stale versions, and index by stable ID so a replay replaces
+the same logical document.
+{% /system-node %}
+{% system-node title="Read alias" eyebrow="Serve" icon="route" tone="green" %}
+Point search traffic at one validated generation and move the alias atomically after
+backfill and catch-up complete.
+{% /system-node %}
+{% /system-flow %}
+
+### Reindex without mixing contracts
+
+1. Create `products-v2` with the new mapping, analyzer, shard plan, and lifecycle policy.
+2. Record a source checkpoint and backfill every document through the same transformer
+   used for live events.
+3. Catch up mutations after that checkpoint and compare counts, sampled documents,
+   search relevance, latency, and error rate.
+4. Move the read and write aliases only after the new generation satisfies explicit
+   release gates.
+5. Keep rollback and independent snapshots until the old generation's retention window
+   expires.
+
+{% code-block file="/api/content/technology/elasticsearch/code/reindex-alias-cutover.py" language="python" title="Gate an alias cutover on checkpoint and validation evidence" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design for node loss and degraded clusters
+
+Cluster health summarizes shard assignment:
+
+- **Green:** every primary and replica shard copy is assigned.
+- **Yellow:** all primary shards are assigned, but at least one replica is unassigned;
+  current data is searchable, but redundancy is reduced.
+- **Red:** at least one primary shard is unassigned, so some index data is unavailable.
+
+### Failure rules
+
+- A replica can be promoted after primary failure only if an in-sync copy exists and is
+  allocated on another node.
+- Adding replicas cannot protect a cluster that has too few eligible nodes or zones to
+  place those copies.
+- Recovery and relocation consume disk, network, CPU, and I/O alongside live queries and
+  indexing.
+- A replica repeats accidental deletes and corrupt application writes; restore requires
+  independent snapshots or replayable source data.
+- Cross-zone placement improves fault isolation, but surviving nodes still need capacity
+  for the redistributed workload.
+
+{% callout variant="warn" %}
+Never respond to a red cluster by deleting data or forcing stale shard copies without
+first identifying which primary is missing, what good copies or snapshots exist, and
+what data loss the action would accept.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Write queries that bound work
+
+Use full-text queries for relevance and filter context for exact eligibility. Keep
+tenant and authorization constraints in non-scoring filters so they cannot be bypassed
+by ranking behavior.
+
+{% code-block file="/api/content/technology/elasticsearch/code/products-index-template.json" language="json" title="Explicit product mapping with text and keyword access paths" /%}
+
+{% code-block file="/api/content/technology/elasticsearch/code/product-search-request.json" language="json" title="Bounded search with relevance, filters, facets, and deterministic sort" /%}
+
+### Query guardrails
+
+- Cap result size and use stable continuation such as `search_after` for deep paging;
+  do not make large offsets the routine pagination path.
+- Limit expensive aggregations by time range, tenant, cardinality, and bucket count.
+- Return only fields the client needs instead of moving entire documents by default.
+- Set deadlines and decide whether timed-out or partial results are acceptable for each
+  product surface.
+- Separate search relevance experiments from authorization and availability rules.
+- Capture slow-query evidence with query shape, index generation, shard count, and
+  filter selectivity.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Secure and operate the cluster
+
+### Security boundary
+
+- Require authenticated encrypted connections for clients and node communication.
+- Grant least-privilege index, document, and field access through controlled service
+  identities; do not expose cluster administration to application callers.
+- Prevent untrusted users from supplying arbitrary query DSL, scripts, index names, or
+  unbounded aggregation shapes.
+- Separate tenants physically when noisy-neighbor risk, compliance, or deletion proof
+  cannot be handled safely by shared filters.
+- Audit administrative changes, access failures, snapshot operations, and alias moves.
+
+### Query-plane signals
+
+- End-to-end and per-shard latency, timeout rate, rejected searches, and concurrent
+  search pressure.
+- Search fan-out, cache behavior, result count, aggregation bucket count, and slow-query
+  traces.
+- Relevance quality on a stable judged query set, not only infrastructure latency.
+
+### Data-plane signals
+
+- Indexing rate, rejected writes, refresh and merge pressure, segment count, and version
+  conflicts.
+- Primary and replica assignment, relocation progress, recovery speed, and allocation
+  explanations.
+- Disk watermarks, heap and garbage collection, filesystem cache pressure, and node
+  saturation.
+- Snapshot success, restore duration, replay lag, lifecycle rollover, and alias state.
+
+{% interactive-checklist checklistId="elasticsearch-production-readiness" dataFile="/api/content/technology/elasticsearch/data/production-readiness.json" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose Elasticsearch for the retrieval problem it solves
+
+### Strong fit
+
+- Full-text relevance over large document collections.
+- Faceted search combining text, exact filters, ranges, and aggregations.
+- Operational exploration of logs or events with explicit lifecycle controls.
+- A derived search projection that can tolerate bounded indexing lag.
+
+### Reconsider or pair it with another store
+
+- Multi-row transactional invariants and normalized joins belong in a transactional
+  database.
+- Direct object storage remains better for durable large binary payloads.
+- A tiny exact lookup workload may not justify a distributed search cluster.
+- Strict read-after-write product paths need a source lookup, checkpoint wait, or bounded
+  overlay instead of pretending refresh lag cannot occur.
+- Long-term recovery needs snapshots or source replay, not replica copies alone.
+
+The design question is not "Can Elasticsearch store this JSON?" It is "Which retrieval
+contract deserves a distributed search index, and how will we rebuild it when the
+mapping, shard plan, or source data changes?"
+{% /section-card %}
+
+{% section-card %}
+## Test the production decisions
+
+The assessment checks mapping behavior, distributed request paths, shard arithmetic,
+failure states, and safe reindex operations.
+
+{% quiz questionsFile="/api/content/technology/elasticsearch/quiz/elasticsearch-production.json" lessonSlug="elasticsearch" title="Elasticsearch Production Quiz" /%}
+{% /section-card %}

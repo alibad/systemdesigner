@@ -1,0 +1,163 @@
+---
+registryId: hybrid-multi-cloud-orchestration
+---
+
+{% section-card tone="intro" %}
+## What is hybrid multi-cloud orchestration?
+
+**Hybrid multi-cloud orchestration is the process of declaring where a workload may run, placing it across cloud and on-premises environments, and continuously reconciling that placement with policy, capacity, health, and recovery state.** Hybrid means private or on-premises infrastructure participates with public cloud. Multi-cloud means more than one cloud provider participates.
+
+In plain language, the orchestrator answers "where should this run?" It does not make every provider identical. Each environment still has its own identity system, network, quotas, managed services, billing meters, and failure modes.
+
+{% callout variant="warn" %}
+### Core invariant
+
+Keep the product's authority and failure behavior explicit. Portability is a tested claim about a specific layer, not proof that state, identity, networking, and recovery can move together without adaptation.
+{% /callout %}
+
+Use multiple environments only when a named requirement justifies the operating cost: data location, provider exit, acquisition integration, edge latency, specialized capacity, or recovery from a failure that one provider domain cannot contain.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate four planes before choosing a tool
+
+A single dashboard can hide four different systems. Name them separately so a control-plane outage is not confused with a workload outage and a traffic change is not mistaken for safe data failover.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Management plane" eyebrow="What should exist?" icon="settings" tone="blue" %}
+Stores desired configuration, policy, inventory, ownership, and evidence. Git, templates, and policy tests can be shared even when provider APIs differ.
+{% /concept-card %}
+{% concept-card title="Placement plane" eyebrow="Where may it run?" icon="route" tone="violet" %}
+Filters candidate clusters by residency, capability, health, capacity, and affinity, then spreads replicas only across eligible failure domains.
+{% /concept-card %}
+{% concept-card title="Traffic plane" eyebrow="Where should this request go?" icon="globe" tone="cyan" %}
+Uses DNS, gateways, service discovery, load balancers, and health state. Routing can select a service endpoint; it cannot safely promote a data copy.
+{% /concept-card %}
+{% concept-card title="Data plane" eyebrow="Which fact is authoritative?" icon="database" tone="green" %}
+Owns writes, replication, consistency, backups, and recovery position. Its topology usually determines the real latency and failover contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [Kubernetes SIG Multicluster](https://multicluster.sigs.k8s.io/) defines APIs for cluster identity, workload placement, service exposure, and cluster status, while deliberately leaving implementations open. That separation is useful: an API can standardize intent without erasing differences between networks, controllers, or providers.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Treat portability as an inventory, not a percentage slogan
+
+A portable container image is one artifact. A portable service also needs a compatible CPU architecture, configuration contract, secrets path, identity policy, network reachability, storage semantics, health model, telemetry, capacity envelope, and recovery procedure.
+
+Before promising provider exit, classify each layer:
+
+- **Reuse unchanged:** application protocol, image, health contract, telemetry names, or policy tests are identical.
+- **Adapt behind a contract:** identity, gateway, queue, object store, or database differs but a maintained adapter preserves the required behavior.
+- **Rebuild or migrate:** provider-native data and operational state need a measured export, conversion, replay, and validation process.
+- **Intentionally anchored:** a dataset or capability stays in one domain because moving it would violate residency, latency, consistency, or cost constraints.
+
+### Lab 1: choose a placement and expose the portability bill
+
+Select a workload contract and placement model. The lab uses visible illustrative assumptions to recompute reused layers, cross-cloud data movement, WAN latency on the critical path, operating domains, and hard-constraint failures.
+
+{% interactive-block id="fundamentals/hybrid-multi-cloud-orchestration-calculator" dataFile="/api/content/fundamentals/hybrid-multi-cloud-orchestration/data/placement-portability-model.json" /%}
+
+The lesson is not "maximize the reusable surface." The safer target is the smallest cross-environment design that satisfies the requirement while keeping state authority, adapters, and recovery ownership visible.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Put cross-cloud latency and egress on the architecture diagram
+
+Every cross-cloud edge has at least four consequences: another network failure, another security boundary, added latency, and data transfer that must be measured under the source provider's rules.
+
+For an asynchronous recovery stream changing by `180 GiB/day`:
+
+- Normal replication sends about `180 GiB/day` across the boundary before compression, retries, or protocol overhead.
+- A two-hour link outage creates about `180 / 24 x 2 = 15 GiB` of backlog.
+- Catch-up can send faster than the normal rate and compete with production traffic.
+- The recovery point ages while the link is down even though the primary service remains healthy.
+
+These are capacity quantities, not a price quote. Network charges depend on provider, service, source, destination, region, transport, and contract. Use billing exports and current provider pricing for approval.
+
+### Lab 2: inject a cross-cloud failure
+
+Switch between healthy operation, interconnect loss, primary-cloud loss, orchestrator loss, and a synchronous WAN write. The active path and result distinguish routing, data promotion, replication backlog, and control-plane continuity.
+
+{% topology-lab dataFile="/api/content/fundamentals/hybrid-multi-cloud-orchestration/data/failure-egress-topology.json" /%}
+
+The important asymmetry is deliberate: with one anchored write authority and asynchronous recovery replication, interconnect loss can leave primary writes available while recovery freshness degrades. Putting the WAN on the write path changes that contract; a two-site partition must either block writes or risk divergent authorities.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose a state model before a traffic model
+
+Stateless services are relatively easy to place in several domains. Stateful failover is a data decision first and a routing decision second.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Anchored authority" eyebrow="Default for critical writes" icon="database" tone="green" %}
+One domain accepts authoritative writes. Backups or an asynchronous copy move off-path. Failover requires an explicit promotion gate and has a measurable recovery point.
+{% /concept-card %}
+{% concept-card title="Synchronous quorum" eyebrow="Coordinate every write" icon="shield" tone="violet" %}
+A justified quorum can protect one logical history across failures, but writes pay coordination latency and need enough independent voters to survive the intended partition.
+{% /concept-card %}
+{% concept-card title="Capability split" eyebrow="Different homes by bounded context" icon="boxes" tone="amber" %}
+Each capability owns its data in the environment that fits it. Versioned APIs and events expose cross-domain transfer, replay, retention, and fallback behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+Active-active compute does not imply active-active state. It is valid for two service pools to be ready while one database remains authoritative. Write that asymmetry into the runbook and traffic controls instead of letting an automated health check invent a data decision.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Encode placement and promotion as separate policies
+
+Placement policy should describe eligibility and spread. It should not pretend to own database promotion, business consistency, or provider exit.
+
+The example uses a current Karmada `PropagationPolicy` to select clusters labeled for an EU data boundary and a shared runtime contract, then spread stateless service replicas across two providers. [Karmada's placement documentation](https://karmada.io/docs/userguide/scheduling/propagation-policy/) distinguishes the candidate set created by cluster affinity from the number of groups selected by spread constraints.
+
+{% code-block file="/api/content/fundamentals/hybrid-multi-cloud-orchestration/code/placement-policy.yaml" language="yaml" title="Place portable stateless compute across eligible providers" /%}
+
+Recovery promotion needs different evidence. The old authority must be fenced, replica lag must fit the recovery-point objective, integrity and dependencies must pass, and traffic controls must be ready.
+
+{% code-block file="/api/content/fundamentals/hybrid-multi-cloud-orchestration/code/evaluate-recovery-promotion.ts" language="typescript" title="Gate recovery promotion on explicit evidence" /%}
+
+The function returns blockers instead of a weighted score. That makes an unsafe promotion explainable and prevents a healthy load balancer from overruling an unhealthy data copy.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate each environment as a real failure domain
+
+### Before launch
+
+- Record the requirement that justifies every additional environment, its owner, and the condition that retires it.
+- Inventory workload images, policy, identity, secrets, network routes, certificates, state, backups, queues, quotas, telemetry, and billing exports by environment.
+- Measure normal and catch-up cross-cloud bytes by source, destination, service, and business flow.
+- Test the provider-exit path with real data volume; a compatible API does not prove export speed or semantic equivalence.
+- Verify that policy denial, quota exhaustion, certificate expiry, and control-plane loss fail closed without stopping healthy data-plane workloads.
+
+### During failure exercises
+
+- **Interconnect loss:** confirm the authoritative path, backlog growth, recovery-point age, queue capacity, and catch-up rate.
+- **Primary-cloud loss:** fence the old authority, validate the recovery position and integrity, start dependencies, promote state, then move traffic.
+- **Orchestrator loss:** keep existing workloads serving while blocking unreviewed placement and rollout changes.
+- **Credential or trust failure:** test certificate rotation, identity federation loss, and emergency access without a shared permanent administrator.
+- **Corruption or deletion:** restore from an independent backup; replicas can copy bad writes and are not a backup.
+
+### Signals with an owner
+
+- Placement attempts, unschedulable reasons, policy denials, and configuration drift.
+- User latency and errors by serving domain, including remote fallback traffic.
+- Cross-cloud bytes, transfer rate, retry volume, and top flows by cost owner.
+- Replication lag, oldest unapplied record, backup age, restore result, and promotion readiness.
+- Control-plane reconciliation delay separately from workload availability.
+{% /section-card %}
+
+{% section-card %}
+## Use current contracts and pricing evidence
+
+- [Kubernetes SIG Multicluster](https://multicluster.sigs.k8s.io/) documents portable API boundaries for cluster identity, work, services, and status without claiming one implementation.
+- [Karmada PropagationPolicy](https://karmada.io/docs/userguide/scheduling/propagation-policy/) documents resource selection, cluster affinity, fallback groups, and spread constraints for multi-cluster placement.
+- [Istio multicluster installation](https://istio.io/latest/docs/setup/install/multicluster/) makes network topology and control-plane topology separate choices; a service mesh still needs reachability, trust, and failure policy across clusters.
+- [AWS data transfer charge guidance](https://docs.aws.amazon.com/cur/latest/userguide/cur-data-transfers-charges.html), [Google Cloud VPC pricing](https://cloud.google.com/vpc/pricing), and [Azure data transfer fee guidance](https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/data-transfer-fees) show why egress estimates must use the actual source, destination, service, region, and billing agreement.
+
+Provider features, prices, quotas, and preview status change. Pin production decisions to a dated architecture record, current documentation, a measured workload, and an accountable owner.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/hybrid-multi-cloud-orchestration/quiz/hybrid-multi-cloud-orchestration.json" lessonSlug="hybrid-multi-cloud-orchestration" title="Hybrid Multi-Cloud Orchestration Decisions" /%}

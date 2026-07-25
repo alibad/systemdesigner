@@ -1,0 +1,172 @@
+{
+  "title": "Protect an invariant under concurrent transactions",
+  "description": "Choose a business operation, isolation level, and application guard. Increase overlap to see whether PostgreSQL prevents the anomaly, rejects work for retry, or makes writers wait.",
+  "defaults": {
+    "scenarioId": "seat-capacity",
+    "isolationId": "read-committed",
+    "guardId": "none",
+    "concurrency": 8
+  },
+  "concurrency": { "min": 2, "max": 48, "step": 2 },
+  "isolationLevels": [
+    {
+      "id": "read-committed",
+      "label": "Read Committed",
+      "detail": "Each statement gets a fresh snapshot. This is PostgreSQL's default and allows multi-statement read drift.",
+      "snapshot": "One snapshot per statement"
+    },
+    {
+      "id": "repeatable-read",
+      "label": "Repeatable Read",
+      "detail": "One transaction snapshot prevents read drift, but snapshot isolation can still permit write skew.",
+      "snapshot": "One stable transaction snapshot"
+    },
+    {
+      "id": "serializable",
+      "label": "Serializable",
+      "detail": "SSI rejects dangerous dependency structures so committed transactions behave like a serial order.",
+      "snapshot": "Stable snapshot plus conflict detection"
+    }
+  ],
+  "guards": [
+    {
+      "id": "none",
+      "label": "No explicit guard",
+      "detail": "Read state, decide in application code, then write without locking the decision boundary."
+    },
+    {
+      "id": "decision-lock",
+      "label": "Lock the decision row",
+      "detail": "Use SELECT FOR UPDATE on the row that owns the invariant and acquire locks in a stable order."
+    },
+    {
+      "id": "atomic-predicate",
+      "label": "Atomic predicate or constraint",
+      "detail": "Move the check into one conditional statement or a database-enforced uniqueness or exclusion rule."
+    },
+    {
+      "id": "retry-loop",
+      "label": "Bounded transaction retry",
+      "detail": "Retry the complete unit of work after serialization failure with a fresh snapshot and bounded backoff."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "seat-capacity",
+      "label": "Reserve the final seats",
+      "detail": "Several writers observe remaining capacity, then create reservations for different customers.",
+      "invariant": "Confirmed reservation quantity must never exceed venue capacity.",
+      "failureMode": "Write skew can oversell capacity",
+      "baseRiskPercent": {
+        "read-committed": 18,
+        "repeatable-read": 14,
+        "serializable": 0
+      },
+      "baseAbortPercent": {
+        "read-committed": 0,
+        "repeatable-read": 2,
+        "serializable": 8
+      },
+      "guardEffects": {
+        "none": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "Independent snapshots can each validate an old aggregate before any writer changes the shared decision state."
+        },
+        "decision-lock": {
+          "riskMultiplier": 0,
+          "waitMs": 12,
+          "explanation": "Locking one capacity owner serializes the check and reservation update around the invariant."
+        },
+        "atomic-predicate": {
+          "riskMultiplier": 0.04,
+          "waitMs": 4,
+          "explanation": "A conditional capacity update moves the check and state change into one database decision."
+        },
+        "retry-loop": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "Retries recover rejected serializable transactions, but retries alone do not prevent write skew at weaker isolation."
+        }
+      }
+    },
+    {
+      "id": "account-debit",
+      "label": "Apply a balance debit",
+      "detail": "Workers read one account balance, calculate a replacement value, and update the same row.",
+      "invariant": "Accepted debits must not disappear and the account must not cross its permitted limit.",
+      "failureMode": "A stale read can overwrite another debit",
+      "baseRiskPercent": {
+        "read-committed": 24,
+        "repeatable-read": 0,
+        "serializable": 0
+      },
+      "baseAbortPercent": {
+        "read-committed": 0,
+        "repeatable-read": 9,
+        "serializable": 12
+      },
+      "guardEffects": {
+        "none": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "A read-modify-write sequence at Read Committed can calculate from stale state and replace a newer value."
+        },
+        "decision-lock": {
+          "riskMultiplier": 0,
+          "waitMs": 10,
+          "explanation": "A row lock makes each debit observe the balance left by the previous committed writer."
+        },
+        "atomic-predicate": {
+          "riskMultiplier": 0,
+          "waitMs": 2,
+          "explanation": "UPDATE with a balance predicate lets PostgreSQL lock, recheck, and change the row atomically."
+        },
+        "retry-loop": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "A retry loop handles database conflicts but cannot detect a logical overwrite that committed successfully."
+        }
+      }
+    },
+    {
+      "id": "consistent-report",
+      "label": "Build a consistent report",
+      "detail": "A transaction reads several related aggregates while application writes continue.",
+      "invariant": "Every value in the report must describe the same committed point in time.",
+      "failureMode": "Statement snapshots can produce a mixed-time report",
+      "baseRiskPercent": {
+        "read-committed": 38,
+        "repeatable-read": 0,
+        "serializable": 0
+      },
+      "baseAbortPercent": {
+        "read-committed": 0,
+        "repeatable-read": 0,
+        "serializable": 4
+      },
+      "guardEffects": {
+        "none": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "Read Committed may use a different snapshot for each statement, so related totals can describe different moments."
+        },
+        "decision-lock": {
+          "riskMultiplier": 0.05,
+          "waitMs": 30,
+          "explanation": "Locking all contributing rows is expensive and fragile; a stable transaction snapshot is the cleaner read-only boundary."
+        },
+        "atomic-predicate": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "An atomic write predicate does not give several report queries one shared snapshot."
+        },
+        "retry-loop": {
+          "riskMultiplier": 1,
+          "waitMs": 0,
+          "explanation": "Repeating a Read Committed report can still mix statement snapshots; choose a stable snapshot instead."
+        }
+      }
+    }
+  ]
+}

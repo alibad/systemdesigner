@@ -1,0 +1,241 @@
+---
+registryId: practice-feature-store
+---
+
+{% section-card tone="intro" %}
+## What is a feature store?
+
+A **feature** is an input a model uses to make a prediction, such as a customer's recent purchases or the number of failed logins in the last hour. A **feature store** is the system that defines, computes, documents, and serves those inputs so the values used to train a model mean the same thing as the values it receives in production.
+
+This matters because a model can be accurate in an offline notebook and wrong in production when its live inputs are stale, calculated differently, or taken from the future. The central invariant is simple: **a prediction must use a feature definition, event-time rule, and freshness policy compatible with the model that was evaluated.**
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Feature definition" eyebrow="Meaning" icon="braces" tone="blue" %}
+A versioned contract names the entity, transformation, source fields, owner, event-time rule, and allowed missing-value behavior.
+{% /concept-card %}
+{% concept-card title="Offline history" eyebrow="Training" icon="database" tone="violet" %}
+Historical, point-in-time joins reconstruct only the information that existed when each training example occurred.
+{% /concept-card %}
+{% concept-card title="Online materialization" eyebrow="Serving" icon="speed" tone="green" %}
+A low-latency store serves the current approved feature bundle, together with its version and freshness metadata.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Business Context" %}
+
+### Start with the prediction, not the database
+
+Assume this platform supports checkout-risk, ranking, and personalization models. Product teams need to reuse features without each team rebuilding pipelines, while model owners need a defensible answer to: *what did the model know at the moment it made this decision?*
+
+### Agree on the requirements that change the design
+
+- **Functional requirements**
+  - Register a versioned feature definition and make it discoverable by entity, owner, source, and data classification.
+  - Build point-in-time training sets, materialize approved features online, and retrieve a named feature bundle for one entity.
+  - Record lineage from raw event through transform, snapshot, materialization, model release, and serving decision.
+- **Non-functional requirements**
+  - Keep the online lookup contribution below 10 ms at p99 for the latency-sensitive path.
+  - Publish a freshness SLA per feature group instead of pretending every feature is real time.
+  - Preserve 99.99% availability with an explicit, audited fallback policy.
+- **Scope boundary**
+  - The store owns feature semantics and delivery. It does not replace a warehouse, a general event bus, model training infrastructure, or product authorization policy.
+
+### Name the costly failure modes
+
+1. A training join leaks information from after the label time, making offline metrics optimistic.
+2. A transform changes online while the trained model still expects the prior definition.
+3. The materializer is fast but behind, so a valid lookup returns a stale behavior signal.
+4. An online timeout silently becomes default values with no version, age, or reason code recorded.
+
+{% callout variant="info" %}
+For a short primer on moving events through reliable pipelines, review the [data pipelines lesson](/ml-systems/data-pipelines). This practice assumes you can distinguish an event's occurrence time from the time a system happened to ingest it.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="estimates" title="2. Back-of-the-Envelope Data and Compute Estimates" %}
+
+### Estimate the online read path before choosing a store
+
+Use a representative peak of **600,000 predictions per second** with **80 online features per prediction**. That is 48 million feature values per second, not merely 600,000 key lookups. If one shard sustains 4.5 million values per second, a 70% utilization target needs:
+
+`48M / (4.5M x 0.70) = 15.24`, so round up to **16 shards** before reserving additional regional or failure headroom.
+
+The calculation must account for feature fan-out. A request that fetches user, merchant, device, session, and aggregate features can overload the store even when prediction QPS looks modest.
+
+{% interactive-block id="practice/feature-store-freshness-capacity-lab" /%}
+
+### Bound the offline workload separately
+
+- **Historical storage:** 5 PB of source and feature history, partitioned by event date and entity or source domain.
+- **Daily ingestion:** 2 billion events at roughly 1 KB each is about 2 TB/day before replication and derived tables.
+- **Training sets:** 1,000 daily jobs reading 10,000 candidate features should prune columns and partitions before the join.
+- **Metadata:** the catalog is small compared with raw history, but it must retain immutable feature, transform, and ownership versions.
+
+Online memory and offline scan cost are different constraints. Keep only the current online values and their safety metadata in the hot store; retain long history in columnar, time-travel-capable offline storage.
+
+{% /accordion-item %}
+
+{% accordion-item id="framing" title="3. Formal ML Framing" %}
+
+### Define the learning example at one point in time
+
+For a fraud model, an example might be: predict whether a payment at time `t` will later be confirmed fraudulent. The label arrives after an investigation window. Every feature in the training row must be computed from records with event time at or before `t`.
+
+### State the contracts a model release needs
+
+- **Entity key:** which customer, device, merchant, or session is being described.
+- **Event-time watermark:** the latest event that may contribute to the value.
+- **Definition version:** the transform code, dependencies, window, null behavior, and schema expected by the model.
+- **Freshness policy:** the maximum acceptable age for the online value and the action after expiry.
+- **Bundle manifest:** the exact set of feature versions, model version, fallback rules, and owner approvals used in one release.
+
+The offline baseline is a point-in-time-correct snapshot. The online baseline is the last compatible feature bundle with an explicit age. A model score is not meaningful without both references.
+
+{% callout variant="warn" %}
+Do not use processing time as a shortcut for event time. Late-arriving events can be safely included only when the feature's watermark and training join make that decision explicit.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. Design the End-to-End Data, Training, and Serving Architecture" %}
+
+### Separate the paths, share the definition
+
+{% system-flow title="Versioned feature lifecycle" caption="One declarative feature definition drives both historical reconstruction and online materialization." %}
+{% system-node title="Events and snapshots" eyebrow="Inputs" icon="activity" tone="blue" %}
+Immutable event streams and batch snapshots carry event time, source identity, and schema version.
+{% /system-node %}
+{% system-node title="Transform registry" eyebrow="Compute" icon="workflow" tone="violet" %}
+Versioned batch and streaming transforms apply the same declared semantics and emit lineage.
+{% /system-node %}
+{% system-node title="Offline history" eyebrow="Training" icon="database" tone="cyan" %}
+Columnar history supports point-in-time joins, backfills, reproducible snapshots, and offline evaluation.
+{% /system-node %}
+{% system-node title="Online store" eyebrow="Serving" icon="speed" tone="green" %}
+Materialized entity values include feature version, update time, quality status, and TTL metadata.
+{% /system-node %}
+{% system-node title="Model gateway" eyebrow="Decision" icon="workflow" tone="amber" %}
+The gateway requests a named compatible bundle, enforces timeout policy, and logs the decision manifest.
+{% /system-node %}
+{% /system-flow %}
+
+### Make the release boundary explicit
+
+1. Author and test a definition in development with representative historical and streaming inputs.
+2. Backfill an offline snapshot and compare batch and stream outputs over the same event-time interval.
+3. Materialize the candidate online version, measure freshness and distribution parity, then build a bundle manifest.
+4. Shadow the model with the manifest before gradually promoting traffic. Keep the preceding compatible manifest warm for rollback.
+
+The feature registry is the control plane. The offline store, online store, and compute jobs are data-plane systems that implement its approved contract.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep Dive on Model and Feature Work" %}
+
+### Build point-in-time correctness into the join
+
+For each label timestamp `t`, select the latest feature value where `feature_event_time <= t` and the value's definition version matches the candidate bundle. Do not join the latest value known today. Store the source event range and transform version so the join can be reproduced during an incident.
+
+### Design online retrieval as a bounded decision
+
+An online request should include an entity key, requested bundle ID, deadline, and fallback policy. The response should include values plus their version, update time, quality status, and missingness. A timeout is not permission to make up a value: it must resolve through a declared last-good or default bundle, or fail the feature-dependent route.
+
+{% interactive-block id="practice/feature-store-parity-failure-lab" /%}
+
+### Handle difficult feature shapes deliberately
+
+- **Slow rolling aggregates:** compute incrementally in streaming state and periodically reconcile against batch history.
+- **Sparse or new entities:** expose explicit missingness and defaults rather than treating absence as a normal zero.
+- **Expensive embeddings:** materialize asynchronously, serve a versioned cached vector, and keep a simpler fallback feature family.
+- **Cross-entity features:** document ownership and consent boundaries before joining identities or sharing values across products.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Define Evaluation and QA Release Gates" %}
+
+### Test the feature system, not only model accuracy
+
+- **Point-in-time tests:** seed events before and after a label time and assert that future values never appear in the training row.
+- **Parity tests:** replay the same event interval through batch and streaming transforms, then compare values, null rates, and timestamps by feature version.
+- **Freshness tests:** delay a source or materializer and assert that the serving path emits the intended stale, fallback, or reject action at the SLA boundary.
+- **Contract tests:** reject a model manifest when a requested feature is missing, uses a different definition, or has an incompatible entity key.
+- **Slice checks:** compare missingness, drift, age, and distribution by market, device class, source, and entity cohort.
+
+### Set release gates that force a decision
+
+Before promotion, require zero unapproved parity differences, no event-time leakage in sampled joins, online p99 below 10 ms at peak-shaped load, and each feature group inside its published freshness SLA. Shadow traffic should log candidate-versus-current bundle differences without changing customer decisions.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate and Retrain Through a Controlled Loop" %}
+
+### Monitor contracts at runtime
+
+- Alert on freshness age, materialization lag, missingness, online timeout rate, and fallback activation by feature group and region.
+- Track online-versus-offline distribution differences and transform-version mismatches before they become model drift incidents.
+- Sample decision manifests so responders can trace a score to the model, feature bundle, entity values, and fallback reason.
+- Assign an owner, on-call route, SLO, deprecation date, and downstream consumers to every production feature group.
+
+### Promote retraining only after the input contract passes
+
+{% process-flow %}
+{% process-step number="1" title="Mature labels" label="Evidence" %}
+Wait for label windows, deduplicate outcomes, and quarantine incomplete or suspicious feedback.
+{% /process-step %}
+{% process-step number="2" title="Freeze a snapshot" label="Training" %}
+Build a reproducible point-in-time dataset with feature, source, and transform versions.
+{% /process-step %}
+{% process-step number="3" title="Challenge parity" label="Evaluation" %}
+Test quality, slices, freshness, online latency, and batch-to-stream agreement against the current release.
+{% /process-step %}
+{% process-step number="4" title="Shadow and canary" label="Release" %}
+Observe manifest and score differences, then shift bounded traffic with automatic rollback on contract failures.
+{% /process-step %}
+{% /process-flow %}
+
+Retraining can run frequently, but promotion should wait for clean labels, compatible feature versions, and a rehearsed rollback to the last known-good bundle.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Compare Trade-offs and Plan Improvements" %}
+
+### Make the major choices explicit
+
+**Dual online and offline stores vs one unified store**
+
+- Choose dual stores when online point lookups and historical scans have fundamentally different latency, retention, and cost profiles.
+- Accept synchronization complexity, then reduce it with one registry, versioned transforms, parity tests, and manifests.
+
+**Compute features at request time vs materialize them**
+
+- Materialize predictable, high-volume features that must meet a tight inference deadline.
+- Compute only bounded, request-specific features online when their source dependencies and latency budget are trustworthy.
+
+**Fail with a default vs fail the feature-dependent route**
+
+- Use a default or last-good bundle only when the model was evaluated with that exact fallback and its age remains within policy.
+- Reject or route around the prediction when an expired or incompatible feature would create an unsafe decision.
+
+### Residual risks and next improvements
+
+- Late or corrected events can create unavoidable tension between freshness and historical completeness.
+- Shared feature reuse can spread a bad definition quickly, so canaries and blast-radius-aware ownership matter.
+- High-cardinality entities and wide bundles can make online memory costs grow faster than prediction QPS.
+- Governance rules for consent, retention, and deletion must propagate to both offline history and online materializations.
+
+### Interview recap
+
+Design the feature store around a versioned semantic contract, not a cache. Use offline history for reproducible point-in-time training, an online store for bounded low-latency retrieval, and a manifest that keeps models, feature versions, watermarks, and fallbacks compatible. Then operate it with parity gates, freshness SLOs, traceable fallbacks, and rollback-ready releases.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/feature-store/quiz/feature-store-design-review.json"
+   lessonSlug="practice-feature-store"
+   title="Feature Store Design Review" /%}

@@ -1,0 +1,141 @@
+{
+  "title": "Trace a production signal before choosing a response",
+  "description": "Switch between fleet averages, cohort slices, and versioned traces, then choose whether to continue, pause, or roll back. The same top-line metric can justify different actions once the affected path is visible.",
+  "defaults": {
+    "scenarioId": "retrieval-slice-regression",
+    "lensId": "aggregate",
+    "actionId": "continue"
+  },
+  "stages": [
+    {
+      "id": "request",
+      "label": "Request and cohort",
+      "responsibility": "Record task, language, tenant, risk class, and experiment assignment."
+    },
+    {
+      "id": "orchestration",
+      "label": "Prompt and model route",
+      "responsibility": "Attach prompt, model, decoding, policy, and feature-flag versions."
+    },
+    {
+      "id": "dependency",
+      "label": "Retrieval and tools",
+      "responsibility": "Track index, corpus, tool, cache, and dependency versions."
+    },
+    {
+      "id": "outcome",
+      "label": "Output and outcome",
+      "responsibility": "Join quality, safety, latency, cost, feedback, and delayed task outcome."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "retrieval-slice-regression",
+      "label": "Stable average, damaged cohort",
+      "detail": "Fleet quality looks flat, but Spanish retrieval answers lose fresh citations.",
+      "sliceLabel": "Spanish retrieval",
+      "globalQualityDeltaPct": -0.6,
+      "sliceQualityDeltaPct": -12.4,
+      "p95LatencyDeltaPct": 4.5,
+      "errorRatePct": 1.3,
+      "complaintRatePct": 1.8,
+      "exposedUsersPerHour": 4200,
+      "recommendedAction": "rollback",
+      "recommendation": "Roll back the retrieval index version for the affected route, retain the failing traces, and replay them against a repaired snapshot before resuming the canary.",
+      "rootStageId": "dependency",
+      "rollbackTarget": "retrieval-index es-2026-07-12",
+      "findings": {
+        "aggregate": {
+          "headline": "The fleet average appears inside its normal band",
+          "detail": "Healthy English traffic dominates the aggregate, so the affected cohort contributes too little weight to trigger a global quality alert.",
+          "confidence": 0.34,
+          "suspect": "No component can be isolated from an aggregate-only result."
+        },
+        "slice": {
+          "headline": "Spanish retrieval quality crosses the abort threshold",
+          "detail": "The regression is concentrated in citation freshness and starts at the candidate experiment boundary, which rules out a fleet-wide model shift.",
+          "confidence": 0.76,
+          "suspect": "The affected experiment route or one of its versioned dependencies."
+        },
+        "trace": {
+          "headline": "A stale Spanish index snapshot caused unsupported answers",
+          "detail": "Failing traces share the candidate route and retrieval-index es-2026-07-18; the prompt and model versions match healthy control traces.",
+          "confidence": 0.96,
+          "suspect": "The candidate retrieval snapshot is missing the latest Spanish source documents."
+        }
+      }
+    },
+    {
+      "id": "provider-latency",
+      "label": "Latency rises without quality loss",
+      "detail": "A model-provider route throttles long requests while answers remain correct.",
+      "sliceLabel": "Long-context requests",
+      "globalQualityDeltaPct": 0.3,
+      "sliceQualityDeltaPct": -0.8,
+      "p95LatencyDeltaPct": 46,
+      "errorRatePct": 3.9,
+      "complaintRatePct": 2.6,
+      "exposedUsersPerHour": 7800,
+      "recommendedAction": "pause",
+      "recommendation": "Pause expansion, route long-context traffic to the healthy provider, and verify queue and timeout recovery before changing model quality gates.",
+      "rootStageId": "orchestration",
+      "rollbackTarget": "provider route primary-v4",
+      "findings": {
+        "aggregate": {
+          "headline": "Latency and timeout signals rise together",
+          "detail": "The fleet view establishes operational pressure but cannot show whether the model, scheduler, or provider route is responsible.",
+          "confidence": 0.58,
+          "suspect": "Several serving-path components remain plausible."
+        },
+        "slice": {
+          "headline": "Only long-context requests breach the latency budget",
+          "detail": "Short requests and output quality remain stable, narrowing the incident to a capacity or route-specific problem.",
+          "confidence": 0.8,
+          "suspect": "The long-context serving route or its provider capacity."
+        },
+        "trace": {
+          "headline": "Provider throttling stretches queue and first-token time",
+          "detail": "Trace joins show the candidate provider route returning throttle metadata before timeout growth; model outputs that finish still pass quality checks.",
+          "confidence": 0.94,
+          "suspect": "The candidate provider route lacks reserved long-context capacity."
+        }
+      }
+    },
+    {
+      "id": "feedback-noise",
+      "label": "Feedback spike without corroboration",
+      "detail": "Thumbs-down events rise after a UI survey change, but hard outcomes stay healthy.",
+      "sliceLabel": "Survey-exposed sessions",
+      "globalQualityDeltaPct": 0.4,
+      "sliceQualityDeltaPct": 0.2,
+      "p95LatencyDeltaPct": 1.5,
+      "errorRatePct": 0.8,
+      "complaintRatePct": 3.1,
+      "exposedUsersPerHour": 9600,
+      "recommendedAction": "continue",
+      "recommendation": "Continue the bounded canary, annotate the feedback-instrument change, and recalibrate the complaint baseline before treating the spike as a model regression.",
+      "rootStageId": "outcome",
+      "rollbackTarget": "No rollback; retain candidate canary-17",
+      "findings": {
+        "aggregate": {
+          "headline": "A complaint spike is visible, but the model signal is ambiguous",
+          "detail": "Feedback changed while quality, safety, completion, latency, and errors stayed inside their declared bands.",
+          "confidence": 0.5,
+          "suspect": "Either model behavior or the feedback collection path changed."
+        },
+        "slice": {
+          "headline": "The spike follows survey exposure, not model assignment",
+          "detail": "Control and candidate traffic show the same increase when the new survey is visible, weakening the model-regression hypothesis.",
+          "confidence": 0.82,
+          "suspect": "The outcome instrument changed independently of model behavior."
+        },
+        "trace": {
+          "headline": "A UI event-version change explains the feedback discontinuity",
+          "detail": "Versioned traces show a new survey prompt doubling response rate for both control and candidate while downstream task outcomes remain stable.",
+          "confidence": 0.97,
+          "suspect": "The feedback instrumentation changed the measurement baseline."
+        }
+      }
+    }
+  ]
+}

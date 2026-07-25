@@ -1,0 +1,127 @@
+{
+  "title": "Trace the authorization code and refresh-token defenses",
+  "description": "Switch scenarios to see which value crosses the browser, what remains secret, and where exact redirects, PKCE, or rotation stop replay.",
+  "nodes": [
+    {
+      "id": "browser",
+      "label": "User agent",
+      "eyebrow": "Front channel",
+      "detail": "Carries the authorization request and one-time response. It should not receive a client secret, refresh token, or access token in a URL.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 25
+    },
+    {
+      "id": "client",
+      "label": "OAuth client",
+      "eyebrow": "Transaction owner",
+      "detail": "Creates state and the PKCE verifier, stores them against the browser session, and validates the response before exchanging the code.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 30,
+      "y": 25
+    },
+    {
+      "id": "authorization",
+      "label": "Authorization endpoint",
+      "eyebrow": "User decision",
+      "detail": "Authenticates as needed, obtains authorization, binds the code to client and redirect URI, and accepts only registered redirects.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 53,
+      "y": 25
+    },
+    {
+      "id": "token",
+      "label": "Token endpoint",
+      "eyebrow": "Back channel",
+      "detail": "Redeems a code once after validating client binding, redirect URI, and PKCE verifier; it also detects rotated refresh-token reuse.",
+      "kind": "allocator",
+      "tone": "amber",
+      "x": 53,
+      "y": 75
+    },
+    {
+      "id": "api",
+      "label": "Resource server",
+      "eyebrow": "Protected API",
+      "detail": "Accepts tokens only from the expected issuer and for its audience, then enforces scope and resource-level authorization.",
+      "kind": "service",
+      "tone": "green",
+      "x": 76,
+      "y": 25
+    },
+    {
+      "id": "session-store",
+      "label": "Token/session store",
+      "eyebrow": "Protected state",
+      "detail": "Keeps verifier, one-time state, tokens, grant family, and application session data in the boundary appropriate to the client type.",
+      "kind": "database",
+      "tone": "blue",
+      "x": 76,
+      "y": 75
+    },
+    {
+      "id": "attacker",
+      "label": "Attacker",
+      "eyebrow": "Replay attempt",
+      "detail": "May steal a code, tamper with a redirect, or replay an invalidated refresh token. Each scenario shows the server-side rejection point.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 91,
+      "y": 75
+    }
+  ],
+  "edges": [
+    {"id": "client-browser", "from": "client", "to": "browser", "label": "authorize URL"},
+    {"id": "browser-authorization", "from": "browser", "to": "authorization", "label": "code challenge", "via": {"x": 31, "y": 10}},
+    {"id": "authorization-client", "from": "authorization", "to": "client", "label": "code + state"},
+    {"id": "client-token", "from": "client", "to": "token", "label": "code + verifier", "via": {"x": 32, "y": 68}},
+    {"id": "token-store", "from": "token", "to": "session-store", "label": "bound tokens"},
+    {"id": "client-api", "from": "client", "to": "api", "label": "audience + scope", "via": {"x": 53, "y": 8}},
+    {"id": "attacker-token-code", "from": "attacker", "to": "token", "label": "stolen code"},
+    {"id": "attacker-authorization", "from": "attacker", "to": "authorization", "label": "wrong redirect", "via": {"x": 91, "y": 24}},
+    {"id": "client-token-refresh", "from": "client", "to": "token", "label": "current refresh", "via": {"x": 32, "y": 82}},
+    {"id": "attacker-token-refresh", "from": "attacker", "to": "token", "label": "reused refresh"},
+    {"id": "token-revoke-family", "from": "token", "to": "session-store", "label": "revoke family"}
+  ],
+  "scenarios": [
+    {
+      "id": "happy-code-flow",
+      "label": "Happy code flow",
+      "summary": "The client starts one transaction, the authorization server returns a one-time code, and the client redeems it with the matching PKCE verifier.",
+      "activeEdges": ["client-browser", "browser-authorization", "authorization-client", "client-token", "token-store", "client-api"],
+      "focusNode": "token",
+      "result": "The access token is issued only at the token endpoint. The browser carries the code, while the transaction-specific verifier remains under the client's control."
+    },
+    {
+      "id": "stolen-code",
+      "label": "Stolen code",
+      "summary": "An attacker obtains the authorization code but does not have the transaction's high-entropy verifier.",
+      "activeEdges": ["browser-authorization", "authorization-client", "attacker-token-code"],
+      "failedNodes": ["attacker"],
+      "focusNode": "token",
+      "result": "The token endpoint rejects the exchange because the attacker's verifier does not produce the challenge bound to the code. A client secret embedded in a public app would not provide this protection."
+    },
+    {
+      "id": "redirect-mismatch",
+      "label": "Redirect mismatch",
+      "summary": "An attacker changes the requested callback to an unregistered URI in an attempt to receive the authorization response.",
+      "activeEdges": ["attacker-authorization"],
+      "failedNodes": ["attacker"],
+      "focusNode": "authorization",
+      "result": "Exact string matching rejects the request before a code is sent. Native loopback redirects have the standards-defined dynamic-port exception; broad wildcard callbacks do not."
+    },
+    {
+      "id": "refresh-reuse",
+      "label": "Refresh reuse",
+      "summary": "After rotation, the legitimate client uses the current refresh token while an attacker replays an invalidated token from the same grant family.",
+      "activeEdges": ["client-token-refresh", "attacker-token-refresh", "token-revoke-family"],
+      "failedNodes": ["attacker"],
+      "degradedNodes": ["client", "session-store"],
+      "focusNode": "session-store",
+      "result": "Reuse reveals that the refresh-token family is compromised. The authorization server revokes the active family, stopping the attacker and forcing the legitimate client through a new authorization grant."
+    }
+  ]
+}

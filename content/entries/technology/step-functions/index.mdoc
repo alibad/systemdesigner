@@ -1,0 +1,260 @@
+---
+registryId: step-functions
+---
+
+{% section-card tone="intro" %}
+## What is AWS Step Functions?
+
+**AWS Step Functions is a managed workflow orchestrator that executes a state machine
+defined in Amazon States Language (ASL).** Each state receives JSON, performs control
+flow or calls a service, and produces JSON for the next state. Step Functions persists
+or runs that coordination according to the workflow type you choose.
+
+Use it when one business operation spans multiple tasks and needs explicit sequencing,
+branching, parallel work, waits, retries, compensation, or audit evidence. Do not use a
+state machine to hide unclear ownership: payment, inventory, customer, and order systems
+must still own their durable business records.
+
+{% callout variant="info" %}
+The core invariant is **workflow completion and business effect are different facts**.
+An execution can retry a Task after an ambiguous response, a caller can start the same
+logical order twice, and compensation can fail. Every side-effecting integration needs
+a stable operation key and an externally observable business outcome.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose the workflow type before writing states
+
+A Step Functions state machine is created as either Standard or Express, and AWS does
+not let you change that type in place. Express then has two invocation modes:
+Asynchronous Express acknowledges the start, while Synchronous Express waits and
+returns the result.
+
+Select a scenario and compare all three execution contracts. The lab intentionally
+omits prices and guessed throughput. Those change by region, account, payload, and
+usage; duration, execution guarantee, history, and integration-pattern support decide
+whether the workflow is valid at all.
+
+{% interactive-block id="technology/step-functions-calculator" dataFile="/api/content/technology/step-functions/data/workflow-type-scenarios.json" /%}
+
+### The three modes in plain language
+
+- **Standard:** durable state between transitions, exactly-once workflow execution
+  unless ASL explicitly retries, managed execution history, up to one year, and support
+  for request-response, `.sync`, and `.waitForTaskToken` integrations.
+- **Asynchronous Express:** start acknowledgement, at-least-once workflow execution,
+  up to five minutes, no Step Functions execution history, and request-response service
+  integrations only.
+- **Synchronous Express:** waits and returns output, at-most-once workflow execution,
+  up to five minutes, no Step Functions execution history, and request-response service
+  integrations only.
+
+Express execution evidence exists only when CloudWatch logging is enabled. Neither
+Express mode supports Run a Job (`.sync`) or Callback with Task Token
+(`.waitForTaskToken`). See AWS's current
+[workflow type comparison](https://docs.aws.amazon.com/step-functions/latest/dg/choosing-workflow-type.html)
+before creating the state machine.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Model states as control flow, not hidden application code
+
+ASL offers a small set of state types. Their value is that the execution path is
+declared, inspectable, and testable.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Task" eyebrow="Perform work" icon="play" tone="blue" %}
+Call an optimized AWS service integration, an AWS SDK operation, Lambda, an HTTP
+endpoint, an activity, or a nested workflow. Specify timeouts and failure handling at
+this boundary.
+{% /concept-card %}
+{% concept-card title="Choice" eyebrow="Select a path" icon="git-branch" tone="violet" %}
+Evaluate explicit conditions without running code. Always define a default path when
+unmatched input should not fail at runtime.
+{% /concept-card %}
+{% concept-card title="Parallel and Map" eyebrow="Bound concurrency" icon="layers" tone="amber" %}
+Run independent branches or items. Set concurrency and tolerated failure deliberately;
+fan-out can amplify downstream load and history volume.
+{% /concept-card %}
+{% concept-card title="Wait, Succeed, and Fail" eyebrow="Expose lifecycle" icon="clock" tone="green" %}
+Make delays, terminal success, and terminal failure visible in the graph instead of
+embedding them in a worker's local control flow.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep the state payload bounded
+
+Use input and output filtering to pass only fields the next state needs. Put large
+documents, media, and batch data in S3 or another owned store and pass a location,
+checksum, schema version, and business identifier through the workflow.
+
+- Name fields as a versioned contract rather than forwarding each service's full raw
+  response.
+- Preserve the original business identifier and a separate execution identifier.
+- Store caught errors under a dedicated result path so the original input remains
+  available for recovery.
+- Validate required fields before a side effect begins.
+- Treat JSONPath or JSONata transformations as production code with fixtures and edge
+  cases, not as incidental wiring.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Trace retries, duplicates, and compensation separately
+
+A retry repeats one Task attempt inside an execution. A duplicate start creates another
+execution for the same business intent. Compensation reverses or neutralizes an effect
+that already succeeded. These are different failure modes and need different controls.
+
+{% topology-lab dataFile="/api/content/technology/step-functions/data/order-recovery-topology.json" /%}
+
+The topology uses an external idempotency ledger because a Step Functions execution
+name or workflow guarantee is not a universal business lock. A stable `orderId` can
+protect the inventory reservation, payment charge, release operation, and status write
+across Task retries, caller retries, redrives, and replacement executions.
+
+### Design the recovery contract
+
+- **Bounded retry:** retry named transient failures, not every business rejection. Set
+  task timeouts, maximum attempts, capped exponential delay, and jitter.
+- **Duplicate protection:** atomically claim or look up a stable business key before
+  performing an effect. Store enough status to distinguish in-progress, completed,
+  compensated, and manual-recovery outcomes.
+- **Compensation:** make each undo action idempotent and safe to resume. Compensation
+  is a new business event, not deletion of history.
+- **Terminal failure:** preserve the original error, completed effects, compensation
+  attempts, and current authorities so an operator can reconcile safely.
+- **Redrive:** understand which successful states are preserved and which failed state
+  runs again. Re-test idempotency with operator-triggered recovery, not only automatic
+  retries.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Write a Standard order saga with explicit failure paths
+
+The example claims one logical order in DynamoDB, reserves inventory, charges payment,
+and writes the final order state. Lambda Task payloads carry the caller's `orderId` as
+the operation key. A terminal payment failure moves to inventory release; failed
+release moves to a manual-recovery state.
+
+{% code-block file="/api/content/technology/step-functions/code/standard-order-saga.asl.json" language="json" title="Standard workflow: order saga with bounded retry and compensation" /%}
+
+Important boundaries in the definition:
+
+- `ConditionExpression` protects the first order claim from duplicate starts.
+- transient Lambda service failures retry with capped backoff and full jitter;
+- business errors enter `Catch` instead of being retried indefinitely;
+- `ResultPath` preserves order input while attaching task results and failures;
+- inventory release uses its own stable idempotency key;
+- the terminal compensation failure contains enough context for reconciliation.
+
+The Lambda functions must implement the same contract. If payment succeeds but its
+response is lost, the next Task attempt must return the existing charge for that
+`orderId`, not create another one.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make an Asynchronous Express handler replay-safe
+
+Asynchronous Express can run the whole execution more than once. The event processor
+therefore sends a producer-assigned `eventId` to one idempotent handler. That handler
+must atomically claim the event, apply the domain update, and record an outbox or
+completed result before returning.
+
+{% code-block file="/api/content/technology/step-functions/code/async-express-event.asl.json" language="json" title="Asynchronous Express: idempotent event processor" /%}
+
+The ASL still retries only transient Lambda service failures. It does not claim that a
+Lambda invocation, database update, or emitted event is exactly once. The durable
+handler contract must decide what to do with:
+
+- the same `eventId` and same payload after completion;
+- the same `eventId` with a conflicting payload;
+- an in-progress claim whose worker stopped responding;
+- a domain update that committed before the function response was lost;
+- an outbox record awaiting downstream publication.
+
+Synchronous Express uses the same Express state-machine type but is started with
+`StartSyncExecution` or a supported synchronous integration. It returns the result to
+the caller and uses at-most-once workflow execution, so an interrupted invocation can
+leave the caller without a result. Caller timeouts, task retries, and side effects still
+need explicit semantics.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Treat retries as load and ambiguity, not free resilience
+
+Step Functions applies retriers in order. A match repeats the state after the configured
+delay; once attempts are exhausted, matching catchers are evaluated. Retry attempts
+are state transitions and can multiply load during a dependency incident.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the error" label="Meaning" %}
+Separate throttling, network, service, timeout, validation, authorization, and business
+rejection errors. Retry only failures whose next attempt can reasonably change outcome.
+{% /process-step %}
+{% process-step number="2" title="Bound the attempt" label="Deadline" %}
+Set Task timeout, heartbeat where applicable, maximum attempts, delay cap, and jitter.
+Keep the total retry envelope within the business deadline.
+{% /process-step %}
+{% process-step number="3" title="Protect the effect" label="Idempotency" %}
+Pass a stable operation key and persist the request fingerprint plus outcome at the
+service that owns the side effect.
+{% /process-step %}
+{% process-step number="4" title="Catch deliberately" label="Recovery" %}
+Route exhausted transient errors, terminal business failures, and compensation failures
+to different states with enough context to act safely.
+{% /process-step %}
+{% /process-flow %}
+
+`States.ALL` does not make every failure recoverable. For example, payload-size and
+runtime path errors need explicit design attention, and malformed data selection can
+fail before a service call. Consult the current
+[Step Functions error names and retry fields](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html)
+for exact catchability and redrive behavior.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the workflow and the business process
+
+Standard and Express require different evidence paths. Standard has Step Functions
+execution history available through the console and APIs. Express does not retain that
+history in Step Functions, so CloudWatch Logs must be enabled before an incident if the
+team expects to reconstruct executions.
+
+### Emit evidence at three levels
+
+- **Workflow:** starts, succeeds, fails, times out, aborts, redrives, execution duration,
+  throttling, and the state where failure occurred.
+- **Task:** attempts, error name, timeout, heartbeat loss, downstream request ID,
+  latency, and idempotency result such as claimed, replayed, or conflicted.
+- **Business:** order status, payment charge ID, inventory reservation ID,
+  compensation status, owner, and the customer-visible outcome.
+
+### Production review
+
+- Enable CloudWatch logging at a level justified by incident needs and data sensitivity;
+  redact credentials, tokens, and personal or regulated payload fields.
+- Enable tracing where supported and propagate business and request correlation IDs
+  through every service integration.
+- Alarm on failed and timed-out executions, throttling, retry growth, age of in-progress
+  business operations, and compensation or manual-recovery backlog.
+- Use least-privilege execution roles and remember that `.sync` and callback patterns
+  require additional permissions.
+- Version and alias state machines for controlled deployment; test old in-flight
+  executions against downstream schema and behavior changes.
+- Set an execution-level timeout so a missed Task timeout or wait cannot outlive the
+  business deadline.
+- Load-test retry storms, Map concurrency, and downstream quotas rather than assuming
+  serverless orchestration removes capacity boundaries.
+
+### Current primary references
+
+- [Choosing a workflow type](https://docs.aws.amazon.com/step-functions/latest/dg/choosing-workflow-type.html)
+- [Service integration patterns](https://docs.aws.amazon.com/step-functions/latest/dg/connect-to-resource.html)
+- [Handling workflow errors](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html)
+- [Viewing execution details](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-view-execution-details.html)
+- [Redriving Standard executions](https://docs.aws.amazon.com/step-functions/latest/dg/redrive-executions.html)
+- [Step Functions best practices](https://docs.aws.amazon.com/step-functions/latest/dg/sfn-best-practices.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/step-functions/quiz/step-functions-production-decisions.json" lessonSlug="step-functions" title="Step Functions Production Decisions" /%}

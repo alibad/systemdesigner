@@ -1,0 +1,159 @@
+---
+registryId: code-generation-benchmarks
+---
+
+{% section-card tone="intro" %}
+## What is a code generation benchmark?
+
+**A code generation benchmark is a repeatable experiment that asks a model to produce programs, runs those programs against a fixed test contract, and reports how often at least one sampled program succeeds.** HumanEval and MBPP are two Python-oriented benchmark collections that make this experiment convenient.
+
+In plain language, the benchmark is an executable exam, not a syntax check. It matters because fluent-looking code can be wrong, slow, unsafe, or only tailored to the examples it saw. A result helps compare candidates only when every candidate receives the same tasks, runtime, sampling budget, tests, and scoring rule.
+
+The core invariant is **same untrusted workload, same versioned test contract**: the score must be reproducible from the frozen task revision, generation settings, sandbox policy, and per-candidate test outcomes. A high pass@k is not evidence that generated code is safe to run outside that boundary.
+
+This lesson builds on [evaluation benchmarks](/genai/evaluation-benchmarks-comprehensive). Read that first if terms such as holdout, slice, contamination, or confidence interval are unfamiliar.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="164" label="HumanEval tasks" detail="Function-completion problems in the original set" tone="blue" /%}
+{% metric value="1,000" label="MBPP problems" detail="Short, mostly basic programming tasks" tone="violet" /%}
+{% metric value="pass@k" label="Primary metric" detail="At least one of k candidates passes all tests" tone="amber" /%}
+{% metric value="0 trust" label="Generated code" detail="Treat every candidate as an untrusted workload" tone="rose" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Turn a prompt into executable evidence
+
+The test suite, not surface similarity to a reference solution, decides whether a candidate passes. A defensible run records enough detail to reproduce both the number and every exclusion.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the manifest" label="Contract" %}
+Version the dataset or product task, prompt, entry point, language image, dependencies, hidden-test policy, decoding settings, and timeout before sampling.
+{% /process-step %}
+{% process-step number="2" title="Sample candidates" label="Generate" %}
+Keep every completion, seed, token count, model revision, and candidate index. Do not silently resample failures or select a best-looking answer.
+{% /process-step %}
+{% process-step number="3" title="Contain execution" label="Sandbox" %}
+Parse and execute each candidate in a disposable isolated environment with no ambient credentials, bounded CPU, memory, output, files, processes, and network.
+{% /process-step %}
+{% process-step number="4" title="Score and retain evidence" label="Report" %}
+Run public and protected tests, retain outcomes and failure classes, calculate the declared pass@k estimator, then report slices, uncertainty, cost, and exclusions.
+{% /process-step %}
+{% /process-flow %}
+
+### What belongs in the run manifest
+
+- **Task contract:** benchmark revision, task IDs, prompt template, function signature, allowed imports, and public versus protected test identities.
+- **Generation contract:** model build, temperature, top-p, maximum tokens, seed policy, candidates per task, and any repair loop.
+- **Execution contract:** immutable runtime image digest, package allowlist, CPU and memory limits, wall-clock timeout, filesystem policy, and network policy.
+- **Scoring contract:** whether every test must pass, the pass@k values, aggregation weights, dropped-task policy, and interval method.
+
+{% callout variant="warn" %}
+Never run a completion with the evaluator's credentials, repository checkout, package-manager token, host filesystem, or unrestricted network. A subprocess with a timeout is not, by itself, an isolation boundary.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Design the pass@k claim before sampling
+
+For a task with `n` generated candidates, of which `c` pass all tests, pass@k estimates the chance that a uniformly chosen set of `k` candidates contains at least one passing solution. The common unbiased estimator is `1 - C(n - c, k) / C(n, k)`. It is only meaningful when the candidates, task set, and verifier match the declared protocol.
+
+The lab uses synthetic task slices. Change the observed samples, task mix, verifier strength, timeout, and aggregation rule. It shows why a larger `k` can improve opportunity while also increasing execution cost, and why visible examples alone cannot support a claim about unseen behavior.
+{% /section-card %}
+
+{% interactive-block id="genai/code-generation-benchmarks-pass-at-k-design-lab" dataFile="/api/content/genai/code-generation-benchmarks/data/pass-at-k-design.json" /%}
+
+{% section-card %}
+## Read pass@k without hiding the denominator
+
+### What the metric answers
+
+- **pass@1:** How often the first sampled completion passes the full declared suite. This is the closest view of an assistant that offers one suggestion.
+- **pass@k:** How often at least one of `k` samples passes. It measures an assisted search budget, not the quality of the first answer.
+- **Per-slice pass@k:** Which task families benefit from sampling and which remain weak. A macro average prevents a large, easy slice from silently dominating.
+
+### What to publish beside the score
+
+1. Candidate count per task, number of tasks, exact `k`, model and decoding configuration.
+2. Benchmark revision, public and protected test policy, timeout, environment digest, and package policy.
+3. Aggregate formula plus HumanEval, MBPP, and product-shaped slice scores with denominators and uncertainty.
+4. Median and tail execution time, timeout rate, syntax and runtime failures, token and evaluator cost, and any omitted tasks.
+
+{% callout variant="info" %}
+Increasing `k` is a product decision as well as an evaluation decision. A coding agent that creates ten candidates must still rank, test, expose, and safely discard the other nine. Report that search budget rather than presenting pass@10 as an interchangeable replacement for pass@1.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Use HumanEval and MBPP as narrow lenses
+
+{% concept-grid columns="2" %}
+{% concept-card title="HumanEval" eyebrow="Function completion" icon="code" tone="blue" %}
+HumanEval presents a Python function signature and docstring, then checks a candidate against tests. It is compact and easy to reproduce, but it has only 164 original tasks and is widely discussed.
+{% /concept-card %}
+{% concept-card title="MBPP" eyebrow="Mostly basic tasks" icon="list" tone="violet" %}
+MBPP contains short natural-language programming problems with solutions and tests. It is useful for entry-level behavior, but its task style and minimum test count do not represent a multi-file repository.
+{% /concept-card %}
+{% concept-card title="What both can reveal" eyebrow="Useful signal" icon="search" tone="green" %}
+They can reveal regressions in small algorithmic and implementation tasks when the benchmark revision, prompt, execution harness, and sampling protocol are frozen.
+{% /concept-card %}
+{% concept-card title="What neither certifies" eyebrow="Missing evidence" icon="shield" tone="rose" %}
+Neither benchmark alone establishes repository navigation, dependency management, secure changes, test maintenance, reviewability, latency, licensing, or production readiness.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Limitations that change the claim
+
+- **Small and public collections:** model pretraining, tuning data, prompt libraries, and benchmark discussions can overlap with tasks or near-duplicates. Measure and disclose contamination; do not call an exposed task an independent holdout.
+- **Incomplete behavioral coverage:** a passing test suite proves only the properties it asserts. Add metamorphic, boundary, adversarial, performance, and integration tests for the product behavior at stake.
+- **Single-language, function-level shape:** Python snippets omit multi-file edits, build systems, configuration, APIs, database migrations, code review, and collaboration constraints.
+- **Sampling sensitivity:** temperature, prompt scaffolding, repair loops, and candidate selection can move pass@k. Predeclare these choices and apply them evenly.
+
+{% code-block file="/api/content/genai/code-generation-benchmarks/code/humaneval-prompt.py" language="python" title="HumanEval-style task contract" /%}
+{% code-block file="/api/content/genai/code-generation-benchmarks/code/mbpp-visible-tests.py" language="python" title="Visible tests are examples, not full coverage" /%}
+{% /section-card %}
+
+{% section-card %}
+## Gate execution, security, and evidence separately
+
+A correct result from an unsafe evaluator is not a valid release result. This gate models a candidate runner: choose the access boundaries and evidence conditions, then inspect the execution path, risk, evidence quality, and release consequence.
+
+The secure default is deliberately restrictive: a pinned local runtime, read-only task files, disposable writable scratch space, no network, no host mounts, no ambient dependencies, protected tests, stable reruns, and a clean holdout. Relaxing one boundary may be necessary for a product scenario, but it must be explicit and independently reviewed.
+{% /section-card %}
+
+{% interactive-block id="genai/code-generation-benchmarks-sandbox-evidence-gate-lab" dataFile="/api/content/genai/code-generation-benchmarks/data/sandbox-evidence-gate.json" /%}
+
+{% section-card tone="warn" %}
+## Fail closed when the verifier cannot support the claim
+
+- **Timeout or resource exhaustion:** classify it as a failure, capture bounded logs, terminate the isolated workload, and avoid retrying indefinitely. Measure the timeout rate by task slice.
+- **Flaky tests:** rerun the test harness on known-good and known-bad fixtures before blaming the candidate. A non-deterministic verifier produces weak evidence and should hold the release.
+- **Contaminated or over-tuned tasks:** quarantine exact and near-duplicate clusters from training, tuning, prompt development, and prior debugging. Replace them with independently sourced or freshly authored held-out tasks.
+- **Malicious or policy-violating behavior:** block release, preserve the minimal forensic record, rotate any potentially exposed secret, and investigate the isolation failure. Do not turn the same run into a retry.
+- **Protected-test failures:** report them separately from visible-test success. A candidate that fits examples but fails held-out cases is a generalization failure, not partial correctness.
+{% /section-card %}
+
+{% section-card %}
+## Implement a minimal evaluator boundary
+
+The example orchestrates a runner rather than pretending that Python resource limits create a complete sandbox. In production, the runner needs a hardened isolation technology appropriate to the platform, an image allowlist, an egress policy, a process supervisor, and an audited artifact store.
+
+{% code-block file="/api/content/genai/code-generation-benchmarks/code/isolated-evaluation-runner.py" language="python" title="Evaluator orchestration with an explicit trust boundary" /%}
+
+### Operational checks for every run
+
+- Pin the evaluator image by digest and verify the runner has no production credentials or mounted source repository.
+- Record task, candidate, image, policy, test-suite version, start and end time, exit reason, resource use, and redacted failure class in an append-only result record.
+- Alert on changes in pass@1, timeout rate, protected-test gap, sandbox-policy violations, contamination findings, and evaluator flakiness.
+- Keep a baseline model and a bounded canary path. Offline pass@k earns controlled exposure, not an unrestricted deployment.
+{% /section-card %}
+
+{% section-card %}
+## Choose evidence that matches the product
+
+For a code-completion feature, measure pass@1, latency, acceptance, and protected-test behavior on representative local edits. For an agent that edits repositories, add multi-file tasks, build and test outcomes, diff size, rollback behavior, dependency changes, secret scanning, and reviewer burden. For security-sensitive automation, add adversarial prompts, permission-boundary tests, and human approval gates.
+
+The practical trade-off is simple: public benchmarks are cheap, stable regression signals; product-shaped, independently held-out tasks are slower and more expensive, but they support the release claim users actually rely on. Use both, and do not let a single leaderboard number decide deployment.
+{% /section-card %}
+
+{% quiz title="Code Generation Benchmarks Check" questionsFile="/api/content/genai/code-generation-benchmarks/quiz/code-generation-benchmarks.json" lessonSlug="code-generation-benchmarks" /%}

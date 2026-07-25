@@ -1,0 +1,242 @@
+---
+registryId: bpe-algorithm
+---
+
+{% section-card tone="intro" %}
+## What is Byte Pair Encoding?
+
+**Byte Pair Encoding (BPE)** is a vocabulary-learning algorithm that repeatedly replaces the most frequent adjacent symbol pair with one new symbol. In tokenization, those learned symbols become reusable subword pieces such as `low`, `ing`, or `_user`.
+
+BPE sits between character and word tokenization. It can represent unseen words from smaller pieces while giving frequent patterns shorter sequences. That balance matters because every token consumes model context and inference work, but every vocabulary entry also consumes an embedding row and must be learned from data.
+
+### The invariant to protect
+
+**The normalizer, boundary rules, ordered merge table, token-to-ID map, special tokens, and model checkpoint form one contract.** Applying the same merges in a different order, or assigning a familiar piece a different ID, changes what the model receives.
+
+This lesson assumes the basic text-to-token path from [Tokenization Fundamentals](/genai/tokenization-fundamentals). It prepares you for [Production Tokenization Systems](/genai/production-tokenization), where that contract must survive batching, caching, releases, and rollback.
+
+{% metric-strip %}
+{% metric value="Count" label="Evidence" detail="Every merge begins with weighted adjacent-pair frequency in the current corpus segmentation." tone="blue" /%}
+{% metric value="Ranked" label="Program" detail="The learned merge order is deterministic model input, not a bag of optional vocabulary strings." tone="violet" /%}
+{% metric value="Finite" label="Budget" detail="A larger vocabulary shortens common sequences but adds parameters and can overfit a narrow corpus." tone="amber" /%}
+{% metric value="Exact" label="Contract" detail="Existing text must keep approved IDs unless a compatible checkpoint is trained and released with it." tone="green" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card %}
+## Put BPE between two costly extremes
+
+{% concept-grid columns="3" %}
+{% concept-card title="Characters or bytes" eyebrow="Small fixed alphabet" icon="code" tone="blue" %}
+Any input can fall back to small symbols, but common words and identifiers become long sequences. That consumes context and repeats work in every transformer layer.
+{% /concept-card %}
+{% concept-card title="Whole words" eyebrow="Short common sequences" icon="database" tone="amber" %}
+Frequent words can use one ID, but spelling variants, names, code, and new terms create an unbounded vocabulary or collapse into an unknown token.
+{% /concept-card %}
+{% concept-card title="BPE subwords" eyebrow="Learned compromise" icon="layers" tone="green" %}
+Frequent adjacent pieces earn compact tokens. Rare text remains representable from smaller symbols, assuming the base alphabet or byte fallback covers the input.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Know what BPE optimizes
+
+BPE directly optimizes pair frequency on its training corpus. It does **not** directly optimize linguistic morphology, downstream accuracy, fairness across languages, or production latency. Those outcomes must be measured separately.
+
+- Repeated stems often emerge because they create frequent pairs, not because the algorithm understands a word's meaning.
+- A domain term may become one token while a common word in an underrepresented language remains many tokens.
+- Better corpus compression can still hurt a model if useful boundaries disappear or token IDs no longer match its checkpoint.
+{% /section-card %}
+
+{% section-card %}
+## Learn one merge at a time
+
+{% process-flow %}
+{% process-step number="1" title="Initialize symbols" label="Declared boundaries" %}
+Normalize and pre-tokenize the corpus, split each word into characters or bytes, and retain a word-ending marker such as `</w>`.
+{% /process-step %}
+{% process-step number="2" title="Count adjacent pairs" label="Weighted evidence" %}
+Count pairs inside every current token sequence and multiply by each sequence's corpus frequency.
+{% /process-step %}
+{% process-step number="3" title="Merge the winner" label="One vocabulary entry" %}
+Choose the highest-frequency eligible pair, replace every non-overlapping occurrence, and append the result to the vocabulary.
+{% /process-step %}
+{% process-step number="4" title="Repeat to budget" label="Ordered program" %}
+Recount from the new segmentation until the vocabulary budget or minimum-frequency rule stops training.
+{% /process-step %}
+{% /process-flow %}
+
+For a weighted corpus, the score is:
+
+- `pair_count(a, b) = sum(word_frequency x occurrences_of_pair_in_word)`
+- `weighted_tokens = sum(word_frequency x tokens_in_current_segmentation)`
+- `compression = initial_weighted_tokens / current_weighted_tokens`
+
+Recount after every merge. A merge changes the neighbors visible to the next step, so selecting the top pairs once and applying them in bulk is a different algorithm.
+{% /section-card %}
+
+{% interactive-block id="genai/bpe-algorithm-merge-training-lab" dataFile="/api/content/genai/bpe-algorithm/data/merge-training-model.json" /%}
+
+{% section-card %}
+## Read the training trace as evidence, not truth
+
+The first few merges usually capture broad repeated structure. Later merges often become more specific because earlier steps have already compressed the common patterns.
+
+### What the trace can tell you
+
+- **A high pair count** means the current corpus offers repeated local evidence for that merge.
+- **A large token reduction** means the merge removes many sequence positions in the weighted sample.
+- **A low-frequency late merge** may be useful, but it needs validation on held-out traffic before consuming vocabulary capacity.
+- **A whole-word token** is not inherently good or bad; it trades sequence length for a dedicated embedding and less compositional sharing.
+
+### What the trace cannot prove
+
+- The training corpus represents production languages, domains, naming conventions, or user groups.
+- Shorter token sequences improve downstream task quality.
+- The same vocabulary budget is appropriate for a small encoder and a large generative model.
+- A merge table can be changed after model training without retraining or compatibility evidence.
+{% /section-card %}
+
+{% section-card %}
+## Encode text by replaying the ranked merge program
+
+Training produces an ordered merge table. Encoding must use the same normalization, pre-tokenization, base symbols, merge ranks, special-token policy, and ID map.
+
+{% system-flow title="Deterministic text-to-ID path" caption="Every stage is part of the model-facing contract. A change at any stage can alter sequence length, boundaries, or embedding IDs." %}
+{% system-node title="Normalize text" eyebrow="Unicode and case" icon="repeat" tone="blue" %}
+Apply the exact Unicode, whitespace, and casing policy used to build and validate the bundle.
+{% /system-node %}
+{% system-node title="Mark boundaries" eyebrow="Pre-tokenization" icon="split" tone="cyan" %}
+Separate words or byte spans according to the approved policy and add any boundary representation.
+{% /system-node %}
+{% system-node title="Apply merge ranks" eyebrow="Lowest rank first" icon="layers" tone="violet" %}
+Start from base symbols and replay eligible merges in learned order until no ranked pair remains.
+{% /system-node %}
+{% system-node title="Map pieces to IDs" eyebrow="Checkpoint contract" icon="database" tone="green" %}
+Resolve every final piece to the integer row expected by the model and preserve offsets when clients need them.
+{% /system-node %}
+{% /system-flow %}
+
+Do not tokenize greedily by longest string unless the tokenizer specification explicitly defines that behavior. Standard BPE segmentation is determined by merge ranks; a longer vocabulary item can lose to an earlier-ranked sequence of merges.
+{% /section-card %}
+
+{% interactive-block id="genai/bpe-algorithm-encoding-contract-lab" dataFile="/api/content/genai/bpe-algorithm/data/encoding-contract-model.json" /%}
+
+{% section-card %}
+## Distinguish BPE families before implementing one
+
+{% concept-grid columns="3" %}
+{% concept-card title="Word-level BPE" eyebrow="Explicit word boundaries" icon="file-text" tone="blue" %}
+Training starts from characters within pre-tokenized words and commonly uses an end-of-word marker. The pre-tokenizer decides which cross-boundary pairs are impossible.
+{% /concept-card %}
+{% concept-card title="Byte-level BPE" eyebrow="Byte fallback" icon="binary" tone="violet" %}
+Input bytes are mapped to a reversible visible alphabet before merges. This avoids a global unknown token, but unusual Unicode text can expand into several byte-derived pieces.
+{% /concept-card %}
+{% concept-card title="SentencePiece BPE" eyebrow="Raw-text training" icon="braces" tone="green" %}
+SentencePiece learns over a representation that includes whitespace markers and does not require a separate language-specific word tokenizer. Its normalization is still an explicit contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+These systems share the pair-merge idea but not identical normalization, boundary, fallback, or decoding behavior. Name the exact implementation and artifact versions rather than treating "BPE" as a complete tokenizer specification.
+{% /section-card %}
+
+{% section-card %}
+## Choose the corpus and vocabulary budget together
+
+The vocabulary budget controls how many merge-derived symbols may compete for embedding capacity. The corpus decides which patterns win that competition.
+
+### Build representative evidence
+
+- Sample by language, script, domain, document type, code language, and input length instead of taking one global random average.
+- Deduplicate boilerplate and near-duplicate documents so repeated templates do not dominate pair counts.
+- Preserve realistic punctuation, whitespace, identifiers, emoji, and malformed-input policy.
+- Keep a held-out tokenizer evaluation set that training never sees.
+- Record corpus lineage, normalization, pre-tokenization, frequency weighting, random seeds, and tool versions.
+
+### Treat budget as a model trade-off
+
+- A larger vocabulary often lowers tokens per input for frequent slices.
+- Every extra token adds an embedding row and output-logit capacity; the cost scales with model width.
+- Rare dedicated tokens receive fewer training updates and may learn weaker representations.
+- Small vocabularies share pieces broadly but lengthen sequences, increasing attention and decoding work.
+- Compare candidate budgets with the target model architecture and training-token budget, not tokenizer compression alone.
+{% /section-card %}
+
+{% section-card %}
+## Implement a deterministic trainer
+
+The example keeps the core algorithm visible: weighted pair counts, deterministic tie-breaking, non-overlapping replacement, a minimum frequency, and a finite merge budget.
+
+{% code-block file="/api/content/genai/bpe-algorithm/code/train_bpe.py" language="python" title="Deterministic BPE training loop" /%}
+
+Production trainers also need:
+
+- streaming or sharded pair statistics for corpora that do not fit in memory;
+- stable reduction and tie-breaking across workers;
+- checksums for the corpus manifest, normalizer, pre-tokenizer, vocabulary, and merge table;
+- restartable checkpoints because a long distributed count should not restart from zero;
+- explicit handling for reserved IDs and byte or character fallback.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Expect representation failures before service failures
+
+Tokenizer problems often appear as cost or quality regressions while the service remains healthy.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Slice expansion" eyebrow="Coverage failure" icon="gauge" tone="amber" %}
+An underrepresented language, code style, or domain produces many more tokens than the average, raising truncation and latency for that slice.
+{% /concept-card %}
+{% concept-card title="Normalization drift" eyebrow="Boundary failure" icon="repeat" tone="rose" %}
+Training and serving disagree about case, Unicode composition, whitespace, or control characters, so familiar text reaches different merges.
+{% /concept-card %}
+{% concept-card title="ID remapping" eyebrow="Compatibility failure" icon="warning" tone="rose" %}
+A rebuilt vocabulary assigns an old piece a new integer. The model silently reads a different embedding row even when logs show recognizable token strings.
+{% /concept-card %}
+{% concept-card title="Narrow-corpus memorization" eyebrow="Allocation failure" icon="database" tone="violet" %}
+Vocabulary capacity is spent on repeated templates or domain strings while protected traffic remains fragmented.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use explicit fallback for unseen symbols, but measure it. A byte-level tokenizer can represent every byte and still impose severe sequence expansion on specific inputs.
+{% /section-card %}
+
+{% section-card %}
+## Version and test the complete encoding contract
+
+Golden fixtures catch exact drift that aggregate compression metrics cannot see.
+
+{% code-block file="/api/content/genai/bpe-algorithm/code/verify_tokenizer_contract.py" language="python" title="Tokenizer compatibility gate" /%}
+
+For every candidate bundle:
+
+1. fingerprint normalization, pre-tokenization, base alphabet, ordered merges, ID map, special tokens, and library behavior;
+2. compare exact token IDs, offsets, special-token boundaries, and decode behavior on approved fixtures;
+3. measure token expansion, fallback, truncation, latency, and memory on protected slices;
+4. run downstream quality and safety evaluations with the compatible model checkpoint;
+5. canary and roll back the tokenizer, checkpoint, prompt template, and caches as one release unit.
+
+A changed tokenizer can be valid as a new training experiment. It is not a drop-in production optimization for an existing checkpoint unless the compatibility contract still passes.
+{% /section-card %}
+
+{% section-card %}
+## Review BPE with production evidence
+
+### Training evidence
+
+- Pair counts and tie-breaking are deterministic across repeated and distributed runs.
+- Corpus weighting and deduplication do not let one source dominate accidentally.
+- Candidate vocabulary budgets are compared on held-out, slice-aware text.
+- Reserved IDs, fallback symbols, and decoding round trips are tested before model training.
+
+### Model and serving evidence
+
+- Training, evaluation, and serving load the same fingerprinted tokenizer bundle.
+- Dashboards expose tokens per byte or character by protected slice, not only a global mean.
+- Context truncation, fallback expansion, and latency are correlated with downstream quality.
+- Golden fixtures block ID, offset, boundary, or normalization drift before canary traffic.
+- Rollback restores the complete compatible tokenizer-and-checkpoint unit.
+
+The useful question is not "Does this vocabulary compress the corpus?" It is "Does this representation allocate model capacity and runtime work well for the traffic and checkpoint we intend to serve?"
+{% /section-card %}
+
+{% quiz title="BPE Algorithm Decision Check" lessonSlug="bpe-algorithm" questionsFile="/api/content/genai/bpe-algorithm/quiz/bpe-algorithm-decisions.json" /%}

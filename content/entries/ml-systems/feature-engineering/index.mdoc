@@ -1,0 +1,187 @@
+---
+registryId: feature-engineering
+---
+
+{% section-card tone="intro" %}
+## What is feature engineering?
+
+Feature engineering is the work of turning raw observations into model inputs that express a useful, reproducible signal. A feature can be a direct value, such as account age, or a derived value, such as purchases in the previous seven days.
+
+The goal is not to manufacture as many columns as possible. The goal is to represent what the model needs to know using information that was genuinely available when the prediction was made. A feature is only production-ready when its meaning, timing, transformation state, and serving behavior are defined together.
+
+Read [ML Fundamentals](/ml-systems/ml-fundamentals) first if prediction units, labels, training splits, and generalization are unfamiliar. Review [Data Pipelines](/ml-systems/data-pipelines) for the systems that compute and transport these values.
+{% /section-card %}
+
+{% section-card %}
+## A useful feature must satisfy four invariants
+
+{% concept-grid columns="2" %}
+{% concept-card title="Available" eyebrow="Information boundary" icon="timer" tone="cyan" %}
+The value exists when the prediction is requested. Future events, delayed labels, and late-arriving records cannot silently enter historical training rows.
+{% /concept-card %}
+{% concept-card title="Reproducible" eyebrow="Same definition" icon="repeat" tone="blue" %}
+Given the same entity, timestamp, raw inputs, and feature version, the offline and online paths produce the same value.
+{% /concept-card %}
+{% concept-card title="Useful" eyebrow="Unseen evidence" icon="activity" tone="green" %}
+The feature improves an appropriate holdout metric or important slice enough to justify its complexity and cost.
+{% /concept-card %}
+{% concept-card title="Operable" eyebrow="Owned contract" icon="shield" tone="amber" %}
+The feature has a type, owner, source, freshness target, null policy, lineage, monitoring plan, and safe fallback.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+A feature can be highly predictive and still be invalid. If it contains information unavailable at prediction time, the model is learning from the future rather than from a deployable signal.
+{% /callout %}
+{% /section-card %}
+
+{% system-flow title="One feature definition, two materializations" caption="The feature contract is shared; historical and online values are computed for different access patterns." %}
+{% system-node title="Raw observations" eyebrow="Preserve time" icon="cloud" tone="cyan" %}
+Store entity keys, event time, availability time, source lineage, and immutable raw values.
+{% /system-node %}
+{% system-node title="Versioned transform" eyebrow="Define once" icon="braces" tone="violet" %}
+Specify inputs, windows, learned state, types, null behavior, and output semantics.
+{% /system-node %}
+{% system-node title="Offline materialization" eyebrow="Train" icon="database" tone="blue" %}
+Reconstruct each historical value at its prediction timestamp without future information.
+{% /system-node %}
+{% system-node title="Online materialization" eyebrow="Serve" icon="speed" tone="green" %}
+Publish fresh entity values within the inference latency and availability budget.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Start from the feature's meaning, not a transformation menu
+
+Ask three questions before choosing an encoding:
+
+1. **What relationship should become easier to learn?** A ratio may express affordability; a rolling count may express recent intensity; a sine/cosine pair may express a cycle.
+2. **Which model will consume the value?** Distance-based and linear models are sensitive to scale and geometry in ways many tree-based models are not.
+3. **What must production reproduce?** High-cardinality encoders, external enrichments, and long windows add state, latency, and failure modes.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Numeric" eyebrow="Magnitude and shape" icon="gauge" tone="blue" %}
+- Scale when model geometry depends on distance or gradient size.
+- Use a log transform for positive, heavily skewed values when relative differences matter.
+- Add ratios or differences only when their denominator, units, and missing behavior are defensible.
+{% /concept-card %}
+{% concept-card title="Categorical" eyebrow="Identity without false order" icon="layers" tone="violet" %}
+- One-hot encode bounded nominal categories.
+- Group rare values when sparse dimensions are unstable.
+- Fit frequency or target-derived encodings inside each training fold, with unknown-category behavior defined.
+{% /concept-card %}
+{% concept-card title="Temporal" eyebrow="History without the future" icon="timer" tone="cyan" %}
+- Express recency as time since a prior event.
+- Compute windows using only eligible earlier events.
+- Encode periodic variables with a representation that keeps the cycle boundary adjacent.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% interactive-block id="ml-systems/feature-engineering-representation-workbench" dataFile="/api/content/ml-systems/feature-engineering/data/representation-workbench.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Fit learned transformation state after the split
+
+Some transforms are stateless: extracting the hour from a timestamp requires no learned parameters. Others learn state from data: imputers learn replacement values, scalers learn distribution statistics, vocabularies learn categories, and selectors learn which inputs survive.
+
+{% process-flow %}
+{% process-step number="1" title="Create the evaluation boundary" label="Split first" %}
+Separate training and evaluation evidence by the correct unit and time before inspecting target-derived statistics.
+{% /process-step %}
+{% process-step number="2" title="Fit on training evidence" label="Learn state" %}
+Learn medians, means, vocabularies, bins, encodings, and selected columns from the training partition only.
+{% /process-step %}
+{% process-step number="3" title="Transform every partition" label="Reuse state" %}
+Apply the frozen training-fitted transform to validation, test, batch inference, and online inference inputs.
+{% /process-step %}
+{% process-step number="4" title="Version the full pipeline" label="Release" %}
+Bind preprocessing state, feature definitions, model artifact, and schema so they are promoted and rolled back together.
+{% /process-step %}
+{% /process-flow %}
+
+The same rule applies inside cross-validation: each fold must fit preprocessing and feature selection using only that fold's training portion. A pipeline makes this boundary explicit and prevents inconsistent transformations.
+
+{% code-block file="/api/content/ml-systems/feature-engineering/code/fit-transform-contract.py" language="python" title="Fit transformation state on training values only" /%}
+{% /section-card %}
+
+{% section-card %}
+## Point-in-time joins keep historical features honest
+
+A historical training row asks: **what could the system have known for this entity at this prediction timestamp?** That question involves two clocks:
+
+- **Event time:** when the source event happened in the real world.
+- **Availability time:** when the event became usable by the feature pipeline.
+
+A row that happened before the prediction but arrived afterward can still create training-serving skew. The offline job sees it during a later backfill; the online model could not have seen it at prediction time. A correct join also enforces entity keys, window boundaries, and any time-to-live policy.
+
+{% interactive-block id="ml-systems/feature-engineering-point-in-time-join-lab" dataFile="/api/content/ml-systems/feature-engineering/data/point-in-time-join-lab.json" /%}
+
+{% code-block file="/api/content/ml-systems/feature-engineering/code/point-in-time-join.py" language="python" title="Join by event time and availability time" /%}
+{% /section-card %}
+
+{% section-card %}
+## Select features by evidence and total cost
+
+Feature selection is a controlled model decision, not a one-time ranking exercise. Put selection inside the evaluation loop and compare the smallest useful set with larger candidates.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Filter methods" eyebrow="Fast screening" icon="search" tone="cyan" %}
+Rank inputs using statistics independent of the final model. They are inexpensive, but they can miss interactions and do not prove production value.
+{% /concept-card %}
+{% concept-card title="Wrapper methods" eyebrow="Subset experiments" icon="repeat" tone="amber" %}
+Train repeated candidate subsets against the chosen metric. They capture model-specific interactions but can be computationally expensive and unstable on small data.
+{% /concept-card %}
+{% concept-card title="Embedded methods" eyebrow="Selection during fit" icon="layers" tone="violet" %}
+Use regularization, tree splits, or learned gates to reduce effective inputs while training. Validate stability across folds and time periods.
+{% /concept-card %}
+{% /concept-grid %}
+
+Evaluate each candidate across more than aggregate accuracy:
+
+- holdout quality and important slice quality;
+- stability across folds, seeds, and out-of-time windows;
+- data acquisition and computation cost;
+- online latency, freshness, and availability;
+- privacy, policy, and explanation requirements;
+- monitoring burden and ownership;
+- ablation evidence showing what is lost when the feature is removed.
+
+Feature importance is not causal evidence. A model can rely on a proxy, split credit across correlated inputs, or assign importance to a leaking feature.
+{% /section-card %}
+
+{% section-card %}
+## Treat every production feature as a contract
+
+For each released feature, record:
+
+- **Meaning:** a plain-language definition, unit, entity key, and valid range.
+- **Timing:** event-time rule, availability rule, window, freshness target, and time to live.
+- **Computation:** source fields, transformation version, learned state, and dependencies.
+- **Serving:** offline and online materializations, latency budget, null fallback, and default behavior.
+- **Governance:** owner, lineage, access policy, sensitive-data classification, and retention.
+- **Monitoring:** null rate, freshness, distribution shift, offline-online parity, and downstream model usage.
+
+### Monitor the mechanism, not only the distribution
+
+Distribution drift can be legitimate, while a stable distribution can hide a broken pipeline. Pair statistical checks with operational invariants:
+
+1. compare offline and online values for sampled entity-timestamp pairs;
+2. alert on late data, stale values, schema changes, and default-rate spikes;
+3. track feature versions alongside model predictions and outcomes;
+4. rehearse fallback and rollback when a dependency or backfill fails.
+
+{% callout variant="tip" %}
+Prefer the simplest feature set that meets the product target and can be reproduced under production constraints. Every additional feature adds a dependency that must remain correct for every prediction.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [scikit-learn: common pitfalls and recommended practices](https://scikit-learn.org/stable/common_pitfalls.html) explains inconsistent preprocessing, train-only fitting, and leakage-safe pipelines.
+- [scikit-learn: ColumnTransformer with mixed types](https://scikit-learn.org/stable/auto_examples/compose/plot_column_transformer_mixed_types.html) demonstrates separate numeric and categorical preprocessing inside one model pipeline.
+- [Feast: point-in-time joins](https://docs.feast.dev/getting-started/concepts/point-in-time-joins) documents historical retrieval relative to each entity timestamp and feature time-to-live window.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/feature-engineering/quiz/feature-engineering.json" lessonSlug="feature-engineering" title="Feature Engineering Decision Check" /%}

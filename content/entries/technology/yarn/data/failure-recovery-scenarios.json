@@ -1,0 +1,125 @@
+{
+  "title": "Recover the right YARN layer",
+  "description": "Inject a component failure, set the cluster recovery posture, and choose the first response. The trace distinguishes scheduler recovery from framework retry and from worker-local evidence.",
+  "defaults": {
+    "scenarioId": "node-loss",
+    "actionId": "quarantine-node",
+    "rmHa": true,
+    "nmRecovery": false,
+    "logAggregation": true
+  },
+  "actions": [
+    {
+      "id": "failover-rm",
+      "label": "Fail over the ResourceManager",
+      "detail": "Promote the standby and reconstruct scheduler state."
+    },
+    {
+      "id": "quarantine-node",
+      "label": "Quarantine the worker",
+      "detail": "Stop new placement and let the application retry lost work elsewhere."
+    },
+    {
+      "id": "restart-am",
+      "label": "Relaunch the ApplicationMaster",
+      "detail": "Use the application's attempt and checkpoint contract."
+    },
+    {
+      "id": "rightsize-container",
+      "label": "Correct the container request",
+      "detail": "Inspect diagnostics, fix the memory envelope, and retry idempotent work."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "rm-loss",
+      "label": "Active ResourceManager stops",
+      "detail": "Scheduling and application control lose their active authority.",
+      "component": "ResourceManager",
+      "symptom": "Node and ApplicationMaster heartbeats cannot reach the active RM.",
+      "owner": "RM HA",
+      "boundary": "Promote a standby backed by a healthy state store, then reconstruct applications, requests, queues, and live containers.",
+      "evidence": "Verify active/standby state, state-store health, node re-registration, queue usage, and application progress.",
+      "correctActionId": "failover-rm",
+      "correctResult": "A standby ResourceManager can resume the control plane. Work-preserving recovery reduces container loss, but the application still must tolerate a temporary scheduling gap.",
+      "wrongResult": "Restarting a worker or one application does not restore the cluster-wide scheduler authority. Applications remain unable to negotiate resources.",
+      "failedContainers": 120,
+      "baseRecoveryMinutes": 8,
+      "benefitsFromRmHa": true,
+      "benefitsFromNmRecovery": false,
+      "needsAggregatedLogs": false
+    },
+    {
+      "id": "node-loss",
+      "label": "Worker disappears",
+      "detail": "The ResourceManager stops receiving one NodeManager heartbeat.",
+      "component": "NodeManager",
+      "symptom": "The node becomes LOST or UNHEALTHY and its running containers vanish.",
+      "owner": "ApplicationMaster",
+      "boundary": "Stop placing new containers on the node; each framework decides which failed task attempts can be retried on healthy workers.",
+      "evidence": "Check node health, lost container diagnostics, retried task IDs, output commit state, and application progress.",
+      "correctActionId": "quarantine-node",
+      "correctResult": "The scheduler removes the failed node from placement while the ApplicationMaster requests replacement containers. External side effects still need idempotent task design.",
+      "wrongResult": "Failing over the ResourceManager or relaunching every ApplicationMaster expands the incident without removing the unhealthy worker from placement.",
+      "failedContainers": 18,
+      "baseRecoveryMinutes": 12,
+      "benefitsFromRmHa": false,
+      "benefitsFromNmRecovery": false,
+      "needsAggregatedLogs": true
+    },
+    {
+      "id": "nm-restart",
+      "label": "NodeManager process restarts",
+      "detail": "The host remains healthy while its worker agent is restarted.",
+      "component": "NodeManager",
+      "symptom": "The NodeManager connection drops, but supervised container processes may still run.",
+      "owner": "NM recovery",
+      "boundary": "Reload the local NodeManager state store and reattach recoverable containers and auxiliary services before accepting new work.",
+      "evidence": "Verify recovered container IDs, auxiliary-service state, local directories, RPC address, and renewed heartbeats.",
+      "correctActionId": "quarantine-node",
+      "correctResult": "Keep the node out of new placement while recovery reattaches supervised containers. If recovery is disabled, the ApplicationMaster must replace lost attempts.",
+      "wrongResult": "ResourceManager failover cannot recreate NodeManager-local state. Treating the restart as an AM failure leaves the worker boundary unverified.",
+      "failedContainers": 14,
+      "baseRecoveryMinutes": 6,
+      "benefitsFromRmHa": false,
+      "benefitsFromNmRecovery": true,
+      "needsAggregatedLogs": true
+    },
+    {
+      "id": "am-loss",
+      "label": "ApplicationMaster crashes",
+      "detail": "One application's coordinator loses progress and task state.",
+      "component": "ApplicationMaster",
+      "symptom": "The application attempt fails while other applications and nodes remain healthy.",
+      "owner": "ApplicationsManager",
+      "boundary": "Relaunch the AM within its maximum-attempt policy; the framework restores checkpoints and reconciles already-running or completed work.",
+      "evidence": "Inspect AM diagnostics, attempt count, checkpoint state, container reconciliation, and duplicate-safe output commits.",
+      "correctActionId": "restart-am",
+      "correctResult": "The ResourceManager can launch another AM attempt, but the framework defines how much application progress is recovered and which tasks replay.",
+      "wrongResult": "Worker quarantine or cluster-wide failover does not repair an application-specific coordinator and may discard useful running work.",
+      "failedContainers": 42,
+      "baseRecoveryMinutes": 9,
+      "benefitsFromRmHa": false,
+      "benefitsFromNmRecovery": false,
+      "needsAggregatedLogs": true
+    },
+    {
+      "id": "memory-kill",
+      "label": "Container exceeds memory",
+      "detail": "A task crosses its physical-memory resource envelope.",
+      "component": "Container",
+      "symptom": "The NodeManager kills the container and reports an exit status and diagnostics.",
+      "owner": "Application owner",
+      "boundary": "Measure heap, native memory, overhead, and workload skew; request a justified envelope before retrying the task.",
+      "evidence": "Correlate container diagnostics, stderr, peak memory, host pressure, exit status, and repeated failures by task or input partition.",
+      "correctActionId": "rightsize-container",
+      "correctResult": "A corrected request can stop repeat kills. Keep enough node headroom and investigate leaks or skew instead of only raising every container limit.",
+      "wrongResult": "Changing ResourceManager or NodeManager availability does not correct a task whose process exceeds its declared memory boundary.",
+      "failedContainers": 6,
+      "baseRecoveryMinutes": 18,
+      "benefitsFromRmHa": false,
+      "benefitsFromNmRecovery": false,
+      "needsAggregatedLogs": true
+    }
+  ]
+}

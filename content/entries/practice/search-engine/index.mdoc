@@ -1,0 +1,645 @@
+---
+title: "Design Search Engine"
+section: practice
+level: advanced
+duration: 60 min
+description: "Design a web search engine with distributed crawling, indexing, ranking, query serving, freshness, evaluation, and abuse controls."
+registryId: practice-search-engine
+---
+
+{% section-card tone="intro" %}
+## What is a web search engine?
+
+**A web search engine discovers public documents, builds a searchable representation of
+them, and returns a ranked result list for a user's query.** Discovery and indexing happen
+asynchronously. Query serving reads a published index snapshot under a strict latency
+deadline.
+
+The core invariant is stronger than "return relevant links": **every served result must
+come from a valid index snapshot and pass current eligibility policy**. A stale result may
+be tolerable during a failure. A removed, malicious, or access-restricted result is not.
+
+This walkthrough uses an illustrative target of 10 billion canonical text documents and
+4 billion queries per day. Those are design assumptions for practicing arithmetic, not
+claims about any existing search provider.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Discover and revisit" eyebrow="Crawl" icon="globe" tone="cyan" %}
+Maintain a prioritized URL frontier, respect host capacity and crawl policy, fetch
+documents, and decide when each URL deserves another visit.
+{% /concept-card %}
+{% concept-card title="Build searchable evidence" eyebrow="Index" icon="database" tone="violet" %}
+Parse and canonicalize content, detect duplicates, build compressed posting lists, and
+publish immutable index segments through a versioned manifest.
+{% /concept-card %}
+{% concept-card title="Retrieve, rank, and filter" eyebrow="Serve" icon="search" tone="green" %}
+Retrieve a broad candidate set, score it with lexical and quality signals, enforce hard
+policy, generate snippets, and return within the request deadline.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="info" %}
+New to indexes or capacity math? Review [database indexing](/fundamentals/database-indexing),
+[caching](/fundamentals/caching), and [back-of-the-envelope
+estimation](/fundamentals/back-of-envelope-calculations) before the deeper sections.
+{% /callout %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+### Turn "search the web" into a bounded contract
+
+Requirements are the user-visible actions and guarantees that the architecture must
+support. Clarify them before choosing shards, queues, models, or vendors because one
+change in freshness, corpus scope, or policy can reshape the whole system.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Core user actions" eyebrow="Functional" icon="search" tone="blue" %}
+- Submit keyword, phrase, and filtered text queries.
+- Receive ten ranked links with titles, URLs, and generated snippets.
+- Correct obvious spelling errors and offer query suggestions.
+- Discover HTML and PDF documents from seeds, links, and submitted sitemaps.
+{% /concept-card %}
+
+{% concept-card title="Service promises" eyebrow="Non-functional" icon="gauge" tone="green" %}
+- Query-serving p95 below 200 ms in supported regions.
+- Query-serving availability of 99.99%; indexing availability of 99.9%.
+- Publish high-priority updates within five minutes and most accepted changes within 24 hours.
+- Keep partial-result and policy-violation rates explicitly measurable.
+{% /concept-card %}
+
+{% concept-card title="Correctness and safety" eyebrow="Invariant" icon="shield" tone="amber" %}
+- Never serve a document that current policy marks ineligible.
+- Do not mix postings, metadata, and ranking features from incompatible index versions.
+- Make deletions and legal or security removals override cached result pages.
+- Treat fetched documents, links, and structured metadata as untrusted input.
+{% /concept-card %}
+
+{% concept-card title="First-version boundary" eyebrow="Out of scope" icon="boxes" tone="neutral" %}
+- No image, video, shopping, advertisement, or generated-answer vertical.
+- No per-user behavioral personalization.
+- No guarantee that every discovered URL is crawled or indexed.
+- No requirement to synchronously rebuild the full index after each document change.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Questions that change the design
+
+1. **Corpus:** Is this a public-web engine, a fixed enterprise collection, or a vertical
+   search product? Which languages and document formats are in scope?
+2. **Freshness:** Which sources need minute-level updates, and which can be revisited over
+   days? Is freshness measured from publication, discovery, fetch, or index visibility?
+3. **Quality:** Which query intents matter most, and who provides graded relevance
+   judgments for offline evaluation?
+4. **Policy:** Which crawler rules, removal requests, malware decisions, and regional
+   restrictions can exclude a document?
+5. **Degradation:** May the service return partial shard coverage, an older complete
+   snapshot, cached head-query results, or an explicit error?
+6. **Economics:** What are the storage, network, and ranking-compute budgets per query and
+   per accepted document?
+
+{% callout variant="warn" %}
+`robots.txt` is a crawler coordination protocol, not authorization. [RFC
+9309](https://www.rfc-editor.org/rfc/rfc9309.html) defines how compliant crawlers interpret
+the Robots Exclusion Protocol; private content still needs real access control.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Estimate scale and constraints" %}
+
+### Convert assumptions into coupled workloads
+
+Capacity estimation translates product assumptions into rates, bytes, and fan-out. It
+does not predict an exact fleet size. Server counts come later from representative load
+tests with explicit headroom and failure assumptions.
+
+For the baseline scenario, use decimal units, 86,400 seconds per day, and a 3x
+peak-to-average query multiplier.
+
+{% metric-strip %}
+{% metric value="46.3K/s" label="Average queries" detail="4B queries / 86,400 seconds" tone="blue" /%}
+{% metric value="139K/s" label="Peak queries" detail="3x the average query rate" tone="violet" /%}
+{% metric value="5.8K/s" label="Average revisits" detail="5% of 10B documents per day" tone="green" /%}
+{% metric value="60 TB" label="Primary index" detail="30% of a 200 TB extracted-text corpus" tone="amber" /%}
+{% /metric-strip %}
+
+### Explore the workload envelope
+
+Change one assumption at a time, then combine stressors. Notice that a larger corpus
+increases both storage and the number of document-shard groups a long-tail query may
+contact.
+
+{% interactive-block id="practice/search-engine-capacity-freshness-lab" /%}
+
+### Reproduce the arithmetic
+
+The executable model uses the same explicit assumptions as the lab. Run it with different
+inputs before replacing any constant with a production benchmark.
+
+{% code-block file="/api/content/practice/search-engine/code/capacity-model.py" language="python" title="Crawl, index, and query fan-out model" /%}
+
+The baseline calculations are:
+
+1. **Extracted text:** `10B documents x 20 KB = 200 TB` before replicas, metadata,
+   postings overhead, raw fetches, or backups.
+2. **Inverted index:** an assumed 30% text-to-index ratio gives `60 TB` primary and
+   `180 TB` across three serving copies.
+3. **Revisit work:** `10B x 5% = 500M` fetches per day, or about `5.8K/s` on average.
+4. **Fetch bandwidth:** at an assumed 100 KB response, those revisits transfer about
+   `50 TB/day` before retries and rendering.
+5. **Query fan-out:** 40 document-shard groups and a 25% whole-result cache hit rate
+   produce about `139K x 75% x 40 = 4.2M` shard RPCs per second at peak.
+
+{% callout variant="tip" %}
+Popular-query caching lowers head traffic, but it does little for the long tail. Bound
+long-tail work with shard pruning, local top-K retrieval, query complexity limits, and
+deadline propagation.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### Separate asynchronous ingestion from synchronous serving
+
+High-level architecture identifies the critical paths and ownership boundaries before
+implementation detail. A crawler or segment merge may take minutes; a user query cannot
+wait for either. Connect the two paths only through published, versioned index artifacts.
+
+{% callout variant="info" %}
+Sketch the design before reading the reference flows. The grading rubric values a short
+query path, a polite and replayable crawler, atomic index publication, bounded fan-out,
+and an explicit degraded mode.
+{% /callout %}
+
+{% design-challenge
+   challengeId="search-engine"
+   title="Design the crawl-to-query architecture"
+   prompt="Design a text web search engine for 10 billion canonical documents and 139K peak query QPS. Show URL scheduling, polite fetching, parsing and deduplication, immutable index publication, document-shard retrieval, staged ranking, policy enforcement, caching, and behavior when one serving shard or the learned ranker times out." /%}
+
+### Crawl and index path
+
+{% system-flow title="From discovered URL to published index" caption="Every stage is replayable. A document becomes searchable only after its segment and metadata version appear in an atomic manifest." %}
+{% system-node title="URL frontier" eyebrow="Schedule" icon="route" tone="blue" %}
+Prioritize by host, importance, change probability, and next eligible fetch time while
+preserving per-host politeness state.
+{% /system-node %}
+{% system-node title="Fetcher fleet" eyebrow="Retrieve" icon="globe" tone="cyan" %}
+Resolve policy, acquire a host lease, fetch within byte and time limits, and record the
+HTTP outcome without following unbounded redirects.
+{% /system-node %}
+{% system-node title="Parse and canonicalize" eyebrow="Normalize" icon="code" tone="amber" %}
+Extract text, links, language, metadata, and canonical hints; reject malformed or
+dangerous content and compute exact and near-duplicate fingerprints.
+{% /system-node %}
+{% system-node title="Document and link stores" eyebrow="Persist" icon="database" tone="violet" %}
+Keep fetched blobs, parsed document versions, graph edges, policy state, and processing
+lineage independently of the serving index.
+{% /system-node %}
+{% system-node title="Segment builder" eyebrow="Index" icon="layers" tone="rose" %}
+Analyze fields, write compressed postings and forward metadata, compute batch features,
+and verify checksums and document counts.
+{% /system-node %}
+{% system-node title="Manifest publisher" eyebrow="Release" icon="check" tone="green" %}
+Atomically publish compatible segments, deletion generations, and feature versions, then
+warm serving replicas before shifting queries.
+{% /system-node %}
+{% /system-flow %}
+
+### Query-serving path
+
+{% system-flow title="From query to ranked results" caption="Each hop receives the remaining deadline. Logging and model training consume events asynchronously and cannot block the response." %}
+{% system-node title="Edge and admission" eyebrow="Protect" icon="shield" tone="blue" %}
+Authenticate paid APIs where needed, rate-limit abusive clients, normalize locale, and
+reject requests that exceed a query-complexity budget.
+{% /system-node %}
+{% system-node title="Query understanding" eyebrow="Interpret" icon="search" tone="cyan" %}
+Tokenize, detect language and intent, apply bounded spelling or synonym expansion, and
+check a version-aware whole-result cache.
+{% /system-node %}
+{% system-node title="Shard broker" eyebrow="Retrieve" icon="network" tone="violet" %}
+Route to one healthy replica per relevant document-shard group, apply per-shard
+deadlines, and request only a bounded local top-K.
+{% /system-node %}
+{% system-node title="Candidate merge" eyebrow="Aggregate" icon="workflow" tone="amber" %}
+Merge local candidates, deduplicate canonical documents, record shard coverage, and
+prepare features for a much smaller global set.
+{% /system-node %}
+{% system-node title="Staged ranking" eyebrow="Score" icon="activity" tone="rose" %}
+Apply lexical retrieval, inexpensive quality signals, and a richer learned ranker only
+to the final hundreds of candidates.
+{% /system-node %}
+{% system-node title="Policy and response" eyebrow="Release" icon="check" tone="green" %}
+Recheck current eligibility, generate safe snippets, attach freshness and coverage
+metadata, cache eligible output, and return.
+{% /system-node %}
+{% /system-flow %}
+
+The original [Google search architecture
+paper](https://research.google/pubs/the-anatomy-of-a-large-scale-hypertextual-web-search-engine/)
+is useful historical research on crawling, indexing, link structure, and query serving.
+Treat it as a foundation for reasoning, not a description of any current production
+system.
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Model data and choose storage" %}
+
+### Design records around access patterns and lifecycle
+
+A data model defines identity, versioning, and ownership before it defines a database
+vendor. Search needs several stores because URL scheduling, immutable posting scans,
+document lookup, graph processing, and policy deletion have different access patterns.
+
+{% concept-grid columns="3" %}
+{% concept-card title="URL frontier" icon="route" tone="blue" %}
+Key work by normalized host and `next_fetch_at`. Store priority, retry state, robots
+version, lease owner, and last outcome. Leasing prevents duplicate concurrent fetches.
+{% /concept-card %}
+{% concept-card title="Document store" icon="braces" tone="cyan" %}
+Map a stable `doc_id` to canonical URL, content hash, fetch version, parsed fields,
+language, timestamps, and current eligibility state.
+{% /concept-card %}
+{% concept-card title="Blob store" icon="storage" tone="neutral" %}
+Keep bounded raw responses and large parsed artifacts in object storage for replay,
+auditing, and parser upgrades. Tier or delete them by explicit retention policy.
+{% /concept-card %}
+{% concept-card title="Inverted index" icon="database" tone="violet" %}
+Map each analyzed term to compressed postings containing document IDs, term frequency,
+positions, and field information for one document-shard segment.
+{% /concept-card %}
+{% concept-card title="Link and feature stores" icon="network" tone="amber" %}
+Represent canonical document edges separately and publish computed authority, quality,
+language, and spam features under a version compatible with the index snapshot.
+{% /concept-card %}
+{% concept-card title="Policy ledger" icon="shield" tone="rose" %}
+Record removals, malware decisions, expiry, provenance, appeal state, and deletion
+generation. This ledger can invalidate caches faster than a full index rebuild.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose document sharding for the baseline
+
+Partition canonical documents across shard groups by a stable hash or managed range. Each
+group owns the complete term dictionary and postings for its document subset. A query can
+run independently on every selected group, return local top-K candidates, and merge them.
+
+Term sharding sends each query term to a different owner and then performs distributed
+posting intersections. It can reduce duplicated term dictionaries, but multi-term and
+phrase queries require more cross-shard coordination. It is not the baseline here.
+
+### Publish snapshots, not partial mutations
+
+- Builders write immutable segments, checksums, document counts, analyzer versions, and
+  feature versions to durable storage.
+- Validators open the complete candidate snapshot and run retrieval, policy, and
+  compatibility checks before publication.
+- A small strongly consistent manifest changes from generation `N` to `N+1` atomically.
+- Query replicas pin one manifest generation for the full request, even during rollout.
+- Tombstones and urgent policy deny-lists suppress removed documents until compaction
+  physically drops their postings.
+- Old generations remain available long enough for rollback and in-flight requests, then
+  are reclaimed by reference count and retention policy.
+
+{% callout variant="warn" %}
+Never treat the result cache as the source of truth for eligibility. Cache entries need a
+snapshot version and a policy version, and urgent removals need direct invalidation or a
+final query-time deny check.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep-dive the critical components" %}
+
+### Inspect the mechanisms that dominate quality and risk
+
+A critical component owns a constraint the rest of the design cannot repair later. For
+search, those constraints are polite discovery, consistent index publication, bounded
+retrieval and ranking, and resistance to adversarial content and traffic.
+
+{% tabs %}
+{% tab title="Crawling" %}
+### Schedule by host, value, and change probability
+
+The frontier is not one FIFO queue. Partition by normalized host so one worker coordinates
+connection limits, robots policy, retries, and adaptive backoff for that host. Within the
+allowed work, prioritize URLs by expected search value, estimated change rate, source
+quality, depth, and time since last successful fetch.
+
+- Fetch and cache `robots.txt` according to RFC 9309 before scheduling allowed paths.
+- Use bounded response bytes, redirect hops, rendering time, and links per page to contain
+  crawler traps and decompression bombs.
+- Normalize URLs, honor defensible canonical hints, and remove tracking parameters before
+  adding new work.
+- Detect exact duplicates with content hashes and near duplicates with shingles plus an
+  approximate fingerprint; keep one canonical document and merge useful signals.
+- Learn recrawl intervals from observed change history. Breaking sources may receive
+  minutes; stable reference pages may receive weeks.
+- Back off on timeouts, throttling, and server errors. More crawler capacity does not grant
+  permission to overload a publisher.
+
+Google's current [crawl-budget documentation](https://developers.google.com/crawling/docs/crawl-budget)
+describes capacity and demand as separate constraints. The same distinction is useful in
+this vendor-neutral design.
+{% /tab %}
+
+{% tab title="Indexing and freshness" %}
+### Make new content visible without rewriting the world
+
+Analyzers tokenize text, normalize case and language-specific forms, and emit fielded
+terms. Posting lists store sorted document IDs plus term frequency and optional positions;
+delta encoding and block compression reduce bytes and improve sequential scans.
+
+Use two index lanes:
+
+1. **Delta lane:** build small segments continuously for high-priority accepted changes.
+   Publish them frequently so news and urgent updates become searchable within minutes.
+2. **Base lane:** compact many immutable segments in the background, recompute expensive
+   global features, and periodically publish a cleaner snapshot.
+
+Queries read the base plus a bounded number of delta segments. Excessive tiny segments
+increase seeks and duplicate work, so compaction is part of serving health, not only a
+storage task. Measure freshness from source publication when available, then separately
+track discovery lag, fetch lag, processing lag, and publish lag.
+{% /tab %}
+
+{% tab title="Retrieval and ranking" %}
+### Spend compute in stages
+
+The inverted index retrieves candidates with a lexical function such as BM25, which
+rewards term match while controlling repeated-term saturation and document-length bias.
+[Lucene's BM25 documentation](https://lucene.apache.org/core/10_2_2/core/org/apache/lucene/search/similarities/package-summary.html)
+is an official implementation reference.
+
+1. Each document shard uses lexical matching, phrase positions, and cheap static quality
+   signals to return a local top-K.
+2. The broker merges and deduplicates local candidates, then applies global authority,
+   freshness, locale, and lightweight intent features.
+3. A learned ranker scores only the final hundreds of candidates under a fixed time and
+   feature budget.
+4. Deterministic policy removes ineligible results, applies domain or duplicate limits,
+   and chooses snippets. Policy is not another soft ranking feature.
+
+Propagate one request deadline. If an optional feature misses its budget, use a versioned
+default or an earlier-stage score. Never let an unbounded feature fan-out consume the
+whole query latency target.
+{% /tab %}
+
+{% tab title="Abuse and integrity" %}
+### Assume publishers and clients can optimize against the system
+
+- **Index spam:** detect keyword stuffing, doorway pages, link farms, cloaking, copied
+  content, malicious downloads, and sudden coordinated graph changes.
+- **Crawler attacks:** sandbox parsers, cap decompression and rendering, validate network
+  destinations, and prevent fetched pages from reaching internal or link-local services.
+- **Query abuse:** rate-limit by risk and account, cap terms and expansions, bound regex or
+  filter complexity, and shed anonymous expensive queries before healthy traffic.
+- **Signal manipulation:** exclude known bots from click labels, detect coordinated click
+  patterns, preserve randomized exploration data, and audit training lineage.
+- **Policy mistakes:** require reason codes, reviewer provenance, appeal workflows,
+  versioned rules, false-positive measurement, and independent emergency rollback.
+
+Abuse controls have two error classes: missed harmful content and legitimate content
+incorrectly removed. Monitor both by language, region, source cohort, and rule version.
+{% /tab %}
+{% /tabs %}
+
+### Practice the ranking boundary
+
+Change query intent and signal weights, then disable the hard gate. The important lesson
+is not one universal weight vector; it is the separation between graded relevance and
+non-negotiable eligibility.
+
+{% interactive-block
+   id="practice/search-engine-ranking-policy-lab"
+   dataFile="/api/content/practice/search-engine/data/ranking-scenarios.json" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability, reliability, and evaluation" %}
+
+### Protect the query path while slower pipelines recover
+
+Reliability is the ability to keep user-visible promises through partial failure. Scale
+the crawler, builders, query brokers, retrieval shards, ranking service, and caches
+independently so pressure in one path does not cascade into the others.
+
+{% metric-strip %}
+{% metric value="99.99%" label="Query availability" detail="Measured by region and query class" tone="green" /%}
+{% metric value="<200 ms" label="Query p95" detail="Includes retrieval, ranking, policy, and network" tone="blue" /%}
+{% metric value="<5 min" label="Priority freshness" detail="Source publication to searchable result" tone="violet" /%}
+{% metric value="0" label="Policy violations" detail="A correctness target, not an error-budget metric" tone="amber" /%}
+{% /metric-strip %}
+
+### Define failure behavior before incidents
+
+{% concept-grid columns="3" %}
+{% concept-card title="Serving replica loss" icon="server" tone="blue" %}
+Route the shard group to a healthy replica, hedge only slow tail requests within a budget,
+and rebuild redundancy without overloading the remaining copies.
+{% /concept-card %}
+{% concept-card title="Shard timeout" icon="timer" tone="amber" %}
+Stop at the request deadline. Return partial candidates only when coverage remains above a
+defined threshold; record missing groups and avoid caching low-coverage output.
+{% /concept-card %}
+{% concept-card title="Ranker outage" icon="activity" tone="violet" %}
+Fall back to the last compatible lightweight ranker or lexical score. Continue current
+policy checks and expose the fallback rate to operators.
+{% /concept-card %}
+{% concept-card title="Bad index generation" icon="database" tone="rose" %}
+Stop rollout on checksum, document-count, latency, quality, or policy regressions. Pin
+replicas to the previous complete manifest and investigate offline.
+{% /concept-card %}
+{% concept-card title="Crawler backlog" icon="route" tone="cyan" %}
+Preserve host leases and durable frontier state, lower low-value recrawl priority, and keep
+urgent deletion or security work on a separate bounded lane.
+{% /concept-card %}
+{% concept-card title="Regional outage" icon="globe" tone="green" %}
+Route queries to another region with an older complete snapshot if necessary. State the
+freshness and latency cost; never bypass policy to claim availability.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Evaluate retrieval and the complete product
+
+Search quality needs labeled information needs, candidate documents, and graded relevance
+judgments. [NIST's TREC program](https://trec.nist.gov/howto.html) documents test
+collections, topics, runs, pooling, and relevance judgments used in information-retrieval
+evaluation.
+
+- **Retrieval:** Recall@K confirms that relevant documents enter the candidate set.
+- **Ranking:** NDCG@10 rewards placing highly relevant documents near the top; MRR helps
+  navigational queries where the first correct result matters most.
+- **Freshness:** measure publication-to-index lag and stale-result rate by source priority.
+- **Policy and abuse:** measure violation rate, false positives, appeal reversals, spam in
+  top results, and time to urgent removal.
+- **System health:** measure p50, p95, and p99 latency by stage; shard coverage; timeout and
+  fallback rates; cache age; segment count; and index-generation skew.
+- **User outcomes:** monitor successful-result interactions, reformulation, abandonment,
+  and explicit satisfaction by intent. Treat clicks as biased observations, not labels by
+  themselves.
+
+### Release changes with layered evidence
+
+1. Evaluate on frozen, time-separated query sets with graded judgments and critical slices.
+2. Replay production-like query mixes against a complete candidate index generation.
+3. Shadow the new retrieval, ranker, or policy version without changing user results.
+4. Canary by region and query class with automatic rollback on latency, coverage, quality,
+   or policy gates.
+5. Run an online experiment only after defining the primary metric, guardrails, sample
+   unit, and stopping rule.
+
+Alert on error-budget burn and sustained quality movement, not every isolated noisy query.
+Keep model, feature, analyzer, policy, and index versions in every trace so operators can
+attribute a regression.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+### Make every optimization name its cost
+
+A trade-off exchanges one desirable property for another under a stated workload. Avoid
+calling a choice "best" without naming the query mix, freshness target, failure model, and
+measurement that justify it.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Document vs term sharding" icon="database" tone="blue" %}
+Document sharding makes each shard independently retrieve local top-K but fans long-tail
+queries across groups. Term sharding narrows term ownership but makes multi-term and phrase
+intersection a distributed operation.
+{% /concept-card %}
+{% concept-card title="Freshness vs segment efficiency" icon="timer" tone="green" %}
+Frequent delta publication lowers visibility lag but creates more segments, cache churn,
+and merge pressure. Batch rebuilds are compact but make urgent changes wait.
+{% /concept-card %}
+{% concept-card title="Completeness vs tail latency" icon="gauge" tone="amber" %}
+Waiting for every shard improves coverage but lets one slow group control p99. A deadline
+protects latency but requires measured partial-result quality and a minimum coverage gate.
+{% /concept-card %}
+{% concept-card title="Precomputation vs adaptability" icon="layers" tone="violet" %}
+Static authority and quality features are cheap at query time but update slowly. Dynamic
+features adapt to intent and events but add latency, cost, and failure dependencies.
+{% /concept-card %}
+{% concept-card title="Lexical vs hybrid retrieval" icon="search" tone="cyan" %}
+Lexical retrieval is efficient, precise for rare terms, and explainable. Vector candidates
+can improve semantic recall but add index memory, approximate-search tuning, and new abuse
+and evaluation surfaces.
+{% /concept-card %}
+{% concept-card title="Caching vs freshness" icon="cache" tone="rose" %}
+Whole-result caching removes repeated head work but can preserve stale ranking or policy.
+Short TTLs, version keys, removal invalidation, and final eligibility checks constrain risk.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Alternatives rejected for the baseline
+
+- **One mutable global index:** simple to describe, but partial writes expose inconsistent
+  versions and recovery is difficult. Immutable segments plus manifests isolate rollout.
+- **A synchronous crawl-to-query pipeline:** appears fresh, but user latency and
+  availability would depend on fetchers, parsers, and builders.
+- **A vector-only index:** loses strong exact-term behavior and makes web-scale memory,
+  filtering, and explainability harder. Add semantic retrieval as a measured candidate
+  source, not a replacement by default.
+- **One large learned ranker for every document:** spends expensive inference before
+  retrieval has reduced the corpus. Staged ranking gives richer models a bounded input.
+- **Clicks as the only relevance signal:** confounds position, presentation, bot traffic,
+  and the previous ranker's exposure policy. Preserve human judgments and controlled
+  experiments.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Wrap up, risks, and extensions" %}
+
+### Restate the design as four owned loops
+
+A wrap-up proves that the components form one coherent system. Trace discovery, index
+publication, query serving, and measurement without adding a new dependency in the final
+minute.
+
+{% process-flow %}
+{% process-step number="1" title="Schedule bounded discovery" label="Crawl" %}
+Prioritize a durable host-partitioned frontier, respect crawl policy and server health,
+contain traps, and persist replayable fetch outcomes.
+{% /process-step %}
+{% process-step number="2" title="Publish complete snapshots" label="Index" %}
+Canonicalize and deduplicate documents, build immutable base and delta segments, validate
+versions, and atomically advance the serving manifest.
+{% /process-step %}
+{% process-step number="3" title="Retrieve and rank in stages" label="Serve" %}
+Interpret the query, fan out with deadlines, merge local top-K candidates, apply bounded
+ranking, enforce policy, and generate the response.
+{% /process-step %}
+{% process-step number="4" title="Measure and improve safely" label="Operate" %}
+Join system traces, relevance judgments, freshness, abuse reviews, and experiments to
+release changes gradually and roll back each layer independently.
+{% /process-step %}
+{% /process-flow %}
+
+### Highest remaining risks
+
+1. A crawler trap or parser exploit consumes the fetch fleet or reaches an internal
+   network destination.
+2. A bad manifest combines incompatible postings, document metadata, features, or policy
+   generations.
+3. Query fan-out or hedging multiplies load during a shard or regional incident.
+4. Spam and coordinated behavior corrupt both the index and the learning signals used to
+   rank it.
+5. A whole-result cache serves content after an urgent removal or across incompatible
+   policy versions.
+6. Offline relevance gains do not transfer to tail queries, languages, regions, or live
+   user outcomes.
+
+### Extensions worth rehearsing
+
+- **Real-time news lane**
+  - Add trusted push discovery, smaller delta segments, and minute-level publication.
+  - Measure duplicate-event bursts, source authority, correction handling, and merge debt.
+- **Hybrid semantic retrieval**
+  - Build a separate vector candidate source with metadata filtering and a fixed latency
+    budget.
+  - Evaluate incremental Recall@K and NDCG gains by intent before paying the global cost.
+- **Multilingual search**
+  - Add language-specific analyzers, cross-language retrieval, locale-aware judgments, and
+    independent policy coverage.
+  - Keep analyzer and embedding versions explicit in every segment manifest.
+- **Image and video verticals**
+  - Introduce media extraction, perceptual deduplication, modality-specific indexes, and
+    separate ranking and safety evaluation.
+  - Merge vertical results through a calibrated policy instead of one incomparable score.
+- **Private enterprise search**
+  - Replace public eligibility with document-level authorization evaluated at query time.
+  - Propagate source permissions and deletions faster than content indexing while avoiding
+    permission-based existence leaks.
+
+### Primary references
+
+- [RFC 9309: Robots Exclusion Protocol](https://www.rfc-editor.org/rfc/rfc9309.html) for
+  crawler access rules, error handling, caching, and security considerations.
+- [Google Crawling Infrastructure: crawl budget](https://developers.google.com/crawling/docs/crawl-budget)
+  for an official description of crawl capacity and crawl demand.
+- [The Anatomy of a Large-Scale Hypertextual Web Search
+  Engine](https://research.google/pubs/the-anatomy-of-a-large-scale-hypertextual-web-search-engine/)
+  for the foundational research architecture and link-based ranking context.
+- [Apache Lucene similarity documentation](https://lucene.apache.org/core/10_2_2/core/org/apache/lucene/search/similarities/package-summary.html)
+  for an official BM25 implementation reference.
+- [NIST TREC](https://trec.nist.gov/howto.html) for test collections, pooled relevance
+  judgments, retrieval runs, and evaluation practice.
+
+{% callout variant="tip" %}
+End an interview by restating the index-publication invariant, tracing one crawl and one
+query, naming the most dangerous overload path, defending one trade-off, and identifying
+the first metric that would force the design to change.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/search-engine/quiz/search-engine-design-review.json"
+   lessonSlug="practice-search-engine"
+   title="Search Engine Design Review" /%}

@@ -1,0 +1,215 @@
+---
+registryId: model-quantization
+---
+
+{% section-card tone="intro" %}
+## What is model quantization?
+
+**Model quantization maps model values from a high-precision representation to a smaller set of representable values.** A deployment might store weights as 8-bit integers instead of 32-bit floating-point values, or use a low-precision floating-point format for selected matrix operations.
+
+The goal is not merely a smaller file. Quantization is useful when the target runtime has kernels that can move and compute the lower-precision representation efficiently. It can reduce weight storage, memory traffic, and sometimes latency or energy, but every benefit must be measured on the actual model, runtime, operator graph, batch shape, and device.
+
+{% callout variant="info" %}
+### Core invariant
+
+A quantized artifact is releasable only when **its numeric mapping is defined, every required operator has an intentional execution path, measured deployment evidence meets the service envelope, important quality slices remain acceptable, and a compatible rollback artifact is ready**.
+{% /callout %}
+
+Changing 32-bit weights to 8-bit values makes the raw weight payload one quarter of its former size before scales, zero points, packing, and other metadata. It does not guarantee a fourfold model file reduction or fourfold end-to-end speedup.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Map real values into a finite numeric grid
+
+Uniform affine integer quantization uses a scale and a zero point:
+
+`quantized = clamp(round(real / scale) + zero_point, q_min, q_max)`
+
+`dequantized = scale * (quantized - zero_point)`
+
+- **Scale** is the real-value distance between adjacent integer codes. A wider observed range needs a larger scale and therefore coarser steps.
+- **Zero point** is the integer code that represents real zero. Exact zero matters for operations such as zero padding.
+- **Rounding error** occurs when an in-range value falls between two representable levels.
+- **Clamping error** occurs when a value lies outside the chosen range and is clipped to an endpoint.
+
+For asymmetric 8-bit quantization, one common range estimate is:
+
+`scale = (real_max - real_min) / (q_max - q_min)`
+
+`zero_point = clamp(round(q_min - real_min / scale), q_min, q_max)`
+
+The equations define the mapping. The observer or calibration algorithm decides which real minimum and maximum to use.
+
+### Granularity controls who shares a scale
+
+{% concept-grid columns="3" %}
+{% concept-card title="Per tensor" eyebrow="One range" icon="square" tone="blue" %}
+Every value in a tensor shares one scale and zero point. Metadata is small, but one high-magnitude channel can make the step coarse for all other channels.
+{% /concept-card %}
+{% concept-card title="Per channel or axis" eyebrow="One range per slice" icon="layers" tone="violet" %}
+Each output channel or selected axis receives its own parameters. This often represents differently scaled weight channels more closely, with extra metadata and kernel requirements.
+{% /concept-card %}
+{% concept-card title="Per group or block" eyebrow="Bounded sharing" icon="grid" tone="green" %}
+Small groups share parameters. Group size trades metadata and kernel complexity against how closely each local distribution is represented.
+{% /concept-card %}
+{% /concept-grid %}
+
+The runtime contract decides which granularities are legal for each operator and format. A mathematically valid scheme that the target kernel cannot execute is not a deployment plan.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: choose a calibration range and granularity
+
+Select a calibration corpus, a clipping policy, and per-tensor or per-channel parameters. The lab recomputes the INT8 scale, zero point, rounding bound, clipped-tail estimate, and probe-value mapping. Its numbers are a transparent teaching fixture, not a promised accuracy result.
+
+{% interactive-block id="ml-systems/model-quantization-calibration-lab" dataFile="/api/content/ml-systems/model-quantization/data/calibration-range-model.json" /%}
+
+Calibration examples should follow the real input contract and cover the ranges that matter:
+
+- common production inputs at their expected proportions;
+- rare but valid high-magnitude, long-tail, or safety-critical cases;
+- every preprocessing and tensor-shape path used in deployment;
+- slices that would be expensive to misclassify or distort;
+- enough examples to stabilize the selected observer, followed by a separate evaluation set.
+
+Calibration data chooses numeric parameters. It is not a substitute for the post-conversion evaluation set, and it must not contain protected evaluation examples.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose PTQ, dynamic quantization, or QAT from the constraint
+
+{% concept-grid columns="3" %}
+{% concept-card title="Static PTQ" eyebrow="Observe, then convert" icon="gauge" tone="blue" %}
+Run representative calibration inputs to compute fixed activation parameters, then convert the trained model. This is a fast first experiment when a supported static path exists.
+{% /concept-card %}
+{% concept-card title="Dynamic activation" eyebrow="Compute ranges at runtime" icon="activity" tone="green" %}
+Store supported weights at lower precision and derive activation parameters for each input or token at runtime. This can adapt to changing ranges but adds quantization work to inference.
+{% /concept-card %}
+{% concept-card title="QAT" eyebrow="Simulate during learning" icon="repeat" tone="violet" %}
+Insert fake-quantization behavior during training or fine-tuning. Parameters can adapt to rounding and clipping, but training cost and reproducibility become part of the release.
+{% /concept-card %}
+{% /concept-grid %}
+
+Start with PTQ when calibration data is representative, the target operators are supported, and the quality budget survives conversion. Escalate to selective higher precision, a different granularity or observer, or QAT only after diagnostics identify where the PTQ artifact fails.
+
+QAT can recover quality for some models because learning sees simulated quantization error. It cannot create a missing device kernel or prove that a target runtime will execute the exported graph as intended.
+{% /section-card %}
+
+{% section-card %}
+## Build against the runtime and hardware contract
+
+Quantization support is the intersection of five things:
+
+1. **Format:** integer, low-precision floating point, symmetric or asymmetric mapping, and packed weight layout.
+2. **Granularity:** per-tensor, per-channel, per-row, per-token, per-group, or per-block parameters.
+3. **Operator:** matrix multiplication, convolution, embedding lookup, normalization, activation, and every fused graph pattern.
+4. **Runtime:** exporter, graph representation, execution provider, compiler, and fallback behavior.
+5. **Device:** instruction set, accelerator generation, memory hierarchy, and supported accumulation type.
+
+{% callout variant="warn" %}
+An artifact can contain low-precision weights while unsupported operations execute at higher precision. Inspect the compiled graph or runtime trace. Silent fallback can erase latency gains and add conversion overhead without making the output incorrect.
+{% /callout %}
+
+Current framework documentation makes the target dependency explicit:
+
+- [PyTorch directs new quantization work to torchao](https://docs.pytorch.org/docs/stable/quantization), whose workflows enumerate supported weight, activation, granularity, kernel, and hardware combinations.
+- [ONNX Runtime documents static and dynamic quantization](https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html), the affine scale and zero-point model, QOperator and Q/DQ representations, calibration methods, and execution-provider constraints.
+- [NVIDIA TensorRT documents quantized types and workflows](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/work-with-quantized-types.html), including explicit Q/DQ, supported integer and floating-point formats, granularities, and platform limitations.
+
+Treat those pages as current capability references, then verify the exact versions installed in the release environment.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Convert a model and preserve its evidence
+
+This ONNX Runtime example uses a representative data reader and emits an INT8 Q/DQ graph. Production code should pin library versions, preprocess the graph separately, version the calibration manifest, and record any nodes intentionally excluded from quantization.
+
+{% code-block file="/api/content/ml-systems/model-quantization/code/quantize-static-onnx.py" language="python" title="Create an INT8 Q/DQ artifact" /%}
+
+Keep one manifest per candidate artifact:
+
+- source checkpoint and preprocessing version;
+- quantization format, dtype, granularity, observer, and calibration manifest;
+- included and excluded operators or tensors;
+- exporter, compiler, runtime, driver, and hardware identifiers;
+- artifact checksum and the higher-precision rollback checksum;
+- evaluation dataset, slice definitions, benchmark protocol, and results.
+
+That manifest makes a result reproducible and keeps two similarly named `int8` artifacts from being treated as equivalent when their numeric or runtime contracts differ.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Measure the whole serving path
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the comparison" label="Protocol" %}
+Use identical preprocessing, requests, batch shapes, concurrency, warmup, device state, and runtime versions for the baseline and candidate.
+{% /process-step %}
+{% process-step number="2" title="Inspect execution" label="Coverage" %}
+Confirm every required operator uses the intended supported path. Record fallbacks, graph breaks, casts, and transfer boundaries.
+{% /process-step %}
+{% process-step number="3" title="Measure deployment" label="Performance" %}
+Compare artifact bytes, peak memory, cold start, sustained throughput, and latency percentiles on the target hardware.
+{% /process-step %}
+{% process-step number="4" title="Re-evaluate behavior" label="Quality" %}
+Run aggregate metrics, calibration, downstream thresholds, invariants, and important slices against the higher-precision artifact.
+{% /process-step %}
+{% /process-flow %}
+
+{% metric-strip %}
+{% metric value="P50/P95/P99" label="Latency distribution" detail="Include preprocessing, queueing, transfers, and post-processing" tone="blue" /%}
+{% metric value="Peak bytes" label="Runtime memory" detail="Measure allocator and workspace behavior, not only weight bits" tone="violet" /%}
+{% metric value="Graph trace" label="Operator coverage" detail="Find fallbacks and precision conversions on the exact target" tone="green" /%}
+{% metric value="By slice" label="Behavioral quality" detail="Compare costly and rare cases, not only the aggregate" tone="amber" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: decide whether a candidate may ship
+
+Choose a target profile and quantized candidate, then change the canary size and rollback readiness. The fixture compares captured evidence with explicit service thresholds. It illustrates gate arithmetic; it does not claim that INT8 or QAT has these results for another model or device.
+
+{% interactive-block id="ml-systems/model-quantization-release-gate-lab" dataFile="/api/content/ml-systems/model-quantization/data/deployment-release-model.json" /%}
+
+The release gate should fail closed when evidence is missing. A promising model-size result cannot waive an unsupported operator, a failing quality slice, an unmeasured target device, or an unusable rollback.
+
+{% code-block file="/api/content/ml-systems/model-quantization/code/evaluate-release-gates.py" language="python" title="Evaluate explicit candidate release gates" /%}
+{% /section-card %}
+
+{% section-card %}
+## Release with a bounded rollback path
+
+- Shadow the candidate first when outputs can be compared without affecting users.
+- Canary on the same device class, runtime, input shapes, and traffic mix used by the benchmark.
+- Monitor runtime errors, fallback count, latency distribution, memory pressure, output drift, confidence or calibration, and named quality proxies.
+- Keep the higher-precision artifact loadable under the same request and response contract.
+- Define who can stop promotion, how quickly traffic can return, and which state or cache must be invalidated.
+- Retain both artifact manifests so an incident review can reconstruct the exact numeric and execution plans.
+
+Rollback compatibility is part of the artifact contract. If a quantized candidate changes output schemas, thresholds, tokenizer behavior, or downstream assumptions, simply switching model files may not restore the former system.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Avoid conclusions the evidence cannot support
+
+- Do not report theoretical bit-width reduction as measured memory, latency, throughput, energy, or cost improvement.
+- Do not calibrate on convenient examples that omit production tails or important slices.
+- Do not compare candidates across different devices, runtimes, batch shapes, or preprocessing and call the difference a quantization gain.
+- Do not infer operator coverage from a successful export; inspect the target execution plan.
+- Do not accept aggregate quality when a rare or high-cost slice breaches its budget.
+- Do not promote without a compatible higher-precision fallback and a rehearsed rollback trigger.
+- Do not keep a precision choice forever; runtime, kernel, compiler, and hardware support changes.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [PyTorch quantization migration and API status](https://docs.pytorch.org/docs/stable/quantization)
+- [torchao quantized inference workflows](https://docs.pytorch.org/ao/stable/workflows/inference.html)
+- [torchao quantization-aware training](https://docs.pytorch.org/ao/stable/workflows/qat.html)
+- [ONNX Runtime model quantization](https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html)
+- [NVIDIA TensorRT quantized types](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/work-with-quantized-types.html)
+- [NVIDIA TensorRT reduced-precision accuracy considerations](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/accuracy-considerations.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/model-quantization/quiz/model-quantization.json" lessonSlug="model-quantization" /%}

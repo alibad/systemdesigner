@@ -1,0 +1,250 @@
+---
+registryId: llamaindex
+---
+
+{% section-card tone="intro" %}
+## What is LlamaIndex?
+
+**LlamaIndex is an application framework for turning private or domain-specific data
+into retrievable context for language-model applications.** It supplies abstractions
+for loading data, transforming it into retrieval units, indexing those units,
+retrieving evidence, synthesizing responses, and orchestrating longer workflows.
+
+It does not replace the source system, vector database, embedding model, or LLM. It
+connects those parts through explicit contracts. That distinction matters in
+production: the framework can run the pipeline, but your application still owns data
+identity, access rules, retrieval quality, source attribution, budgets, and recovery.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Ingest deliberately" eyebrow="Data plane" icon="database" tone="violet" %}
+Turn source records into stable Nodes with intentional chunk boundaries, metadata,
+identity, and update behavior.
+{% /concept-card %}
+{% concept-card title="Retrieve evidence" eyebrow="Query plane" icon="search" tone="cyan" %}
+Select candidate Nodes with semantic, lexical, metadata, routed, or composed retrieval
+before asking a model to write an answer.
+{% /concept-card %}
+{% concept-card title="Orchestrate only when needed" eyebrow="Control plane" icon="workflow" tone="green" %}
+Keep direct retrieval paths simple. Add Workflows or agents when the task genuinely
+needs branching, tools, state, retries, or multi-step control.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow the core data path
+
+The shortest useful LlamaIndex path is not "upload files and chat." It is a sequence
+of boundaries that can be inspected and tested independently.
+
+{% system-flow title="LlamaIndex retrieval-augmented generation path" caption="Retrieval chooses evidence; response synthesis uses that evidence to produce an answer. Keeping the stages separate makes failures diagnosable." %}
+{% system-node title="Readers and Documents" eyebrow="Load" icon="database" tone="blue" %}
+Load source material and attach stable source identity plus metadata needed for access,
+freshness, tenant, product, or version rules.
+{% /system-node %}
+{% system-node title="Transformations and Nodes" eyebrow="Shape" icon="layers" tone="violet" %}
+Split, parse, enrich, and embed source material. A Node is the retrieval-sized unit
+derived from a Document.
+{% /system-node %}
+{% system-node title="Index and retriever" eyebrow="Select" icon="search" tone="cyan" %}
+Store retrieval structures and return scored candidate Nodes for one query and policy.
+{% /system-node %}
+{% system-node title="Query engine" eyebrow="Synthesize" icon="workflow" tone="green" %}
+Combine a retriever, optional postprocessors, and a response synthesizer while retaining
+source Nodes for inspection and citation.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep these objects distinct
+
+- **Document:** one logical source item, such as a policy version, ticket, or report.
+- **Node:** a retrieval unit derived from a Document, with text, relationships,
+  metadata, and a source reference.
+- **Index:** a structure that exposes retrieval over Nodes; it is not necessarily the
+  system of record.
+- **Retriever:** the component that selects candidate Nodes for a query.
+- **Query engine:** the composed read path that retrieves, postprocesses, and
+  synthesizes a response.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make ingestion repeatable before tuning retrieval
+
+An `IngestionPipeline` applies ordered transformations to input data. Those
+transformations may split text, extract metadata, compute embeddings, and write Nodes
+to a vector store. The framework can cache transformation work and use a document
+store to detect unchanged or updated inputs, but only when the application supplies a
+stable identity and a deliberate update contract.
+
+The learning invariant is: **the chunk is both a retrieval unit and an operational
+unit.** Chunk size and overlap change how precisely evidence can be selected, how much
+text is repeated, and how much work an update can trigger.
+
+{% interactive-block id="technology/llamaindex-ingestion-contract-lab" dataFile="/api/content/technology/llamaindex/data/ingestion-contract-model.json" /%}
+
+### Review ingestion as five contracts
+
+1. **Identity:** define a stable `doc_id` for the logical source, independent of a
+   temporary file path or ingestion run.
+2. **Transformation:** version parsers, splitters, enrichment, and embedding choices so
+   an index can be reproduced.
+3. **Metadata:** attach the fields needed for eligibility filters, access control,
+   provenance, and deletion to every derived Node.
+4. **Mutation:** specify how inserts, updates, tombstones, and source deletions replace
+   prior Nodes.
+5. **Evidence:** record source version, transformation version, and ingestion time so a
+   retrieved Node can be traced back to its origin.
+
+{% code-block file="/api/content/technology/llamaindex/code/build-ingestion-pipeline.py" language="python" title="Build a versionable ingestion boundary" /%}
+
+{% callout variant="tip" %}
+Do not hide access control inside prose metadata and hope the model obeys it. Enforce
+tenant, region, version, and permission eligibility before candidate Nodes reach the
+model context.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat retrieval as evidence selection
+
+Retrieval has a different job from response synthesis. It should produce a bounded,
+inspectable evidence set that is likely to contain the required sources and unlikely
+to contain ineligible or distracting material.
+
+One strategy does not fit every query shape:
+
+- Semantic retrieval is a strong baseline when meaning matters more than exact terms.
+- Lexical or hybrid retrieval helps preserve identifiers, product names, error codes,
+  and domain vocabulary.
+- Metadata filtering should enforce structured eligibility such as tenant, region,
+  source family, effective date, or access tier before semantic ranking.
+- Routing or composed retrieval helps when distinct source families require different
+  retrievers, but every extra branch adds latency and evaluation surface.
+- Postprocessors and rerankers can reduce noise after broad candidate retrieval; they
+  cannot recover evidence that the first-stage retriever never returned.
+
+{% interactive-block id="technology/llamaindex-retrieval-evidence-lab" dataFile="/api/content/technology/llamaindex/data/retrieval-evidence-model.json" /%}
+
+The lab values are a teaching model, not universal benchmarks. In a real application,
+build a labeled query set and measure retrieval metrics such as hit rate or reciprocal
+rank separately from answer faithfulness and relevance.
+
+{% code-block file="/api/content/technology/llamaindex/code/retrieve-before-synthesis.py" language="python" title="Inspect filtered evidence before synthesis" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Diagnose the stage that actually failed
+
+A polished answer can hide a retrieval failure, and a strong evidence set can still be
+synthesized incorrectly. Preserve enough evidence to classify the failure before
+changing prompts or models.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Ingestion failure" eyebrow="Wrong units" icon="layers" tone="violet" %}
+The correct source exists, but parsing, chunk boundaries, metadata, identity, or index
+freshness makes it unavailable or misleading.
+{% /concept-card %}
+{% concept-card title="Retrieval failure" eyebrow="Wrong evidence" icon="search" tone="amber" %}
+The query reaches the correct index, but filtering, ranking, candidate breadth, or
+routing omits the needed Node or admits ineligible ones.
+{% /concept-card %}
+{% concept-card title="Synthesis failure" eyebrow="Wrong answer" icon="warning" tone="rose" %}
+The evidence is sufficient, but the model ignores it, combines it incorrectly, fails
+to abstain, or emits claims without traceable support.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Minimum trace for each production query
+
+- Query ID, tenant or policy scope, and the normalized query sent to retrieval.
+- Retriever configuration, filters, index version, candidate Node IDs, and scores.
+- Postprocessor or reranker decisions and the final context passed to synthesis.
+- Model and prompt version, latency, token usage, output, citations, and abstention state.
+- User feedback and offline evaluation labels linked back to the same trace.
+
+Log source identifiers and metrics without copying sensitive document bodies into an
+uncontrolled telemetry system.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Add workflows and agents at a real control boundary
+
+A direct query engine is usually easier to reason about for one retrieve-and-synthesize
+request. Use a Workflow or agent when the application needs observable steps such as
+query classification, parallel retrieval, human approval, tool execution, retry,
+reconciliation, or durable state.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the task" label="Bound" %}
+Decide whether the request is answerable by one evidence path or needs a controlled
+multi-step operation.
+{% /process-step %}
+{% process-step number="2" title="Select allowed capabilities" label="Authorize" %}
+Expose only the retrievers and tools permitted for this identity, tenant, and request.
+{% /process-step %}
+{% process-step number="3" title="Run observable steps" label="Execute" %}
+Bound time, retries, fan-out, and token use. Persist state before any step that may be
+replayed or resumed.
+{% /process-step %}
+{% process-step number="4" title="Verify the outcome" label="Reconcile" %}
+Check evidence, tool results, side effects, and citations before presenting success to
+the user.
+{% /process-step %}
+{% /process-flow %}
+
+Avoid the legacy `QueryPipeline` abstraction for new orchestration work. The official
+LlamaIndex documentation marks it as feature-frozen and directs new orchestration to
+Workflows. A framework upgrade should be treated as an application change: pin
+versions, read migration notes, and rerun retrieval and workflow evaluations.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Ship the system with explicit ownership
+
+### Data and index operations
+
+- Keep source content in its system of record and make index rebuilds reproducible.
+- Separate tenants and permission scopes in both storage and retrieval filters.
+- Define freshness targets, deletion propagation, embedding migration, backup, and
+  rebuild procedures.
+- Test malformed files, parser regressions, partial ingestion, duplicate deliveries,
+  and failed vector-store writes.
+
+### Query and model operations
+
+- Set timeouts and budgets for retrieval, reranking, synthesis, and any workflow step.
+- Evaluate common queries, tail cases, adversarial instructions, stale versions, and
+  permission boundaries before release.
+- Monitor retrieval quality and answer quality separately; latency and cost alone do
+  not prove correctness.
+- Design abstention and escalation when evidence is missing, conflicting, stale, or
+  unauthorized.
+
+### Architecture decision
+
+Use LlamaIndex when its data, retrieval, and workflow abstractions remove real
+application complexity while leaving the important boundaries observable. A small
+application with one search call may need only a vector-store client and a narrow
+prompt. A multi-source system with repeatable ingestion, several retrieval paths,
+evaluation, and controlled workflows can benefit from the framework's composition.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+LlamaIndex APIs and integration packages evolve. The examples use the current
+`llama_index.core` package structure documented while authoring; verify imports and
+integration package versions against the release you pin.
+
+- [LlamaIndex ingestion pipeline](https://docs.llamaindex.ai/en/stable/module_guides/loading/ingestion_pipeline/)
+- [Documents and Nodes](https://docs.llamaindex.ai/en/stable/module_guides/loading/documents_and_nodes/)
+- [Indexing concepts](https://docs.llamaindex.ai/en/stable/module_guides/indexing/)
+- [Retriever API and modules](https://docs.llamaindex.ai/en/stable/module_guides/querying/retriever/)
+- [Response synthesis](https://docs.llamaindex.ai/en/stable/module_guides/querying/response_synthesizers/)
+- [Evaluation modules](https://docs.llamaindex.ai/en/stable/module_guides/evaluating/)
+- [Instrumentation](https://docs.llamaindex.ai/en/stable/module_guides/observability/instrumentation/)
+- [Workflows introduction](https://docs.llamaindex.ai/en/stable/understanding/workflows/)
+- [Query Pipeline status](https://docs.llamaindex.ai/en/stable/module_guides/querying/pipeline/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/llamaindex/quiz/llamaindex-production-decisions.json" lessonSlug="llamaindex" title="LlamaIndex Production Design Review" /%}

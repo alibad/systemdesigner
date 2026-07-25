@@ -1,0 +1,266 @@
+---
+registryId: grpc
+---
+
+{% section-card tone="intro" %}
+## What is gRPC?
+
+**gRPC is a framework for calling typed service methods across a network.** A service
+definition declares method names and request and response messages, usually with
+Protocol Buffers. Code generators then create client stubs and server interfaces for
+supported languages.
+
+In plain language, a local-looking method call still crosses a distributed-system
+boundary. It can wait in a queue, lose its connection, outlive the caller, execute more
+than once, or return after its result is no longer useful. A production gRPC contract
+therefore includes deadlines, cancellation, status semantics, retry safety, schema
+evolution, transport security, and load balancing as well as message types.
+
+{% callout variant="info" %}
+### Core invariant
+
+Every RPC must have a bounded lifetime and an explicit effect contract. A generated
+stub makes the call typed; it does not make a mutation safe to retry or stop downstream
+work when the caller has gone away.
+{% /callout %}
+
+This lesson builds on [API design](/technology/api-design). Review that lesson first if
+method contracts, compatibility, or idempotency are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose a method shape from the conversation
+
+gRPC defines four method types. The choice is about who sends how many messages and
+when either side can act, not about which option is universally fastest.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Unary" eyebrow="One request, one response" icon="arrow-right" tone="blue" %}
+Use for a bounded command or lookup. The client sends one message, then receives one
+response and final status.
+{% /concept-card %}
+{% concept-card title="Server streaming" eyebrow="One request, many responses" icon="list-start" tone="cyan" %}
+Use when one query yields an ordered sequence over time or is too large to buffer as a
+single response. The client must consume or cancel the stream.
+{% /concept-card %}
+{% concept-card title="Client streaming" eyebrow="Many requests, one response" icon="list-end" tone="violet" %}
+Use for uploads or incremental aggregation where the server responds after the client
+finishes sending. Define partial-upload and cancellation behavior.
+{% /concept-card %}
+{% concept-card title="Bidirectional streaming" eyebrow="Two independent streams" icon="refresh-cw" tone="green" %}
+Use when both peers send ordered messages independently. Define application framing,
+heartbeats, idle policy, bounded buffering, and reconnect semantics.
+{% /concept-card %}
+{% /concept-grid %}
+
+Within one RPC, messages in each direction preserve order. Across separate RPCs, do not
+infer a global order. HTTP/2 flow control limits transport data in flight, but it does
+not choose an application queue limit or decide what to do with a slow consumer.
+
+{% code-block file="/api/content/technology/grpc/code/inventory-service.proto" language="protobuf" title="Declare unary and streaming method contracts" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Evolve Protocol Buffers without changing old meaning
+
+Protocol Buffer field numbers identify fields on the binary wire. Once a message is in
+use, a field number is part of the compatibility contract. Renaming a source field may
+be manageable; changing or reusing its number can make old bytes ambiguous.
+
+{% process-flow %}
+{% process-step number="1" title="Add, do not reinterpret" label="Compatible growth" %}
+Add a new field with a new number and define behavior when it is absent. Prefer explicit
+presence where the application must distinguish unset from a default scalar value.
+{% /process-step %}
+{% process-step number="2" title="Deploy tolerant readers" label="Mixed versions" %}
+Roll out code that understands both shapes before writers depend on the new field. Test
+old-client/new-server and new-client/old-server combinations.
+{% /process-step %}
+{% process-step number="3" title="Migrate behavior" label="Application contract" %}
+Move callers gradually and observe unknown enum values, default handling, validation,
+and any JSON or TextFormat boundary separately from binary compatibility.
+{% /process-step %}
+{% process-step number="4" title="Reserve removed identity" label="No reuse" %}
+When a field is retired, reserve its number and old name. Never recycle them for a new
+meaning, even after all current source references disappear.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/grpc/code/inventory-messages.proto" language="protobuf" title="A message contract designed for mixed-version clients" /%}
+
+Important rules from the current
+[Protocol Buffers language guide](https://protobuf.dev/programming-guides/proto3/):
+
+- field numbers must remain unique and must not be changed after use;
+- deleted field numbers and names should be reserved;
+- adding fields is binary wire-safe, but generated application code can still need a
+  coordinated rollout;
+- an enum needs a zero value, and clients must tolerate values introduced by newer
+  writers; and
+- binary compatibility does not automatically imply ProtoJSON compatibility.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Budget the whole call, including retries
+
+By default, gRPC does not set a deadline. The client must choose one from the user or
+job budget and pass it through the call chain. A retry is a new attempt inside the same
+overall deadline, not a fresh latency budget.
+
+### Lab 1: build a deadline and retry ledger
+
+Enter network and service durations measured from traces or representative load tests.
+Then inject transient `UNAVAILABLE` failures. The model adds the same per-attempt budget
+and explicit exponential backoff for each retry. It does not predict future latency or
+claim a throughput number.
+
+{% interactive-block id="technology/grpc-performance" dataFile="/api/content/technology/grpc/data/deadline-retry-budget.json" /%}
+
+Read the result as a planning envelope:
+
+- **Per-attempt budget** is measured network/proxy time plus measured server work for
+  the selected percentile and load condition.
+- **Remaining deadline** is the original call deadline minus completed attempt budgets
+  and backoff. A downstream call receives only what remains.
+- **Maximum attempts** includes the original attempt. More attempts can amplify an
+  outage even when each individual retry is bounded.
+- **Retry safety** belongs to the application effect. `UNAVAILABLE` can be retryable,
+  but an unkeyed mutation may already have committed before the client lost the result.
+
+The official [gRPC deadline guide](https://grpc.io/docs/guides/deadlines/) recommends
+choosing realistic deadlines from network and server behavior and validating them with
+load testing. The [retry guide](https://grpc.io/docs/guides/retry/) defines attempt
+limits, exponential backoff, retryable statuses, throttling, and the point at which an
+RPC becomes committed to the application.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Trace success, cancellation, retry, and backpressure
+
+A status code describes how one RPC ended from one participant's perspective. It does
+not roll back application work. The client and server can even disagree: a server may
+commit and send a response that reaches the client after its deadline.
+
+### Lab 2: switch the runtime path
+
+Use the topology to compare a healthy unary call with three failure-sensitive paths.
+The selected scenario updates the active connection path, degraded or failed nodes,
+and the user-visible consequence together.
+
+{% topology-lab dataFile="/api/content/technology/grpc/data/rpc-lifecycle-topology.json" /%}
+
+Use status codes as a stable API vocabulary:
+
+- `INVALID_ARGUMENT` means the request is invalid regardless of current system state.
+- `FAILED_PRECONDITION` means the caller should wait until an explicit state condition
+  is fixed instead of immediately retrying.
+- `ABORTED` means a larger read-modify-write or transaction sequence should restart.
+- `UNAVAILABLE` describes a transient inability to serve the call, but the method must
+  still be safe before a client retries it.
+- `DEADLINE_EXCEEDED` means the caller's time budget expired; server-side effects may
+  already have happened.
+- `CANCELLED` means the call was cancelled, typically by a caller or propagated context.
+
+Cancellation should flow through every spawned task and downstream RPC. The gRPC
+runtime cancels an expired server call, but application code must stop its own work and
+respect the propagated context. Changes performed before cancellation are not rolled
+back. See the official [cancellation guide](https://grpc.io/docs/guides/cancellation/)
+and [status code guide](https://grpc.io/docs/guides/status-codes/).
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make retry safety part of the method contract
+
+Classify effects before enabling a retry policy:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Read-only lookup" eyebrow="Usually retryable" icon="search" tone="green" %}
+A repeated call observes state but does not create another effect. Still bound attempts,
+backoff, deadline, and retry amplification.
+{% /concept-card %}
+{% concept-card title="Idempotent mutation" eyebrow="Retry with stable identity" icon="key-round" tone="blue" %}
+Require a client-generated operation key, persist its result with the mutation, and
+return the same logical result when the key is replayed with the same request.
+{% /concept-card %}
+{% concept-card title="Unkeyed mutation" eyebrow="Do not retry automatically" icon="circle-alert" tone="rose" %}
+If the result is lost after commit, another attempt can duplicate the effect. Reconcile
+or query operation state instead of guessing that failure means no change occurred.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/grpc/code/go-client-usage.go" language="go" title="Create a TLS channel and call a retry-safe method with one deadline" /%}
+
+Keep retries centralized. If an SDK, sidecar, proxy, service client, and workflow layer
+all retry independently, the total attempt count multiplies. Observe call count and
+attempt count separately, including attempt duration, status, backoff, server pushback,
+and remaining deadline.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Balance RPCs, not only TCP connections
+
+HTTP/2 multiplexes many concurrent RPC streams over a long-lived connection. This is
+efficient, but it changes load-balancing behavior: a transport-level balancer that picks
+one backend when the connection opens may keep all of that channel's RPCs on the same
+backend.
+
+{% system-flow title="Resolution and policy determine backend spread" caption="A channel receives addresses and load-balancing configuration, maintains subchannels, and picks a ready connection for each RPC according to policy." %}
+{% system-node title="Name resolver" eyebrow="Addresses + service config" icon="map" tone="cyan" %}
+Refreshes the eligible backend set and may deliver load-balancing policy. DNS, xDS, and
+custom resolvers have different update and failure behavior.
+{% /system-node %}
+{% system-node title="Channel policy" eyebrow="Pick first or distribute" icon="git-branch" tone="violet" %}
+Maintains subchannels and chooses one for each RPC. The default and available policies
+vary by language and deployment.
+{% /system-node %}
+{% system-node title="Ready subchannels" eyebrow="Long-lived HTTP/2" icon="network" tone="blue" %}
+Carry many concurrent RPC streams. Health, connectivity state, connection age, proxy
+behavior, and endpoint churn affect which backends remain reachable.
+{% /system-node %}
+{% system-node title="Backend methods" eyebrow="Per-RPC work" icon="server" tone="green" %}
+Enforce deadlines, authorization, message limits, concurrency, and graceful shutdown;
+report method-level status, latency, active streams, and bytes.
+{% /system-node %}
+{% /system-flow %}
+
+The current [gRPC load-balancing guide](https://grpc.io/docs/guides/custom-load-balancing/)
+explains that a resolver supplies addresses while the load-balancing policy manages
+subchannels and picks a connection for each RPC. Test the actual language policy,
+resolver refresh, proxy layer, endpoint drain, and long-lived stream behavior rather
+than assuming a round-robin network load balancer redistributes existing channels.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Secure the channel and define the browser boundary
+
+Use TLS to authenticate the server and encrypt transport. Use mutual TLS or workload
+identity when the server must authenticate the calling workload, and apply per-call
+authorization to the requested method and resource. Transport identity does not replace
+application authorization.
+
+Production controls include:
+
+- trusted roots, server-name verification, certificate rotation, and a deliberate
+  minimum TLS policy;
+- short-lived workload or user credentials carried as call credentials or metadata,
+  never logged as ordinary fields;
+- interceptors that authenticate, authorize, add bounded telemetry context, and map
+  internal failures to stable public statuses;
+- conservative message-size, metadata-size, concurrent-stream, keepalive, idle, and
+  connection-age limits agreed with proxies and servers; and
+- graceful shutdown that stops admitting new RPCs, lets bounded in-flight calls finish,
+  then cancels remaining work.
+
+Native browser networking does not expose the same raw HTTP/2 interface used by normal
+gRPC clients. Use [gRPC-Web](https://grpc.io/docs/platforms/web/) through a compatible
+proxy or choose a browser-facing JSON/SSE/WebSocket boundary as the product requires.
+Treat CORS, cookies or tokens, supported streaming modes, proxy translation, and error
+mapping as part of that separate public contract.
+
+The official [authentication guide](https://grpc.io/docs/guides/auth/) distinguishes
+channel credentials such as TLS from call credentials such as tokens. Verify both sides
+of the trust decision and test certificate expiry, rotation, revoked identity, and
+authorization denial before production.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/grpc/quiz/grpc.json" lessonSlug="grpc" title="gRPC Contract and Runtime Decisions" /%}

@@ -1,0 +1,189 @@
+---
+registryId: url-shortener-read-path
+---
+
+{% section-card tone="intro" %}
+## What is a URL-shortener read path?
+
+**A URL-shortener read path is the sequence that turns a short-code request such as `GET /r7K2` into an HTTP redirect to the stored destination.** It begins when a client reaches the service and ends when the client receives a redirect response. The common path should be short, read-heavy, and safe when caches or dependencies fail.
+
+This path matters because one link can be created once and opened millions of times. If redirects outnumber creations by about **100 to 1**, read latency, cache behavior, and failure isolation dominate the user experience and infrastructure cost.
+
+{% callout variant="info" %}
+The core invariant is simple: every valid short code resolves to the intended destination without making analytics, cache warm-up, or a retry storm part of the user's critical path.
+{% /callout %}
+
+This lesson builds on [Scalability Basics](/fundamentals/scalability-basics). Review it first if horizontal scaling, latency percentiles, or caching are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace one redirect before adding scale
+
+Start with the request that must succeed. A client sends a short code, the service validates it, a cache or durable store supplies the destination, and the service returns an HTTP redirect. Click analytics can be emitted after the response decision.
+
+{% system-flow title="The redirect critical path" caption="The cache-hit route is the common path. A cache miss may consult durable storage, while analytics leaves the user-facing latency budget." %}
+{% system-node title="Client" eyebrow="GET /r7K2" icon="users" tone="blue" %}
+Send the short code with a finite deadline. Follow a redirect only after validating the response and destination policy.
+{% /system-node %}
+{% system-node title="Edge and redirect service" eyebrow="Validate and route" icon="route" tone="violet" %}
+Normalize the code, reject malformed input, apply abuse controls, and look up the mapping without keeping request-local state.
+{% /system-node %}
+{% system-node title="Mapping cache" eyebrow="Common path" icon="cache" tone="green" %}
+Return hot mappings in a few milliseconds. Cache misses and expired entries continue to the source of truth.
+{% /system-node %}
+{% system-node title="Durable mapping store" eyebrow="Miss path" icon="database" tone="amber" %}
+Return the current mapping, expiration, and state. The service populates the cache before returning the redirect.
+{% /system-node %}
+{% system-node title="Analytics stream" eyebrow="Off path" icon="activity" tone="cyan" %}
+Receive a click event asynchronously. Counting can lag briefly without delaying or blocking the redirect.
+{% /system-node %}
+{% /system-flow %}
+
+The handler makes four bounded decisions:
+
+1. Validate the code and reject missing, expired, disabled, or abusive requests.
+2. Read the mapping cache and distinguish a hit from a miss.
+3. On a miss, read durable storage once, populate the cache, and return the same redirect contract.
+4. Publish analytics asynchronously with a request identifier so consumers can deduplicate retries.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Turn the read ratio into a capacity model
+
+A read-heavy ratio does not automatically guarantee a healthy design. The origin load depends on the cache miss ratio:
+
+`origin reads per second = redirect requests per second x (1 - cache hit rate)`
+
+At 100,000 redirects per second, a 99% hit rate sends about 1,000 reads per second to storage. A 90% hit rate sends 10,000. The percentage changed by only nine points, but origin demand grew tenfold.
+
+{% metric-strip %}
+{% metric value="100:1" label="Read-to-write ratio" detail="Redirects dominate link creation" tone="blue" /%}
+{% metric value="99%" label="Target hit rate" detail="One miss per 100 redirects" tone="green" /%}
+{% metric value="1,000/s" label="Origin reads" detail="At 100,000 redirects/s" tone="amber" /%}
+{% metric value="<100 ms" label="Redirect p99" detail="Measured at the service boundary" tone="violet" /%}
+{% /metric-strip %}
+
+Use the lab to change traffic, cache hit rate, and miss protection. Watch the storage demand and latency budget move together.
+
+{% interactive-block id="fundamentals/url-shortener-read-path-pressure-lab" dataFile="/api/content/fundamentals/url-shortener-read-path/data/read-path-pressure-model.json" /%}
+
+The model exposes three operational lessons:
+
+- **Percentages hide absolute load.** A 95% hit rate still creates 15,000 origin reads per second at 300,000 redirects per second.
+- **Bursts matter.** Popular links can expire together and turn one hot key into many concurrent origin reads.
+- **The miss path is production traffic.** It needs bounded concurrency, request coalescing, timeouts, and tested capacity.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Protect the cache without confusing it for storage
+
+The cache accelerates reads; it does not own the mapping. Durable storage remains the authority for destination, expiration, and disabled state.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Read through" eyebrow="Lookup" icon="cache" tone="blue" %}
+Read the cache first. On a miss, load one authoritative record, populate the cache with a bounded TTL, and answer the request.
+{% /concept-card %}
+
+{% concept-card title="Coalesce misses" eyebrow="Hot key" icon="network" tone="violet" %}
+Let one request refill an expired key while matching requests await that result. This limits duplicate origin work during bursts.
+{% /concept-card %}
+
+{% concept-card title="Jitter expiry" eyebrow="Distribution" icon="clock" tone="green" %}
+Vary TTLs within a safe range so many popular mappings do not expire in the same instant and create synchronized load.
+{% /concept-card %}
+
+{% concept-card title="Cache absence" eyebrow="Negative result" icon="shield" tone="amber" %}
+Briefly cache a verified not-found or expired state. Use a short TTL so later creation or reactivation is not hidden for long.
+{% /concept-card %}
+{% /concept-grid %}
+
+Cache policy must preserve correctness:
+
+- A disabled or expired link must stop redirecting within the product's stated propagation window.
+- A destination edit needs explicit invalidation or a versioned key; waiting for an arbitrary long TTL is not a release plan.
+- A cache outage must not unlock unbounded direct reads to storage.
+- A stale response, if allowed during an incident, must be bounded by age and link state.
+- Cache keys must include tenant or namespace boundaries when codes are not globally unique.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make the HTTP redirect an explicit contract
+
+The response code is not a cosmetic choice. Browsers, crawlers, and intermediary caches can remember permanent redirects, and some status codes allow an HTTP method to change when followed.
+
+- **`301 Moved Permanently`:** suitable only when the destination is stable enough for clients and caches to remember it beyond your immediate control.
+- **`302 Found`:** a conservative default for changeable links reached with `GET`; clients treat the destination as temporary.
+- **`307 Temporary Redirect`:** temporary like `302`, but explicitly preserves the original HTTP method and body.
+- **`404 Not Found` or `410 Gone`:** use a terminal response for missing or expired mappings instead of redirecting to an invented destination.
+
+Choose a link lifecycle, redirect status, and analytics placement in the contract lab. The result explains what the client can cache and what work remains on the critical path.
+
+{% interactive-block id="fundamentals/url-shortener-read-path-contract-lab" dataFile="/api/content/fundamentals/url-shortener-read-path/data/redirect-contract-model.json" /%}
+
+The safest default for an editable marketing or user-created link is usually a temporary redirect with analytics emitted asynchronously. A permanent redirect can be more cacheable, but that optimization transfers control to clients that may not promptly observe later destination changes.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design the failures before they happen
+
+A healthy cache hit is only one state. Review the user-visible result and the protection boundary for each failure.
+
+{% process-flow %}
+{% process-step number="1" title="Cache miss" label="Recover" %}
+Load the authoritative mapping once, populate the cache with bounded TTL and jitter, then return the redirect.
+{% /process-step %}
+
+{% process-step number="2" title="Cache unavailable" label="Contain" %}
+Allow only a bounded number of requests to reach storage. Shed excess work or use policy-approved stale data instead of collapsing the source of truth.
+{% /process-step %}
+
+{% process-step number="3" title="Store slow" label="Bound" %}
+Use a deadline shorter than the client budget, avoid unsafe retries, and return a controlled error when no trustworthy mapping is available.
+{% /process-step %}
+
+{% process-step number="4" title="Analytics delayed" label="Decouple" %}
+Keep redirecting, buffer or retry events asynchronously, and monitor event age. Analytics loss must not become redirect loss.
+{% /process-step %}
+{% /process-flow %}
+
+Watch these failure signals together:
+
+- redirect p50, p95, and p99 latency by cache result;
+- cache hit rate, eviction rate, and refill duration;
+- origin reads, throttled reads, queue age, and timeout ratio;
+- missing, expired, disabled, and stale-link responses;
+- click-event publish failures, backlog age, and consumer deduplication;
+- hot-key concentration and coalesced waiter count.
+
+{% callout variant="warn" %}
+Do not retry the complete redirect path without a deadline. Retries can multiply cache misses, origin reads, and analytics events while the user still receives no redirect.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement a bounded read-through handler
+
+The handler example keeps the authoritative lookup bounded, coalesces concurrent misses for one code, distinguishes negative results, and emits analytics after the response decision.
+
+{% code-block file="/api/content/fundamentals/url-shortener-read-path/code/serve-read-through-redirect.js" language="javascript" title="Read-through redirect handler with miss coalescing" /%}
+
+Cache entries need a policy as well as a value. The second example applies TTL jitter and keeps negative entries short-lived so absent-code traffic cannot overload storage without hiding a later valid mapping for too long.
+
+{% code-block file="/api/content/fundamentals/url-shortener-read-path/code/build-cache-entry.js" language="javascript" title="Build positive and negative cache entries" /%}
+
+Before release, prove all of the following:
+
+- cache hits and misses return the same destination and redirect status;
+- concurrent misses for one hot code produce one authoritative read per service instance;
+- expired and disabled mappings never become successful redirects;
+- destination edits invalidate or version the cached mapping within the promised window;
+- analytics retries do not duplicate business counts;
+- a cache outage cannot exceed the storage concurrency budget;
+- timeout and shed responses are observable and do not trigger an unbounded retry loop.
+{% /section-card %}
+
+{% section-card %}
+## Check your read-path decisions
+
+{% quiz questionsFile="/api/content/fundamentals/url-shortener-read-path/quiz/url-shortener-read-path.json" lessonSlug="url-shortener-read-path" title="URL Shortener Read Path Decision Review" /%}
+{% /section-card %}

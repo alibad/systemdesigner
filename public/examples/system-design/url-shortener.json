@@ -1,0 +1,324 @@
+{
+  "metadata": {
+    "id": "url-shortener",
+    "title": "URL Shortener (like bit.ly)",
+    "description": "Design a URL shortening service that generates short aliases for long URLs and tracks click analytics",
+    "templateType": "system_design",
+    "category": "Web Services",
+    "complexity": "medium",
+    "estimatedDuration": "30-45 min interview",
+    "tags": ["hashing", "key-generation", "caching", "analytics", "redirection"],
+    "author": "SystemDesigner Team",
+    "version": "1.0.0"
+  },
+  "project": {
+    "title": "URL Shortener (like bit.ly)",
+    "description": "A scalable URL shortening service generating unique short codes, handling billions of redirects, and providing click analytics.",
+    "templateType": "system_design"
+  },
+  "pages": [
+    {
+      "id": "requirements",
+      "title": "Requirements & Scope",
+      "description": "Functional and non-functional requirements",
+      "order": 0,
+      "sections": {
+        "functional-requirements": {
+          "id": "functional-requirements",
+          "title": "Functional Requirements",
+          "type": "requirements",
+          "order": 0,
+          "content": {
+            "type": "requirements",
+            "functional": [
+              {
+                "id": "url-shortening",
+                "title": "URL Shortening",
+                "description": "Generate a short URL for a given long URL",
+                "priority": "high",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "Given a long URL, return a short URL (e.g., bit.ly/abc123)",
+                  "Short URLs should be 6-8 characters long",
+                  "Support custom short URLs (vanity URLs)",
+                  "Return existing short URL if long URL already shortened"
+                ]
+              },
+              {
+                "id": "url-redirection",
+                "title": "URL Redirection",
+                "description": "Redirect users from short URL to original long URL",
+                "priority": "high",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "HTTP 301 redirect (permanent) for SEO",
+                  "Redirect in &lt;100ms (p95)",
+                  "Handle invalid/expired short URLs gracefully"
+                ]
+              },
+              {
+                "id": "analytics",
+                "title": "Click Analytics",
+                "description": "Track and display click statistics",
+                "priority": "medium",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "Total click count",
+                  "Clicks over time (daily, monthly)",
+                  "Geographic location of clicks",
+                  "Referrer and device information"
+                ]
+              },
+              {
+                "id": "expiration",
+                "title": "URL Expiration",
+                "description": "Support expiring URLs after a specified time",
+                "priority": "low",
+                "status": "in_progress",
+                "acceptanceCriteria": [
+                  "Optional expiration date/time",
+                  "Automatic cleanup of expired URLs",
+                  "Return 404 for expired URLs"
+                ]
+              }
+            ],
+            "nonFunctional": [
+              {
+                "id": "scale",
+                "title": "Scale",
+                "description": "Support billions of URLs and high redirect throughput",
+                "priority": "high",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "100M URL shortenings per month",
+                  "10B redirects per month",
+                  "100:1 read:write ratio"
+                ]
+              },
+              {
+                "id": "latency",
+                "title": "Low Latency",
+                "description": "Fast redirects for good user experience",
+                "priority": "high",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "p95 redirect latency &lt; 100ms",
+                  "p99 redirect latency &lt; 200ms"
+                ]
+              },
+              {
+                "id": "availability",
+                "title": "High Availability",
+                "description": "99.9% uptime for redirects",
+                "priority": "high",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "Multi-region deployment",
+                  "Automatic failover",
+                  "No single point of failure"
+                ]
+              },
+              {
+                "id": "uniqueness",
+                "title": "Unique Short URLs",
+                "description": "No collisions in short URL generation",
+                "priority": "high",
+                "status": "completed",
+                "acceptanceCriteria": [
+                  "Each short URL maps to exactly one long URL",
+                  "No duplicate short URLs"
+                ]
+              }
+            ],
+            "assumptions": [
+              "100:1 read-to-write ratio (mostly redirects)",
+              "Average long URL length: 200 characters",
+              "Short URL length: 7 characters (62^7 = 3.5 trillion combinations)",
+              "URLs never updated (immutable after creation)",
+              "Most URLs accessed within first 24 hours",
+              "20% of URLs account for 80% of traffic (Pareto)"
+            ],
+            "constraints": [
+              "Short URLs must be case-sensitive (a-z, A-Z, 0-9)",
+              "Avoid confusing characters (0/O, 1/l/I)",
+              "URLs stored indefinitely unless expired",
+              "Must prevent abuse (rate limiting, spam detection)"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "calculations",
+      "title": "Back-of-Envelope Calculations",
+      "description": "Traffic, storage, and bandwidth estimates",
+      "order": 1,
+      "sections": {
+        "scale-calculations": {
+          "id": "scale-calculations",
+          "title": "Scale Estimations",
+          "type": "calculations",
+          "order": 0,
+          "content": {
+            "type": "calculations",
+            "calculations": [
+              {
+                "id": "write-qps",
+                "title": "URL Shortening QPS",
+                "formula": "Monthly shortenings / (30 days × 86400 sec)",
+                "variables": {
+                  "monthly_shortenings": "100M URLs/month",
+                  "seconds_per_month": "2.6M seconds"
+                },
+                "result": "40 QPS",
+                "unit": "writes/second",
+                "breakdown": "100M / 2.6M ≈ 40 QPS (avg), 200 QPS (peak)"
+              },
+              {
+                "id": "read-qps",
+                "title": "Redirect QPS",
+                "formula": "Monthly redirects / (30 days × 86400 sec)",
+                "variables": {
+                  "monthly_redirects": "10B redirects/month",
+                  "read_write_ratio": "100:1"
+                },
+                "result": "4K QPS",
+                "unit": "reads/second",
+                "breakdown": "10B / 2.6M ≈ 4K QPS (avg), 20K QPS (peak)"
+              },
+              {
+                "id": "storage",
+                "title": "Storage Requirements",
+                "formula": "Total URLs × Storage per URL",
+                "variables": {
+                  "total_urls": "1B URLs (10 years)",
+                  "storage_per_url": "500 bytes (URL + metadata)"
+                },
+                "result": "500GB",
+                "unit": "GB",
+                "breakdown": "1B × 500 bytes = 500GB for 10 years of data"
+              },
+              {
+                "id": "cache-size",
+                "title": "Cache Memory (20% Hot Data)",
+                "formula": "Total URLs × Hit rate × Storage per URL",
+                "variables": {
+                  "hot_urls": "200M URLs (20% of 1B)",
+                  "storage_per_url": "500 bytes"
+                },
+                "result": "100GB",
+                "unit": "GB",
+                "breakdown": "200M × 500 bytes = 100GB cache for hot URLs"
+              },
+              {
+                "id": "bandwidth",
+                "title": "Bandwidth (Redirects)",
+                "formula": "Redirect QPS × Response size",
+                "variables": {
+                  "redirect_qps": "4K QPS (average)",
+                  "response_size": "500 bytes (HTTP 301 + headers)"
+                },
+                "result": "2MB/s",
+                "unit": "MB/s",
+                "breakdown": "4K × 500 bytes = 2MB/s (negligible bandwidth)"
+              }
+            ],
+            "assumptions": [
+              "Read-heavy system (100:1 read:write ratio)",
+              "80/20 rule: 20% of URLs get 80% of traffic",
+              "Cache hit rate: 90% for hot URLs",
+              "URL retention: Indefinite (10+ years)",
+              "Peak traffic: 5x average"
+            ],
+            "references": [
+              "Bitly Engineering Blog",
+              "TinyURL architecture patterns",
+              "Industry benchmarks for URL shorteners"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "api-design",
+      "title": "API Design",
+      "description": "Core API endpoints",
+      "order": 2,
+      "sections": {
+        "rest-apis": {
+          "id": "rest-apis",
+          "title": "REST API Endpoints",
+          "type": "code-editor",
+          "order": 0,
+          "content": {
+            "type": "code-editor",
+            "code": "",
+            "language": "yaml",
+            "theme": "vs-dark",
+            "examples": [
+              {
+                "id": "shorten-url",
+                "title": "Shorten URL",
+                "language": "yaml",
+                "code": "POST /api/v1/shorten\n\nHeaders:\n  Authorization: Bearer {api_key}\n  Content-Type: application/json\n\nBody:\n  {\n    \"long_url\": \"https://example.com/very/long/url?param=value\",\n    \"custom_alias\": \"mylink\",  // Optional vanity URL\n    \"expiration_date\": \"2025-12-31T23:59:59Z\"  // Optional\n  }\n\nResponse (201 Created):\n  {\n    \"short_url\": \"https://bit.ly/abc123\",\n    \"short_code\": \"abc123\",\n    \"long_url\": \"https://example.com/very/long/url?param=value\",\n    \"created_at\": \"2024-10-26T10:30:00Z\",\n    \"expiration_date\": \"2025-12-31T23:59:59Z\"\n  }\n\nErrors:\n  - 400: Invalid URL format\n  - 409: Custom alias already taken\n  - 429: Rate limit exceeded",
+                "description": "Create a short URL"
+              },
+              {
+                "id": "redirect",
+                "title": "Redirect",
+                "language": "yaml",
+                "code": "GET /{short_code}\n\nExample: GET /abc123\n\nResponse (301 Moved Permanently):\n  Location: https://example.com/very/long/url?param=value\n\nErrors:\n  - 404: Short URL not found or expired\n  - 410: URL has been deleted",
+                "description": "Redirect to original URL"
+              },
+              {
+                "id": "analytics",
+                "title": "Get Analytics",
+                "language": "yaml",
+                "code": "GET /api/v1/analytics/{short_code}\n\nHeaders:\n  Authorization: Bearer {api_key}\n\nQuery Params:\n  start_date: 2024-10-01\n  end_date: 2024-10-26\n\nResponse:\n  {\n    \"short_code\": \"abc123\",\n    \"total_clicks\": 15420,\n    \"clicks_by_date\": [\n      {\"date\": \"2024-10-26\", \"count\": 342},\n      {\"date\": \"2024-10-25\", \"count\": 521}\n    ],\n    \"clicks_by_country\": [\n      {\"country\": \"US\", \"count\": 8234},\n      {\"country\": \"GB\", \"count\": 3421}\n    ],\n    \"clicks_by_referrer\": [\n      {\"referrer\": \"twitter.com\", \"count\": 5234},\n      {\"referrer\": \"facebook.com\", \"count\": 2134}\n    ]\n  }",
+                "description": "Retrieve click analytics"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "deep-dive",
+      "title": "Deep Dive: Short Code Generation",
+      "description": "Unique ID generation strategies",
+      "order": 3,
+      "sections": {
+        "id-generation": {
+          "id": "id-generation",
+          "title": "Short Code Generation Strategies",
+          "type": "text-editor",
+          "order": 0,
+          "content": {
+            "type": "text-editor",
+            "markdown": "# Short Code Generation\n\n## Requirements\n- **Unique**: No collisions\n- **Short**: 6-8 characters (62^7 = 3.5T combinations)\n- **Random-looking**: Not sequential (prevents enumeration)\n- **Fast**: Generate in &lt;10ms\n\n## Option 1: Hash-based (MD5 + Base62)\n\n### Algorithm\n```python\nimport hashlib\nimport base62\n\ndef generate_short_code_hash(long_url):\n    # 1. Hash the long URL (MD5)\n    hash_digest = hashlib.md5(long_url.encode()).hexdigest()\n    \n    # 2. Take first 7 characters of hash\n    short_hash = hash_digest[:7]\n    \n    # 3. Convert to base62 (a-z, A-Z, 0-9)\n    short_code = base62.encode(int(short_hash, 16))\n    \n    # 4. Pad to 7 characters if needed\n    return short_code.zfill(7)\n```\n\n**Pros:**\n- Deterministic: Same long URL → same short code\n- No database lookup needed before generation\n- Stateless (no coordination)\n\n**Cons:**\n- ❌ **Hash collisions possible**: Different URLs → same short code\n- Requires collision detection and retry\n- Not truly unique without checks\n\n### Handling Collisions\n```python\ndef shorten_url_with_hash(long_url):\n    max_attempts = 5\n    \n    for attempt in range(max_attempts):\n        # Add salt to URL to generate different hash\n        salted_url = f\"{long_url}_{attempt}\"\n        short_code = generate_short_code_hash(salted_url)\n        \n        # Check if short_code already exists\n        if not db.exists(short_code):\n            db.insert(short_code, long_url)\n            return short_code\n    \n    raise Exception(\"Failed to generate unique short code\")\n```\n\n## Option 2: Counter-based (Auto-increment + Base62)\n\n### Algorithm\n```python\nimport base62\nfrom redis import Redis\n\nredis_client = Redis()\n\ndef generate_short_code_counter():\n    # 1. Get next ID from Redis counter\n    next_id = redis_client.incr('url_counter')\n    \n    # 2. Convert to base62\n    short_code = base62.encode(next_id)\n    \n    # 3. Pad to 7 characters\n    return short_code.zfill(7)\n\n# Example:\n# ID 1 → base62 → \"0000001\"\n# ID 62 → base62 → \"000000z\"\n# ID 3521614606208 → base62 → \"aBcD123\"\n```\n\n**Pros:**\n- ✅ **Guaranteed unique**: No collisions\n- Fast: Single Redis INCR command\n- Simple implementation\n\n**Cons:**\n- Sequential (predictable): Users can enumerate all URLs\n- **Single point of failure**: Redis counter is bottleneck\n- Requires coordination (Redis)\n\n### Solution: Multiple Counters (Sharding)\n```python\n# Use multiple Redis counters with different ranges\nSERVER_ID = 1  # Server identifier (0-999)\n\ndef generate_short_code_sharded():\n    # Each server gets its own range\n    # Server 1: 1, 1000, 2000, 3000, ...\n    # Server 2: 2, 1001, 2001, 3001, ...\n    next_id = redis_client.incrby(f'counter:{SERVER_ID}', 1000)\n    next_id += SERVER_ID\n    \n    return base62.encode(next_id).zfill(7)\n```\n\n## Option 3: UUID + Base62 (Recommended)\n\n### Algorithm\n```python\nimport uuid\nimport base62\n\ndef generate_short_code_uuid():\n    # 1. Generate UUID4 (random)\n    unique_id = uuid.uuid4().int\n    \n    # 2. Convert to base62\n    short_code = base62.encode(unique_id)\n    \n    # 3. Take first 7 characters\n    return short_code[:7]\n```\n\n**Pros:**\n- ✅ **Highly unlikely collisions**: UUID4 has 2^122 combinations\n- No coordination needed (stateless)\n- Random (not sequential)\n- Fast generation\n\n**Cons:**\n- Theoretical collision possibility (check on insert)\n- Slightly longer than pure counter\n\n### With Collision Check\n```python\ndef shorten_url_with_uuid(long_url):\n    max_attempts = 3\n    \n    for _ in range(max_attempts):\n        short_code = generate_short_code_uuid()\n        \n        # Try to insert (unique constraint on short_code)\n        try:\n            db.insert({\n                'short_code': short_code,\n                'long_url': long_url,\n                'created_at': datetime.now()\n            })\n            return short_code\n        except UniqueConstraintViolation:\n            # Collision detected, retry\n            continue\n    \n    raise Exception(\"Failed after 3 attempts\")\n```\n\n## Option 4: Snowflake ID (Twitter's approach)\n\n### Structure (64 bits)\n```\n1 bit (unused) | 41 bits (timestamp) | 10 bits (machine ID) | 12 bits (sequence)\n```\n\n### Algorithm\n```python\nimport time\nimport base62\n\nMACHINE_ID = 1  # 0-1023\nEPOCH = 1609459200000  # Custom epoch (2021-01-01)\n\nclass SnowflakeIDGenerator:\n    def __init__(self, machine_id):\n        self.machine_id = machine_id\n        self.sequence = 0\n        self.last_timestamp = -1\n    \n    def generate(self):\n        timestamp = int(time.time() * 1000)  # Milliseconds\n        \n        if timestamp == self.last_timestamp:\n            # Same millisecond: increment sequence\n            self.sequence = (self.sequence + 1) & 0xFFF  # 12 bits\n            if self.sequence == 0:\n                # Sequence overflow: wait for next millisecond\n                while timestamp <= self.last_timestamp:\n                    timestamp = int(time.time() * 1000)\n        else:\n            self.sequence = 0\n        \n        self.last_timestamp = timestamp\n        \n        # Build 64-bit ID\n        snowflake_id = (\n            ((timestamp - EPOCH) << 22) |\n            (self.machine_id << 12) |\n            self.sequence\n        )\n        \n        # Convert to base62\n        return base62.encode(snowflake_id)[:7]\n```\n\n**Pros:**\n- ✅ **Guaranteed unique** (timestamp + machine ID + sequence)\n- Time-ordered (useful for analytics)\n- No central coordination\n- Scalable (1024 machines, 4096 IDs/ms per machine)\n\n**Cons:**\n- Requires clock synchronization (NTP)\n- Machine ID management\n- More complex than UUID\n\n## Recommendation: **Option 3 (UUID + Base62)**\n\n**Why?**\n- Simplest implementation\n- No coordination/state required\n- Collision probability negligible (2^122 combinations)\n- Fast (&lt;1ms generation)\n- Works in distributed environment\n\n**Implementation:**\n```python\ndef shorten_url(long_url, custom_alias=None):\n    # Check if custom alias requested\n    if custom_alias:\n        if db.exists(custom_alias):\n            raise ConflictError(\"Alias already taken\")\n        short_code = custom_alias\n    else:\n        # Generate random short code\n        short_code = generate_short_code_uuid()\n    \n    # Insert with unique constraint\n    try:\n        db.insert({\n            'short_code': short_code,\n            'long_url': long_url,\n            'created_at': datetime.now(),\n            'click_count': 0\n        })\n    except UniqueConstraintViolation:\n        # Retry once on collision\n        short_code = generate_short_code_uuid()\n        db.insert({...})\n    \n    return f\"https://bit.ly/{short_code}\"\n```\n\n## Base62 Encoding\n\n```python\nBASE62_CHARS = \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\"\n\ndef base62_encode(num):\n    if num == 0:\n        return BASE62_CHARS[0]\n    \n    result = []\n    while num:\n        num, remainder = divmod(num, 62)\n        result.append(BASE62_CHARS[remainder])\n    \n    return ''.join(reversed(result))\n\ndef base62_decode(s):\n    num = 0\n    for char in s:\n        num = num * 62 + BASE62_CHARS.index(char)\n    return num\n```\n\n## Monitoring\n\n**Key Metrics:**\n- Short code generation latency (p50, p95, p99)\n- Collision rate (should be &lt;0.01%)\n- Database insert failures\n- Unique constraint violations",
+            "format": "markdown"
+          }
+        }
+      }
+    },
+    {
+      "id": "architecture",
+      "title": "High-Level Architecture",
+      "description": "System components and data flow",
+      "order": 4,
+      "sections": {
+        "system-architecture": {
+          "id": "system-architecture",
+          "title": "System Architecture",
+          "type": "text-editor",
+          "order": 0,
+          "content": {
+            "type": "text-editor",
+            "markdown": "# System Architecture\n\n## Components\n\n### 1. Load Balancer (NGINX)\n- Routes traffic to API servers\n- SSL termination\n- Rate limiting (per API key)\n\n### 2. API Servers (Stateless)\n- Handle shorten and analytics requests\n- Horizontally scalable\n- Technology: Go, Node.js, or Python\n\n### 3. Redirect Servers (Stateless)\n- Handle GET /{short_code} requests\n- Highly optimized for low latency\n- Separate from API servers (different scaling needs)\n\n### 4. Database (PostgreSQL)\n**Schema:**\n```sql\nCREATE TABLE urls (\n  short_code VARCHAR(10) PRIMARY KEY,\n  long_url TEXT NOT NULL,\n  created_at TIMESTAMP DEFAULT NOW(),\n  expiration_date TIMESTAMP,\n  user_id BIGINT,\n  click_count BIGINT DEFAULT 0\n);\n\nCREATE INDEX idx_urls_user_id ON urls(user_id);\nCREATE INDEX idx_urls_created_at ON urls(created_at DESC);\n```\n\n**Sharding:** By hash(short_code) % num_shards\n\n### 5. Cache (Redis)\n**Cache Strategy:**\n- Cache hot URLs (20% that get 80% of traffic)\n- TTL: 24 hours\n- LRU eviction\n\n```python\ndef get_long_url(short_code):\n    # 1. Check cache\n    long_url = redis.get(f\"url:{short_code}\")\n    \n    if long_url:\n        return long_url  # Cache hit\n    \n    # 2. Query database\n    long_url = db.query(\"SELECT long_url FROM urls WHERE short_code = %s\", short_code)\n    \n    if long_url:\n        # 3. Write to cache\n        redis.setex(f\"url:{short_code}\", 86400, long_url)  # 24 hour TTL\n    \n    return long_url\n```\n\n### 6. Analytics Service\n**Click Tracking:**\n```python\n# Async event logging (non-blocking)\ndef track_click(short_code, request_metadata):\n    kafka.send('click_events', {\n        'short_code': short_code,\n        'timestamp': time.time(),\n        'country': request_metadata.get('country'),\n        'referrer': request_metadata.get('referrer'),\n        'user_agent': request_metadata.get('user_agent')\n    })\n```\n\n**Batch Processing:**\n- Consume click events from Kafka\n- Batch insert into analytics database (Cassandra or ClickHouse)\n- Increment click counters in Redis\n\n### 7. Analytics Database (ClickHouse)\n- Columnar database optimized for analytics queries\n- Store click events for reporting\n\n```sql\nCREATE TABLE click_events (\n  short_code String,\n  timestamp DateTime,\n  country String,\n  referrer String,\n  user_agent String\n) ENGINE = MergeTree()\nORDER BY (short_code, timestamp);\n```\n\n## Data Flow\n\n### Shorten URL Flow\n1. Client → Load Balancer → API Server\n2. API Server generates short code (UUID + Base62)\n3. Insert into PostgreSQL (with unique constraint)\n4. Return short URL to client\n\n### Redirect Flow (Hot Path)\n1. Client → Load Balancer → Redirect Server\n2. Redirect Server checks Redis cache\n3. On cache hit: Return 301 redirect (95% of requests)\n4. On cache miss: Query PostgreSQL, cache result, return 301\n5. Async: Log click event to Kafka (non-blocking)\n\n## Scalability\n\n### Database Sharding\n- Shard by `hash(short_code) % 256`\n- Each shard: 4M URLs (1B URLs / 256 shards)\n- Read replicas for heavy read load\n\n### Caching Strategy\n- Cache 20% hot URLs → 200M URLs × 500 bytes = 100GB\n- Redis Cluster with 10 nodes (10GB each)\n- Cache hit rate: 90%+\n\n### Read Replicas\n- 1 master + 3 read replicas per shard\n- Redirects read from replicas\n- Analytics queries read from replicas\n\n## Monitoring\n\n**Key Metrics:**\n- Redirect latency (p50, p95, p99)\n- Cache hit rate\n- Database query latency\n- Short code generation latency\n- API error rate",
+            "format": "markdown"
+          }
+        }
+      }
+    }
+  ]
+}

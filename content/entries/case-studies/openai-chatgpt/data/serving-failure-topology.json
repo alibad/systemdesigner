@@ -1,0 +1,246 @@
+{
+  "title": "Trace routing decisions when serving dependencies fail",
+  "description": "Select a scenario to follow the active request path and inspect each responsibility. This is a case-study reference design, not a disclosure of OpenAI's private deployment.",
+  "nodes": [
+    {
+      "id": "chat-client",
+      "label": "Chat client",
+      "eyebrow": "Request and stream",
+      "detail": "Sends a message with a request ID, renders streamed tokens, supports cancellation, and makes degraded or retry states visible to the user.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 18
+    },
+    {
+      "id": "global-gateway",
+      "label": "Global gateway",
+      "eyebrow": "Admission boundary",
+      "detail": "Authenticates, applies quotas, validates request size, enforces an idempotency key for side effects, and rejects work the fleet cannot safely admit.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 30,
+      "y": 18
+    },
+    {
+      "id": "orchestrator",
+      "label": "Conversation orchestrator",
+      "eyebrow": "Context and routing",
+      "detail": "Builds a bounded prompt from the current turn, conversation summary, instructions, and tool results; then selects an eligible model tier and region.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 50,
+      "y": 18
+    },
+    {
+      "id": "primary-model",
+      "label": "Primary model pool",
+      "eyebrow": "Region A",
+      "detail": "Runs prefill and token decoding on the selected model tier, batches compatible work, and streams tokens through output policy checks.",
+      "kind": "stream",
+      "tone": "green",
+      "x": 70,
+      "y": 18
+    },
+    {
+      "id": "stream-delivery",
+      "label": "Policy and stream delivery",
+      "eyebrow": "Final boundary",
+      "detail": "Applies output controls, records finish and fallback reasons, persists the assistant turn when allowed, and closes or cancels the stream explicitly.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 90,
+      "y": 18
+    },
+    {
+      "id": "input-safety",
+      "label": "Input safety policy",
+      "eyebrow": "Risk decision",
+      "detail": "Classifies policy risk and decides whether the request may continue, needs restrictions, or must be refused. Its failure policy is explicit rather than bypassed.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 20,
+      "y": 75
+    },
+    {
+      "id": "restricted-path",
+      "label": "Restricted response path",
+      "eyebrow": "Safe degradation",
+      "detail": "Returns a bounded retry or refusal response when a required safety decision is unavailable. Tool execution and high-risk generation remain disabled.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 40,
+      "y": 75
+    },
+    {
+      "id": "tool-broker",
+      "label": "Tool broker",
+      "eyebrow": "Typed side effects",
+      "detail": "Validates arguments, checks user authorization, applies timeouts and idempotency, executes an allowlisted tool, and returns either a typed result or typed failure.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 60,
+      "y": 75
+    },
+    {
+      "id": "recovery-model",
+      "label": "Recovery model pool",
+      "eyebrow": "Region B reserve",
+      "detail": "Keeps independent regional serving headroom. It may use a compatible smaller tier or shorter output cap when the primary region is unavailable.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 80,
+      "y": 75
+    }
+  ],
+  "edges": [
+    {
+      "id": "client-gateway",
+      "from": "chat-client",
+      "to": "global-gateway",
+      "label": "message"
+    },
+    {
+      "id": "gateway-safety",
+      "from": "global-gateway",
+      "to": "input-safety",
+      "label": "policy check"
+    },
+    {
+      "id": "safety-orchestrator",
+      "from": "input-safety",
+      "to": "orchestrator",
+      "label": "allowed context",
+      "via": {
+        "x": 36,
+        "y": 50
+      }
+    },
+    {
+      "id": "orchestrator-primary",
+      "from": "orchestrator",
+      "to": "primary-model",
+      "label": "tier and region"
+    },
+    {
+      "id": "primary-stream",
+      "from": "primary-model",
+      "to": "stream-delivery",
+      "label": "filtered tokens"
+    },
+    {
+      "id": "gateway-restricted",
+      "from": "global-gateway",
+      "to": "restricted-path",
+      "label": "fail-safe route",
+      "via": {
+        "x": 31,
+        "y": 54
+      }
+    },
+    {
+      "id": "restricted-stream",
+      "from": "restricted-path",
+      "to": "stream-delivery",
+      "label": "bounded response",
+      "via": {
+        "x": 70,
+        "y": 54
+      }
+    },
+    {
+      "id": "orchestrator-tool",
+      "from": "orchestrator",
+      "to": "tool-broker",
+      "label": "typed call"
+    },
+    {
+      "id": "tool-primary",
+      "from": "tool-broker",
+      "to": "primary-model",
+      "label": "result or typed error"
+    },
+    {
+      "id": "orchestrator-recovery",
+      "from": "orchestrator",
+      "to": "recovery-model",
+      "label": "recovery assignment",
+      "via": {
+        "x": 66,
+        "y": 50
+      }
+    },
+    {
+      "id": "recovery-stream",
+      "from": "recovery-model",
+      "to": "stream-delivery",
+      "label": "degraded tokens"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-text-turn",
+      "label": "Healthy text turn",
+      "summary": "Admission and input policy succeed, the orchestrator selects a model tier with regional headroom, and output controls stay on the streaming path.",
+      "activeEdges": [
+        "client-gateway",
+        "gateway-safety",
+        "safety-orchestrator",
+        "orchestrator-primary",
+        "primary-stream"
+      ],
+      "focusNode": "orchestrator",
+      "result": "The user sees tokens as they are generated. Request ID, model route, policy versions, queue delay, time to first token, and finish reason provide enough context to investigate the turn without treating raw conversation text as unrestricted telemetry."
+    },
+    {
+      "id": "primary-region-loss",
+      "label": "Primary region lost",
+      "summary": "The primary model pool is unavailable. Safety and admission still run before the orchestrator assigns compatible reserve capacity in another region.",
+      "activeEdges": [
+        "client-gateway",
+        "gateway-safety",
+        "safety-orchestrator",
+        "orchestrator-recovery",
+        "recovery-stream"
+      ],
+      "failedNodes": [
+        "primary-model"
+      ],
+      "focusNode": "recovery-model",
+      "result": "Eligible requests continue with higher network latency, a shorter output cap, or a compatible lower-cost tier. If reserve headroom is exhausted, admission rejects or queues bounded work instead of sending traffic to the failed pool."
+    },
+    {
+      "id": "safety-dependency-loss",
+      "label": "Safety decision unavailable",
+      "summary": "A required input-risk decision cannot be produced. The gateway opens the dependency circuit and sends affected work to a restricted deterministic path rather than bypassing policy.",
+      "activeEdges": [
+        "client-gateway",
+        "gateway-restricted",
+        "restricted-stream"
+      ],
+      "failedNodes": [
+        "input-safety"
+      ],
+      "focusNode": "restricted-path",
+      "result": "The user receives a clear retry or refusal response. High-risk generation and tools remain disabled, and operators can distinguish policy-dependency loss from a model refusal."
+    },
+    {
+      "id": "tool-timeout",
+      "label": "Tool call times out",
+      "summary": "The model requests an allowlisted tool, but the provider exceeds its deadline. The broker returns one typed failure and prevents an unbounded retry loop.",
+      "activeEdges": [
+        "client-gateway",
+        "gateway-safety",
+        "safety-orchestrator",
+        "orchestrator-tool",
+        "tool-primary",
+        "primary-stream"
+      ],
+      "degradedNodes": [
+        "tool-broker"
+      ],
+      "focusNode": "tool-broker",
+      "result": "The model may answer without fresh tool data only when the product contract allows it, and it must disclose the limitation. Side-effecting tools use the original idempotency key so a late response cannot duplicate the action."
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "title": "Balance the signal, not just the request count",
+  "description": "Change workload shape, algorithm, failure domain, health policy, retries, and connection reuse. The model recomputes target pressure, retry amplification, handshake rate, and the user-visible serving result.",
+  "bounds": {
+    "requestRate": { "min": 300, "max": 3000, "step": 100 }
+  },
+  "defaults": {
+    "workloadId": "variable-work",
+    "topologyId": "two-zone",
+    "algorithmId": "least-request",
+    "incidentId": "slow-outlier",
+    "retryPolicyId": "budgeted-safe",
+    "requestRate": 1600,
+    "readinessGating": true,
+    "outlierEjection": true,
+    "connectionReuse": true
+  },
+  "workloads": [
+    {
+      "id": "uniform-short",
+      "label": "Uniform short requests",
+      "detail": "Requests have similar cost and finish quickly, so request count is a reasonable load estimate.",
+      "kind": "uniform",
+      "affinitySharePct": 30,
+      "writePct": 5
+    },
+    {
+      "id": "variable-work",
+      "label": "Variable request cost",
+      "detail": "Some requests hold backend work much longer; active requests reveal pressure better than arrival count.",
+      "kind": "variable",
+      "affinitySharePct": 45,
+      "writePct": 15
+    },
+    {
+      "id": "tenant-affinity",
+      "label": "Hot tenant with affinity",
+      "detail": "One tenant owns 65% of traffic, so deterministic placement improves locality but concentrates load.",
+      "kind": "affinity",
+      "affinitySharePct": 65,
+      "writePct": 25
+    }
+  ],
+  "topologies": [
+    {
+      "id": "single-zone",
+      "label": "Four targets in one zone",
+      "detail": "Instance failures have spare capacity, but one zonal event removes the whole serving pool.",
+      "entryZone": "zone-a",
+      "backends": [
+        { "id": "app-a1", "label": "app-a1", "zone": "zone-a", "capacityRps": 600 },
+        { "id": "app-a2", "label": "app-a2", "zone": "zone-a", "capacityRps": 600 },
+        { "id": "app-b1", "label": "app-a3", "zone": "zone-a", "capacityRps": 600 },
+        { "id": "app-b2", "label": "app-a4", "zone": "zone-a", "capacityRps": 600 }
+      ]
+    },
+    {
+      "id": "two-zone",
+      "label": "Two targets in each of two zones",
+      "detail": "The pool can route around one zone when the surviving zone has enough reserved capacity.",
+      "entryZone": "zone-a",
+      "backends": [
+        { "id": "app-a1", "label": "app-a1", "zone": "zone-a", "capacityRps": 600 },
+        { "id": "app-a2", "label": "app-a2", "zone": "zone-a", "capacityRps": 600 },
+        { "id": "app-b1", "label": "app-b1", "zone": "zone-b", "capacityRps": 600 },
+        { "id": "app-b2", "label": "app-b2", "zone": "zone-b", "capacityRps": 600 }
+      ]
+    }
+  ],
+  "algorithms": [
+    {
+      "id": "round-robin",
+      "label": "Round robin",
+      "detail": "Even request counts; simple and predictable when targets and request cost are truly similar.",
+      "kind": "round-robin",
+      "adaptation": 0
+    },
+    {
+      "id": "least-request",
+      "label": "Least active requests",
+      "detail": "Uses outstanding L7 work as a feedback signal and steers away from a target that stays busy.",
+      "kind": "least-request",
+      "adaptation": 0.85
+    },
+    {
+      "id": "consistent-hash",
+      "label": "Consistent hash affinity",
+      "detail": "Keeps a key on a stable target for locality, but a hot key can dominate one target.",
+      "kind": "consistent-hash",
+      "adaptation": 0
+    }
+  ],
+  "incidents": [
+    {
+      "id": "healthy",
+      "label": "All targets healthy",
+      "detail": "Every target is ready and has its full measured capacity.",
+      "kind": "healthy",
+      "capacityFactor": 1,
+      "errorRate": 0
+    },
+    {
+      "id": "not-ready",
+      "label": "app-a2 is alive but not ready",
+      "detail": "The process accepts connections while caches and required dependencies are still warming.",
+      "kind": "not-ready",
+      "targetBackendId": "app-a2",
+      "capacityFactor": 0.2,
+      "errorRate": 0.7
+    },
+    {
+      "id": "slow-outlier",
+      "label": "app-a2 becomes a slow outlier",
+      "detail": "The target passes active checks but live requests are slow and frequently fail.",
+      "kind": "slow-outlier",
+      "targetBackendId": "app-a2",
+      "capacityFactor": 0.35,
+      "errorRate": 0.3
+    },
+    {
+      "id": "zone-loss",
+      "label": "zone-a stops serving",
+      "detail": "Power, networking, or a shared zonal dependency removes every target in the entry zone.",
+      "kind": "zone-loss",
+      "targetZone": "zone-a",
+      "capacityFactor": 0,
+      "errorRate": 1
+    }
+  ],
+  "retryPolicies": [
+    {
+      "id": "none",
+      "label": "No proxy retry",
+      "detail": "Return the first result and let the caller follow the application contract.",
+      "kind": "none",
+      "retryBudgetPct": 0,
+      "retriesPerFailure": 0,
+      "idempotent": true
+    },
+    {
+      "id": "budgeted-safe",
+      "label": "One budgeted, idempotent retry",
+      "detail": "Retry only declared-safe operations, capped at 10% of original traffic and inside the caller deadline.",
+      "kind": "budgeted",
+      "retryBudgetPct": 10,
+      "retriesPerFailure": 1,
+      "idempotent": true
+    },
+    {
+      "id": "blind",
+      "label": "Two blind retries",
+      "detail": "Retry every failure twice without an idempotency contract or shared retry budget.",
+      "kind": "blind",
+      "retryBudgetPct": 100,
+      "retriesPerFailure": 2,
+      "idempotent": false
+    }
+  ]
+}

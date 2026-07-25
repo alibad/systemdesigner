@@ -1,0 +1,308 @@
+---
+registryId: vector-databases-tech
+---
+
+{% section-card tone="intro" %}
+## What is a vector database?
+
+**A vector database stores records with numerical embeddings and retrieves the records
+whose vectors are nearest to a query vector.** An embedding is a fixed-length list of
+numbers produced by a model. Nearby vectors often represent items the model considers
+similar, such as passages about the same topic or products with related behavior.
+
+A production vector database is more than a nearest-neighbor index. It must preserve
+record identity, metadata filters, updates, deletions, replication, checkpoints, and
+observable query behavior. The source database normally remains the system of record;
+the vector index is a derived retrieval structure that must be reproducible.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Represent" eyebrow="Embedding contract" icon="layers" tone="violet" %}
+Use one embedding model, dimension, normalization rule, and version for every vector
+compared in the same search space.
+{% /concept-card %}
+{% concept-card title="Retrieve" eyebrow="Query contract" icon="search" tone="cyan" %}
+Combine a distance function, eligibility filters, candidate search, and a deterministic
+top-k result contract.
+{% /concept-card %}
+{% concept-card title="Operate" eyebrow="Data contract" icon="database" tone="green" %}
+Make inserts, replacements, tombstones, rebuilds, and serving checkpoints explicit so
+search does not silently mix incompatible state.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with the record and query contracts
+
+A useful vector record contains more than an array of floats:
+
+- **Stable ID:** identifies one logical item across retries, updates, and deletions.
+- **Vector:** carries the model-produced representation used for similarity.
+- **Embedding version:** prevents vectors from incompatible model spaces being compared.
+- **Filterable metadata:** enforces tenant, permission, locale, time, category, or status
+  eligibility before a result reaches the application.
+- **Payload or source reference:** lets the caller recover the authoritative content and
+  provenance without treating the index as the only copy.
+
+The query contract must name the embedding version, distance metric, filters, `k`,
+freshness expectation, timeout, and behavior when fewer than `k` eligible results exist.
+
+{% system-flow title="Vector query path" caption="Eligibility and ranking are separate decisions. The application must be able to inspect both." %}
+{% system-node title="Query encoder" eyebrow="Represent" icon="layers" tone="violet" %}
+Produce a vector with the same model, dimension, and normalization contract as the
+indexed records.
+{% /system-node %}
+{% system-node title="Eligibility boundary" eyebrow="Filter" icon="filter" tone="amber" %}
+Apply authorization and structured constraints before or during candidate traversal,
+not as instructions for a downstream language model.
+{% /system-node %}
+{% system-node title="Nearest-neighbor index" eyebrow="Search" icon="search" tone="cyan" %}
+Visit exact or approximate candidates under a bounded search-effort budget.
+{% /system-node %}
+{% system-node title="Rerank and hydrate" eyebrow="Return" icon="check" tone="green" %}
+Optionally rerank candidates, fetch authoritative payloads, and return traceable IDs,
+scores, versions, and metadata.
+{% /system-node %}
+{% /system-flow %}
+
+### Choose the distance function before indexing
+
+- **Cosine distance** compares direction. Normalize vectors consistently when the
+  embedding model expects cosine similarity.
+- **Inner product** preserves magnitude as part of the score and is useful when the
+  model was trained for maximum inner-product search.
+- **Euclidean distance** measures geometric separation and can suit embeddings trained
+  with an L2 objective.
+
+Scores from different metrics, embedding versions, or collections are not directly
+comparable. Treat a score threshold as an evaluated product policy, not a universal
+measure of confidence.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose an index by the tradeoff it creates
+
+Exact search computes distance against every eligible vector and provides the ground
+truth for evaluation. Approximate nearest-neighbor (ANN) indexes visit a smaller
+candidate set, trading some recall for latency, throughput, or memory.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Flat exact" eyebrow="Baseline" icon="scan" tone="blue" %}
+Simple and exact. It is often sufficient for small or highly selective collections
+and is the reference used to measure ANN recall.
+{% /concept-card %}
+{% concept-card title="HNSW" eyebrow="Graph" icon="network" tone="cyan" %}
+Traverses a multilayer proximity graph. More search effort can improve recall, while
+graph edges increase memory and build work.
+{% /concept-card %}
+{% concept-card title="IVF" eyebrow="Partition" icon="boxes" tone="violet" %}
+Trains centroids, assigns vectors to lists, and probes selected lists at query time.
+More probes usually improve recall while increasing work.
+{% /concept-card %}
+{% concept-card title="Quantized IVF" eyebrow="Compress" icon="archive" tone="amber" %}
+Stores compact vector codes and often reranks a shortlist. Compression reduces memory
+and bandwidth but adds approximation error and training requirements.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Index selection rules
+
+1. Start with exact search and a labeled query set so quality has a ground truth.
+2. Add ANN only when measured collection size, QPS, or latency requires it.
+3. Benchmark the actual vectors and filters; dimensionality alone does not predict the
+   recall-latency curve.
+4. Include build time, update behavior, resident memory, replicas, and recovery in the
+   decision, not only median query latency.
+
+{% interactive-block id="technology/vector-databases-query-plan-lab" dataFile="/api/content/technology/vector-databases/data/query-plan-model.json" /%}
+
+The workbench is a transparent planning model, not a vendor benchmark. Use it to see
+how coupled decisions move together, then replace its assumptions with measurements
+from your own corpus and hardware.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make filters part of index design
+
+Filtering is not a cosmetic clause added after vector search. It changes the candidate
+population and can cause an ANN query to return too few eligible rows.
+
+### Three common execution shapes
+
+- **Prefilter:** restrict the eligible set before distance search. This is strong for
+  authorization and selective predicates when the engine can search that subset well.
+- **Filtered traversal:** carry filter state through graph or partition traversal. This
+  can preserve more search efficiency but is index-implementation specific.
+- **Postfilter with expansion:** retrieve a broader ANN candidate window, discard
+  ineligible rows, and continue scanning until `k` results or a work limit is reached.
+
+For high-cardinality tenant or category boundaries, consider physical partitioning or
+partial indexes. That can improve isolation and filter completeness, but creates more
+indexes to place, rebalance, rebuild, and observe. Never let an authorization filter
+fail open when the search budget is exhausted.
+
+{% callout variant="warn" %}
+A query that returns five rows quickly is not successful when the contract requested
+ten authorized rows. Monitor result completeness alongside latency and recall.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build a replayable ingestion path
+
+The vector index is derived state. A durable mutation log or outbox should let the
+system rebuild it after corruption, a model change, or an index-format migration.
+
+{% process-flow %}
+{% process-step number="1" title="Commit source state" label="System of record" %}
+Write the authoritative item and an idempotent mutation identifier in one transaction
+or through an equivalent durable boundary.
+{% /process-step %}
+{% process-step number="2" title="Create the embedding" label="Versioned transform" %}
+Record model, preprocessing, dimension, normalization, and source version with the
+produced vector.
+{% /process-step %}
+{% process-step number="3" title="Apply the mutation" label="Index writer" %}
+Upsert by stable ID, reject stale versions, and represent deletion with a tombstone
+until all serving copies have crossed the deletion checkpoint.
+{% /process-step %}
+{% process-step number="4" title="Publish a checkpoint" label="Serving boundary" %}
+Expose the highest durable mutation covered by the searchable index so reads and
+cutovers can reason about freshness.
+{% /process-step %}
+{% /process-flow %}
+
+### Preserve these invariants
+
+- Replaying one mutation does not create a second logical record.
+- An older embedding cannot overwrite a newer source version.
+- A delete cannot be undone by a delayed update.
+- The serving alias points to one compatible embedding space at a time.
+- A rebuild can prove which source checkpoint and transform version it contains.
+
+{% code-block file="/api/content/technology/vector-databases/code/versioned-index-writer.py" language="python" title="Apply idempotent versioned mutations" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Control freshness and index migrations
+
+Online updates and embedding migrations create two rates: mutations arrive at one rate
+and indexing capacity drains them at another. When sustained demand exceeds capacity,
+the backlog and freshness lag grow even while the query API remains available.
+
+An embedding-model change requires a new collection or generation because old and new
+vectors do not share a stable score space. Build the new generation from a recorded
+source checkpoint, catch up subsequent mutations, compare it with the serving
+generation, and move the alias only after the cutover contract is satisfied.
+
+{% interactive-block id="technology/vector-databases-index-lifecycle-lab" dataFile="/api/content/technology/vector-databases/data/index-lifecycle-model.json" /%}
+
+### Read-after-write options
+
+- **Eventual search:** acknowledge the source write and expose the current serving
+  checkpoint so callers can detect that search may lag.
+- **Checkpoint wait:** block a read until the index covers the required mutation. This
+  preserves visibility but turns indexing lag into user latency.
+- **Bounded overlay:** merge a small transactional change set with ANN results while
+  the index catches up. Cap the overlay so it does not become an unbounded second index.
+
+Use a blue-green generation for index-format changes, large rebuilds, and embedding
+migrations. In-place mutation is appropriate only when rollback and compatibility are
+clear.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Estimate capacity from bytes and work
+
+For `N` dense float32 vectors of dimension `d`, raw vector storage is approximately
+`N * d * 4` bytes. That is only the first term.
+
+{% metric-strip %}
+{% metric label="Raw vectors" value="N x d x bytes" detail="Choose float32, float16, or a measured code size" tone="blue" /%}
+{% metric label="Index overhead" value="Graph, lists, codes" detail="Measure the chosen structure and its build workspace" tone="violet" /%}
+{% metric label="Replication" value="Stored bytes x copies" detail="Include failure domains and migration overlap" tone="green" /%}
+{% metric label="Query work" value="Candidates x dimensions" detail="Filters and reranking change the visited set" tone="amber" /%}
+{% /metric-strip %}
+
+### Capacity review
+
+- Size metadata, payload references, tombstones, write-ahead state, and temporary build
+  files separately from vectors.
+- Reserve headroom for a second index generation during rebuild or embedding migration.
+- Measure p50 and p95 query work by filter shape; average QPS hides selective tenants
+  and expensive tails.
+- Budget ingestion throughput for retries, re-embedding, delete propagation, and replica
+  fan-out, not only new records.
+- Test recovery time from source data and checkpoints. A backup that cannot restore
+  within the objective is not an adequate recovery plan.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Evaluate retrieval before shipping
+
+ANN tuning needs an exact reference set. For each labeled query, run exact filtered
+search, record the true top-k IDs, and compare the ANN result produced by the same
+metric and eligibility rules.
+
+- **Recall@k:** fraction of exact top-k neighbors recovered by ANN.
+- **Result completeness:** fraction of the requested `k` eligible slots returned.
+- **Ranking quality:** task-aware metrics such as MRR or nDCG when order matters.
+- **Latency and throughput:** distribution by index version, filter shape, and search
+  effort, including tail latency under concurrent load.
+- **Freshness:** time from accepted source mutation to visibility at the serving
+  checkpoint.
+- **Resource cost:** memory, CPU or accelerator time, storage, network, and rebuild work.
+
+{% code-block file="/api/content/technology/vector-databases/code/evaluate-recall.py" language="python" title="Measure filtered Recall@k against exact search" /%}
+
+Keep retrieval evaluation separate from downstream answer quality. A language model can
+hide a missing neighbor with fluent text, while perfect nearest-neighbor recall can
+still retrieve evidence that is irrelevant to the user's task.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the index as derived production state
+
+### Monitor the query plane
+
+- p50 and p95 latency, timeout rate, candidate visits, and search-effort settings.
+- Recall on a stable canary set, result completeness, and filter selectivity.
+- Query volume, hot partitions, cache behavior, and replica saturation.
+- Embedding version, index generation, and serving checkpoint in every trace.
+
+### Monitor the data plane
+
+- Accepted, applied, retried, rejected, and dead-lettered mutations.
+- Backlog age, checkpoint lag, tombstone count, and delete completion.
+- Build duration, validation status, replica progress, and cutover state.
+- Memory headroom, disk growth, compaction pressure, and recovery-time evidence.
+
+### Rehearse failure and change
+
+1. Lose a query replica and verify traffic drains without violating latency or
+   authorization boundaries.
+2. Pause an index writer and prove that lag alerts before the freshness objective is
+   missed.
+3. Replay duplicate and out-of-order mutations and verify identity and version checks.
+4. Restore or rebuild one generation, compare exact and ANN quality, then practice
+   alias rollback.
+5. Rotate an embedding version through shadow evaluation, backfill, catch-up, cutover,
+   and old-generation retirement.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+Index behavior and tuning options evolve. Verify exact settings against the engine and
+version you operate, and benchmark with your own vectors, filters, and hardware.
+
+- [HNSW paper: Efficient and robust approximate nearest neighbor search](https://arxiv.org/abs/1603.09320)
+- [Faiss documentation and research references](https://faiss.ai/)
+- [Faiss index families and storage formulas](https://github.com/facebookresearch/faiss/wiki/Faiss-indexes)
+- [Faiss guidance for choosing an index](https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index)
+- [Product Quantization for Nearest Neighbor Search](https://inria.hal.science/inria-00514462/document)
+- [DiskANN library: fast, fresh, and filtered vector search](https://www.microsoft.com/en-us/research/publication/the-diskann-library-graph-based-indices-for-fast-fresh-and-filtered-vector-search/)
+- [pgvector exact, HNSW, IVFFlat, filtering, and iterative-scan documentation](https://github.com/pgvector/pgvector/blob/master/README.md)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/vector-databases/quiz/vector-database-production-design.json" lessonSlug="vector-databases" title="Vector Database Production Design Review" /%}

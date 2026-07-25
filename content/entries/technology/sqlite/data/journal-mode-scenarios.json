@@ -1,0 +1,29 @@
+{
+  "title":"Trace locks, journals, and checkpoints around one database file",
+  "description":"Switch scenarios to see what readers and the single writer use in rollback and WAL modes, then inspect the operational consequence.",
+  "nodes":[
+    {"id":"readers","label":"Reader connections","eyebrow":"Stable view","detail":"Each reader holds a transaction snapshot. Long-lived reads can delay a rollback-mode writer or prevent a WAL checkpoint from fully advancing.","kind":"client","tone":"blue","x":7,"y":24},
+    {"id":"writer","label":"Single writer","eyebrow":"Serialized mutation","detail":"One connection at a time changes the database. Keep its transaction short and use a bounded busy policy for contention.","kind":"client","tone":"violet","x":7,"y":76},
+    {"id":"pager","label":"SQLite pager","eyebrow":"Lock and page owner","detail":"Coordinates page cache, locks, atomic commit, rollback, and durability through the operating-system storage interface.","kind":"service","tone":"cyan","x":34,"y":50},
+    {"id":"database","label":"Main database","eyebrow":"Durable pages","detail":"Contains the database pages. In WAL mode, recent committed pages may remain in the WAL until a checkpoint copies them back.","kind":"database","tone":"amber","x":61,"y":22},
+    {"id":"journal","label":"Rollback journal","eyebrow":"Original pages","detail":"Rollback mode records original page content before the main file changes so an interrupted transaction can be reversed.","kind":"database","tone":"rose","x":61,"y":78},
+    {"id":"wal","label":"WAL + shared memory","eyebrow":"Append and coordinate","detail":"WAL mode appends committed pages and uses shared state to coordinate readers, the writer, and checkpoints on one host.","kind":"stream","tone":"green","x":85,"y":35},
+    {"id":"checkpoint","label":"Checkpoint","eyebrow":"Merge WAL pages","detail":"Copies eligible committed pages from the WAL into the main database. Active readers can limit how far it advances.","kind":"allocator","tone":"blue","x":87,"y":80}
+  ],
+  "edges":[
+    {"id":"read-pager","from":"readers","to":"pager","label":"read transaction"},
+    {"id":"write-pager","from":"writer","to":"pager","label":"write transaction"},
+    {"id":"pager-db","from":"pager","to":"database","label":"database pages"},
+    {"id":"pager-journal","from":"pager","to":"journal","label":"original pages"},
+    {"id":"journal-db","from":"journal","to":"database","label":"commit or rollback","via":{"x":72,"y":58}},
+    {"id":"pager-wal","from":"pager","to":"wal","label":"append commit"},
+    {"id":"wal-checkpoint","from":"wal","to":"checkpoint","label":"eligible pages"},
+    {"id":"checkpoint-db","from":"checkpoint","to":"database","label":"merge","via":{"x":74,"y":92}}
+  ],
+  "scenarios":[
+    {"id":"rollback-read","label":"Rollback-mode read","summary":"Several readers hold shared locks while a writer prepares a change using the rollback journal.","activeEdges":["read-pager","write-pager","pager-db","pager-journal","journal-db"],"focusNode":"journal","result":"Readers can coexist, but the writer eventually needs the required lock to commit. A long read can extend writer wait, so transaction lifetime matters."},
+    {"id":"wal-overlap","label":"WAL reader + writer","summary":"Readers use a stable snapshot while the single writer appends committed pages to the WAL.","activeEdges":["read-pager","write-pager","pager-db","pager-wal"],"focusNode":"wal","result":"Readers and one writer overlap, reducing a common source of blocking. Writes remain serialized and the WAL still needs a checkpoint policy."},
+    {"id":"long-reader","label":"Long WAL reader","summary":"A reader keeps an old snapshot while new writes continue to append and checkpoints attempt to advance.","activeEdges":["read-pager","write-pager","pager-wal","wal-checkpoint"],"degradedNodes":["readers","checkpoint"],"focusNode":"checkpoint","result":"The checkpoint cannot pass pages needed by the old snapshot, so the WAL can keep growing. Find and bound long read transactions rather than deleting WAL files."},
+    {"id":"network-filesystem","label":"Shared network file","summary":"Processes on different machines attempt to coordinate one WAL-mode database through a mounted network filesystem.","activeEdges":["read-pager","write-pager","pager-wal"],"failedNodes":["wal"],"focusNode":"wal","result":"WAL depends on same-host shared coordination and is not a multi-machine write design. Put a service owner in front of local SQLite or choose a client/server database."}
+  ]
+}

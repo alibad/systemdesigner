@@ -1,0 +1,123 @@
+{
+  "title": "Frontier state lab",
+  "description": "Choose a URL outcome to see which crawl-state transitions are allowed. Then select a node to inspect the component that owns that decision.",
+  "nodes": [
+    {
+      "id": "extractor",
+      "label": "Link extractor",
+      "eyebrow": "Discovery",
+      "detail": "Finds candidate links in an accepted document. Extracted links are untrusted input, not crawl work yet.",
+      "kind": "stream",
+      "tone": "blue",
+      "x": 10,
+      "y": 50
+    },
+    {
+      "id": "normalizer",
+      "label": "URL normalizer",
+      "eyebrow": "Admission",
+      "detail": "Resolves relative links, removes fragments, applies scheme and size policy, and creates the URL key used by later checks.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 27,
+      "y": 50
+    },
+    {
+      "id": "seen-store",
+      "label": "Seen URL state",
+      "eyebrow": "Duplicate check",
+      "detail": "Combines a fast probable-repeat filter with exact durable state for important decisions and redirect aliases.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 42,
+      "y": 23
+    },
+    {
+      "id": "frontier",
+      "label": "URL frontier",
+      "eyebrow": "Policy engine",
+      "detail": "Ranks admissible URLs by importance and freshness, but grants no fetch until the owning host is eligible.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 48,
+      "y": 52
+    },
+    {
+      "id": "policy-cache",
+      "label": "Robots policy cache",
+      "eyebrow": "Host rules",
+      "detail": "Stores fetched robots policy, expiry, path decision, and configured crawl-delay interpretation for a host.",
+      "kind": "cache",
+      "tone": "amber",
+      "x": 51,
+      "y": 82
+    },
+    {
+      "id": "host-queue",
+      "label": "Host queue",
+      "eyebrow": "Eligibility",
+      "detail": "Owns the host's next-allowed time and assignment lease so concurrent workers cannot bypass the crawl budget.",
+      "kind": "allocator",
+      "tone": "green",
+      "x": 67,
+      "y": 52
+    },
+    {
+      "id": "fetcher",
+      "label": "Fetch worker",
+      "eyebrow": "Bounded request",
+      "detail": "Uses a granted lease to perform one bounded HTTP request with redirect, timeout, and body-size limits.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 84,
+      "y": 30
+    },
+    {
+      "id": "processor",
+      "label": "Content processor",
+      "eyebrow": "Asynchronous",
+      "detail": "Parses accepted content, fingerprints it, persists useful results, and emits newly discovered links back to admission.",
+      "kind": "analytics",
+      "tone": "blue",
+      "x": 84,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "extract-normalize", "from": "extractor", "to": "normalizer", "label": "candidate", "mode": "async" },
+    { "id": "normalize-seen", "from": "normalizer", "to": "seen-store", "label": "URL key", "mode": "sync" },
+    { "id": "seen-frontier", "from": "seen-store", "to": "frontier", "label": "new", "mode": "sync" },
+    { "id": "frontier-policy", "from": "frontier", "to": "policy-cache", "label": "policy check", "mode": "sync" },
+    { "id": "frontier-host", "from": "frontier", "to": "host-queue", "label": "priority", "mode": "async" },
+    { "id": "policy-host", "from": "policy-cache", "to": "host-queue", "label": "allowed", "mode": "sync" },
+    { "id": "host-fetch", "from": "host-queue", "to": "fetcher", "label": "lease", "mode": "sync" },
+    { "id": "fetch-process", "from": "fetcher", "to": "processor", "label": "response", "mode": "async" },
+    { "id": "process-extract", "from": "processor", "to": "extractor", "label": "accepted links", "mode": "async", "via": { "x": 51, "y": 97 } }
+  ],
+  "scenarios": [
+    {
+      "id": "new-eligible",
+      "label": "New eligible URL",
+      "summary": "A new, policy-allowed URL reaches an eligible host queue, receives one lease, and is fetched without letting parsing delay the host scheduler.",
+      "activeEdges": ["extract-normalize", "normalize-seen", "seen-frontier", "frontier-policy", "frontier-host", "policy-host", "host-fetch", "fetch-process", "process-extract"],
+      "focusNode": "frontier",
+      "result": "The crawler makes one bounded request and feeds accepted links back through the same admission path."
+    },
+    {
+      "id": "known-duplicate",
+      "label": "Known duplicate",
+      "summary": "The normalized URL already has exact seen state. It is rejected before it consumes host eligibility, a worker lease, or remote bandwidth.",
+      "activeEdges": ["extract-normalize", "normalize-seen"],
+      "focusNode": "seen-store",
+      "result": "The URL is recorded as a duplicate decision; no fetch is scheduled."
+    },
+    {
+      "id": "robots-blocked",
+      "label": "Robots blocked",
+      "summary": "The URL is new, but the cached host policy disallows its path. The frontier preserves the policy result rather than treating the URL as delayed work.",
+      "activeEdges": ["extract-normalize", "normalize-seen", "seen-frontier", "frontier-policy"],
+      "focusNode": "policy-cache",
+      "result": "The crawler does not enqueue or fetch the blocked path, protecting the remote host and avoiding needless queue growth."
+    }
+  ]
+}

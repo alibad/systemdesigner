@@ -1,0 +1,332 @@
+---
+registryId: rag-systems-foundation
+---
+
+{% section-card tone="intro" %}
+## What is a RAG system?
+
+A **retrieval-augmented generation (RAG) system** is an application pipeline that finds external evidence for a question, places selected evidence in a language model's context, and asks the model to answer from that evidence.
+
+In plain language, RAG gives the model a small, authorized, open-book packet for each request. The model still generates the answer, but the facts should come from identifiable sources that can be updated without retraining the model.
+
+RAG matters when an application needs private, domain-specific, or changing knowledge. It does not make a model truthful by itself. **Core invariant: every factual claim must be traceable to authorized, versioned evidence that was valid for that request, or the system must abstain or contain the failure.**
+
+The original RAG work joined parametric model memory with a retrievable non-parametric memory and highlighted provenance and knowledge updates as central problems ([Lewis et al., NeurIPS 2020](https://proceedings.neurips.cc/paper/2020/hash/6b493230205f780e1bc26945df7481e5-Abstract.html)). If embeddings or language-model context windows are new, review [large language models](/genai/llms) and the earlier [RAG systems lesson](/genai/rag-systems) first.
+{% /section-card %}
+
+{% section-card %}
+## Separate the knowledge loop from the answer loop
+
+A RAG system contains two connected loops. The **knowledge loop** turns source material into a reproducible, searchable snapshot. The **answer loop** uses one snapshot to retrieve, assemble, generate, verify, and either serve or contain a response.
+
+{% process-flow %}
+{% process-step number="1" title="Ingest sources" label="Offline" %}
+Discover authorized documents, parse structure, normalize text, and attach source, revision, owner, access, and freshness metadata.
+{% /process-step %}
+{% process-step number="2" title="Publish an index" label="Offline" %}
+Chunk content, compute versioned representations, write searchable records, verify counts, then atomically publish one snapshot.
+{% /process-step %}
+{% process-step number="3" title="Retrieve candidates" label="Online" %}
+Authorize the request before search, encode or rewrite the query, and collect lexical, dense, or structured candidates.
+{% /process-step %}
+{% process-step number="4" title="Rerank evidence" label="Online" %}
+Deduplicate, apply metadata and safety filters, and spend a bounded second-stage budget on the strongest candidates.
+{% /process-step %}
+{% process-step number="5" title="Assemble and answer" label="Online" %}
+Fit source-labeled evidence into the prompt budget and require supported claims, claim-linked citations, and abstention.
+{% /process-step %}
+{% process-step number="6" title="Verify and contain" label="Online" %}
+Check policy, support, freshness, citations, latency, and cost before serving; otherwise abstain, degrade, or route to review.
+{% /process-step %}
+{% /process-flow %}
+
+### Preserve identity across both loops
+
+- **Source identity:** document ID, revision, location, owner, tenant, access policy, effective time, and deletion state.
+- **Transformation identity:** parser, normalizer, tokenizer, chunker, embedding model, dimensions, normalization, and schema versions.
+- **Index identity:** snapshot or generation, distance metric, filter schema, build time, validation result, and rollback target.
+- **Request identity:** query and rewrite versions, authorized principal, candidate and rerank settings, prompt version, model version, and response policy.
+- **Evidence identity:** chunk IDs, source spans, scores by stage, filter decisions, packed order, and citations actually shown to the user.
+{% /section-card %}
+
+{% section-card %}
+## Build ingestion as a reproducible data product
+
+**Ingestion** is the pipeline that converts source-of-truth content into searchable records. It is not a one-time file upload. Production ingestion must handle retries, revisions, deletions, partial failures, access changes, and a delayed index without creating duplicate or stale evidence.
+
+{% system-flow title="A safe ingestion publication path" caption="The serving alias moves only after the complete snapshot passes validation. Old snapshots remain available for rollback until retention policy removes them." %}
+{% system-node title="Discover and authorize" eyebrow="Source" icon="search" tone="blue" %}
+Read only approved locations and record owner, tenant, permissions, revision, and effective time.
+{% /system-node %}
+{% system-node title="Parse and chunk" eyebrow="Transform" icon="layers" tone="violet" %}
+Preserve headings, tables, code, and page or section boundaries before applying bounded overlap.
+{% /system-node %}
+{% system-node title="Embed and write" eyebrow="Index" icon="database" tone="cyan" %}
+Use one representation contract and idempotent chunk keys; write tombstones for removed or superseded content.
+{% /system-node %}
+{% system-node title="Validate and publish" eyebrow="Release" icon="check" tone="green" %}
+Reconcile counts, sample content, test permissions and retrieval, then switch a versioned serving alias.
+{% /system-node %}
+{% /system-flow %}
+
+### Choose chunk boundaries from answer shape
+
+A **chunk** is the smallest independently indexed evidence unit. Chunk size is a retrieval decision, not a universal constant.
+
+- **Small chunks** can improve focus and reduce irrelevant prompt tokens.
+  - They can split a definition from its exception, a table header from its row, or a procedure step from its prerequisite.
+- **Large chunks** preserve more local structure and continuity.
+  - They can dilute similarity, repeat irrelevant text, and consume context that could hold other evidence.
+- **Overlap** protects facts near boundaries.
+  - It also repeats embedding work and increases index size, refresh time, and duplicate candidates.
+- **Structure-aware chunking** should preserve semantic units such as headings, clauses, code symbols, table rows, and speaker turns before applying token limits.
+
+For fixed token chunks, start with `stride = chunk_tokens - overlap_tokens`. Measure the resulting answer-span coverage, duplicate-token ratio, retrieval recall, and prompt precision on representative queries. Do not select a chunk size from one average document.
+
+{% code-block file="/api/content/genai/rag-systems-foundation/code/ingestion-index-contract.py" language="python" title="Versioned, idempotent ingestion and deletion contract" /%}
+{% /section-card %}
+
+{% section-card %}
+## Bind embeddings and indexes into one contract
+
+An **embedding** maps an input into a numeric vector. A vector index can compare vectors quickly, but the numbers are meaningful only under the exact representation contract that produced them.
+
+{% concept-grid %}
+{% concept-card title="Representation" icon="braces" tone="blue" %}
+Version model ID, dimensions, query-versus-document encoding instructions, tokenizer, preprocessing, pooling, normalization, and language or domain scope.
+{% /concept-card %}
+{% concept-card title="Index semantics" icon="database" tone="violet" %}
+Bind vector dimensions, data type, distance metric, approximate-search settings, metadata schema, and filter behavior to the published index version.
+{% /concept-card %}
+{% concept-card title="Security metadata" icon="shield" tone="rose" %}
+Carry tenant, principal, classification, region, effective time, and deletion state into fields that can be enforced before candidates leave search.
+{% /concept-card %}
+{% concept-card title="Migration evidence" icon="workflow" tone="green" %}
+Build a new index, compare labeled recall and latency by slice, shadow queries, canary the alias, and preserve the last known-good snapshot.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Reject incompatible writes and queries
+
+- Fail closed when vector dimensions, normalization, distance metric, or contract fingerprints differ.
+- Never encode documents with one model and queries with another unless that asymmetric pairing was explicitly trained and evaluated.
+- Re-embed into a new index when the model or preprocessing contract changes; do not silently mix versions.
+- Publish a source checkpoint with the index so operators can answer which revision was searchable for a request.
+- Test deletion propagation through source storage, queues, index replicas, caches, and prompt assembly.
+{% /section-card %}
+
+{% section-card %}
+## Retrieve candidates, then rank evidence
+
+**Retrieval** finds a broad candidate set. **Reranking** spends more computation to order a smaller set for the actual question. Keeping these stages separate lets the first stage protect recall while the second stage improves prompt focus.
+
+- **Sparse retrieval** uses lexical signals. It is valuable for names, exact identifiers, quoted phrases, and rare terms.
+- **Dense retrieval** uses embedding similarity. It is valuable for paraphrases and semantically related language.
+- **Hybrid retrieval** fuses sparse and dense rankings so one representation does not erase the other's strengths.
+- **Metadata filtering** enforces authorization, locale, time, product, and document-state constraints inside the retrieval boundary.
+- **Reranking** scores query-chunk pairs with richer features or a model, but its candidate depth creates a direct latency and cost budget.
+
+Use labeled production-shaped queries to measure recall at the first-stage candidate depth. Then measure precision and answer support after filtering, deduplication, and reranking. The heterogeneous BEIR benchmark showed that retrieval methods behave differently across tasks, so an average from another corpus is not a local release argument ([Thakur et al., 2021](https://arxiv.org/abs/2104.08663)).
+
+{% interactive-block id="genai/rag-systems-foundation-retrieval-contract-lab" dataFile="/api/content/genai/rag-systems-foundation/data/retrieval-contract-scenarios.json" /%}
+
+### Read the workbench in causal order
+
+1. Check whether chunks cover the answer span before increasing search effort.
+2. Match lexical and semantic retrieval to the query distribution, including exact identifiers.
+3. Increase candidate depth only while measured recall gains justify added tail latency.
+4. Rerank a bounded pool and verify that prompt precision improves without dropping required evidence.
+5. Treat the synthetic model as a planning aid; the release decision must use labeled queries and measured infrastructure.
+{% /section-card %}
+
+{% section-card %}
+## Assemble a prompt that preserves evidence boundaries
+
+**Prompt assembly** selects and formats the evidence that the generator may use. **Grounding** means the answer's factual claims are supported by that evidence. A **citation** is the user-visible link from a claim to the supporting source span.
+
+Start with a budget, not with every retrieved chunk:
+
+`evidence_budget = context_limit - system_policy - conversation - query - output_reserve - safety_margin`
+
+Then apply a deterministic assembly policy:
+
+1. Keep only authorized, current, non-quarantined chunks from the declared index snapshot.
+2. Deduplicate near-identical text and resolve superseded or conflicting revisions.
+3. Reserve evidence for distinct sub-questions instead of letting one long source consume the budget.
+4. Order and delimit evidence as untrusted data, preserving chunk ID, source URI, revision, and location.
+5. Require claim-linked citations and an explicit abstention response when support is missing or contradictory.
+6. Verify the generated structure, citations, and high-risk claims before display or downstream use.
+
+{% code-block file="/api/content/genai/rag-systems-foundation/code/retrieval-and-prompt.py" language="python" title="Authorized hybrid retrieval and evidence-bounded prompt assembly" /%}
+
+{% callout variant="warn" %}
+A citation proves that the system displayed a reference, not that the reference supports the claim or is correct. Validate source identity, span entailment, freshness, and citation coverage separately.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Make the answer earn permission to serve
+
+An **answer gate** is a deterministic policy that evaluates evidence and operational conditions before a generated response reaches the user. Generation success is not permission to serve.
+
+{% interactive-block id="genai/rag-systems-foundation-answer-gate-lab" dataFile="/api/content/genai/rag-systems-foundation/data/answer-gate-scenarios.json" /%}
+
+### Contain each failure deliberately
+
+- **No relevant evidence:** abstain, ask a clarifying question, or route to a bounded specialist source.
+- **Stale evidence:** refresh or select a known-current snapshot; do not relax the freshness gate to make the answer pass.
+- **Conflicting revisions:** identify the authoritative owner or route to review; do not ask the generator to guess.
+- **Suspicious retrieved instructions:** quarantine the chunk, preserve the trace, and prevent tool or secret access.
+- **Retriever timeout:** use an explicit no-evidence response or a separately evaluated degraded path, never an invisible parametric-only fallback.
+- **Model or verifier timeout:** stop within the request deadline and return a bounded failure; do not retry until the latency budget collapses.
+- **Budget pressure:** reduce candidate or output work according to a tested policy, or reject early with a retry signal.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Treat safety and freshness as retrieval properties
+
+**RAG safety** protects the complete path from source ingestion to displayed answer. A relevant chunk can still be unauthorized, malicious, stale, poisoned, or unsuitable for the user's task.
+
+OWASP's current GenAI risk guidance classifies prompt injection as `LLM01:2025` and explicitly notes that inputs can alter behavior even when they are not human-visible ([OWASP Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)). Retrieved documents are therefore untrusted data, not instructions. Delimiters help express the boundary but do not prove that a model will obey it.
+
+### Enforce controls at more than one boundary
+
+- **Before ingestion:** authenticate connectors, allowlist sources, scan content, record ownership, and isolate tenants.
+- **Before retrieval:** authorize the principal, apply tenant and document predicates inside search, and reject ambiguous scope.
+- **Before assembly:** recheck authorization and freshness, quarantine suspicious content, resolve revisions, and cap source contribution.
+- **Before serving:** verify claims and citations, redact sensitive output, enforce task policy, and disable side effects unless a separate capability gate allows them.
+- **After deletion:** prove that tombstones reached every index replica, cache, evaluation store, trace payload, and replay path within the declared objective.
+
+The current NIST Generative AI Profile frames risk management across the AI lifecycle rather than as a model-only step ([NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence)). Apply that lifecycle view to source acquisition, evaluation, deployment, monitoring, incident response, and retirement.
+
+{% callout variant="info" %}
+Similarity is not authority. A high retrieval score says that a chunk resembles the query under one representation; it says nothing about permission, truth, freshness, or instruction priority.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the stages before evaluating the whole answer
+
+**RAG evaluation** measures retrieval, evidence use, answer behavior, and operations separately, then checks the end-to-end user task. One blended score cannot identify the owner of a failure.
+
+{% metric-strip %}
+{% metric value="Recall@k" label="Did required evidence arrive?" detail="Measure by query, source type, language, tenant policy, freshness, and answer shape" tone="cyan" /%}
+{% metric value="Support" label="Did evidence justify claims?" detail="Score grounded claims, citation precision, citation coverage, and contradiction handling" tone="blue" /%}
+{% metric value="Abstain" label="Did the system refuse correctly?" detail="Include unanswerable, stale, unauthorized, conflicting, and attacked cases" tone="amber" /%}
+{% metric value="P95/P99" label="Did the path meet its budget?" detail="Attribute queue, encode, search, rerank, assembly, generation, and verification time" tone="violet" /%}
+{% /metric-strip %}
+
+### Build a stage-attributed evaluation set
+
+- **Retrieval labels:** relevant chunk IDs or source spans, hard negatives, exact identifiers, paraphrases, and multi-hop evidence.
+- **Generation labels:** expected claims, acceptable variants, required citations, prohibited claims, and abstention behavior.
+- **Safety labels:** unauthorized sources, indirect prompt injections, poisoned content, secrets, and policy-sensitive requests.
+- **Freshness labels:** updates, superseded revisions, deletions, delayed connectors, and index cutover windows.
+- **Operational labels:** corpus size, candidate depth, cache state, concurrency, dependency failure, and latency or cost ceiling.
+
+The RAGAS research separates context relevance, answer faithfulness, and answer relevance, illustrating why retrieval and generation need distinct evidence ([Es et al., 2023](https://arxiv.org/abs/2309.15217)). Automated evaluators can accelerate iteration, but calibrate them against qualified human judgment and keep deterministic checks for exact properties.
+
+{% code-block file="/api/content/genai/rag-systems-foundation/code/rag-evaluation-gate.py" language="python" title="Stage metrics and hard release gates" /%}
+
+### Diagnose by metric pattern
+
+- Low retrieval recall with good groundedness usually means the generator behaves when evidence arrives, but the retriever misses too often.
+- High recall with low prompt precision means assembly or reranking admits too much distracting evidence.
+- High context quality with unsupported claims points to prompt, generation, citation, or verification behavior.
+- Good averages with a failed tenant, language, freshness, or attack slice means the release is still blocked.
+- Good offline quality with production latency or cost regressions means the operating point, not necessarily the model, must change.
+{% /section-card %}
+
+{% section-card %}
+## Budget latency and cost by stage
+
+A **service budget** assigns a measurable ceiling to each stage while preserving the end-to-end objective. For a sequential request, begin with:
+
+`p95_total ~= p95_queue + p95_query + p95_search + p95_rerank + p95_assembly + p95_generation + p95_verification`
+
+This sum is a planning approximation; shared queues, parallel calls, retries, and correlated tails require trace measurements and load tests. Cost should likewise include ingestion and online work:
+
+`monthly_cost = source_processing + embedding_updates + index_storage + retrieval + reranking + model_input + model_output + evaluation + observability`
+
+### Control the dominant terms
+
+- Re-embed only changed chunks and cache immutable transformation results by contract fingerprint.
+- Cap candidate and rerank depth from measured recall curves rather than a fixed generous top-k.
+- Remove duplicate and low-value evidence before model input; prompt tokens affect both latency and cost.
+- Route simple, low-risk requests to a smaller evaluated model only when the same grounding contract still passes.
+- Apply admission control, bounded retries, deadlines, and backpressure before queues consume the entire tail budget.
+- Track cost per answered request, per grounded answer, and per abstention; a cheap unsupported answer is not an efficiency win.
+{% /section-card %}
+
+{% section-card %}
+## Observe one request from query to decision
+
+**RAG observability** connects one request to the exact data, versions, stage timings, decisions, and user-visible outcome that produced it. Logs without this lineage cannot distinguish a model regression from an index cutover, stale connector, filter bug, or prompt change.
+
+Trace at least these spans or equivalent events:
+
+1. `authorize`: principal, tenant, policy version, allowed corpus, and decision without secret-bearing payloads.
+2. `encode_query`: representation contract, dimensions, cache state, duration, and error.
+3. `retrieve`: index snapshot, mode, filters, candidate count, chunk IDs, stage scores, and duration.
+4. `rerank`: reranker version, input and output counts, score distribution, and duration.
+5. `assemble`: prompt version, evidence IDs, token allocation, exclusions, conflicts, and quarantine decisions.
+6. `generate_and_verify`: model version, input and output token counts, citations, groundedness decision, finish reason, and latency.
+7. `serve_or_contain`: answer, abstain, degrade, review, or error outcome plus the gate and policy version that chose it.
+
+OpenTelemetry's current GenAI registry includes retrieval document IDs and scores while warning that query and message attributes can contain sensitive information; the GenAI conventions are also moving between repositories and include development-status fields ([OpenTelemetry GenAI attributes](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/)). Treat that evolving standard as input, pin your own telemetry contract, and default to IDs, counts, hashes, and sampled redacted content.
+
+### Alert on user impact and broken contracts
+
+- Retrieval empty rate, recall proxy shifts, score-distribution drift, filter denials, and reranker drop-off by slice
+- Source-to-index lag, failed or stuck checkpoints, stale-answer rate, deletion objective breaches, and snapshot age
+- Grounded claim rate, citation coverage and validity, abstention rate, conflict rate, and safety gate failures
+- Queue delay, stage p95 and p99, timeout and retry rate, context tokens, output tokens, and cost per outcome
+- Release identity, canary cohort, error-budget burn, fallback use, and rollback success
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Require evidence before every release
+
+A **release gate** converts test and production evidence into an allow, contain, or rollback decision. Thresholds are product contracts, not values to copy from this lesson.
+
+### Block publication when the knowledge loop fails
+
+- Source manifest, ownership, permission, parser, chunker, embedding, or index identity is missing.
+- Reconciliation, idempotent replay, tombstone propagation, or snapshot rollback tests fail.
+- Labeled retrieval recall, exact-identifier performance, freshness, or authorization isolation misses its slice floor.
+- The new index cannot reproduce the request-to-source lineage needed for incident response.
+
+### Block serving when the answer loop fails
+
+- Required evidence is missing, stale, conflicting, unauthorized, or quarantined.
+- Grounded claim, citation precision, citation coverage, abstention, or safety hard gates fail.
+- Tail latency, cost, queue, or dependency budgets exceed the declared operating envelope.
+- The degraded path, canary abort rule, owner, or last known-good rollback target is absent or untested.
+
+### Expand exposure only with production evidence
+
+1. Freeze the candidate, baseline, corpus snapshot, prompts, policies, evaluator versions, and thresholds.
+2. Pass deterministic contracts, offline quality slices, adversarial tests, and load tests.
+3. Shadow traffic without user exposure and compare stage traces with the baseline.
+4. Canary a small cohort with automatic abort signals for safety, stale evidence, quality, latency, and cost.
+5. Expand gradually while retaining rollback and preserving failed traces for a new regression-set version.
+{% /section-card %}
+
+{% section-card %}
+## Carry the foundation into deeper design
+
+The foundation is one end-to-end evidence contract: reproducible ingestion, compatible representations, authorized retrieval, bounded reranking, evidence-aware prompting, claim-linked citations, stage-level evaluation, and tested containment.
+
+Continue with [RAG architecture deep dive](/genai/rag-architecture-deep-dive) to study more advanced ranking and context strategies, then [vector database implementation](/genai/vector-database-implementation) for index internals and operational consistency.
+
+### Primary sources used in this lesson
+
+- [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://proceedings.neurips.cc/paper/2020/hash/6b493230205f780e1bc26945df7481e5-Abstract.html)
+- [BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation of Information Retrieval Models](https://arxiv.org/abs/2104.08663)
+- [RAGAS: Automated Evaluation of Retrieval Augmented Generation](https://arxiv.org/abs/2309.15217)
+- [OWASP LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+- [NIST AI 600-1: Generative Artificial Intelligence Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence)
+- [OpenTelemetry GenAI semantic convention registry](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/)
+{% /section-card %}
+
+{% quiz title="RAG Systems Foundation Review" quizId="rag-systems-foundation" lessonSlug="rag-systems-foundation" questionsFile="/api/content/genai/rag-systems-foundation/quiz/rag-systems-foundation-review.json" /%}

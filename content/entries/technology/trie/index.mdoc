@@ -1,0 +1,263 @@
+---
+registryId: trie
+---
+
+{% section-card tone="intro" %}
+## What is a Trie?
+
+**A Trie, pronounced "try," is a tree that stores keys by their prefixes.** Each step
+from the root consumes part of a key, so keys such as `car`, `card`, and `care` share
+the path for `c-a-r` instead of storing that prefix three times.
+
+Tries matter when the question is not only "does this exact key exist?" but also
+"which keys begin here?" That makes them useful for autocomplete, longest-prefix
+routing, dictionary search, and ordered key traversal.
+
+The core invariant is **every stored key is represented by one root-to-terminal path,
+and a terminal marker distinguishes a complete key from a prefix that merely leads to
+longer keys**. If `car` and `card` are both stored, the node for `r` is terminal and
+still has a child for `d`.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read the structure before choosing an implementation
+
+A Trie has a small vocabulary. Keeping these roles separate prevents common search
+and deletion mistakes.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Root" eyebrow="Empty prefix" icon="network" tone="blue" %}
+Represents the empty string. It anchors every key but normally does not consume a
+character itself.
+{% /concept-card %}
+{% concept-card title="Edge or segment" eyebrow="Key material" icon="route" tone="cyan" %}
+Consumes one character in a standard Trie or a longer substring in a compressed Trie.
+The complete path reconstructs the key.
+{% /concept-card %}
+{% concept-card title="Child container" eyebrow="Next choices" icon="boxes" tone="violet" %}
+Maps the next character or segment to another node. Arrays, maps, and sorted vectors
+trade memory for lookup speed differently.
+{% /concept-card %}
+{% concept-card title="Terminal marker" eyebrow="Complete key" icon="check" tone="green" %}
+Records that the current path is a stored key. Descendants may still represent longer
+keys that share the same prefix.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Three consequences of the invariant
+
+- Reaching a node proves that the prefix exists, not that the prefix is a stored key.
+- Removing one key may clear its terminal marker while preserving descendants and
+  ancestors used by other keys.
+- Prefix lookup reaches one node first, then enumerates only that node's descendants;
+  it does not scan unrelated branches.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow search, insert, and autocomplete through the same path
+
+All core operations consume key units from the root. Their work differs only when a
+required edge is missing or when traversal reaches the final key unit.
+
+{% process-flow %}
+{% process-step number="1" title="Normalize the key" label="Input contract" %}
+Apply the documented Unicode, case, and locale policy before traversal. Reads and
+writes must use exactly the same canonical form.
+{% /process-step %}
+{% process-step number="2" title="Walk the shared prefix" label="O(key length)" %}
+Follow one child transition per character or compressed segment. Search stops at the
+first missing transition.
+{% /process-step %}
+{% process-step number="3" title="Interpret the final node" label="Exact or prefix" %}
+Exact lookup checks the terminal marker. Prefix lookup accepts the node and prepares
+to visit its descendants.
+{% /process-step %}
+{% process-step number="4" title="Bound the output" label="Fan-out control" %}
+Autocomplete traverses descendants in ranking order and stops at an explicit result,
+time, or node-visit budget.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace a prefix and expose its fan-out
+
+Choose a query, scale the dictionary, and change the result limit. The workbench shows
+which path is shared, which candidates remain, and why reaching a prefix can be cheap
+while enumerating everything below it is not.
+
+{% interactive-block id="technology/trie-prefix-trace-lab" dataFile="/api/content/technology/trie/data/prefix-query-scenarios.json" /%}
+
+The lookup portion remains proportional to prefix length. The output portion must also
+pay for candidate nodes and returned text, so production autocomplete always needs a
+bound and usually a ranking signal.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement operations without breaking shared paths
+
+This dependency-free implementation supports insertion, exact lookup, prefix lookup,
+bounded autocomplete, and deletion. Deletion prunes a node only when it is not terminal
+and no child still needs it.
+
+{% code-block file="/api/content/technology/trie/code/trie.py" language="python" title="A tested Trie with bounded autocomplete and safe deletion" /%}
+
+### Operation costs
+
+{% metric-strip %}
+{% metric label="Exact search" value="O(m)" detail="m is the normalized key length" tone="blue" /%}
+{% metric label="Insert or delete" value="O(m)" detail="Deletion may prune at most the traversed path" tone="violet" /%}
+{% metric label="Reach a prefix" value="O(p)" detail="p is the normalized prefix length" tone="cyan" /%}
+{% metric label="Return matches" value="O(p + visited)" detail="Output and ranking work cannot be hidden" tone="amber" /%}
+{% /metric-strip %}
+
+These bounds describe transition count, not necessarily wall-clock time. Hashing a
+Unicode unit, following cache-cold pointers, comparing a compressed segment, or sorting
+children can add different constants.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Size nodes, edges, and the output budget
+
+For `n` keys with average normalized length `m`, storing every key independently would
+contain roughly `n x m` key units. A Trie saves repeated prefixes but adds node metadata
+and child references.
+
+### Make the memory estimate explicit
+
+1. Estimate created nodes from real key samples; do not assume every prefix is shared.
+2. Measure the average number of children per node and its distribution, not only its
+   mean. A few dense nodes can justify a hybrid representation.
+3. Add terminal flags, payload references, allocator overhead, and alignment.
+4. Include ranking metadata, cached suggestions, snapshots, and rebuild overlap.
+5. Recompute with normalized production keys because case folding and Unicode policy
+   change both key length and branch density.
+
+{% code-block file="/api/content/technology/trie/code/estimate-trie-memory.py" language="python" title="Compare approximate child-container memory" /%}
+
+The estimator is a planning model. Validate its bytes-per-node assumptions with heap
+profiles from the language runtime and allocator used in production.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose a child representation from the actual branch shape
+
+The best child container depends on alphabet size, average branching, update rate, and
+whether keys are static enough to compress. Change the workload and representation to
+see memory, depth, and lookup consequences move together.
+
+{% interactive-block id="technology/trie-performance" dataFile="/api/content/technology/trie/data/representation-model.json" /%}
+
+Fast transition lookup does not make a fixed array efficient when most slots are
+empty. Likewise, the smallest compressed structure may be the wrong choice for a
+write-heavy dictionary that would constantly split segments.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Match the Trie variant to the query
+
+{% concept-grid columns="3" %}
+{% concept-card title="Standard Trie" eyebrow="One unit per edge" icon="network" tone="blue" %}
+Use for mutable dictionaries and straightforward prefix search. It is easy to reason
+about, but node and pointer overhead can dominate sparse data.
+{% /concept-card %}
+{% concept-card title="Radix or Patricia Trie" eyebrow="Compressed single-child paths" icon="route" tone="violet" %}
+Use when long non-branching paths are common. Fewer nodes improve locality, while
+insertions and deletions must split or merge stored segments correctly.
+{% /concept-card %}
+{% concept-card title="Suffix-oriented index" eyebrow="Substring search" icon="search" tone="amber" %}
+Index suffixes when arbitrary substring queries are the requirement. This changes the
+space envelope substantially; suffix arrays or suffix automata are often more compact.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Prefer another structure when it matches the question better
+
+- Use a hash table for exact membership when prefix operations are unimportant.
+- Use a sorted array for a mostly static dataset that needs compact storage and range
+  scans; binary search can locate the first matching prefix.
+- Use a balanced search tree when updates and ordered range queries matter but string
+  prefix sharing does not justify Trie overhead.
+- Use a finite-state transducer or succinct Trie when a large static dictionary needs
+  aggressive compression and the build pipeline can absorb more complexity.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Place the Trie inside a serving path
+
+A production autocomplete service usually does more than walk characters. It must
+apply one normalization contract, rank bounded candidates, publish updates safely,
+and prevent expensive queries from monopolizing the service.
+
+{% system-flow title="A bounded autocomplete request" caption="Traversal narrows the key space; ranking and limits keep descendant work predictable." %}
+{% system-node title="Input policy" eyebrow="Normalize + validate" icon="shield" tone="blue" %}
+Reject oversized keys, apply the documented case and Unicode policy, and attach tenant
+or language scope before lookup.
+{% /system-node %}
+{% system-node title="Trie snapshot" eyebrow="Traverse prefix" icon="network" tone="cyan" %}
+Read an immutable or versioned root so a concurrent publication cannot expose a
+partially updated path.
+{% /system-node %}
+{% system-node title="Candidate frontier" eyebrow="Bound visits" icon="search" tone="violet" %}
+Expand only enough descendants to satisfy a node, time, and result budget. Use stored
+top-k summaries when low latency matters.
+{% /system-node %}
+{% system-node title="Ranked response" eyebrow="Return + observe" icon="activity" tone="green" %}
+Return deterministic suggestions and record depth, visited nodes, truncation, latency,
+and snapshot version.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design for malformed input, concurrency, and recovery
+
+{% concept-grid columns="3" %}
+{% concept-card title="Unsafe deletion" eyebrow="Shared path loss" icon="warning" tone="rose" %}
+Deleting `car` must not remove the path required by `card`. Clear the terminal marker,
+then prune only childless, non-terminal nodes while walking back toward the root.
+{% /concept-card %}
+{% concept-card title="Mixed normalization" eyebrow="Unreachable duplicates" icon="repeat" tone="amber" %}
+If writers store one Unicode form while readers query another, visually identical keys
+can occupy different paths. Version and test the canonicalization contract.
+{% /concept-card %}
+{% concept-card title="Partial publication" eyebrow="Inconsistent snapshot" icon="layers" tone="violet" %}
+Readers must not observe half a bulk update. Build a new immutable snapshot or apply
+copy-on-write changes, verify it, then swap one root or version pointer atomically.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Operational and security guardrails
+
+- Cap normalized key length, result count, descendant visits, and request time.
+- Scope tenant data before traversal so suggestions cannot leak keys across accounts.
+- Treat returned suggestions as untrusted text and escape them in every output context.
+- Track p50, p95, and p99 lookup latency with prefix depth, candidates visited, and
+  truncation rate.
+- Measure total nodes, bytes per key, branch density, snapshot build time, and memory
+  during blue-green publication.
+- Checksum persisted snapshots, retain the prior known-good version, and rehearse
+  rollback after a failed rebuild.
+- Fuzz insertion and deletion with overlapping keys such as `a`, `an`, and `ant`, plus
+  empty, long, mixed-case, and multi-code-point inputs.
+{% /section-card %}
+
+{% section-card %}
+## Review the production decision
+
+Before choosing a Trie, make these answers explicit:
+
+- Which queries require exact lookup, prefix expansion, longest-prefix matching, or
+  substring search?
+- What normalization and locale policy defines a key unit?
+- How many nodes and child references do sampled production keys create?
+- Which child representation fits branch density and update frequency?
+- What limits bound descendant enumeration and ranking work?
+- How are concurrent updates published atomically and recovered after failure?
+- Which metrics prove that memory and tail latency remain inside their budgets?
+
+A Trie earns its complexity when prefix traversal is the dominant operation and its
+memory, output fan-out, and update contract are controlled deliberately.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/trie/quiz/trie-production-design.json" lessonSlug="trie" title="Trie Production Design Review" /%}

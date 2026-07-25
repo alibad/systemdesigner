@@ -1,0 +1,218 @@
+---
+registryId: bottleneck-analysis
+---
+
+{% section-card tone="intro" %}
+## What is bottleneck analysis?
+
+**A bottleneck is the stage that limits an important system outcome, such as completed requests per second or checkout latency. Bottleneck analysis is the evidence-driven process of finding that limiting stage, changing it safely, and proving that the end-to-end outcome improved.**
+
+A busy component is not automatically the bottleneck. A CPU can be 90% utilized while requests are actually waiting for database connections, and a nearly idle application can still be slow because a downstream service is timing out. Start with the user-visible symptom, measure the request path, and test one causal hypothesis before optimizing.
+
+{% callout variant="info" %}
+The core invariant is measurable: changing the active constraint should improve the target end-to-end signal under the same workload. If throughput and latency do not move, the change did not address the active bottleneck.
+{% /callout %}
+
+This lesson builds on [Latency vs Throughput](/fundamentals/latency-vs-throughput). Review it first if request rate, percentiles, or queueing are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Measure the system before changing it
+
+Optimization without a baseline turns an incident into guesswork. Define one user path and one controlled workload window, then collect enough context to compare before and after.
+
+{% process-flow %}
+{% process-step number="1" title="Name the symptom" label="Outcome" %}
+State the affected path, population, time window, request rate, error ratio, and p95 or p99 latency. "The service is slow" is not a testable claim.
+{% /process-step %}
+
+{% process-step number="2" title="Reproduce the workload" label="Baseline" %}
+Hold request mix, payload size, cache state, concurrency, and dependency behavior as stable as possible. Record the release and configuration.
+{% /process-step %}
+
+{% process-step number="3" title="Correlate the path" label="Evidence" %}
+Use traces to divide active work from waiting. Compare queue age, pool waits, CPU run queues, garbage-collection pauses, I/O latency, and dependency spans.
+{% /process-step %}
+
+{% process-step number="4" title="Perturb and verify" label="Cause" %}
+Change one suspected constraint in a canary or repeatable test. Rerun the same workload and confirm that the end-to-end outcome moves.
+{% /process-step %}
+{% /process-flow %}
+
+A useful baseline records four kinds of evidence:
+
+- **Demand:** arrivals per second, concurrent requests, request mix, payload sizes, and burst duration.
+- **User outcome:** completed throughput, errors, timeouts, and latency percentiles for the affected path.
+- **Waiting and work:** queue depth and oldest age, pool acquisition time, active service time, dependency spans, and retry volume.
+- **Resource context:** CPU saturation and throttling, memory and pause time, disk or network wait, open connections, release version, and recent configuration changes.
+
+{% callout variant="warn" %}
+Do not treat a generic threshold such as 80% CPU as proof. A threshold is an investigation cue. Causal evidence connects a resource or wait state to the affected request and shows that changing it improves the outcome.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Turn service capacity into queue pressure
+
+A worker can complete about `1,000 / average service time in milliseconds` requests per second when work is independent. A pool's approximate capacity is:
+
+`worker count x per-worker completion rate`
+
+Utilization is `arrival rate / completion capacity`. At 100%, arrivals equal average completions and there is no room for variation. Before 100%, bursts and slower-than-average requests can still queue. As utilization approaches the boundary, expected wait grows nonlinearly because fewer workers are free when a request arrives.
+
+{% metric-strip %}
+{% metric value="400/s" label="Measured arrivals" detail="Requests entering one worker pool" tone="blue" /%}
+{% metric value="20 ms" label="Average service" detail="About 50 completions/s per worker" tone="violet" /%}
+{% metric value="10" label="Workers" detail="About 500 completions/s total" tone="green" /%}
+{% metric value="80%" label="Utilization" detail="400 arrivals / 500 capacity" tone="amber" /%}
+{% /metric-strip %}
+
+The average is only a planning input. Measure p95 service time, burst size, and queue age as well, because a stable average can hide a harmful tail.
+
+{% interactive-block id="fundamentals/bottleneck-analysis-queue-pressure-lab" /%}
+
+When the model crosses 100%, its queue has no steady state: backlog grows by approximately `arrivals - completions` each second. In a real service, a bounded queue eventually rejects work, consumes a deadline, or pushes pressure into another dependency.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Locate the constraint on the request path
+
+End-to-end latency includes both active service time and waiting between stages. A trace should make those boundaries visible so the team can ask where a request stopped making progress.
+
+{% system-flow title="A checkout path with bounded resources" caption="Every stage can create work or waiting. The bottleneck is the stage that currently limits the measured checkout outcome." %}
+{% system-node title="Client and gateway" eyebrow="Admit demand" icon="route" tone="blue" %}
+Record route, region, payload class, deadline, and rejected work. A burst can exceed downstream capacity even when daily traffic looks normal.
+{% /system-node %}
+{% system-node title="Application workers" eyebrow="Execute" icon="cpu" tone="cyan" %}
+Separate CPU time from scheduler wait, lock contention, garbage-collection pauses, and time blocked on another resource.
+{% /system-node %}
+{% system-node title="Connection pool" eyebrow="Wait for a slot" icon="gauge" tone="amber" %}
+A bounded pool protects the database, but callers queue when every connection is borrowed. Measure acquisition time and waiters.
+{% /system-node %}
+{% system-node title="Database" eyebrow="Read or write" icon="database" tone="violet" %}
+Measure query execution, lock waits, scanned rows, storage latency, active sessions, and replication behavior separately.
+{% /system-node %}
+{% system-node title="Payment dependency" eyebrow="Cross a boundary" icon="network" tone="green" %}
+Track connection setup, remote processing, timeouts, retries, and fallback results. Local utilization cannot explain a remote slowdown.
+{% /system-node %}
+{% /system-flow %}
+
+Three distinctions prevent common mistakes:
+
+- **Busy versus waiting:** high CPU means active compute; high pool wait means requests cannot begin their database work.
+- **Cause versus consequence:** an origin queue may rise because a cache regression multiplied misses. The queue is real, but the cache change initiated the pressure.
+- **Average versus tail:** a healthy average can coexist with repeated long pauses or one slow route. Use percentiles and bounded dimensions such as route, region, and release.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Build a diagnosis from discriminating evidence
+
+The same symptom can support several explanations. Rising latency and flat throughput could come from CPU saturation, a full connection pool, long garbage-collection pauses, storage contention, or a slow dependency. Choose evidence that separates those hypotheses instead of collecting more copies of the same graph.
+
+{% interactive-block id="fundamentals/bottleneck-analysis-diagnosis-lab" dataFile="/api/content/fundamentals/bottleneck-analysis/data/symptom-evidence-diagnosis.json" /%}
+
+A strong diagnosis usually combines at least two forms of evidence:
+
+1. **Correlation:** the wait or resource signal moves in the same window and on the same request path as the user symptom.
+2. **Mechanism:** a trace, profile, or runtime metric explains how that signal delays or rejects work.
+3. **Perturbation:** changing the suspected constraint changes the end-to-end result under a comparable workload.
+
+Correlation narrows the search. Mechanism and perturbation make the causal claim credible.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Recognize signatures without jumping to fixes
+
+Signatures are starting hypotheses. For each one, connect a request-level wait to a resource-level signal and run the smallest safe experiment that can disprove the idea.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Compute pressure" eyebrow="CPU" icon="cpu" tone="blue" %}
+Look for a sustained run queue, throttling, hot stacks, and active CPU time aligned with the slow route. A profiler identifies which work consumes the cores.
+{% /concept-card %}
+
+{% concept-card title="Runtime pauses" eyebrow="Memory" icon="activity" tone="violet" %}
+Look for heap growth, allocation rate, garbage-collection duration, swap, or out-of-memory events aligned with latency gaps. High memory usage alone is not a leak.
+{% /concept-card %}
+
+{% concept-card title="Blocked operations" eyebrow="I/O and network" icon="network" tone="amber" %}
+Look for storage queue depth, I/O wait, packet loss, retransmits, connection setup, and dependency spans. Separate local disk wait from remote service time.
+{% /concept-card %}
+
+{% concept-card title="Bounded concurrency" eyebrow="Pools and locks" icon="database" tone="green" %}
+Look for acquisition wait, queued callers, lock duration, database sessions, and rejected work. Increasing a pool can overload the dependency it was protecting.
+{% /concept-card %}
+{% /concept-grid %}
+
+Useful disproof experiments include reducing a representative payload, bypassing optional work for a small cohort, raising one canary's worker limit, restoring a previous cache policy, or replaying the same trace mix against a query index. Keep a rollback condition and observe the downstream consequence.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Expect pressure to amplify and move
+
+Systems often hide a bottleneck until a feedback loop makes it visible. Plan for these failure behaviors before increasing capacity.
+
+- **Queues trade rejection for waiting.** A deeper queue can absorb a short burst, but it also consumes deadlines, memory, and recovery time. Oldest-item age is often more actionable than depth alone.
+- **Retries multiply demand.** When a slow dependency triggers retries, attempted work can rise while successful throughput stays flat. Bound attempts, add jitter, and retry only safe operations.
+- **Larger pools move pressure downstream.** More application concurrency may reduce local waiting while exhausting database sessions, locks, memory, or provider quotas.
+- **Caches can shift the constraint.** Better hit rate protects an origin, while stale or incorrect policy can break product correctness. Provision and test the miss path.
+- **One fix reveals the next limit.** After a query index removes database work, CPU serialization or a downstream quota may become the active constraint.
+
+{% callout variant="warn" %}
+Never declare success because one resource graph falls. Success means the target user outcome improves, errors and downstream saturation remain acceptable, and the same controlled test is repeatable.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Fix one constraint and rerun the baseline
+
+Choose the smallest change that addresses the measured mechanism. Optimizing code, adding concurrency, shedding demand, caching work, batching I/O, adding an index, or isolating a dependency solve different causes.
+
+{% process-flow %}
+{% process-step number="1" title="State the hypothesis" label="Predict" %}
+Write the expected movement: "If connection-pool waiting is active, reducing acquisition p95 should raise completed checkout throughput above 320/s."
+{% /process-step %}
+
+{% process-step number="2" title="Bound the experiment" label="Protect" %}
+Use a canary, fixed load test, feature flag, or small cohort. Set rollback thresholds for errors, downstream saturation, and data correctness.
+{% /process-step %}
+
+{% process-step number="3" title="Compare the outcome" label="Verify" %}
+Measure the same route, workload, percentiles, throughput, errors, waits, and downstream signals. Reject the hypothesis if only an internal metric improves.
+{% /process-step %}
+
+{% process-step number="4" title="Find the new limit" label="Repeat" %}
+Keep the evidence and rerun the analysis. Capacity work is a control loop because traffic, code, data shape, and dependencies continue to change.
+{% /process-step %}
+{% /process-flow %}
+
+Trade-offs belong in the decision record:
+
+- Adding workers costs compute and can increase pressure on shared dependencies.
+- Reducing service time usually improves both latency and capacity, but profiling and code changes take engineering time.
+- Shedding low-priority traffic protects critical work, but the product must define the degraded user experience.
+- Caching removes repeated work, but freshness, invalidation, warm-up, and miss-path capacity become operating concerns.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate an evidence-first performance loop
+
+Record a small, stable signal set before an incident. The example recording rules keep request demand and user outcome beside queue and pool evidence so an operator can move from symptom to cause without changing tools.
+
+{% code-block file="/api/content/fundamentals/bottleneck-analysis/code/evidence-first-recording-rules.yaml" language="yaml" title="Prometheus recording rules for one measured path" /%}
+
+For each critical path, keep an operational record with:
+
+- the owner, user-visible objective, representative load test, and known safe capacity envelope;
+- request rate, completion rate, error ratio, latency percentiles, queue age, retry volume, and dominant dependency timing;
+- bounded breakdowns by route template, region, workload class, and release version;
+- recent bottlenecks, the evidence that proved each one, the change made, and the next observed constraint;
+- an alert that points to a usable runbook and a mitigation that protects correctness.
+
+Review the baseline after releases, traffic-shape changes, schema migrations, cache-policy changes, and dependency quota updates. A capacity number without its workload assumptions will become misleading.
+{% /section-card %}
+
+{% section-card %}
+## Check your bottleneck analysis decisions
+
+{% quiz questionsFile="/api/content/fundamentals/bottleneck-analysis/quiz/bottleneck-analysis.json" lessonSlug="bottleneck-analysis" title="Bottleneck Analysis Decision Review" /%}
+{% /section-card %}

@@ -1,0 +1,222 @@
+{
+  "title": "Trace dashboard access and alert delivery boundaries",
+  "description": "Switch scenarios to see which Kibana, Elasticsearch, saved-object, scheduler, and connector boundary owns the outcome. A visible dashboard and a delivered notification require different chains of evidence.",
+  "nodes": [
+    {
+      "id": "user",
+      "label": "Operator",
+      "eyebrow": "Human request",
+      "detail": "Opens a dashboard or manages a rule within one Kibana space. The user's effective access is the union of assigned roles.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 7,
+      "y": 24
+    },
+    {
+      "id": "role",
+      "label": "Role + space",
+      "eyebrow": "Kibana boundary",
+      "detail": "Controls which Kibana features are visible and whether the user has read or write access in the selected space.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 25,
+      "y": 24
+    },
+    {
+      "id": "kibana",
+      "label": "Kibana server",
+      "eyebrow": "Experience layer",
+      "detail": "Loads saved content, constructs Elasticsearch requests, renders results, and runs application services. It does not own the source telemetry.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 43,
+      "y": 24
+    },
+    {
+      "id": "data",
+      "label": "Elasticsearch data",
+      "eyebrow": "Data boundary",
+      "detail": "Stores and indexes source documents, enforces index privileges, executes searches, and computes aggregations.",
+      "kind": "database",
+      "tone": "green",
+      "x": 67,
+      "y": 12
+    },
+    {
+      "id": "saved",
+      "label": "Saved objects",
+      "eyebrow": "Kibana content",
+      "detail": "Stores dashboards, data views, visualizations, rules, and references in Kibana-managed Elasticsearch indices.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 67,
+      "y": 40
+    },
+    {
+      "id": "tasks",
+      "label": "Task Manager",
+      "eyebrow": "Scheduled execution",
+      "detail": "Schedules and runs Kibana background tasks, including rule checks. A delayed task can create an evaluation gap.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 43,
+      "y": 74
+    },
+    {
+      "id": "connector",
+      "label": "Connector",
+      "eyebrow": "Action boundary",
+      "detail": "Holds the integration configuration used to send an action. Deleting or disabling it does not remove the rule that references it.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 67,
+      "y": 74
+    },
+    {
+      "id": "destination",
+      "label": "Notification target",
+      "eyebrow": "External system",
+      "detail": "Receives the email, webhook, ticket, or chat message after a connector action succeeds.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 90,
+      "y": 74
+    }
+  ],
+  "edges": [
+    {
+      "id": "user-role",
+      "from": "user",
+      "to": "role",
+      "label": "effective roles"
+    },
+    {
+      "id": "role-kibana",
+      "from": "role",
+      "to": "kibana",
+      "label": "feature privilege"
+    },
+    {
+      "id": "kibana-data",
+      "from": "kibana",
+      "to": "data",
+      "label": "search + aggregation"
+    },
+    {
+      "id": "kibana-saved",
+      "from": "kibana",
+      "to": "saved",
+      "label": "object + references"
+    },
+    {
+      "id": "saved-tasks",
+      "from": "saved",
+      "to": "tasks",
+      "label": "scheduled rule",
+      "mode": "async",
+      "via": {
+        "x": 56,
+        "y": 58
+      }
+    },
+    {
+      "id": "tasks-data",
+      "from": "tasks",
+      "to": "data",
+      "label": "evaluate condition",
+      "via": {
+        "x": 56,
+        "y": 58
+      }
+    },
+    {
+      "id": "tasks-connector",
+      "from": "tasks",
+      "to": "connector",
+      "label": "run action"
+    },
+    {
+      "id": "connector-destination",
+      "from": "connector",
+      "to": "destination",
+      "label": "deliver notification"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-dashboard",
+      "label": "Dashboard works",
+      "summary": "The operator has Dashboard read access in the operations space, the saved object and its references exist, and the role can read the underlying indices.",
+      "activeEdges": [
+        "user-role",
+        "role-kibana",
+        "kibana-saved",
+        "kibana-data"
+      ],
+      "focusNode": "kibana",
+      "result": "Kibana can load the dashboard definition and ask Elasticsearch for the scoped data. The panels render from Elasticsearch responses."
+    },
+    {
+      "id": "missing-index-access",
+      "label": "Panels forbidden",
+      "summary": "The operator can open the Kibana feature and saved dashboard, but the Elasticsearch role lacks read access to the data indices.",
+      "activeEdges": [
+        "user-role",
+        "role-kibana",
+        "kibana-saved",
+        "kibana-data"
+      ],
+      "failedNodes": ["data"],
+      "focusNode": "data",
+      "result": "The dashboard shell can be visible while panels fail. Kibana feature privileges do not grant access to Elasticsearch documents."
+    },
+    {
+      "id": "missing-reference",
+      "label": "Broken saved object",
+      "summary": "A dashboard was promoted without a referenced data view or visualization, even though the production indices are healthy.",
+      "activeEdges": [
+        "user-role",
+        "role-kibana",
+        "kibana-saved"
+      ],
+      "failedNodes": ["saved"],
+      "focusNode": "saved",
+      "result": "The content is incomplete. Export and import the reference graph rather than treating one dashboard record as a standalone file."
+    },
+    {
+      "id": "healthy-alert",
+      "label": "Alert delivered",
+      "summary": "Task Manager runs the scheduled rule, Elasticsearch returns matching evidence, and the configured connector action succeeds.",
+      "activeEdges": [
+        "saved-tasks",
+        "tasks-data",
+        "tasks-connector",
+        "connector-destination"
+      ],
+      "focusNode": "tasks",
+      "result": "The rule check creates or updates alert state, then the action sends a notification. Detection and delivery are separate outcomes."
+    },
+    {
+      "id": "late-rule",
+      "label": "Rule runs late",
+      "summary": "Task Manager is delayed. The data still exists in Elasticsearch, but the scheduled check did not run at its intended time.",
+      "activeEdges": ["saved-tasks"],
+      "degradedNodes": ["tasks"],
+      "focusNode": "tasks",
+      "result": "Treat the interval as an evaluation gap. A quiet notification channel is not proof that the monitored condition stayed healthy."
+    },
+    {
+      "id": "deleted-connector",
+      "label": "Action fails",
+      "summary": "The rule evaluates its condition, but the referenced connector was deleted or is unavailable.",
+      "activeEdges": [
+        "saved-tasks",
+        "tasks-data",
+        "tasks-connector"
+      ],
+      "failedNodes": ["connector"],
+      "focusNode": "connector",
+      "result": "Kibana can still create alert state, but the action fails and no external notification is delivered. Monitor rule and connector execution separately."
+    }
+  ]
+}

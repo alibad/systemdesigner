@@ -1,0 +1,75 @@
+{
+  "title": "Trace an order through retry, replay protection, and compensation",
+  "description": "Switch scenarios to see which path executes after a transient failure, duplicate start, terminal payment error, or failed compensation. The idempotency ledger represents application state outside Step Functions.",
+  "nodes": [
+    {"id":"caller","label":"Order API","eyebrow":"Stable order ID","detail":"Starts the workflow with a caller-provided business identifier and returns an operation reference instead of claiming the order is already complete.","kind":"client","tone":"blue","x":7,"y":50},
+    {"id":"workflow","label":"Standard workflow","eyebrow":"Durable coordinator","detail":"Persists workflow state, applies explicit retry and catch rules, and records the execution path. It does not own the payment or inventory records.","kind":"service","tone":"violet","x":23,"y":50},
+    {"id":"ledger","label":"Idempotency ledger","eyebrow":"One logical order","detail":"Claims a stable order ID and stores operation status so a duplicate start can return the existing outcome without repeating business effects.","kind":"database","tone":"cyan","x":41,"y":20},
+    {"id":"inventory","label":"Inventory service","eyebrow":"Reversible reservation","detail":"Reserves stock with the order ID as an idempotency key and can release that reservation during compensation.","kind":"service","tone":"green","x":41,"y":79},
+    {"id":"retry","label":"Bounded retrier","eyebrow":"Transient errors only","detail":"Retries named transient failures with a timeout, maximum attempts, capped backoff, and jitter before the Catch path runs.","kind":"allocator","tone":"amber","x":58,"y":50},
+    {"id":"payment","label":"Payment service","eyebrow":"Idempotent charge","detail":"Uses the order ID as the payment operation key so an ambiguous response or explicit Task retry cannot create a second charge.","kind":"service","tone":"rose","x":74,"y":79},
+    {"id":"order-record","label":"Order record","eyebrow":"Business outcome","detail":"Stores completed, duplicate, compensated, or failed status independently from workflow logs so callers can query durable business state.","kind":"database","tone":"green","x":75,"y":20},
+    {"id":"compensation","label":"Release inventory","eyebrow":"Semantic undo","detail":"Reverses the successful reservation after payment cannot complete. It is an idempotent business action, not a database rollback.","kind":"service","tone":"amber","x":91,"y":79},
+    {"id":"terminal","label":"Operations queue","eyebrow":"Manual recovery","detail":"Receives a terminal incident with the order, execution, original error, and compensation result when automation cannot restore a known business state.","kind":"stream","tone":"rose","x":93,"y":23}
+  ],
+  "edges": [
+    {"id":"start","from":"caller","to":"workflow","label":"start order","mode":"async"},
+    {"id":"claim","from":"workflow","to":"ledger","label":"conditional claim"},
+    {"id":"reserve","from":"ledger","to":"inventory","label":"reserve once"},
+    {"id":"attempt","from":"inventory","to":"retry","label":"run task"},
+    {"id":"charge","from":"retry","to":"payment","label":"charge key"},
+    {"id":"retry-loop","from":"payment","to":"retry","label":"bounded retry","via":{"x":67,"y":94}},
+    {"id":"complete","from":"payment","to":"order-record","label":"mark complete"},
+    {"id":"duplicate","from":"ledger","to":"order-record","label":"existing result"},
+    {"id":"compensate","from":"payment","to":"compensation","label":"terminal error"},
+    {"id":"mark-compensated","from":"compensation","to":"order-record","label":"released","via":{"x":88,"y":48}},
+    {"id":"compensation-failed","from":"compensation","to":"terminal","label":"manual recovery"},
+    {"id":"terminal-failure","from":"workflow","to":"terminal","label":"unhandled failure","via":{"x":58,"y":8}}
+  ],
+  "scenarios": [
+    {
+      "id":"normal",
+      "label":"Normal order",
+      "summary":"The workflow claims the order, reserves inventory, charges with a stable operation key, and publishes a completed business record.",
+      "activeEdges":["start","claim","reserve","attempt","charge","complete"],
+      "focusNode":"order-record",
+      "result":"The caller can query a durable completed order. The workflow history explains the orchestration path; the order, inventory, and payment systems remain authoritative for their own state."
+    },
+    {
+      "id":"bounded-retry",
+      "label":"Bounded retry",
+      "summary":"The first payment attempt returns a named transient service error. The retrier waits with capped backoff and jitter, then repeats the same logical charge key.",
+      "activeEdges":["start","claim","reserve","attempt","charge","retry-loop","complete"],
+      "degradedNodes":["payment"],
+      "focusNode":"retry",
+      "result":"A later attempt succeeds without a second business charge because the payment service recognizes the stable idempotency key. After the maximum attempt count, Catch would move to compensation instead."
+    },
+    {
+      "id":"duplicate-start",
+      "label":"Duplicate start",
+      "summary":"A caller or event starts the same logical order again. The conditional ledger claim finds the existing order before inventory or payment runs.",
+      "activeEdges":["start","claim","duplicate"],
+      "degradedNodes":["workflow"],
+      "focusNode":"ledger",
+      "result":"The duplicate follows the existing-result path and creates no new reservation or charge. A workflow execution guarantee alone would not provide this cross-execution business deduplication."
+    },
+    {
+      "id":"compensation",
+      "label":"Compensation",
+      "summary":"Inventory succeeds, but payment reaches a terminal business error after the bounded retry policy. Catch invokes the release operation.",
+      "activeEdges":["start","claim","reserve","attempt","charge","compensate","mark-compensated"],
+      "failedNodes":["payment"],
+      "focusNode":"compensation",
+      "result":"The reservation is released and the order is marked compensated. This restores an understood business state; it does not erase the original payment failure or workflow history."
+    },
+    {
+      "id":"terminal-failure",
+      "label":"Terminal failure",
+      "summary":"Payment fails and the inventory release also exhausts its bounded retry policy. The workflow cannot truthfully claim success or full compensation.",
+      "activeEdges":["start","claim","reserve","attempt","charge","compensate","compensation-failed"],
+      "failedNodes":["payment","compensation"],
+      "focusNode":"terminal",
+      "result":"The execution ends in a terminal failure and sends complete recovery context to operators. The order stays in an explicit manual-recovery state until inventory and payment records are reconciled."
+    }
+  ]
+}

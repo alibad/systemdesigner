@@ -1,0 +1,352 @@
+---
+registryId: practice-headshot-generation
+---
+
+{% section-card tone="intro" %}
+## What is a professional headshot generation system?
+
+A professional headshot generation system turns a small set of consented photos into a
+business-ready portrait. The generator is only one part of the system. The product must
+verify who may use the photos, preserve the subject's identity, apply a bounded visual
+style, inspect the result, and protect both the source and generated images.
+
+The core invariant is **authorized likeness with faithful identity**: release an image
+only when the requester is authorized to use the subject's likeness, the result remains
+recognizably that subject, and the image passes the selected professional and safety
+policy. This walkthrough uses an interview baseline of **50,000 final headshots per
+day**, a **60-second p95 completion target**, and separate interactive and enterprise
+batch queues.
+
+- **Prerequisite:** Review [text-to-image generation](/practice/text-to-image) if
+  diffusion, conditioning, or asynchronous GPU jobs are unfamiliar.
+- **First-version boundary:** Generate still portraits from user-provided photos. Do not
+  offer public-figure cloning, unverified third-party likeness editing, or an open-ended
+  photo editor.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the use case and guardrails" %}
+
+
+### Start with a narrow, observable user journey
+
+1. A user uploads 3-10 photos of themself, accepts consent and retention terms, and
+   chooses a professional preset.
+2. The service checks face count, image quality, ownership signals, and policy before
+   consuming GPU capacity.
+3. It creates a low-cost preview set, then makes an approved final set available after
+   independent identity, composition, and policy checks.
+4. The user downloads a selected result; an enterprise admin may apply a reviewed brand
+   preset and audit the job.
+
+### Requirements that change the system
+
+{% concept-grid columns="2" %}
+{% concept-card title="Functional scope" eyebrow="Product" icon="users" tone="blue" %}
+- Consent-backed selfie uploads and deletion requests.
+- Bounded controls for attire category, background, lighting, and crop.
+- Preview, rerun, selection, and export workflows.
+- Enterprise brand presets with tenant-scoped review and audit evidence.
+{% /concept-card %}
+
+{% concept-card title="Service promises" eyebrow="SLO" icon="gauge" tone="green" %}
+- Return job acceptance immediately and complete standard jobs within 60 seconds at p95.
+- Deliver a 2048 px final image after all release gates pass.
+- Keep an accepted job durable across worker loss; make retry and cancellation idempotent.
+- Keep source photos and output assets isolated by tenant and retention policy.
+{% /concept-card %}
+
+{% concept-card title="Safety boundaries" eyebrow="Likeness" icon="shield" tone="rose" %}
+- Require a single consenting subject in accepted reference photos.
+- Block public-figure, deceptive impersonation, and disallowed image-edit requests.
+- Do not make a person materially younger, change protected traits, or fabricate credentials.
+- Escalate uncertain identity, consent, or policy evidence rather than generating.
+{% /concept-card %}
+
+{% concept-card title="Explicit exclusions" eyebrow="Scope" icon="boxes" tone="neutral" %}
+- No real-time video or live camera stream.
+- No automatic HR approval or identity verification beyond the stated product evidence.
+- No guarantee that every casual photo is recoverable into a professional portrait.
+- No reuse of a tenant's brand preset for another tenant.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="tip" %}
+The system's best degraded response is to request clearer, single-subject inputs or
+offer a safe retry. It must not invent facial details, silently weaken identity checks,
+or bypass policy to make a job look successful.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate token, media, and accelerator capacity" %}
+
+
+### Convert requests into work
+
+Assume 50,000 final headshots per day, 2.5 preview candidates per final image, a 3x
+peak multiplier, and a 25% headroom reserve. A standard final render takes 45 seconds
+of accelerator time; previews use a smaller 10-second pass. A batch should contain
+only jobs with the same model tier and resolution so latency is measurable.
+
+{% metric-strip %}
+{% metric value="50K/day" label="Final images" detail="About 0.58 final images/second on average." tone="blue" /%}
+{% metric value="125K/day" label="Preview candidates" detail="Direction finding consumes work too; account for it explicitly." tone="violet" /%}
+{% metric value="3x" label="Peak multiplier" detail="Capacity must survive bursty business-hour demand, not only daily average." tone="amber" /%}
+{% metric value="25%" label="Headroom" detail="Reserved for retries, worker loss, and placement fragmentation." tone="green" /%}
+{% /metric-strip %}
+
+### Test a capacity plan
+
+{% interactive-block id="practice/headshot-generation-capacity-lab" /%}
+
+The exact accelerator count depends on model, resolution, batch size, and benchmarked
+p95 throughput. The useful interview calculation is the chain: demand becomes preview
+and final jobs, jobs become accelerator seconds, and peak work plus headroom becomes a
+fleet target. Keep queue age, not just GPU utilization, as the admission-control signal.
+
+### Budget media separately from model work
+
+- **Inputs:** 8 uploaded photos at 5 MB on average is roughly 2 TB/day before retries
+  and replication at this scale. Store encrypted originals in object storage, not in a
+  job database.
+- **Outputs:** 4 final images at 8 MB each is roughly 1.6 TB/day before derivatives;
+  previews can be lower resolution and shorter retention.
+- **Metadata:** job stage, model version, consent record, policy version, scores, and
+  asset IDs fit in a transactional database. The job record must never contain image
+  bytes.
+- **Retention:** treat deletion as a workflow across originals, derived images, caches,
+  logs, and evaluation samples. Legal hold and user deletion must be explicit states.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the architecture and model tiers" %}
+
+
+### Keep durable orchestration outside the image model
+
+{% system-flow title="Professional headshot job path" caption="The job controller owns durable state and policy evidence. Accelerator workers only perform bounded, retryable render stages." %}
+{% system-node title="Admission" eyebrow="Protect" icon="shield" tone="rose" %}
+Authenticate, reserve quota, record consent, scan uploads, and reject unsupported input before queueing work.
+{% /system-node %}
+{% system-node title="Identity package" eyebrow="Condition" icon="key" tone="blue" %}
+Detect and align one face, derive a protected identity representation, and validate input diversity and quality.
+{% /system-node %}
+{% system-node title="Preview and final workers" eyebrow="Generate" icon="server" tone="violet" %}
+Use a lower-cost preview tier for direction, then rerender the approved preset with a fixed model and seed manifest.
+{% /system-node %}
+{% system-node title="Release and delivery" eyebrow="Inspect" icon="check" tone="green" %}
+Verify identity, professional composition, policy, and tenant preset before publishing immutable assets through a CDN.
+{% /system-node %}
+{% /system-flow %}
+
+### Assign each tier one job
+
+- **Admission tier:** inexpensive classifiers and rules decide whether the upload,
+  consent claim, and requested edit may proceed. It is fail closed and records a policy
+  version with the job.
+- **Conditioning tier:** produces face alignment, quality signals, and an identity
+  representation scoped to the job. Raw reference images remain in protected object
+  storage.
+- **Preview tier:** uses fewer denoising steps and smaller output to validate framing,
+  style, and user intent. A preview is never automatically promoted to final delivery.
+- **Final tier:** uses the selected preset and versioned conditioning package to render
+  the required resolution. It writes candidates to quarantine storage first.
+- **Validation tier:** independently evaluates candidate identity similarity,
+  composition, technical quality, policy, and brand adherence. It owns the release
+  decision, not the generator.
+
+### Make jobs retryable
+
+Persist a job ID, immutable request manifest, consent receipt, chosen preset, model
+versions, stage attempts, score reports, and final disposition. Queue messages contain
+the job ID and stage only. A worker claims a stage with a lease, writes its candidate to
+quarantine, and commits a stage transition conditionally. This prevents a duplicate
+message from creating two externally visible final images.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep dive into identity preservation and release safety" %}
+
+
+### Identity is a release constraint, not a styling knob
+
+The system may alter lighting, background, crop, and bounded attire categories. It must
+not use a flattering score as proof that the generated face remains the authorized
+person. Use multiple independent signals:
+
+- **Input quality and diversity:** require a single visible face, sufficient resolution,
+  pose variation, and clear lighting. Reject inputs that cannot support a faithful result.
+- **Reference-to-output similarity:** compare protected embeddings from the accepted
+  reference set to each candidate, calibrated by demographic slice and capture quality.
+- **Edit boundary:** classify whether the candidate changes age cues, protected traits,
+  apparent health, or professional credentials beyond the permitted preset.
+- **Policy and provenance:** attach consent, source-asset IDs, model version, preset,
+  score report, and disposition to every candidate.
+
+### Exercise the release gate
+
+{% interactive-block id="practice/headshot-generation-release-gate-lab" /%}
+
+The threshold is not a universal constant. Calibrate it against false accepts and false
+rejects across representative groups, then reserve human review for boundary cases.
+Lowering the threshold to reduce rejections can turn a product-quality issue into an
+identity and impersonation failure.
+
+### Brand presets must remain bounded
+
+An enterprise preset should be a reviewed configuration: palette family, background
+class, crop range, lighting target, allowed attire categories, and model version. It is
+not a prompt that can silently reshape someone's features. Store preset versions by
+tenant, show the selected version in the audit trail, and re-evaluate approved presets
+when models or policies change.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define evaluation and quality assurance" %}
+
+
+### Build a release decision from independent evidence
+
+One aesthetic score cannot measure a professional, faithful, safe headshot. Evaluate a
+versioned holdout set and production samples with separate signals:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Faithfulness" eyebrow="Identity" icon="fingerprint" tone="blue" %}
+Measure false accepts and false rejects for reference-to-output similarity, sliced by image quality and demographic group.
+{% /concept-card %}
+{% concept-card title="Professional quality" eyebrow="Photography" icon="scan-search" tone="violet" %}
+Check face framing, eye placement, focus, lighting balance, artifacts, crop, and background appropriateness; use calibrated human review for disagreement.
+{% /concept-card %}
+{% concept-card title="Safe delivery" eyebrow="Policy" icon="shield-check" tone="green" %}
+Track consent verification, blocked and reviewed cases, policy escapes, deletion completion, and tenant-preset violations.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Gate a model release
+
+1. Freeze a representative evaluation set with consent, explicit retention rules, and
+   documented coverage gaps.
+2. Compare candidate and current models on identity errors, visual quality, policy
+   precision and recall, queue time, failure rate, and cost per accepted final image.
+3. Have trained reviewers inspect a stratified blind sample, especially low-confidence
+   and high-impact cases.
+4. Canary the model by tenant and preset, alert on score drift, and retain a fast
+   rollback path to the prior approved model and threshold configuration.
+
+{% callout variant="warn" %}
+Do not optimize only for acceptance rate or user preference. A model can look more
+polished while becoming less faithful to the person in the reference photos.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="governance" title="6. Control cost, privacy, and governance" %}
+
+
+### Make the trade-offs explicit
+
+- **Preview-first versus final-only:** previews reduce wasted final renders and give
+  feedback, but create extra compute, storage, and a user decision boundary. Expire
+  unselected previews aggressively.
+- **Strict identity threshold versus throughput:** a strict threshold reduces false
+  accepts but sends more jobs to review or retry. Treat review capacity as part of the
+  product budget, not an afterthought.
+- **Per-tenant fine-tuning versus preset conditioning:** fine-tuning may improve a
+  narrow brand look but increases governance, evaluation, rollback, and leakage risk.
+  Start with reviewed presets and isolated configuration.
+- **Long retention versus user control:** retention helps reruns and dispute handling,
+  but increases privacy exposure. Use explicit default expiry, delete workflows, and
+  minimal audit evidence.
+
+### Enforce governance at boundaries
+
+- Encrypt source and output assets; restrict decryption to the job's tenant and purpose.
+- Separate raw photos from derived embeddings, and define independent retention for both.
+- Log human-review access and ensure review tools show only the minimum media needed.
+- Version policies, thresholds, model packages, and brand presets so a released image is
+  explainable later.
+- Maintain a red-team suite for impersonation, consent evasion, biased quality failures,
+  and policy bypass attempts before model or policy changes ship.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Scale, operate, and recover safely" %}
+
+
+### Isolate queues by deadline and blast radius
+
+Use separate queues for interactive previews, interactive finals, enterprise batch jobs,
+and human review. Each job carries a deadline, tenant quota, model tier, and idempotency
+key. Admission control should slow or defer low-priority work when queue age threatens
+the interactive SLO, rather than letting all classes fail together.
+
+{% process-flow %}
+{% process-step number="1" title="Observe" %}
+Track queue age, abandoned previews, accelerator throughput, GPU errors, stage retries, identity-score distribution, release rate, and deletion backlog by model and tenant.
+{% /process-step %}
+{% process-step number="2" title="Contain" %}
+Pause a model or preset on drift, reduce low-priority admission, and quarantine candidates when a release dependency is unhealthy.
+{% /process-step %}
+{% process-step number="3" title="Recover" %}
+Retry only idempotent stages with bounded attempts. Route ambiguous jobs to review or request new photos; never publish a partial candidate.
+{% /process-step %}
+{% process-step number="4" title="Learn" %}
+Record the incident and score evidence, repair the evaluation suite, and canary a corrected model or policy before broad rollout.
+{% /process-step %}
+{% /process-flow %}
+
+### Define failures before launch
+
+- **Worker loss:** reclaim the expired stage lease and retry from the durable job state;
+  do not regenerate after a candidate has already passed release.
+- **Identity service outage:** stop final release and keep completed candidates in
+  quarantine. A lower-quality image is acceptable; an unverified likeness is not.
+- **Queue overload:** return an honest ETA, preserve the job, prioritize paid
+  interactive work according to policy, and defer batch jobs.
+- **Model regression:** halt new jobs for the affected model/preset, roll back the
+  versioned package, and re-review candidates generated during the affected window.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrapup" title="8. Wrap up with risks and extensions" %}
+
+
+### Defend the design in an interview
+
+The central choice is to make a headshot a durable, gated job rather than a direct
+model response. Admission protects consent and input quality; identity conditioning and
+bounded presets guide generation; independent validation owns release; and queues keep
+expensive work reliable under bursty demand. The system degrades by asking for better
+inputs, extending an ETA, or routing to review, never by silently weakening safeguards.
+
+### Risks that remain
+
+- Identity embeddings and face-quality models can perform unevenly across capture
+  conditions and demographic groups, so calibration and human evaluation must be
+  ongoing.
+- Consent and ownership cannot always be inferred from pixels. Product policy, user
+  attestation, auditability, and escalation paths are part of the technical design.
+- Enterprise brand pressure can become appearance manipulation. Keep presets bounded,
+  reviewed, tenant-scoped, and easy to roll back.
+- Cost can rise sharply when preview retries, rejected inputs, or GPU fragmentation
+  increase. Monitor accepted-final cost, not only raw render cost.
+
+### Sensible next increments
+
+1. Start with consented, single-subject images, one professional preset family, and a
+   conservative identity-and-policy release gate.
+2. Add preview approval, enterprise preset review, queue isolation, and a trained
+   human-review workflow after baseline reliability is proven.
+3. Expand to more styles only after representative evaluation, appeal handling, and
+   deletion/audit operations work at production volume.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/headshot-generation/quiz/headshot-generation-design-review.json"
+   lessonSlug="practice-headshot-generation"
+   title="Headshot Generation Design Review" /%}

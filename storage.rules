@@ -1,0 +1,41 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(diagramId) {
+      return request.auth != null &&
+             firestore.exists(/databases/(default)/documents/diagrams/$(diagramId)) &&
+             firestore.get(/databases/(default)/documents/diagrams/$(diagramId)).data.createdBy == request.auth.uid;
+    }
+
+    function isPublic(diagramId) {
+      return firestore.exists(/databases/(default)/documents/diagrams/$(diagramId)) &&
+             firestore.get(/databases/(default)/documents/diagrams/$(diagramId)).data.visibility == 'public';
+    }
+
+    match /diagrams/{diagramId}/assets/{file} {
+      // Allow read if public, owner, or just authenticated (for immediate download after upload)
+      allow read: if request.auth != null || isPublic(diagramId);
+      
+      // Allow write for authenticated users (diagram will be created on first save)
+      allow create, update: if request.auth != null;
+      
+      // Only owner can delete (once diagram exists)
+      allow delete: if isOwner(diagramId);
+    }
+
+    // Feedback widget uploads (screenshots, screen recordings, voice notes,
+    // attachments, diagnostics). Files land flat under feedback/<timestamp>-<name>.
+    // Public reads let GitHub issue embeds resolve, but writes require Firebase
+    // auth. The client signs in anonymously before uploading.
+    match /feedback/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null &&
+        request.resource.size < 15 * 1024 * 1024;
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,228 @@
+---
+registryId: layout-parser
+---
+
+{% section-card tone="intro" %}
+## What is LayoutParser?
+
+LayoutParser is an open-source Python toolkit for document image analysis. It provides
+layout data structures, model adapters, model-zoo integrations, OCR helpers, geometry
+operations, and visualization utilities. A typical pipeline uses it to turn a rendered
+page into typed regions such as titles, text blocks, lists, tables, and figures.
+
+It matters because OCR alone answers "which characters are visible?" Layout analysis
+also asks "where is this region, what role does it play, and how does it relate to the
+rest of the page?" Those relationships determine whether a two-column article, table
+caption, sidebar, or footer becomes useful structured content or scrambled text.
+
+{% callout variant="info" %}
+The core invariant is evidence preservation: every emitted region should remain
+traceable to its source page, coordinates, class, confidence, model/configuration
+version, and later reading-order decision.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Geometry" eyebrow="Where" icon="layout" tone="blue" %}
+Bounding boxes or polygons locate a region in the page coordinate system and make
+cropping, overlap checks, review, and replay possible.
+{% /concept-card %}
+{% concept-card title="Region meaning" eyebrow="What" icon="layers" tone="violet" %}
+A model assigns labels and scores, while explicit post-processing decides which
+detections are safe to send downstream.
+{% /concept-card %}
+{% concept-card title="Document structure" eyebrow="How it connects" icon="route" tone="green" %}
+Reading order, columns, captions, tables, and hierarchy are constructed after region
+detection; they are not guaranteed by a box detector.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Keep detection, recognition, and structure as separate decisions
+
+A production pipeline is easier to test when each stage has one contract. The detector
+does not need to pretend it recognized text, and OCR does not need to invent page
+structure it cannot observe reliably.
+
+{% system-flow title="Layout-aware document path" caption="Each stage adds evidence without erasing the source coordinates or earlier decisions." %}
+{% system-node title="Render and normalize" eyebrow="Page image" icon="image" tone="blue" %}
+Render a bounded page at a recorded scale and preserve the transform between source
+coordinates and pixels.
+{% /system-node %}
+{% system-node title="Detect regions" eyebrow="Vision" icon="search" tone="cyan" %}
+Predict candidate boxes, classes, and confidence scores with a pinned model and backend.
+{% /system-node %}
+{% system-node title="Recognize and relate" eyebrow="Content" icon="layers" tone="violet" %}
+Run OCR only where needed, then resolve columns, captions, tables, and reading order.
+{% /system-node %}
+{% system-node title="Validate and publish" eyebrow="Contract" icon="check" tone="green" %}
+Check coverage, sequence, provenance, and downstream requirements before publishing a
+versioned result.
+{% /system-node %}
+{% /system-flow %}
+
+### Record the coordinate transform
+
+- retain the original page size, rendered image size, rotation, crop, and scale;
+- store boxes in one documented coordinate convention and convert only at boundaries;
+- reject invalid or out-of-page geometry before cropping;
+- keep region IDs stable across OCR, ordering, review, and exported records.
+{% /section-card %}
+
+{% section-card %}
+## Turn raw detections into a deliberate region policy
+
+A detector can produce several overlapping boxes for one region and low-confidence
+boxes for real but difficult content. A confidence floor and non-maximum suppression
+are policies, not measures of truth:
+
+- raising the floor can reduce false positives while dropping captions or footers;
+- keeping every box can send duplicate crops through OCR and duplicate downstream text;
+- class-aware non-maximum suppression compares same-class overlap and retains the
+  stronger candidate when intersection-over-union crosses a declared threshold;
+- a threshold chosen on one document family must be evaluated again on new templates,
+  languages, scan conditions, and region classes.
+
+The lab uses exact synthetic detections. It does not estimate a vendor's accuracy or
+latency.
+
+{% interactive-block id="ml-systems/layout-parser-calculator" dataFile="/api/content/ml-systems/layout-parser/data/region-postprocessing-scenarios.json" /%}
+
+### Emit an auditable region contract
+
+{% code-block file="/api/content/ml-systems/layout-parser/code/detect_layout_regions.py" language="python" title="Detect regions and preserve model evidence" /%}
+
+The example follows the official LayoutParser detector API. Treat its model URI,
+label map, backend, framework build, and score floor as one tested deployment artifact;
+do not load an unpinned model dynamically in a request handler.
+{% /section-card %}
+
+{% section-card %}
+## Choose the model family for the actual task
+
+Layout detection, OCR, and multimodal understanding solve related but different
+problems. The old version of this lesson treated them as interchangeable model choices;
+they are separate stages with separate inputs, outputs, and evaluation.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Region detector" eyebrow="Boxes and classes" icon="scan" tone="cyan" %}
+Use a detector when the contract needs page regions such as text, title, list, table,
+and figure. LayoutParser's official model zoo exposes adapters for supported detection
+backends and datasets.
+{% /concept-card %}
+{% concept-card title="OCR engine" eyebrow="Pixels to text" icon="document" tone="blue" %}
+Run recognition inside selected regions or on full pages when needed. Record the OCR
+engine, language, image transform, word boxes, and confidence separately from detector
+evidence.
+{% /concept-card %}
+{% concept-card title="Multimodal model" eyebrow="Document semantics" icon="brain" tone="violet" %}
+Models such as LayoutLMv3 combine text, page boxes, and image features for tasks such
+as token classification or document question answering. They have their own processor,
+task head, training data, and release gate.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [LayoutParser documentation](https://layout-parser.readthedocs.io/en/stable/)
+describes its layout elements, shape operations, detection adapters, OCR helpers, and
+load/export APIs. The
+[LayoutLMv3 documentation](https://huggingface.co/docs/transformers/model_doc/layoutlmv3)
+documents a separate multimodal Transformer interface and preprocessing contract.
+
+{% callout variant="warn" %}
+Backend compatibility is part of the system design. At this lesson's review, the
+official LayoutParser repository lists v0.3.4 as its latest release and some installation
+material references older Detectron2 versions. Pin the complete environment, build it
+in CI, scan it, and replay a golden corpus before choosing it for a maintained service.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Reconstruct reading order instead of flattening by coordinates
+
+Sorting every region from top to bottom works for a simple single-column page. It can
+interleave two columns, insert a sidebar into the main argument, separate a figure from
+its caption, or place a repeated footer inside the content.
+
+A useful reading-order stage considers:
+
+- spanning regions such as page titles and footers;
+- column or lane membership before local vertical order;
+- containment and adjacency for figures, captions, tables, and notes;
+- explicit predecessor relationships when geometry remains ambiguous;
+- document-family rules or a learned ordering model for layouts that heuristics cannot
+  represent safely.
+
+{% interactive-block id="ml-systems/layout-parser-reading-order-lab" dataFile="/api/content/ml-systems/layout-parser/data/reading-order-scenarios.json" /%}
+
+{% code-block file="/api/content/ml-systems/layout-parser/code/reconstruct_reading_order.py" language="python" title="Build and validate an explicit region sequence" /%}
+
+The lane-aware function is intentionally a small policy example, not a universal
+reading-order algorithm. Its important contract is that every source region appears
+exactly once and every chosen sequence is stored for later review.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate regions, order, and downstream usefulness together
+
+One aggregate "layout accuracy" number hides which classes, layouts, and document
+families fail. Build a labeled release set from real traffic and report at least three
+layers of evidence.
+
+{% metric-strip %}
+{% metric label="Region detection" value="Precision / recall" detail="Match predicted and labeled regions at a declared overlap rule, per class and slice." tone="cyan" /%}
+{% metric label="Reading order" value="Pairwise / exact" detail="Measure relative order and whole-page sequence, including columns and dependent regions." tone="violet" /%}
+{% metric label="Downstream task" value="OCR / table / fields" detail="Verify that the structure improves the consumer rather than only the detector score." tone="green" /%}
+{% metric label="Operations" value="Latency / memory / failures" detail="Measure the pinned build on representative page sizes and concurrency." tone="amber" /%}
+{% /metric-strip %}
+
+### Slice before averaging
+
+- document family: journal, report, invoice, form, newspaper, and unseen template;
+- source condition: native render, scan, photo, skew, blur, compression, and rotation;
+- structure: single column, multi-column, sidebar, borderless table, figure, and caption;
+- region class, size band, language/script, page count, and business consequence;
+- dependency, model, preprocessing, threshold, and ordering-policy version.
+
+{% code-block file="/api/content/ml-systems/layout-parser/code/evaluate_layout_contract.py" language="python" title="Report region and order quality by slice" /%}
+
+Keep a locked release set separate from training and threshold tuning. Add challenge
+sets for rare and adversarial layouts, then canary a new parser version on stored inputs
+and live traffic before changing the default.
+{% /section-card %}
+
+{% section-card %}
+## Operate the parser as an isolated, observable service
+
+Document bytes, fonts, images, and PDF structures are untrusted input. LayoutParser is
+a toolkit inside the worker; the surrounding service still owns admission control,
+resource bounds, retries, provenance, and publication.
+
+### Bound the work
+
+- cap bytes, pages, rendered dimensions, pixels, attachments, and processing time;
+- isolate rendering, detection, and OCR with least privilege and no ambient credentials;
+- load model artifacts at worker start, verify their digest, and keep network access
+  disabled when inference does not require it;
+- use idempotent job and result identities so retries cannot publish duplicate outputs.
+
+### Observe the decision path
+
+- queue age, pages per job, render failures, worker memory, timeouts, and retries;
+- detections per page before and after thresholding and overlap suppression;
+- class confidence, dropped-region, duplicate-region, and out-of-bounds rates;
+- reading-order gate failures and correction rate by document slice;
+- OCR, table, field, and reviewer outcomes tied to parser and policy versions.
+
+### Release and recover
+
+1. replay the golden corpus with the candidate environment;
+2. compare region, order, downstream, latency, and memory gates by slice;
+3. shadow or canary the candidate without overwriting accepted results;
+4. preserve the previous model, policy, and output schema for rollback;
+5. store the exact source and transforms needed to reproduce a disputed result.
+
+For broad ingestion, security, OCR routing, schemas, and review-queue design, revisit
+the prerequisite [Document Parsing Systems](/ml-systems/document-parsing) lesson.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/layout-parser/quiz/layout-parser-production-decisions.json" lessonSlug="layout-parser" title="Layout Analysis Production Decisions" /%}

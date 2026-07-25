@@ -1,0 +1,283 @@
+---
+registryId: nifi
+---
+
+{% section-card tone="intro" %}
+## What is Apache NiFi?
+
+Apache NiFi is a **dataflow system** for moving and transforming data between
+systems. A flow is assembled from processors connected by bounded queues. Operators
+can inspect the flow, change its configuration, observe queued work, and trace what
+happened to individual data objects.
+
+NiFi calls each object moving through a flow a **FlowFile**. A FlowFile contains a map
+of string attributes plus a reference to content stored in the Content Repository.
+Processors read or change that state, then route the FlowFile through named
+relationships such as `success`, `failure`, or `retry`.
+
+The core invariant for the default Traditional execution engine is: **a processor
+commits one unit of work before the FlowFile becomes available in the next persistent
+connection.** That boundary lets a flow resume from a committed queue after restart.
+It does not make an external database write, API call, or message publish exactly once.
+
+{% callout variant="info" %}
+**Use NiFi when operators need visible, controlled data movement.**
+
+NiFi is strongest when a team must ingest from several protocols, transform or route
+records, absorb rate differences, preserve a recoverable handoff, and retain
+provenance. It is not a database, stream-processing state store, or general-purpose
+business workflow orchestrator.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read a NiFi flow as packets, work, and bounded handoffs
+
+Four concepts explain most of the canvas.
+
+{% concept-grid columns="4" %}
+{% concept-card title="FlowFile" eyebrow="Data packet" icon="code" tone="blue" %}
+Carries attributes and a pointer to content. Attributes support routing and
+correlation; the content bytes live in the Content Repository.
+{% /concept-card %}
+{% concept-card title="Processor" eyebrow="Unit of work" icon="workflow" tone="violet" %}
+Fetches, parses, transforms, routes, or delivers FlowFiles. Its configured
+relationships make success and failure paths explicit.
+{% /concept-card %}
+{% concept-card title="Connection" eyebrow="Bounded queue" icon="layers" tone="amber" %}
+Links processors, buffers rate differences, and applies object-count and data-size
+back-pressure thresholds independently.
+{% /concept-card %}
+{% concept-card title="Controller Service" eyebrow="Shared dependency" icon="network" tone="green" %}
+Provides reusable readers, writers, schema registries, database pools, SSL contexts,
+and other services within its configured scope.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="One recoverable record path" caption="The connection is a deliberate handoff. It absorbs short rate differences and exposes where work is waiting." %}
+{% system-node title="Ingest" eyebrow="Receive" icon="cloud" tone="blue" %}
+A source processor obtains data from HTTP, a queue, object storage, a database, or a
+filesystem and creates a FlowFile.
+{% /system-node %}
+{% system-node title="Decode records" eyebrow="Interpret" icon="braces" tone="violet" %}
+A record-aware processor uses a configured reader and writer so format handling is
+separate from routing or transformation logic.
+{% /system-node %}
+{% system-node title="Route" eyebrow="Decide" icon="route" tone="amber" %}
+Attributes, record fields, or processor relationships send data to success, retry,
+failure, or business-specific paths.
+{% /system-node %}
+{% system-node title="Deliver" eyebrow="Commit effect" icon="database" tone="green" %}
+The sink applies an external effect. Idempotency, acknowledgments, and destination
+transactions determine whether a retry is safe.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Let connections control pressure before repositories fill
+
+A connection enters back pressure when either its FlowFile-count threshold or its
+content-size threshold is reached. The upstream component stops transferring more
+FlowFiles to that connection until downstream work creates capacity.
+
+The root process group obtains default thresholds for newly created connections from
+`nifi.properties`. Current Apache NiFi documentation lists `10,000` FlowFiles and
+`1 GB` as the defaults. Changing those defaults does not replace per-connection
+capacity planning.
+
+{% code-block file="/api/content/technology/nifi/code/back-pressure-defaults.properties" language="properties" title="Default thresholds for newly created connections" /%}
+
+Size each important connection from:
+
+- arrival rate and burst duration;
+- downstream processing rate during normal and degraded operation;
+- FlowFile-count and content-size distributions, not only averages;
+- available Content Repository space and FlowFile metadata overhead;
+- the oldest acceptable data age and the recovery time after an outage.
+
+FlowFile expiration is a separate connection setting. Its default `0 sec` means data
+does not expire. A non-zero expiration deliberately drops FlowFiles once their age in
+the NiFi instance reaches the configured limit, so treat it as a product data-loss
+policy rather than a queue-cleanup shortcut.
+{% /section-card %}
+
+{% interactive-block id="technology/nifi-calculator" dataFile="/api/content/technology/nifi/data/flow-control-model.json" /%}
+
+{% section-card accent="violet" %}
+## Choose the execution engine from the delivery contract
+
+NiFi now documents two execution engines for a process group:
+
+{% concept-grid columns="2" %}
+{% concept-card title="Traditional engine" eyebrow="Default" icon="boxes" tone="blue" %}
+Schedules processors independently. Connections buffer work between processors and
+queued FlowFiles are restored after restart. Each processor invocation is its own
+transaction boundary.
+{% /concept-card %}
+{% concept-card title="Stateless engine" eyebrow="Process-group transaction" icon="route" tone="violet" %}
+Runs the process group as one transaction. It does not persist in-flight data across a
+restart, so the source must support application-level acknowledgment and redelivery.
+It is best suited to one source and one destination.
+{% /concept-card %}
+{% /concept-grid %}
+
+Stateless execution can roll back the whole process group when a later step fails.
+That is useful only when the source can resend the unit. Fan-out is dangerous: if the
+first destination accepts data and a later destination fails, a rolled-back retry can
+send the first external effect again.
+{% /section-card %}
+
+{% interactive-block id="technology/nifi-execution-engine-lab" dataFile="/api/content/technology/nifi/data/execution-engine-model.json" /%}
+
+{% section-card accent="amber" %}
+## Route records without hiding failure paths
+
+Prefer record-aware processors when a flow handles structured data. A Record Reader
+decodes Avro, JSON, CSV, or another format into NiFi's record abstraction; a Record
+Writer emits the chosen target format. This keeps schema and serialization choices in
+Controller Services instead of duplicating them across processors.
+
+`RouteOnAttribute` evaluates NiFi Expression Language against FlowFile attributes. Each
+dynamic property name becomes a relationship and each property value must return a
+boolean.
+
+{% code-block file="/api/content/technology/nifi/code/route-on-attribute.properties" language="properties" title="RouteOnAttribute dynamic properties" /%}
+
+Design every processor relationship deliberately:
+
+- Connect `success` only to work that can consume the processor's documented output.
+- Send transient errors to a bounded retry path with backoff and a finite attempt
+  budget.
+- Send malformed, unauthorized, or permanently rejected data to a quarantine path
+  with the original identity and failure reason.
+- Auto-terminate a relationship only when dropping that outcome is intentional and
+  observable.
+- Keep external writes idempotent because NiFi session rollback cannot undo an effect
+  already committed by another system.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate current state, content, and history
+
+NiFi uses several repositories with different recovery jobs.
+
+{% concept-grid columns="3" %}
+{% concept-card title="FlowFile Repository" eyebrow="Current metadata" icon="layers" tone="blue" %}
+Acts as a write-ahead log for FlowFile attributes, content references, and queue
+location. The Traditional engine uses it to restore committed queue state.
+{% /concept-card %}
+{% concept-card title="Content Repository" eyebrow="Current bytes" icon="storage" tone="green" %}
+Stores FlowFile content claims. Capacity and disk isolation matter because a full
+content volume can stop useful progress and threaten recovery.
+{% /concept-card %}
+{% concept-card title="Provenance Repository" eyebrow="Historical events" icon="repeat" tone="violet" %}
+Stores events such as receive, route, modify, fork, join, send, and drop. Authorized
+operators can search lineage and, while referenced content remains available, inspect
+or replay an event.
+{% /concept-card %}
+{% /concept-grid %}
+
+Provenance is evidence, not a side-effect transaction log. A `SEND` event proves that
+NiFi recorded a send attempt; it does not prove the destination applied the business
+effect exactly once. Retention also has two dimensions: keeping event metadata longer
+does not guarantee the underlying content is still available for replay.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make retries finite, observable, and safe
+
+Processor relationships can be configured to retry with a finite attempt count and a
+backoff policy. Penalize delays the affected FlowFile while allowing other FlowFiles
+to proceed. Yield pauses the processor, which is useful when later work is likely to
+fail for the same dependency or when order must be preserved.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the outcome" label="Route" %}
+Separate retryable dependency errors from invalid data, authorization failures, and
+successful effects.
+{% /process-step %}
+{% process-step number="2" title="Back off deliberately" label="Retry" %}
+Use finite attempts and a maximum backoff period. Do not create a tight loop that
+repeatedly calls an unavailable dependency.
+{% /process-step %}
+{% process-step number="3" title="Quarantine exhausted work" label="Own failure" %}
+Preserve identity, attributes, failure reason, and safe content references so an
+operator can diagnose and replay intentionally.
+{% /process-step %}
+{% process-step number="4" title="Verify the business effect" label="Recover" %}
+Use an idempotency key or destination transaction to distinguish a safe replay from a
+duplicate external effect.
+{% /process-step %}
+{% /process-flow %}
+
+Test at least these failures before production:
+
+- destination timeout before and after it commits an effect;
+- NiFi restart with data in each important connection;
+- full or slow Content and Provenance Repository volumes;
+- malformed records and incompatible schema changes;
+- cluster-node loss while local and cluster state are active;
+- retry exhaustion, quarantine growth, and replay authorization.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Scale a cluster without inventing stronger guarantees
+
+In a NiFi cluster, nodes run the same flow definition but process different data. A
+Cluster Coordinator manages membership, and a Primary Node role exists for processors
+that should run on one elected node. Current administration documentation supports
+leader election through Apache ZooKeeper and a Kubernetes Lease implementation.
+
+Clustering adds capacity and node-failure options, but it does not automatically fix:
+
+- a downstream system that cannot accept the aggregate write rate;
+- a single-primary source or other non-parallel processor;
+- uneven partitioning when load balancing by an attribute;
+- repository throughput and disk capacity on each node;
+- stateful processors whose local or cluster state has not been designed for failover;
+- duplicate external effects during retries or node interruption.
+
+Partition-by-attribute load balancing keeps the same attribute value on one node. If
+that destination node is unavailable, those FlowFiles wait for it rather than
+automatically moving to another node. Round-robin load balancing has different
+redistribution behavior, so choose the strategy from ordering, affinity, and failure
+requirements rather than from an assumed throughput score.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate NiFi as a governed data boundary
+
+Production ownership should cover:
+
+- **Queue health:** object count, queued bytes, oldest age, growth rate, and predicted
+  time to back pressure.
+- **Processor outcomes:** success, retry, failure, yield, task duration, and bulletin
+  rates by component.
+- **Repository health:** free space, I/O latency, checkpoint behavior, retention, and
+  recovery tests.
+- **Data governance:** least-privilege component policies, protected sensitive
+  parameters, TLS, provenance access, and content-view authorization.
+- **Change control:** versioned flow definitions, parameter changes by environment,
+  peer review, rollback, and canary validation with representative data.
+- **End-to-end correctness:** destination acknowledgments, idempotency keys, schema
+  compatibility, quarantine ownership, and replay procedures.
+
+NiFi is a good fit when the flow benefits from visible queues, protocol mediation,
+operator-controlled routing, and lineage. Prefer a dedicated stream processor when
+the core problem is large keyed state, event-time windows, and distributed
+computations. Prefer a workflow orchestrator when the core problem is coordinating
+long-running tasks and dependencies rather than carrying data objects through bounded
+queues.
+
+### Current primary references
+
+- [Apache NiFi Overview](https://nifi.apache.org/nifi-docs/overview.html)
+- [Apache NiFi User Guide](https://nifi.apache.org/nifi-docs/user-guide.html)
+- [Apache NiFi In Depth](https://nifi.apache.org/nifi-docs/nifi-in-depth.html)
+- [Apache NiFi System Administrator's Guide](https://nifi.apache.org/nifi-docs/administration-guide.html)
+- [RouteOnAttribute component documentation](https://nifi.apache.org/components/org.apache.nifi.processors.standard.RouteOnAttribute/)
+- [ListenHTTP component documentation](https://nifi.apache.org/components/org.apache.nifi.processors.standard.ListenHTTP/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/nifi/quiz/nifi-production-decisions.json" lessonSlug="nifi" title="Apache NiFi Production Decisions" /%}

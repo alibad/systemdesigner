@@ -1,0 +1,368 @@
+---
+registryId: practice-text-to-image
+---
+
+{% section-card tone="intro" %}
+## What is a text-to-image generation system?
+
+A text-to-image generation system turns a written prompt into a new image. The model is only one part of the product: the service must understand the request, enforce policy, schedule expensive accelerator work, generate and inspect the image, attach provenance, and deliver the result without making the user wait in an invisible queue.
+
+For this interview, design a global service that produces **1024 × 1024 images**, handles **100 million generations per month**, and completes the normal interactive path within **25 seconds at p95**. Treat the scale and benchmark numbers as explicit design assumptions, not claims about any particular commercial system.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Release only inspected output" eyebrow="Product invariant" icon="shield" tone="blue" %}
+Every delivered image passes prompt policy, output policy, identity checks, and provenance recording.
+{% /concept-card %}
+{% concept-card title="Queue the expensive work" eyebrow="Critical path" icon="layers" tone="violet" %}
+The request becomes a durable job so accelerator saturation does not become a lost or duplicated generation.
+{% /concept-card %}
+{% concept-card title="Degrade quality before safety" eyebrow="Failure mode" icon="activity" tone="green" %}
+Offer a preview tier, fewer denoising steps, or a longer ETA when capacity is tight; never remove release gates.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Define the user journey
+
+The smallest useful flow is:
+
+1. A user submits a prompt plus bounded controls such as aspect ratio, style category, and seed.
+2. The API authenticates the user, reserves quota, and checks the prompt against policy.
+3. A durable job enters a regional queue and reports an ETA.
+4. A scheduler assigns an approved model tier and accelerator worker.
+5. The system inspects the generated image, records provenance, stores the asset, and returns a signed delivery URL.
+
+### Separate functional scope from quality goals
+
+**In scope**
+
+- Generate one to four images from a prompt.
+- Support 512 px previews and 1024 px standard images.
+- Provide job status, cancellation, deterministic seeds, and short-lived result links.
+- Enforce prompt, output, identity, tenant, quota, and provenance policy.
+
+**Out of scope for the first design**
+
+- Training a foundation model from scratch.
+- User-specific fine-tuning and persistent character identities.
+- Image editing, inpainting, video generation, and unrestricted custom models.
+- Guaranteed pixel-level reproduction of a reference artist or copyrighted work.
+
+### State the non-functional goals
+
+{% metric-strip %}
+{% metric value="<25s" label="Generation p95" detail="Queue plus inference and release checks for the standard tier." tone="blue" /%}
+{% metric value="99.9%" label="Job API availability" detail="Accepted jobs remain durable across worker failures." tone="green" /%}
+{% metric value="100M" label="Images per month" detail="About 39 images/s average before the peak multiplier." tone="violet" /%}
+{% metric value="0" label="Unchecked releases" detail="Safety and provenance are not degradable stages." tone="rose" /%}
+{% /metric-strip %}
+
+### Ask the questions that change the architecture
+
+- **Audience and policy:** Is this a family-safe consumer product, an enterprise studio, or a controlled internal tool?
+- **Latency and quality:** Does the user need a fast preview, a high-quality final render, or both?
+- **Rights and identity:** Are public figures, uploaded references, logos, and style imitation allowed?
+- **Retention:** Are prompts and outputs temporary, user-owned, enterprise-isolated, or eligible for training?
+- **Failure behavior:** Should overload return an ETA, offer a cheaper tier, reject admission, or consume prepaid quota later?
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Throughput and Accelerator Capacity" %}
+
+
+### Convert monthly volume into a peak rate
+
+Using a 30-day month:
+
+1. Average demand = 100M / 2,592,000 seconds = **38.6 images/s**.
+2. A 4× daily peak produces **154 images/s**.
+3. Adding 25% regional and failure headroom yields a provisioning target near **193 images/s**.
+
+Prompt tokens are small compared with denoising compute. A 150-token prompt does not make generation expensive; image resolution, denoising steps, model size, batch policy, and accelerator efficiency do.
+
+### Estimate storage separately from compute
+
+Assume each final image averages 2 MB and each preview averages 250 KB:
+
+- Final image storage is about **200 TB per month** before replication.
+- A retained preview adds about **25 TB per month**.
+- Metadata is much smaller, but it carries the job state, prompt hash, model and policy versions, seed, safety scores, ownership, retention, and provenance.
+- CDN egress depends on views and downloads, not just generation count, so model it from product behavior rather than copying the storage estimate.
+
+### Size the actual serving configuration
+
+Do not divide peak QPS by “concurrent requests per GPU.” Benchmark one worker with the intended resolution, sampler, steps, precision, batch size, and p95 target. Then add explicit headroom for worker loss and regional imbalance.
+
+{% interactive-block id="practice/text-to-image-capacity-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the Architecture and Model Tiers" %}
+
+
+### Keep the job durable and the release path explicit
+
+{% system-flow title="Text-to-image request path" caption="The queue absorbs variable accelerator time. The image becomes externally visible only after output checks and provenance succeed." %}
+{% system-node title="API and prompt gate" eyebrow="Admit" icon="shield" tone="blue" %}
+Authenticate, reserve quota, validate controls, classify the prompt, and create an idempotent job.
+{% /system-node %}
+{% system-node title="Durable regional queue" eyebrow="Buffer" icon="layers" tone="cyan" %}
+Order work by plan and deadline, expose an ETA, and preserve jobs through scheduler or worker restarts.
+{% /system-node %}
+{% system-node title="GPU scheduler" eyebrow="Place" icon="server" tone="amber" %}
+Route by model, resolution, VRAM, batch compatibility, region, and current queue age.
+{% /system-node %}
+{% system-node title="Generation worker" eyebrow="Create" icon="layers" tone="violet" %}
+Encode text, denoise a latent, decode the image, and emit versioned generation metadata.
+{% /system-node %}
+{% system-node title="Release gate and CDN" eyebrow="Deliver" icon="check" tone="green" %}
+Inspect the output, attach provenance, store the image, and return a short-lived URL.
+{% /system-node %}
+{% /system-flow %}
+
+### Give each model tier one responsibility
+
+- **Preview tier**
+    - Uses a smaller resolution or distilled model with fewer steps.
+    - Supports composition checks and a graceful overload option.
+- **Standard tier**
+    - Serves the default 1024 px product path.
+    - Balances quality, latency, and unit cost under the 25-second target.
+- **Quality tier**
+    - Uses more denoising steps or a stronger model for final assets.
+    - Runs only when the user accepts a longer ETA or reserved capacity exists.
+
+### Separate control-plane state from image bytes
+
+Store job state and ownership in a transactional database. Put prompts and policy evidence in access-controlled metadata storage with explicit retention. Store generated binaries in object storage and distribute them through signed CDN URLs. Workers should receive short-lived credentials and must not publish directly to a public bucket.
+
+### Make job transitions idempotent
+
+A retry may repeat scheduling, generation, or upload. Use a stable job ID and attempt ID, conditionally transition job state, and write the released asset reference once. Charge quota on an explicit business transition such as accepted or successfully released, not on every worker attempt.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive on Conditioning and Safety" %}
+
+
+### Explain latent diffusion in plain language
+
+The system starts with random noise in a compressed latent space. A text encoder turns the prompt into embeddings. At each denoising step, a U-Net or transformer predicts how to remove noise while cross-attention aligns visual regions with prompt tokens. A decoder then expands the final latent into pixels.
+
+{% process-flow %}
+{% process-step number="1" title="Encode intent" label="Condition" %}
+Tokenize the prompt and controls, then create text and optional style or layout embeddings.
+{% /process-step %}
+{% process-step number="2" title="Denoise the latent" label="Generate" %}
+Iteratively remove noise while classifier-free guidance controls prompt adherence.
+{% /process-step %}
+{% process-step number="3" title="Decode pixels" label="Render" %}
+Convert the compact latent into the requested image resolution and color space.
+{% /process-step %}
+{% process-step number="4" title="Inspect and release" label="Policy" %}
+Run output and identity checks, attach provenance, and publish only an approved asset.
+{% /process-step %}
+{% /process-flow %}
+
+### Treat controls as versioned inputs
+
+- Record the prompt, negative prompt, seed, model, sampler, step count, guidance scale, resolution, and policy version.
+- Bound each control so a user cannot force untested memory or latency behavior.
+- Validate combinations before admission; a nominally valid resolution can still exceed a worker's VRAM when paired with a large batch or control model.
+- Use typed controls for composition, style category, and aspect ratio instead of silently rewriting every prompt.
+
+### Build defense in depth
+
+1. **Prompt gate:** Block clear violations before spending accelerator time.
+2. **Generation constraints:** Disable unsafe adapters and unapproved model combinations.
+3. **Output gate:** Classify the actual pixels because a benign prompt can produce a harmful image.
+4. **Identity and rights checks:** Handle impersonation, consent, trademark, and tenant policy as separate risk classes.
+5. **Human review:** Escalate uncertain cases with bounded queues, reviewer policy, and appeal evidence.
+6. **Provenance:** Record model, policy, and generation identifiers on every released asset.
+
+### Apply policy to the output, not only the words
+
+{% interactive-block id="practice/text-to-image-safety-gate-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Evaluation and Launch Gates" %}
+
+
+### Use several lenses because no single image metric is enough
+
+**Automated quality**
+
+- FID and KID compare distributions and can detect broad regressions, but they do not prove one prompt was followed.
+- Text-image similarity measures semantic alignment but can miss counting, spatial relationships, typography, and attribute binding.
+- Perceptual and artifact detectors target anatomy, duplicated objects, watermarks, text rendering, and compression defects.
+
+**Human evaluation**
+
+- Pairwise preference compares a candidate with the current production model.
+- Structured rubrics separate prompt adherence, composition, aesthetics, artifacts, and diversity.
+- Blind, randomized evaluation reduces brand and model-name bias.
+
+**Safety and fairness**
+
+- Measure violation recall on adversarial prompts and precision on legitimate edge cases.
+- Report identity, culture, occupation, language, skin-tone, age, and disability slices where relevant.
+- Test prompt and output classifiers independently so correlated blind spots are visible.
+
+### Define hard launch gates
+
+{% metric-strip %}
+{% metric value="<25s" label="Standard p95" detail="Measured end to end under production-shaped queue load." tone="blue" /%}
+{% metric value="0" label="Critical escapes" detail="No known release of red-team examples in the critical policy set." tone="rose" /%}
+{% metric value="≥ baseline" label="Human preference" detail="No material regression on key prompt and demographic slices." tone="violet" /%}
+{% metric value="<1%" label="Job failure rate" detail="Excludes user cancellations and explicit policy rejections." tone="green" /%}
+{% /metric-strip %}
+
+### Release through staged evidence
+
+1. Run deterministic contract, policy, and provenance tests on every build.
+2. Evaluate representative, difficult, multilingual, and adversarial prompt sets offline.
+3. Shadow the scheduler and safety stack on production-shaped traffic.
+4. Canary the candidate by stable user or tenant assignment.
+5. Expand only while quality improves and every hard latency and safety guardrail passes.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Control Cost and Governance" %}
+
+
+### Track cost per released image
+
+GPU cost per raw attempt hides retries, rejected outputs, cancellations, and safety failures. Track:
+
+- Accelerator seconds per released image.
+- Queue wait and worker utilization by tier and region.
+- Attempts per successful release.
+- Preview-to-final conversion.
+- Storage and egress per retained asset.
+- Human-review cost and age by policy category.
+
+### Reduce cost in the right order
+
+1. Reject invalid and disallowed requests before generation.
+2. Cancel queued work when the user cancels or replaces the job.
+3. Route exploratory requests to preview models and reserve high-quality tiers for final renders.
+4. Batch only compatible jobs within a bounded queue delay.
+5. Distill, quantize, compile, or cache model artifacts after verifying quality and safety slices.
+6. Use interruptible capacity only where checkpointing, retry limits, and quota semantics tolerate eviction.
+
+### Assign clear owners
+
+{% concept-grid columns="3" %}
+{% concept-card title="Data owner" eyebrow="Rights" icon="database" tone="blue" %}
+Approves training and evaluation sources, retention, deletion, residency, and opt-out behavior.
+{% /concept-card %}
+{% concept-card title="Model owner" eyebrow="Quality" icon="brain" tone="violet" %}
+Owns lineage, model cards, benchmark slices, serving compatibility, and rollback artifacts.
+{% /concept-card %}
+{% concept-card title="Policy owner" eyebrow="Release" icon="shield" tone="rose" %}
+Owns thresholds, reviewer guidance, appeals, incidents, and audit requirements.
+{% /concept-card %}
+{% /concept-grid %}
+
+Every release decision should be reproducible from the job ID, model version, policy version, classifier versions, thresholds, and provenance record without exposing raw user content broadly in logs.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Scale Reliably Through Failures" %}
+
+
+### Autoscale from deadline risk
+
+GPU utilization can look healthy while the oldest job is already late. Scale and shed load using queue age, predicted service time, deadline miss probability, available VRAM by model, and regional capacity imbalance.
+
+### Degrade in a deliberate order
+
+{% process-flow %}
+{% process-step number="1" title="Stop obsolete work" label="Cancel" %}
+Remove queued jobs the user cancelled or replaced before they consume GPU time.
+{% /process-step %}
+{% process-step number="2" title="Offer a preview tier" label="Quality" %}
+Use fewer steps or lower resolution with an explicit product label and cost.
+{% /process-step %}
+{% process-step number="3" title="Extend or reject admission" label="Backpressure" %}
+Return an honest ETA or reject new work before an unbounded queue forms.
+{% /process-step %}
+{% process-step number="4" title="Preserve release gates" label="Safety" %}
+Continue prompt, output, identity, and provenance checks in every degraded mode.
+{% /process-step %}
+{% /process-flow %}
+
+### Design retries around the job state machine
+
+- Retry transient worker loss with a bounded attempt count and a new attempt ID.
+- Do not retry deterministic out-of-memory errors on the same worker profile.
+- Quarantine corrupted or policy-rejected outputs instead of blindly regenerating.
+- Make uploads conditional so two successful attempts cannot both become the released asset.
+- Reconcile quota reservations after cancellation, rejection, permanent failure, or release.
+
+### Define regional behavior
+
+Keep the user-facing job and policy state in an allowed residency boundary. Route generation to another region only when policy and data residency permit it. If failover is prohibited, preserve the job and communicate a longer ETA rather than silently crossing the boundary.
+
+### Monitor the system by stage
+
+- Admission rate, rejection reason, and quota reservation failures.
+- Queue depth, oldest-job age, predicted SLA misses, and cancellation rate.
+- Accelerator occupancy, out-of-memory errors, attempt count, and worker evictions.
+- Prompt blocks, output quarantines, review age, appeals, and confirmed safety escapes.
+- Storage publication failures, CDN errors, and provenance write failures.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Defend Trade-offs and Extensions" %}
+
+
+### Present the recommendation in one minute
+
+Use a durable asynchronous job API with prompt admission, tiered regional queues, a VRAM-aware GPU scheduler, versioned latent-diffusion workers, output and identity gates, provenance, object storage, and signed CDN delivery. Offer preview, standard, and quality tiers so the product can trade time and cost explicitly while preserving the release invariant.
+
+### Defend the major choices
+
+- **Latent versus pixel-space diffusion:** Latent generation reduces compute and memory, but the decoder can introduce artifacts and becomes another versioned dependency.
+- **Batching versus latency:** Larger batches improve accelerator throughput, but queue formation and per-image latency must remain inside the product SLA.
+- **Strict policy versus creative range:** Thresholds depend on product context; layered checks and appeals are more defensible than one universal score.
+- **Multi-region capacity versus residency:** Global overflow improves availability only when content and metadata are allowed to cross regions.
+- **Regenerate versus retry:** A new stochastic attempt may produce a different image and charge more compute, so it is a product action rather than an invisible transport retry.
+
+### Call out unresolved risks
+
+- Classifiers and generators can share data biases and adversarial blind spots.
+- Training-data rights, style imitation, identity misuse, and local regulation can change the allowed product surface.
+- A model upgrade can alter latency, VRAM, prompt adherence, safety scores, and unit economics at the same time.
+- Human-review queues can become the true bottleneck during policy incidents.
+
+### Discuss extensions without redesigning the core
+
+- Add inpainting and editing as new job types with masks, source-image ownership, and stricter retention.
+- Support enterprise adapters with tenant-isolated artifacts, evaluation sets, and routing.
+- Add consistent characters through consented reference assets and identity-specific policy.
+- Expose batch APIs with separate deadlines and opportunistic capacity.
+- Add video only after modeling temporal consistency, much larger compute, and longer-lived job state.
+
+### Use these interview follow-ups
+
+1. A launch event raises peak demand from 4× to 8×. Which controls protect the queue first?
+2. The output classifier fails open in one region. How does the release state machine respond?
+3. A new model improves human preference but doubles p95 and identity-review volume. Should it launch?
+4. Professional users request style adapters. How do ownership, isolation, and rollback change?
+5. A reviewer backlog reaches six hours. Which traffic can wait, which is blocked, and which can release automatically?
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/text-to-image/quiz/text-to-image-design-review.json"
+   lessonSlug="practice-text-to-image"
+   title="Text-to-Image Design Review" /%}

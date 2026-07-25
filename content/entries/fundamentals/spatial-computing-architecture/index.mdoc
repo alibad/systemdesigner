@@ -1,0 +1,211 @@
+---
+registryId: spatial-computing-architecture
+---
+
+{% section-card tone="intro" %}
+## What is spatial computing architecture?
+
+**Spatial computing architecture is the set of real-time, data, rendering, and safety boundaries that lets software reason about a device, people, and digital entities in physical or virtual space.** It turns timestamped sensor observations into poses and maps, resolves entities into coordinate frames, renders from a predicted display pose, and preserves enough identity to recover or collaborate later.
+
+In plain language: a spatial application does not merely draw a 3D object. It must know **where the object is, which frame defines “where,” when that transform was valid, how confident tracking is, who may change the object, and what to do when any of those facts becomes uncertain**.
+
+The core invariant is:
+
+**Never present a precise spatial result unless its coordinate frame, observation time, map or anchor version, and confidence still match the action being taken.**
+{% /section-card %}
+
+{% section-card %}
+## Four contracts hold the experience together
+
+{% concept-grid columns="4" %}
+{% concept-card title="Frame contract" eyebrow="Where?" icon="layers" tone="cyan" %}
+Every pose, point, ray, bound, and entity names its source and destination frame. Device, local map, anchor, stage, and world coordinates are not interchangeable.
+{% /concept-card %}
+{% concept-card title="Time contract" eyebrow="When?" icon="clock" tone="violet" %}
+Sensor observations, input actions, transforms, and remote results carry meaningful timestamps. Rendering reasons about a predicted presentation time, not merely “now.”
+{% /concept-card %}
+{% concept-card title="Confidence contract" eyebrow="How certain?" icon="activity" tone="amber" %}
+Tracking quality, relocalization state, occlusion, and model confidence change behavior. Uncertainty is an input to product logic, not a debug-only metric.
+{% /concept-card %}
+{% concept-card title="Authority contract" eyebrow="Who may change it?" icon="shield" tone="green" %}
+The live tracker owns local pose; the application owns entity rules; collaboration owns ordered operations; durable storage owns history. A cloud response does not automatically become physical truth.
+{% /concept-card %}
+{% /concept-grid %}
+
+These contracts prevent common category errors: applying a device-space point as a world-space point, fusing measurements from different moments, rendering a stale remote label, or treating successful synchronization as proof that two users agree on the same physical location.
+{% /section-card %}
+
+{% section-card %}
+## Keep the live loop local and bounded
+
+The live path starts with measurement and ends when light reaches the display. Some runtimes overlap stages or use late pose updates, but the deadline remains finite: a `90 fps` target provides about `11.1 ms` for each displayed frame, while `60 fps` provides about `16.7 ms`.
+
+{% process-flow %}
+{% process-step number="1" title="Capture observations" label="Sensors" %}
+Record camera, inertial, depth, controller, gaze, and hand observations with calibration identity and timestamps.
+{% /process-step %}
+{% process-step number="2" title="Estimate pose and map" label="Tracking" %}
+Fuse observations, update the device pose, maintain map features, and expose tracking confidence or relocalization state.
+{% /process-step %}
+{% process-step number="3" title="Resolve scene state" label="Application" %}
+Transform entities into the render frame, apply ownership and safety rules, and select bounded simulation and interaction work.
+{% /process-step %}
+{% process-step number="4" title="Predict, render, present" label="Display" %}
+Render from the pose predicted for presentation time, submit before the deadline, and keep a body-locked fallback available.
+{% /process-step %}
+{% /process-flow %}
+
+Heavy semantics, durable persistence, analytics, asset processing, and collaboration can use edge or cloud systems. They should update a future frame through a versioned result rather than block basic head tracking or pose-to-display work.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: build a motion-to-photon budget
+
+Choose a display target and semantic inference path, then change acquisition, tracking, application, and rendering work. The model exposes two independent costs:
+
+- **Frame latency:** work that must finish before this frame can be presented.
+- **Result freshness:** how old an asynchronous semantic result can be when it reaches a later frame.
+
+{% interactive-block id="fundamentals/spatial-computing-architecture-calculator" dataFile="/api/content/fundamentals/spatial-computing-architecture/data/frame-budget-model.json" /%}
+
+The arithmetic is illustrative, not a hardware promise. Profile the complete path on target devices under representative motion, lighting, thermal, scene, and network conditions. Tail behavior matters more than a healthy average because a missed frame is visible when it occurs.
+{% /section-card %}
+
+{% section-card %}
+## Treat transforms as typed, time-indexed data
+
+A transform is not just a `4 x 4` matrix. Production code needs an envelope around that matrix:
+
+- source and destination frame identifiers;
+- the observation or prediction time at which it is valid;
+- map, session, calibration, and anchor versions;
+- confidence or tracking-state evidence;
+- units, handedness, and axis conventions at system boundaries.
+
+The [OpenXR 1.1 specification](https://registry.khronos.org/OpenXR/specs/1.1-khr/html/xrspec.html) makes time explicit when locating spaces and recommends meaningful timepoints such as a frame's predicted display time. [ARKit world tracking](https://developer.apple.com/documentation/arkit/understanding-world-tracking) similarly establishes correspondence between real and virtual spaces through visual-inertial odometry and documented coordinate conventions.
+
+This example rejects low-confidence, stale, frame-mismatched, and map-mismatched observations before applying a transform:
+
+{% code-block file="/api/content/fundamentals/spatial-computing-architecture/code/resolve-spatial-observation.ts" language="typescript" title="Validate a spatial observation envelope" /%}
+
+Do not silently transform through an unknown or stale graph. Preserve the original observation and reason for rejection so relocalization, support, and incident analysis can reconstruct what the user saw.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 2: trace failure and recovery paths
+
+Select each runtime condition and follow the active path. The scenarios separate a live local frame from asynchronous enrichment, durable anchor identity, and shared state.
+
+{% topology-lab dataFile="/api/content/fundamentals/spatial-computing-architecture/data/spatial-runtime-topology.json" /%}
+
+The most important failure behavior is deliberate degradation:
+
+- tracking loss changes world-locked behavior instead of freezing the last pose as truth;
+- an unresolved persisted anchor stays unresolved until current localization provides a valid transform;
+- a late semantic result is rejected when its map, entity, or model version no longer matches;
+- a collaboration conflict follows an ownership policy rather than whichever packet arrives last.
+{% /section-card %}
+
+{% section-card %}
+## Separate anchor identity from current localization
+
+An **anchor** gives application identity to a meaningful spatial location. It can stabilize nearby content and may persist across sessions, but it is not an immutable global coordinate.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Local anchor" eyebrow="Stability" icon="map-pin" tone="cyan" %}
+Keeps content stable near a tracked physical location while the runtime refines its understanding of the environment.
+{% /concept-card %}
+{% concept-card title="Persisted anchor" eyebrow="Recovery" icon="database" tone="violet" %}
+Lets the application retrieve an identity in a later session. The current device must still relocalize it and may fail when the environment changed.
+{% /concept-card %}
+{% concept-card title="Shared anchor" eyebrow="Correspondence" icon="users" tone="green" %}
+Helps participants establish related frames. Application entities still need ownership, conflict resolution, privacy, and per-device rebasing.
+{% /concept-card %}
+{% /concept-grid %}
+
+[Apple's current `WorldAnchor` documentation](https://developer.apple.com/documentation/arkit/worldanchor) exposes persistent identity, transform, and tracked state. [Microsoft's spatial-anchor guidance](https://learn.microsoft.com/en-us/windows/mixed-reality/design/spatial-anchors) emphasizes that anchors are most stable near their origin and that applications should release or remove anchors they no longer need.
+
+Design an explicit state machine:
+
+1. `unresolved`: identity exists, but no current transform is available;
+2. `tracking`: a transform exists with current confidence;
+3. `degraded`: the runtime can estimate placement but should limit high-impact actions;
+4. `lost`: the application hides or approximates world-locked content and guides recovery;
+5. `replaced`: a user or operator intentionally binds the entity to a new physical location.
+{% /section-card %}
+
+{% section-card %}
+## Version every asynchronous spatial result
+
+Remote processing is useful for object recognition, semantic maps, asset generation, durable state, fleet learning, and multi-user collaboration. Its result arrives after the scene has moved.
+
+Attach enough context to decide whether the response still applies:
+
+- capture time and device/session identity;
+- source frame, map, and anchor identifiers;
+- entity revision and requested operation;
+- model, prompt, policy, and asset versions;
+- confidence, validity window, and fallback behavior.
+
+{% code-block file="/api/content/fundamentals/spatial-computing-architecture/code/accept-remote-label.py" language="python" title="Accept only a current semantic result" /%}
+
+Rejecting stale work is not an error to hide. Record the rejection reason, track wasted remote work, and use cancellation or coalescing when new scene versions supersede queued requests.
+{% /section-card %}
+
+{% section-card %}
+## Bound privacy, safety, and collaboration
+
+Spatial systems can observe rooms, faces, bodies, bystanders, voices, and precise movement. Minimize collection before optimizing infrastructure.
+
+### Data boundary
+
+- Keep raw sensor streams on-device unless a feature has a specific, consented need.
+- Prefer derived geometry, redacted features, or bounded events over full camera and audio retention.
+- Separate local map identity from account identity where the product does not require the join.
+- Define retention, deletion, export, and access controls for maps, anchors, recordings, and shared-session history.
+
+### Safety boundary
+
+- Stop or require confirmation for high-impact actions when tracking, calibration, authorization, or environmental prerequisites are missing.
+- Keep emergency and recovery guidance body-locked so it remains visible when world localization fails.
+- Test dynamic environments, low texture, poor lighting, sensor obstruction, rapid motion, thermal pressure, and network isolation.
+- Make virtual occlusion and physical clearance policies explicit; a convincing render is not proof that a path is safe.
+
+### Collaboration boundary
+
+- Define entity ownership, operation ordering, conflict resolution, and undo semantics before synchronization.
+- Exchange anchor correspondence and confidence, not an unexplained “global position.”
+- Rebase the winning entity state into each participant's local frame and expose unresolved alignment.
+- Make retries idempotent and distinguish transport acknowledgement from application acceptance.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Operate the system with evidence
+
+### Before release
+
+- Record frame-time distributions by stage, not one aggregate average.
+- Test relocalization, anchor replacement, tracking loss, stale remote results, and concurrent shared edits.
+- Verify every critical interaction has a local fallback and a user-visible recovery state.
+- Threat-model sensor access, map export, anchor sharing, and privileged spatial actions.
+
+### In production
+
+- Monitor missed-frame rate, tracking-state transitions, relocalization time, anchor-resolution failures, stale-result rejection, and collaboration conflicts.
+- Correlate incidents with device, runtime, application, map, model, asset, and policy versions.
+- Bound telemetry so diagnosing spatial failures does not create an unlimited sensor archive.
+- Rehearse rollback for assets, models, policies, and shared-state migrations independently.
+{% /section-card %}
+
+{% section-card %}
+## Use platform APIs as contracts, not architecture substitutes
+
+- [OpenXR 1.1](https://registry.khronos.org/OpenXR/specs/1.1-khr/html/xrspec.html) standardizes spaces, actions, frame timing, composition, and capability discovery across runtimes.
+- [ARKit world tracking](https://developer.apple.com/documentation/arkit/understanding-world-tracking) documents visual-inertial world tracking, coordinate conventions, anchors, and scene understanding on Apple platforms.
+- [Android XR for OpenXR](https://developer.android.com/develop/xr/openxr) documents current Android XR capabilities including anchors and persistence through supported OpenXR paths.
+- [Windows Mixed Reality coordinate systems](https://learn.microsoft.com/en-us/windows/mixed-reality/design/coordinate-systems) remains a useful explanation of attached, stationary, stage, and anchor-relative frames and the need for fallback behavior.
+
+These APIs expose runtime capabilities. The application still owns data minimization, entity authority, frame and version envelopes, remote-result acceptance, collaboration semantics, and recovery behavior.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/spatial-computing-architecture/quiz/spatial-computing-architecture.json" lessonSlug="spatial-computing-architecture" title="Spatial Computing Architecture Review" /%}

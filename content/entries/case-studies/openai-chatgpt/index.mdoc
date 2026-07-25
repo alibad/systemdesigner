@@ -1,0 +1,417 @@
+---
+registryId: case-study-openai-chatgpt
+---
+
+{% section-card tone="intro" %}
+## What is the ChatGPT architecture?
+
+ChatGPT is a conversational AI product: a user sends a message, the service assembles
+the allowed conversation context, selects a model and tools, generates a response,
+applies safety policy, and streams the result back. The language model is one expensive
+dependency inside a larger distributed system that also owns admission, routing,
+memory, tool authorization, feedback, storage, and operations.
+
+In plain language, the architecture turns token generation into a responsive and
+controlled product. The core invariant is: **an admitted request follows the required
+safety and authorization path, and every degradation is explicit to the user and to
+operators.** A faster answer is not correct if it bypasses policy, repeats a tool side
+effect, leaks another conversation, or silently uses stale state.
+
+This case study presents a measured reference design based on observable product
+requirements and general LLM-serving principles. It does not claim to describe
+OpenAI's private deployment. Review [Model Serving](/ml-systems/model-serving) first
+if batching, accelerators, and online inference are unfamiliar.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the conversation contract and scope" %}
+
+## Define what one chat turn must promise
+
+A chat turn begins when the service accepts a user message and ends with a completed,
+cancelled, refused, or failed response. That lifecycle needs explicit states because a
+stream can disconnect after some tokens arrive and a tool can finish after its caller
+times out.
+
+### Functional scope
+
+- Accept a text message for an authenticated conversation and assign a unique request ID.
+- Build a bounded model input from instructions, recent turns, a conversation summary,
+  and authorized tool results.
+- Select an eligible model tier and healthy serving region.
+- Stream response tokens, support cancellation, and record a clear finish reason.
+- Invoke allowlisted tools through typed arguments and return either a typed result or
+  typed failure to the model.
+- Preserve conversation history according to product retention and deletion rules.
+
+### Design targets for this exercise
+
+- **Responsiveness:** keep p95 time to first token below two seconds for admitted,
+  non-tool requests under the planned load.
+- **Availability:** continue safe text generation through a single worker or regional
+  serving failure when reserve capacity exists.
+- **Isolation:** never mix one user's context, cache entries, tool credentials, or
+  streamed output with another request.
+- **Side effects:** execute a tool action at most once for one idempotency key, even if
+  the model or client retries.
+- **Safety:** never turn a required policy dependency failure into an unfiltered model
+  request.
+
+### Deliberate exclusions
+
+- Model training and dataset construction are outside the online serving path.
+- Voice, image, and video pipelines are omitted so token serving remains the focus.
+- Exact model internals, fleet sizes, vendors, prices, and private deployment details
+  are not assumed.
+- Perfect factual accuracy is not guaranteed by generation; tools and retrieval need
+  their own freshness and provenance contracts.
+
+{% callout variant="info" %}
+Time to first token and tokens per second measure different parts of the experience.
+Admission, policy, routing, queueing, and prompt processing happen before the first
+token. Decode throughput determines how quickly the rest of the response arrives.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Estimate tokens, throughput, cost, and model mix" %}
+
+## Convert conversations into serving work
+
+Requests per second are not enough to size an LLM service. Prompt length controls
+prefill work and cache pressure, generated length controls serial decode work, and the
+model tier changes both cost and worker throughput.
+
+For an illustrative baseline of 120 requests/s, 1,200 input tokens per request, and
+320 generated tokens per response:
+
+- Input rate is `120 x 1,200 = 144,000 tokens/s`.
+- Output rate is `120 x 320 = 38,400 tokens/s`.
+- Raw token rate is `182,400 tokens/s`, or about 15.8 billion tokens/day at a constant
+  load.
+- Actual serving capacity still depends on model size, hardware, batching, cache reuse,
+  sequence mix, and the reserved utilization target.
+
+{% metric-strip %}
+{% metric value="120 req/s" label="Illustrative load" detail="Admitted chat turns at the baseline." tone="blue" /%}
+{% metric value="144K/s" label="Input tokens" detail="Prompt and context processed before decode." tone="violet" /%}
+{% metric value="38.4K/s" label="Output tokens" detail="Generated serially and streamed to users." tone="green" /%}
+{% metric value="28% reserve" label="Planning headroom" detail="The lab targets 72% steady utilization." tone="amber" /%}
+{% /metric-strip %}
+
+### Test the serving envelope
+
+Use the lab to separate five decisions that are often collapsed into one estimate.
+Increase context length without changing traffic, switch model tiers at the same load,
+then raise output length until the queue grows. The cost values and per-worker rates
+are illustrative assumptions so the arithmetic is inspectable rather than a claim
+about a production fleet.
+
+{% interactive-block id="case-studies/openai-chatgpt-serving-capacity-lab" dataFile="/api/content/case-studies/openai-chatgpt/data/serving-capacity-model.json" /%}
+
+### Interpret the result
+
+1. **Raw tokens describe product demand.** They make input and generated volume visible.
+2. **Serving units describe the planning model.** Input tokens receive a tier-specific
+   weight while generated tokens retain full weight.
+3. **Headroom is intentional capacity.** It absorbs bursts, retries, uneven sequence
+   lengths, and worker loss; it is not wasted hardware.
+4. **Tier routing is a product policy.** A cheaper tier is useful only when it still
+   satisfies the task's quality and safety requirements.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate admission, orchestration, and inference" %}
+
+## Keep the public boundary away from model workers
+
+The gateway owns whether work enters the system. The orchestrator owns what context,
+model, region, and tools the request may use. The model pool owns prompt processing
+and token generation. Separating those responsibilities prevents a queue spike or
+worker failure from removing authentication, quotas, or safety controls.
+
+{% system-flow title="One admitted generation request" caption="The response can stream incrementally, but every stage remains observable under the same request ID." %}
+{% system-node title="Gateway and admission" eyebrow="Protect" icon="shield" tone="blue" %}
+Authenticate, enforce request and token limits, assign an idempotency key, and reject
+work that cannot fit a bounded queue.
+{% /system-node %}
+{% system-node title="Policy and context" eyebrow="Assemble" icon="database" tone="rose" %}
+Evaluate input risk and build a size-bounded prompt from instructions, conversation
+state, and authorized data.
+{% /system-node %}
+{% system-node title="Router and model pool" eyebrow="Place" icon="route" tone="violet" %}
+Choose an eligible tier and region, batch compatible work, run prefill, and decode
+tokens incrementally.
+{% /system-node %}
+{% system-node title="Filter, stream, and record" eyebrow="Deliver" icon="activity" tone="green" %}
+Apply output controls, stream tokens, persist the finish state, and emit privacy-bounded
+service, safety, quality, and cost signals.
+{% /system-node %}
+{% /system-flow %}
+
+### Request lifecycle
+
+1. The gateway authenticates the caller, validates payload size, assigns a request ID,
+   and reserves queue capacity.
+2. Input policy returns an allow, restrict, or refuse decision with a policy version.
+3. The orchestrator loads only the permitted conversation state and trims it to the
+   selected tier's context budget.
+4. The router selects a compatible model revision, region, and worker pool from health,
+   queue depth, data-residency, and product policy.
+5. The scheduler batches compatible prefill or decode work without allowing a long
+   sequence to hold every interactive request behind it.
+6. Output policy evaluates the stream, the client receives ordered chunks, and the
+   completion record captures a final reason such as stop, length, cancellation,
+   refusal, or failure.
+
+{% callout variant="tip" %}
+Streaming improves perceived latency, not total compute. The system still pays for
+every processed input token and every generated output token until completion or
+cancellation reaches the worker.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="state-and-tools" title="4. Manage model serving, memory, and tools" %}
+
+## Treat generated context as data, not hidden memory
+
+The model does not automatically remember a conversation between requests. The product
+must reconstruct each turn from stored state. That state has different trust levels,
+retention rules, and failure behavior.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Recent turns" eyebrow="Verbatim context" icon="repeat" tone="blue" %}
+The newest user and assistant messages preserve local coherence. They consume context
+quickly and may contain untrusted instructions, so the service applies a token budget
+and clear role boundaries.
+{% /concept-card %}
+{% concept-card title="Conversation summary" eyebrow="Compressed context" icon="layers" tone="violet" %}
+A versioned summary carries older facts at lower token cost. It can be incomplete or
+wrong, so it remains model context rather than an authoritative user profile.
+{% /concept-card %}
+{% concept-card title="Authoritative state" eyebrow="Tools and product data" icon="database" tone="green" %}
+Account settings, permissions, orders, and other mutable facts stay in systems of
+record. A tool reads them under user authorization and returns provenance with the
+result.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Reuse attention state without crossing isolation boundaries
+
+During prefill, the model processes the prompt and creates attention key/value state.
+During decode, it reuses that state while generating one token at a time. A KV cache
+trades accelerator memory for less repeated computation, but its key must include the
+conversation, model revision, and exact tokenized prefix.
+
+{% code-block
+   file="/api/content/case-studies/openai-chatgpt/code/kv-cache-sketch.py"
+   language="python"
+   title="Conversation-scoped KV-cache reuse"
+/%}
+
+### Batch only compatible work
+
+Dynamic batching improves throughput by placing multiple requests in one model step.
+The scheduler still needs memory checks, tier and revision compatibility, deadlines,
+fairness, and cancellation. Maximizing batch size without those constraints can make
+interactive latency worse.
+
+{% code-block
+   file="/api/content/case-studies/openai-chatgpt/code/dynamic-batching-sketch.py"
+   language="python"
+   title="Deadline-aware batch formation"
+/%}
+
+### Make a tool call a controlled state machine
+
+1. The model proposes a tool name and structured arguments; it does not receive raw
+   service credentials.
+2. The broker validates the schema, checks the user's authorization, and rejects
+   disallowed arguments before execution.
+3. The tool runs with a deadline, idempotency key, audit context, and a narrow response
+   schema.
+4. The broker returns a typed success or failure. The model may retry only when policy
+   marks the operation safe and the retry budget remains.
+5. The final response distinguishes tool-backed facts from model-generated explanation.
+
+{% /accordion-item %}
+
+{% accordion-item id="safety-feedback" title="5. Layer safety controls and feedback" %}
+
+## Keep policy decisions on both sides of generation
+
+Safety is not one classifier and it is not only model training. The online system uses
+multiple controls because each catches a different failure and has a different latency
+budget.
+
+- **Before generation:** enforce authentication, age or product restrictions, abuse
+  rate limits, input policy, tool eligibility, and context isolation.
+- **During generation:** bound tokens and time, validate tool calls, detect cancellation,
+  and apply streaming policy where the product requires it.
+- **After generation:** store the finish reason and policy versions, accept reports,
+  sample privacy-bounded traces, and route uncertain incidents to trained reviewers.
+- **Outside the request path:** run red-team suites, offline evaluations, abuse analysis,
+  and staged model or policy rollouts before increasing exposure.
+
+### Feedback is evidence, not an immediate model update
+
+{% process-flow %}
+{% process-step number="1" title="Capture" label="Bounded evidence" %}
+Record explicit ratings, reports, completion state, route, latency, and policy versions
+under the applicable consent, retention, and access rules.
+{% /process-step %}
+{% process-step number="2" title="Triage" label="Separate owners" %}
+Send service failures to reliability owners, policy incidents to safety review, and
+quality regressions to evaluation queues instead of mixing them into one score.
+{% /process-step %}
+{% process-step number="3" title="Evaluate" label="Reproducible gates" %}
+Build reviewed examples and compare candidate model, prompt, tool, and policy versions
+against quality, safety, latency, and cost guardrails.
+{% /process-step %}
+{% process-step number="4" title="Release" label="Controlled exposure" %}
+Canary the compatible change, monitor segmented outcomes, retain rollback artifacts,
+and expand only while all required guardrails hold.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="warn" %}
+Do not use raw conversation logs as unrestricted analytics data. Minimize collection,
+separate access roles, honor deletion and retention policy, and prefer derived metrics
+when operators do not need the message text.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="failures" title="6. Route around failures without bypassing policy" %}
+
+## Choose degraded behavior before an incident
+
+A resilient chat service does not promise that every request always reaches the largest
+model. It promises bounded admission, preserved safety and authorization, explicit
+fallbacks, and an observable final state.
+
+Use the topology lab to compare a healthy text turn with regional capacity loss, a
+required safety-dependency failure, and a tool timeout. The active route, failed or
+degraded node, selected component, and user-visible result change together.
+
+{% topology-lab dataFile="/api/content/case-studies/openai-chatgpt/data/serving-failure-topology.json" /%}
+
+### Failure rules the diagram makes visible
+
+- **Queue overload:** reject or defer bounded low-priority work at admission. An
+  unbounded queue converts overload into a long outage and wastes work users may cancel.
+- **Worker loss:** retry only before visible output or resume under an explicit product
+  contract. A second stream must not silently duplicate the first response.
+- **Region loss:** preserve input policy, authorization, and request identity while
+  routing eligible traffic to reserved compatible capacity.
+- **Safety dependency loss:** use a restricted deterministic path for affected work;
+  never reinterpret missing policy as permission.
+- **Tool timeout:** return one typed failure, stop retry amplification, and use the same
+  idempotency key if a side effect may have reached the provider.
+- **Conversation-store degradation:** continue only with context already attached to
+  the request, label the limited state, and avoid overwriting a newer summary during
+  recovery.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate latency, quality, safety, and cost together" %}
+
+## Measure each boundary of the product contract
+
+One global success rate cannot explain a slow or unsafe conversation. Telemetry should
+join on request ID and be segmented by model tier, model revision, region, queue,
+context-length band, cache state, tool, policy version, client version, and fallback
+reason.
+
+### Service and capacity signals
+
+- Admission rate, rejection reason, queue depth and age, cancellations, and retries.
+- Time to first token split into gateway, policy, context load, queue, and prefill time.
+- Decode tokens/s, stream completion rate, output length, worker utilization, batch
+  occupancy, KV-cache bytes, and cache evictions.
+- Input and output tokens per request, estimated cost per successful turn, and capacity
+  by model tier and region.
+
+### Product, tool, and safety signals
+
+- Finish reason, user-visible errors, conversation continuation, explicit ratings, and
+  quality evaluation slices.
+- Tool proposal, authorization result, timeout, typed error, side-effect idempotency,
+  and provenance presence.
+- Policy decision and version, restricted-path rate, reports, appeal outcomes, and
+  reviewed false-positive and false-negative samples.
+- Privacy access logs, retention enforcement, deletion completion, and unauthorized
+  context-access attempts.
+
+### Incident and release loop
+
+1. Detect the breached boundary and freeze unrelated rollout changes that would blur
+   diagnosis.
+2. Contain impact with admission limits, output caps, tier routing, tool circuit
+   breakers, or regional evacuation while safety remains enforced.
+3. Verify recovery with user-visible SLIs, not only worker health; then drain queues in
+   age order and prevent cancelled work from reappearing.
+4. Reconstruct representative request timelines from versioned, privacy-bounded
+   evidence and update capacity assumptions, tests, and runbooks.
+5. Roll out model, prompt, policy, or scheduler changes to a bounded cohort with a
+   compatible rollback version and predeclared stop conditions.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="8. Make the serving trade-offs explicit" %}
+
+## Optimize the whole conversation, not one metric
+
+The architecture is a set of coupled product decisions. Improving one measure can move
+cost, latency, safety, privacy, or quality elsewhere.
+
+- **Larger model versus routed tiers:** one large tier simplifies behavior but spends
+  scarce capacity on simple turns. Routing lowers cost and queue pressure but needs
+  task classification, eligibility rules, evaluation by route, and clear fallback
+  semantics.
+- **Large batches versus interactive latency:** larger batches improve accelerator
+  utilization. Short batching windows and fairness controls protect time to first token
+  for live conversations.
+- **Long context versus selective memory:** more history can preserve detail but raises
+  prefill time, cost, privacy exposure, and distraction. Summaries save tokens but must
+  be versioned and treated as fallible context.
+- **Regional duplication versus simpler operations:** reserve capacity improves failover
+  and latency but increases cost, model-distribution work, data-governance constraints,
+  and compatibility testing.
+- **Aggressive tool autonomy versus controlled execution:** more tools can complete more
+  tasks, but every side effect adds authorization, idempotency, timeout, audit, and user
+  confirmation requirements.
+
+### A defensible first design
+
+1. Start with bounded text chat, explicit finish states, one general model tier, no
+   side-effecting tools, and a strict context budget.
+2. Add a faster tier only after route-specific quality and safety evaluations show which
+   requests may move without violating the product contract.
+3. Add tools behind a typed broker with user authorization, idempotency, deadlines, and
+   provenance before expanding the allowlist.
+4. Reserve regional recovery capacity and rehearse failover while measuring admission,
+   time to first token, stream completion, policy decisions, and cost together.
+
+### What to carry into another design
+
+- Tokens are both the workload unit and a major cost driver, but model tier and sequence
+  shape determine how those tokens consume capacity.
+- Conversation history is reconstructed state, not durable memory inside the model.
+- Safety, authorization, and idempotency are serving-path invariants, not optional
+  post-processing.
+- Streaming, batching, caching, and model routing improve different bottlenecks and need
+  separate metrics.
+- Feedback becomes useful only after privacy controls, review, reproducible evaluation,
+  and a controlled release path.
+
+Continue with [LLM Serving and APIs](/genai/llm-serving) for deeper inference mechanics
+and [GenAI Monitoring](/genai/genai-monitoring) for evaluation and production telemetry.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/openai-chatgpt/quiz/openai-chatgpt.json" lessonSlug="openai-chatgpt" title="Review the Conversational AI Serving Design" /%}

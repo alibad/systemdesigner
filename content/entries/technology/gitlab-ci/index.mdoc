@@ -1,0 +1,234 @@
+---
+registryId: gitlab-ci
+---
+
+{% section-card tone="intro" %}
+## What is GitLab CI/CD?
+
+**GitLab CI/CD is a pipeline system that turns repository events into controlled,
+repeatable jobs.** A project stores its pipeline policy in `.gitlab-ci.yml`. GitLab
+creates the pipeline and coordinates job state; one or more **runners** provide the
+machines or containers that execute those jobs.
+
+That separation matters. GitLab can decide that a production deployment is allowed,
+but the runner still receives the code, credentials, network access, and operating
+system privileges needed to execute it. Pipeline correctness therefore depends on both
+the job graph and the execution boundary.
+
+{% callout variant="info" %}
+### Core invariant
+
+A job should run only when its required inputs are complete, on a runner whose trust
+level matches the code and credentials the job can access.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Pipeline" eyebrow="One execution" icon="workflow" tone="blue" %}
+A set of jobs created for a push, merge request, tag, schedule, API call, or another
+configured source.
+{% /concept-card %}
+{% concept-card title="Job" eyebrow="Unit of work" icon="code" tone="cyan" %}
+A script plus its image, variables, dependencies, retry policy, timeout, artifacts,
+environment, and runner tags.
+{% /concept-card %}
+{% concept-card title="Runner" eyebrow="Execution boundary" icon="server" tone="violet" %}
+An agent that claims eligible jobs and executes them through a shell, container,
+Kubernetes pod, or another supported executor.
+{% /concept-card %}
+{% concept-card title="Artifact" eyebrow="Pipeline evidence" icon="boxes" tone="amber" %}
+A job output such as a package, test report, or scan report that later jobs and people
+can retrieve under an explicit retention policy.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Schedule work from dependencies, not stage labels
+
+Stages are broad ordering barriers. By default, jobs in one stage can run in parallel,
+but the next stage waits for the previous stage to succeed. The `needs` keyword adds
+specific job dependencies, so an independent path can move forward without waiting for
+unrelated jobs in an earlier stage.
+
+Use the lab to compare both models under a finite runner-slot limit. The schedule is a
+deterministic teaching model: durations are supplied inputs, jobs never fail or retry,
+and runner startup, artifact transfer, and GitLab scheduling overhead are excluded.
+
+{% interactive-block id="technology/gitlab-ci-usage" dataFile="/api/content/technology/gitlab-ci/data/pipeline-scheduling-model.json" /%}
+
+Two bottlenecks can look similar in the pipeline graph:
+
+- **Barrier delay:** a ready job waits for unrelated work because stage ordering is
+  broader than the true dependency.
+- **Runner queueing:** a ready job waits because every eligible runner slot is busy.
+- **Critical-path work:** a job waits because an input it genuinely needs is still
+  running; adding runners cannot remove that dependency.
+
+GitLab's current [`needs` documentation](https://docs.gitlab.com/ci/yaml/needs/)
+explains how dependency-based scheduling bypasses stage order and how optional jobs or
+artifact downloads change the contract.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat artifacts and caches as different contracts
+
+Both features move files, but they answer different questions.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Artifacts carry results" eyebrow="Correctness input" icon="boxes" tone="blue" %}
+Use artifacts for build outputs, reports, and evidence produced by a job. Declare which
+later jobs need them, restrict access when necessary, and set a retention period that
+matches audit and rollback requirements.
+{% /concept-card %}
+{% concept-card title="Caches avoid repeated work" eyebrow="Optional acceleration" icon="database" tone="green" %}
+Use a cache for reproducible dependencies that can be fetched or rebuilt again. Key it
+from a lockfile or another stable input, and never make pipeline correctness depend on
+a cache hit.
+{% /concept-card %}
+{% /concept-grid %}
+
+When a job declares `needs`, it downloads artifacts only from the needed jobs unless
+that transfer is disabled. Keep the graph and the data contract aligned: a job that
+consumes `dist/` should name the job that produced `dist/`.
+
+The official [artifacts guide](https://docs.gitlab.com/ci/jobs/job_artifacts/) and
+[cache guide](https://docs.gitlab.com/ci/caching/) document the current transfer and
+retention behavior.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Decide which pipelines should exist before selecting jobs
+
+Pipeline-level `workflow: rules` decides whether GitLab creates a pipeline. Job-level
+`rules` then decides whether a job is present and can also set attributes such as
+`when` or `allow_failure`. Mixing broad final rules with push and merge-request cases
+can create duplicate pipelines for the same change.
+
+Start from explicit sources:
+
+- create a merge-request pipeline when review feedback is needed;
+- create a default-branch pipeline for integration and delivery;
+- create a tag pipeline only when a tag represents a release contract;
+- reject every source that has no named purpose;
+- make a dependency optional when `rules` can legitimately omit the producer job.
+
+This example creates one intended pipeline per source, starts source-only checks
+immediately, keys the dependency cache from the lockfile, and passes an immutable build
+output through `needs`.
+
+{% code-block file="/api/content/technology/gitlab-ci/code/basic-gitlab-ci-yml.yml" language="yaml" title="A dependency-aware application pipeline" /%}
+
+Validate merged configuration in GitLab's pipeline editor and exercise push, merge
+request, tag, schedule, and manual cases. The current
+[`workflow` reference](https://docs.gitlab.com/ci/yaml/workflow/) describes when its
+rules are evaluated.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make the runner trust boundary explicit
+
+A runner executes repository-controlled code. That makes runner selection a security
+decision, not merely a capacity decision. Tags express capability matching; the
+**Protected** setting limits a runner to protected branches and tags, with separately
+configured merge-request behavior. Neither mechanism is a sandbox by itself.
+
+Select a workload and a runner pool. The lab evaluates a small, explicit policy model:
+tag matching, protected-ref eligibility, workspace lifetime, host access, and
+credential delivery. It intentionally reports discrete facts instead of a numerical
+"security score."
+
+{% interactive-block id="technology/gitlab-ci-runner-trust-lab" dataFile="/api/content/technology/gitlab-ci/data/runner-trust-model.json" /%}
+
+Apply these boundaries in a real fleet:
+
+- run untrusted merge-request code in an ephemeral environment without production
+  credentials or host control;
+- keep deployment runners protected, narrowly tagged, and separate from general build
+  capacity;
+- avoid the shell executor for code that must not share a persistent host boundary;
+- avoid privileged containers unless the workload and host are intentionally trusted;
+- rotate runner authentication tokens and remove stale runners;
+- assume that a compromised runner can expose every credential and network path made
+  available to its jobs.
+
+GitLab's [runner security guidance](https://docs.gitlab.com/runner/security/) and
+[runner configuration guide](https://docs.gitlab.com/ci/runners/configure_runners/)
+describe executor isolation, protected runners, tags, and token risks. Review those
+documents against the exact GitLab offering and runner executor you operate.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Build once, then control promotion
+
+A production job should promote the artifact that passed verification, not rebuild
+source under a different dependency or network state. Deployment policy then controls
+who may start the job, which environment it updates, and whether concurrent pipelines
+may modify the same target.
+
+{% process-flow %}
+{% process-step number="1" title="Produce one artifact" label="Build" %}
+Record a version and digest. Keep the output and its provenance long enough to support
+promotion, rollback, and investigation.
+{% /process-step %}
+{% process-step number="2" title="Verify the same bytes" label="Test" %}
+Run tests and scans against the produced package or image. Preserve reports as evidence
+rather than rebuilding during each gate.
+{% /process-step %}
+{% process-step number="3" title="Authorize the environment" label="Approve" %}
+Use protected branches, protected environments, deployment approvals where available,
+and a manual confirmation for consequential actions.
+{% /process-step %}
+{% process-step number="4" title="Serialize target changes" label="Deploy" %}
+Use a `resource_group` when overlapping jobs must not mutate the same environment at
+the same time, then verify health before promotion completes.
+{% /process-step %}
+{% /process-flow %}
+
+The deployment example requests a short-lived OpenID Connect ID token for a named
+audience, accepts only a default-branch pipeline, and serializes production changes.
+The token-consuming command is deliberately application-owned: its audience, subject,
+issuer, role mapping, and permissions must match the external identity provider.
+
+{% code-block file="/api/content/technology/gitlab-ci/code/advanced-pipeline-features.yaml" language="yaml" title="Protected, serialized deployment with OIDC" /%}
+
+See GitLab's current documentation for
+[ID tokens](https://docs.gitlab.com/ci/secrets/id_token_authentication/),
+[protected environments](https://docs.gitlab.com/ci/environments/protected_environments/),
+and [`resource_group`](https://docs.gitlab.com/ci/resource_groups/) before applying the
+pattern. Feature availability and approval rules depend on the GitLab tier and offering.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate CI/CD as a production system
+
+Pipeline speed matters only after correctness and isolation. Track the path from event
+to trustworthy feedback and deployment:
+
+- **Creation health:** pipeline creation errors, duplicate pipelines, and skipped jobs
+  caused by unexpected `workflow` or `rules` combinations.
+- **Queue health:** queued duration by runner tag, eligible runner count, saturation,
+  and jobs stuck because no runner matches all required tags.
+- **Execution health:** job duration, failure and retry rate, cancellation behavior,
+  and variance by executor, image, project, and job family.
+- **Transfer health:** cache hit behavior, artifact upload and download failures,
+  artifact size, and retention growth.
+- **Delivery health:** deployment frequency, lead time, failed deployment rate,
+  rollback time, and overlap prevented by the environment's concurrency policy.
+- **Fleet health:** offline or stale runners, authentication-token rotation,
+  autoscaling failures, disk pressure, and unexpected privileged workloads.
+
+Use `interruptible` only for work that a newer pipeline can safely replace. Retry only
+failures that are plausibly transient and keep deployment commands idempotent. A
+generic retry can repeat an external side effect even when GitLab reports only one job.
+
+{% callout variant="warn" %}
+### Failure drill
+
+Disable one runner pool, expire one cache, make one optional producer disappear, and
+start two deployments for the same environment. Verify that jobs queue on the intended
+tags, correctness survives a cold cache, `needs: optional` behaves as designed, and
+only one deployment mutates the target at a time.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/gitlab-ci/quiz/gitlab-ci-production.json" lessonSlug="gitlab-ci" title="GitLab CI/CD Production Review" /%}

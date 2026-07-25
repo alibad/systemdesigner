@@ -1,0 +1,135 @@
+{
+  "title": "Contain an OpenAI integration release",
+  "description": "Select a change, complete evidence gates, choose retry and canary limits, then inject a failure. The outcome shows whether impact stays bounded.",
+  "defaults": {
+    "changeId": "responses-migration",
+    "failureId": "none",
+    "canaryPercent": 5,
+    "maxAttempts": 2,
+    "completedGateIds": ["contract", "task-eval", "safety-eval", "observability", "rollback"]
+  },
+  "bounds": {
+    "canaryPercent": { "min": 1, "max": 100, "step": 1 },
+    "maxAttempts": { "min": 1, "max": 5, "step": 1 }
+  },
+  "changes": [
+    {
+      "id": "model-snapshot",
+      "label": "Model snapshot change",
+      "detail": "Same application contract, potentially different output behavior and latency.",
+      "requiredGateIds": ["contract", "task-eval", "safety-eval", "load", "observability", "rollback"]
+    },
+    {
+      "id": "responses-migration",
+      "label": "Responses API migration",
+      "detail": "Adapter changes typed items, storage settings, streaming events, and error mapping.",
+      "requiredGateIds": ["contract", "task-eval", "safety-eval", "observability", "rollback"]
+    },
+    {
+      "id": "tool-scope",
+      "label": "New side-effecting tool",
+      "detail": "Adds model-proposed actions that must stay inside user authority and retry semantics.",
+      "requiredGateIds": ["contract", "task-eval", "safety-eval", "tool-auth", "idempotency", "load", "observability", "rollback"]
+    },
+    {
+      "id": "retrieval-policy",
+      "label": "Retrieval policy change",
+      "detail": "Changes which evidence can enter context and how much is sent to synthesis.",
+      "requiredGateIds": ["contract", "task-eval", "safety-eval", "retrieval-eval", "load", "observability", "rollback"]
+    }
+  ],
+  "gates": [
+    {
+      "id": "contract",
+      "label": "Contract tests",
+      "detail": "Validate item types, strict schemas, refusals, incomplete results, and unknown events."
+    },
+    {
+      "id": "task-eval",
+      "label": "Task evals",
+      "detail": "Meet the reference quality floor overall and on critical slices."
+    },
+    {
+      "id": "safety-eval",
+      "label": "Safety evals",
+      "detail": "Test policy, prompt injection, sensitive data, and escalation behavior."
+    },
+    {
+      "id": "tool-auth",
+      "label": "Tool authorization",
+      "detail": "Derive identity from trusted state and require confirmation where impact is high."
+    },
+    {
+      "id": "idempotency",
+      "label": "Idempotent actions",
+      "detail": "A retry with the same operation key cannot duplicate a side effect."
+    },
+    {
+      "id": "retrieval-eval",
+      "label": "Retrieval evals",
+      "detail": "Measure eligible-source recall, citation support, and cross-tenant exclusion."
+    },
+    {
+      "id": "load",
+      "label": "Load and rate limits",
+      "detail": "Verify latency, token, error, retry, and cost budgets at planned concurrency."
+    },
+    {
+      "id": "observability",
+      "label": "Trace continuity",
+      "detail": "Link client, provider, retrieval, tool, retry, and fallback events."
+    },
+    {
+      "id": "rollback",
+      "label": "Warm rollback",
+      "detail": "Restore the prior configuration without depending on the candidate path."
+    }
+  ],
+  "failures": [
+    {
+      "id": "none",
+      "label": "No injected failure",
+      "detail": "Evaluate whether the release evidence is sufficient for a small canary.",
+      "retryable": false,
+      "duplicateActionRisk": false,
+      "signal": "Candidate metrics remain inside their release thresholds.",
+      "containment": "Continue the bounded canary while watching stop conditions."
+    },
+    {
+      "id": "rate-limit",
+      "label": "Rate limit response",
+      "detail": "The provider rejects a request while shared token or request capacity is pressured.",
+      "retryable": true,
+      "duplicateActionRisk": false,
+      "signal": "Rate-limit rate rises and remaining-limit headers fall.",
+      "containment": "Back off with jitter, honor the deadline, and shed optional work."
+    },
+    {
+      "id": "timeout-after-tool",
+      "label": "Timeout after tool execution",
+      "detail": "The action may have completed, but the caller did not receive the result.",
+      "retryable": true,
+      "duplicateActionRisk": true,
+      "signal": "The trace has a tool start but no acknowledged model continuation.",
+      "containment": "Look up the stable operation key before any retry."
+    },
+    {
+      "id": "schema-drift",
+      "label": "Schema validation failure",
+      "detail": "A candidate returns an item or field shape the adapter does not accept.",
+      "retryable": false,
+      "duplicateActionRisk": false,
+      "signal": "Contract-validation failures exceed the release threshold.",
+      "containment": "Do not parse loosely; route to fallback and block promotion."
+    },
+    {
+      "id": "safety-regression",
+      "label": "Safety slice regression",
+      "detail": "A critical abuse or high-risk slice falls below its reference floor.",
+      "retryable": false,
+      "duplicateActionRisk": false,
+      "signal": "Safety eval or online review rate crosses the stop condition.",
+      "containment": "Stop the canary, preserve evidence, and restore the reference configuration."
+    }
+  ]
+}

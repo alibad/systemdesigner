@@ -1,0 +1,366 @@
+---
+registryId: tensorflow
+---
+
+{% section-card tone="intro" %}
+## What is TensorFlow?
+
+**TensorFlow is an open-source system for expressing numerical computation as operations on tensors, differentiating those computations, training models, and exporting callable programs for inference.** A tensor is a typed, multidimensional value: a scalar has rank 0, a vector rank 1, and a matrix rank 2.
+
+In plain language, TensorFlow lets a team define what data enters a model, how values move through layers, how parameters change during training, and what callable contract leaves the training process for serving.
+
+The core invariant is **the tensor and state contract must stay explicit from data ingestion through serving**. Shape, dtype, feature meaning, training state, and output names cannot drift independently just because two programs import the same framework.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Tensor runtime" eyebrow="Values and operations" icon="braces" tone="blue" %}
+TensorFlow executes typed operations eagerly for inspection or captures compatible operations in graphs for optimization, portability, and export.
+{% /concept-card %}
+{% concept-card title="Keras model API" eyebrow="Layers and training" icon="workflow" tone="violet" %}
+Keras supplies layers, models, optimizers, metrics, callbacks, and built-in training loops on top of the TensorFlow runtime.
+{% /concept-card %}
+{% concept-card title="Production boundary" eyebrow="Artifact and evidence" icon="shield" tone="green" %}
+SavedModel signatures expose callable inference endpoints. Evaluation, load tests, monitoring, canaries, and rollback determine whether an artifact is safe to serve.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Read tensors as contracts, not containers
+
+A tensor has a **dtype**, a **shape**, and a value. The rank is the number of shape dimensions. A shape such as `[64, 32]` commonly means 64 records with 32 features each, but TensorFlow cannot infer that business meaning. The producer and consumer must agree on it.
+
+{% metric-strip %}
+{% metric value="float32" label="Dtype" detail="How each element is represented" tone="blue" /%}
+{% metric value="[None, 32]" label="Shape" detail="Dynamic batch, fixed feature width" tone="violet" /%}
+{% metric value="2" label="Rank" detail="Batch and feature dimensions" tone="cyan" /%}
+{% metric value="features" label="Semantic name" detail="Part of the serving contract" tone="green" /%}
+{% /metric-strip %}
+
+### Values and mutable state are different
+
+- `tf.Tensor` represents a value produced or consumed by operations.
+- `tf.Variable` owns mutable state such as learned weights, counters, or running statistics.
+- A layer or `tf.Module` tracks variables assigned to it, which lets checkpoints and exports discover state.
+- A tensor with the expected shape but the wrong feature order is structurally valid and semantically wrong.
+
+Validate rank, dimensions, dtype, finite values, ranges, and feature semantics at the boundary where bad data can still be rejected. The [TensorFlow basics guide](https://www.tensorflow.org/guide/basics) introduces tensors, variables, gradients, modules, training loops, and saving from the same execution model.
+{% /section-card %}
+
+{% section-card %}
+## Use eager execution to understand; use graphs deliberately
+
+TensorFlow 2 executes operations eagerly by default. Each operation runs immediately, so Python control flow, stack traces, values, and breakpoints are easier to inspect.
+
+`tf.function` traces TensorFlow-compatible code into one or more graphs. A graph can reduce Python dispatch, enable runtime optimization, run across devices, and become part of an exported program. It is not a universal speed switch: a function with a few expensive operations may see little improvement, while repeated small operations may benefit more.
+
+### Tracing is a cache of concrete programs
+
+The first compatible call traces Python and records TensorFlow operations. Later calls reuse the concrete graph when their inputs match. New Python values, dtypes, ranks, or incompatible shapes can create more traces.
+
+- Give hot functions tensors rather than changing Python objects.
+- Use an `input_signature` when the accepted rank, dtype, and dimensions are known.
+- Bucket or pad variable-length examples when unbounded shapes create excessive traces.
+- Use `tf.print` for graph-time output; ordinary Python side effects usually happen during tracing, not on every graph execution.
+- Treat `tf.py_function` as an explicit escape hatch. It is not portable in SavedModel and does not work well with distributed or accelerator execution.
+
+Test the same step eagerly and through `tf.function`, including variable updates and numerical tolerances. The official [`tf.function` guide](https://www.tensorflow.org/guide/function) documents tracing, polymorphism, Python side effects, and the portability limits of `tf.py_function`.
+{% /section-card %}
+
+{% section-card %}
+## Balance the input producer with the device consumer
+
+A training device cannot compute on a batch that has not arrived. The input path usually reads records, parses or decodes them, transforms features, groups examples into batches, and stages the next batch while the current step runs.
+
+Use the lab to compare eager and graph paths, stable and variable shape contracts, parallel mapping, cache placement, prefetch, and a Python callback. Its times are deterministic teaching assumptions, not TensorFlow benchmarks.
+
+{% interactive-block id="technology/tensorflow-execution-pipeline-lab" dataFile="/api/content/technology/tensorflow/data/execution-pipeline-model.json" /%}
+
+The steady-state rule is simple: with effective overlap, the slower of input preparation and device compute limits the step. Without overlap, the times add. A deeper prefetch buffer can absorb jitter, but it cannot make a persistently slow producer faster.
+{% /section-card %}
+
+{% section-card %}
+## Build a tf.data pipeline with explicit semantics
+
+`tf.data.Dataset` represents a sequence of elements and lazy transformations. Its value is not the method chain itself; it is the reproducible contract for ordering, cardinality, batching, parallelism, and failure behavior.
+
+{% process-flow %}
+{% process-step number="1" title="Read bounded records" label="Source" %}
+Define file patterns, schemas, compression, shard ownership, and behavior for missing or corrupt data. Keep source and preprocessing versions with the run.
+{% /process-step %}
+{% process-step number="2" title="Transform and validate" label="CPU" %}
+Parse, decode, normalize, and reject invalid examples. Prefer TensorFlow operations so mapping can be parallelized and serialized.
+{% /process-step %}
+{% process-step number="3" title="Shuffle and batch" label="Semantics" %}
+Choose shuffle scope, repeat rules, deterministic order, bucket boundaries, batch size, and `drop_remainder` from the training contract.
+{% /process-step %}
+{% process-step number="4" title="Stage the consumer" label="Overlap" %}
+Use parallel reads or maps where measured, then prefetch to overlap producer work with the device step.
+{% /process-step %}
+{% /process-flow %}
+
+### Cache only what has a valid identity
+
+- Cache before random augmentation when each epoch should see fresh augmentation.
+- Cache after expensive deterministic transforms only when the larger decoded footprint fits.
+- Include source, schema, vocabulary, preprocessing, and split versions in a persistent cache key.
+- Do not cache a partial first pass by accident; confirm cardinality before declaring the cache complete.
+
+### Make distributed input behavior testable
+
+- State whether each worker reads disjoint shards or repeats the full dataset.
+- State whether batch size is global or per replica.
+- Keep evaluation order deterministic and prevent train/evaluation overlap by entity or time.
+- Count skipped records by reason. Silently ignoring parse errors changes the data distribution.
+
+The official [`tf.data` performance guide](https://www.tensorflow.org/guide/data_performance) recommends profiling and then applying prefetch, parallel interleave, parallel map, cache, and vectorized transforms where they address measured work.
+
+{% code-block file="/api/content/technology/tensorflow/code/execution-and-input-pipeline.py" language="python" title="Run a bounded tf.data pipeline through eager and graph paths" /%}
+{% /section-card %}
+
+{% section-card %}
+## Make layer and model contracts serializable
+
+A layer transforms inputs and may own variables or non-trainable state. A model composes layers and gives the computation a training, evaluation, and export boundary.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Input and output tensors" eyebrow="Public shape" icon="braces" tone="blue" %}
+Name inputs and outputs, constrain dtypes and dimensions, define padding or masking, and document the meaning and range of every feature and score.
+{% /concept-card %}
+{% concept-card title="State ownership" eyebrow="Variables" icon="database" tone="violet" %}
+Create and track weights on layers or modules. Do not create new trainable variables on every call or hide required state in a global Python object.
+{% /concept-card %}
+{% concept-card title="Training behavior" eyebrow="Mode switch" icon="workflow" tone="amber" %}
+Layers such as dropout and batch normalization depend on training versus inference mode. Pass and test the `training` argument where behavior changes.
+{% /concept-card %}
+{% concept-card title="Serialization behavior" eyebrow="Round trip" icon="package" tone="green" %}
+Register custom objects when needed, implement configuration for constructor values, reload in a clean process, and compare outputs within a declared tolerance.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use `Sequential` for one linear stack, the Functional API for directed acyclic graphs with multiple inputs, outputs, or shared layers, and subclassing when the forward pass needs custom control. More flexibility creates a larger serialization and test surface.
+
+{% code-block file="/api/content/technology/tensorflow/code/layer-and-model-contract.py" language="python" title="Define and check a custom layer and named model boundary" /%}
+
+The official [custom layer and model guide](https://www.tensorflow.org/guide/keras/making_new_layers_and_models_via_subclassing) covers tracked state, `call`, training behavior, losses, metrics, and serialization hooks.
+{% /section-card %}
+
+{% section-card %}
+## Treat training as a resumable state machine
+
+Training moves model variables and optimizer state through steps. A production run also owns dataset identity, code and environment versions, random seeds, distribution topology, evaluation results, and checkpoints.
+
+### Choose the narrowest loop that preserves control
+
+- Use Keras `Model.fit` when its compile, callback, checkpoint, validation, and distribution behavior matches the required lifecycle.
+- Use a custom loop when the algorithm needs non-standard updates, multiple optimizers, gradient accumulation, custom control flow, or precise step-level coordination.
+- Keep a single source of truth for loss reduction and metric aggregation. A local replica loss is not automatically the global reported loss.
+
+### Distribution changes the system contract
+
+`tf.distribute.Strategy` can place synchronous replicas on one host, multiple workers, or supported accelerators. The strategy scope owns variable creation; the input path supplies per-replica batches; updates are reduced according to the strategy.
+
+- Record global batch, per-replica batch, replica count, gradient accumulation, and learning-rate policy together.
+- Confirm every worker sees the intended data shard and the same step count where synchronization requires it.
+- Let one designated owner publish checkpoints and final artifacts. Other workers should not race on the same path.
+- Test worker loss, restart, checkpoint restore, and rendezvous time before scaling the expensive run.
+
+The current [distributed training guide](https://www.tensorflow.org/guide/distributed_training) lists supported strategies and their API constraints. Treat experimental labels and estimator guidance on that page as moving contracts and recheck them against the runtime version you pin.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the model and the system separately
+
+`Model.evaluate` can compute configured losses and metrics over a dataset. That is one layer of evidence, not a release decision.
+
+### Model evidence
+
+- Compare against a named baseline on a frozen, versioned evaluation set.
+- Report task metrics by critical slice, not only as one aggregate.
+- Check calibration and threshold-dependent costs when scores trigger actions.
+- Test invariances, invalid inputs, missing features, and known difficult cases.
+- Bound numerical differences between eager, graph, restored, and exported execution.
+
+### System evidence
+
+- Measure cold load, warmup, batch-size response, throughput, and p50, p95, and p99 latency.
+- Test memory growth, long runs, cancellation, malformed requests, concurrency, and overload.
+- Verify preprocessing and postprocessing parity between training and serving.
+- Record the exact artifact, runtime image, hardware, dataset, and load-generator settings.
+
+The [Keras training and evaluation guide](https://www.tensorflow.org/guide/keras/training_with_built_in_methods) documents built-in fit, evaluate, prediction, metrics, callbacks, weighting, and dataset inputs. Product-specific release thresholds still belong to the owning team.
+{% /section-card %}
+
+{% section-card %}
+## Export a callable SavedModel contract
+
+Saving and serving solve different lifecycle needs. The current TensorFlow serialization guide recommends the `.keras` format for a reloadable Keras training artifact and `model.export()` for a lightweight SavedModel inference artifact. The lower-level `tf.saved_model.save` API remains useful when a `tf.Module` needs explicit signatures.
+
+{% system-flow title="TensorFlow artifact path" caption="A serving release is a versioned program plus a tested public tensor contract, not a checkpoint copied into a server." %}
+{% system-node title="Training state" eyebrow="Resume" icon="database" tone="violet" %}
+Model variables, optimizer state, epoch or step position, and run metadata support recovery and continued training.
+{% /system-node %}
+{% system-node title="Export step" eyebrow="Freeze contract" icon="package" tone="blue" %}
+Bind named signatures to bounded tensor specs, include tracked resources, and write an immutable artifact version.
+{% /system-node %}
+{% system-node title="Clean load test" eyebrow="Verify" icon="check" tone="cyan" %}
+Load without training source code, inspect signatures, run golden inputs, and compare outputs to the release tolerance.
+{% /system-node %}
+{% system-node title="Serving version" eyebrow="Operate" icon="server" tone="green" %}
+Warm the model, route bounded traffic, expose version-specific telemetry, and retain an independently loadable rollback version.
+{% /system-node %}
+{% /system-flow %}
+
+### A serving signature should make these finite
+
+- Signature name and model version.
+- Input names, dtypes, ranks, fixed and dynamic dimensions, defaults, and invalid-input behavior.
+- Output names, dtypes, shapes, ranges, and score interpretation.
+- Preprocessing and vocabulary versions that are inside or outside the artifact.
+- Numerical tolerance and golden examples for clean reload.
+
+{% code-block file="/api/content/technology/tensorflow/code/export-serving-contract.py" language="python" title="Export and inspect an explicit SavedModel serving signature" /%}
+
+See the official [Keras serialization and export guide](https://www.tensorflow.org/guide/keras/serialization_and_saving) and [SavedModel guide](https://www.tensorflow.org/guide/saved_model) for the current APIs and signature model.
+{% /section-card %}
+
+{% section-card %}
+## Serve versions without confusing availability and correctness
+
+TensorFlow Serving loads versioned servables and exposes prediction APIs. A model that is loaded is available; it is not necessarily correct, compatible, fast enough, or safe for the current client.
+
+### Put a stable boundary in front of the model server
+
+- Authenticate callers and enforce request size, concurrency, and deadlines before inference.
+- Validate feature names, dtypes, dimensions, and allowed ranges before expensive work.
+- Route by explicit stable and canary version labels or an equivalent deployment policy.
+- Retry only known transient failures and only while the request deadline allows it.
+- Keep preprocessing, model, and postprocessing versions visible in logs and responses where appropriate.
+
+### Understand version policy before rollout
+
+TensorFlow Serving can load specific versions, assign labels, poll model configuration, batch requests, and expose Prometheus-format metrics. Availability-preserving loading may require enough memory for old and new versions at the same time; resource-preserving replacement can create an availability gap. Choose deliberately.
+
+The official [Serving configuration guide](https://www.tensorflow.org/tfx/serving/serving_config) documents model version policy, labels, monitoring, and batching. The [Serving architecture guide](https://www.tensorflow.org/tfx/serving/architecture) explains sources, managers, servable versions, and availability-versus-resource loading policies.
+{% /section-card %}
+
+{% section-card %}
+## Observe causes across data, execution, and serving
+
+TensorBoard can visualize scalar summaries and training behavior. TensorFlow Profiler can collect host and accelerator traces and provides views such as the Input Pipeline Analyzer, TensorFlow Stats, Trace Viewer, kernel statistics, and memory tools where supported.
+
+### Training telemetry
+
+- Run ID, code and environment version, data manifest, random seeds, strategy, replica count, global batch, and checkpoint lineage.
+- Step time split into input, host, device, collective communication, and checkpoint work.
+- Loss, learning rate, gradient norms, metric slices, invalid examples, retrace count, memory, and device utilization.
+
+### Serving telemetry
+
+- Artifact and signature version, request class, response status, and validation failure reason.
+- Queue time, model time, end-to-end latency, batch size, throughput, rejection, timeout, and cancellation.
+- Loaded and unavailable versions, load latency, worker restarts, memory pressure, and rollback events.
+- Delayed quality signals by model version and critical product slice, with privacy-aware logging.
+
+Do not optimize from utilization alone. High accelerator utilization can coexist with failed requests, poor tail latency, or low useful throughput. Capture a baseline, profile a representative window, change one boundary, and verify correctness and service objectives again. The official [TensorFlow Profiler guide](https://www.tensorflow.org/guide/profiler) describes supported capture modes and analysis tools.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Contain failures at the boundary that owns them
+
+- Input and data failures
+  - Quarantine malformed records with reason counts and bounded samples for diagnosis.
+  - Stop the run when cardinality, schema, label distribution, or split invariants fail.
+  - Version cache identity so stale preprocessing cannot silently feed a new run.
+- Execution failures
+  - Detect retracing growth, host fallback, non-finite loss, missing gradients, and memory growth.
+  - Keep the last valid checkpoint; do not publish a partial or non-finite training state as a candidate.
+  - Bound retries around distributed worker failure so repeated collectives do not hide a broken cluster.
+- Artifact failures
+  - Fail export when required signatures, resources, output keys, or clean-load parity are missing.
+  - Store artifacts immutably; promotion changes a reference or routing policy, not artifact bytes.
+- Serving failures
+  - Reject invalid contracts before model execution and shed excess load before queues exhaust all workers.
+  - Isolate candidate workers, queues, and version state from the known-good pool.
+  - Keep rollback capacity warm until the candidate survives quality, latency, memory, and error gates.
+
+A retry is not containment. Containment reduces the affected traffic, state, or dependency surface; a retry can amplify load when the underlying limit remains active.
+{% /section-card %}
+
+{% section-card %}
+## Migrate artifacts and runtimes as data changes
+
+A TensorFlow or Keras upgrade can change serialization, supported operations, default behavior, performance, device kernels, or integration code without changing your model source. Treat it like a production data migration.
+
+{% process-flow %}
+{% process-step number="1" title="Inventory the old contract" label="Discover" %}
+Record runtime and dependency versions, custom objects, checkpoints, SavedModel signatures, preprocessing, serving flags, metrics, and client assumptions.
+{% /process-step %}
+{% process-step number="2" title="Build a reproducible candidate" label="Convert" %}
+Pin the new environment, migrate one artifact path, and preserve an immutable copy of the original training and serving assets.
+{% /process-step %}
+{% process-step number="3" title="Compare every execution path" label="Prove" %}
+Run eager, graph, restored, and exported parity; replay evaluation slices; profile training and serving; and inspect signature diffs.
+{% /process-step %}
+{% process-step number="4" title="Canary with independent rollback" label="Release" %}
+Load the candidate beside the reference, route bounded traffic, compare version-specific signals, and remove the old version only after the rollback window closes.
+{% /process-step %}
+{% /process-flow %}
+
+For TensorFlow 1 migrations, replace graph collections, sessions, and estimator-specific behavior with explicit TensorFlow 2 objects and functions in bounded stages. The official [migration overview](https://www.tensorflow.org/guide/migrate) and [SavedModel migration guide](https://www.tensorflow.org/guide/migrate/saved_model) document current compatibility and export paths. Avoid making `tf.compat.v1` the permanent architecture without an exit plan.
+{% /section-card %}
+
+{% section-card %}
+## Make release evidence change the decision
+
+Use the lab to select a custom layer change, runtime upgrade, or input contract change. Remove evidence, widen traffic, share the failure domain, and inject a serving failure. The initial-canary threshold and recovery penalties are an illustrative local policy, not TensorFlow defaults.
+
+{% interactive-block id="technology/tensorflow-serving-release-lab" dataFile="/api/content/technology/tensorflow/data/serving-release-model.json" /%}
+
+### Minimum production release gates
+
+- The artifact reloads in the exact serving image without training-only source code or undeclared custom objects.
+- Signature names, input and output contracts, invalid-input behavior, and golden-output tolerances pass.
+- Eager, graph, restored, and exported paths agree within the declared numerical tolerance.
+- Aggregate and critical-slice evaluation meet their quality, calibration, and safety floors.
+- Representative load meets cold-load, warmup, latency, throughput, error, memory, and stability targets.
+- Candidate dashboards, version labels, alerts, and incident ownership work before traffic arrives.
+- Migration rehearsals cover checkpoints, preprocessing, custom layers, operations, clients, and metrics.
+- An isolated known-good version can recover traffic inside the rollback budget.
+
+Promote only when every required gate is attached to the immutable candidate. A green training loss, successful export, or loaded server is one fact, not a production verdict.
+{% /section-card %}
+
+{% section-card %}
+## Choose TensorFlow from system constraints
+
+TensorFlow is a reasonable fit when the team needs its tensor runtime, Keras training APIs, distribution strategies, SavedModel contract, Serving integration, or target-platform ecosystem and is prepared to operate those pieces. It is a weak fit when a smaller numerical library, a hosted prediction API, or another framework already satisfies the training and deployment constraints with less integration work.
+
+Before choosing it, answer:
+
+- Which training and serving targets must share an artifact or operator set?
+- Which model, layer, preprocessing, and signature contracts require custom code?
+- Which distribution strategy has been tested for this workload and failure model?
+- Who owns input data correctness, artifact compatibility, serving policy, and delayed quality?
+- Can the team reproduce, profile, canary, observe, and roll back the exact runtime it will ship?
+
+Framework adoption does not remove these responsibilities. It gives the team APIs with which to make them explicit.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and moving contracts
+
+- [TensorFlow basics](https://www.tensorflow.org/guide/basics) connects tensors, variables, gradients, modules, training, and saving.
+- [Better performance with `tf.function`](https://www.tensorflow.org/guide/function) documents tracing, concrete functions, retracing, side effects, and Python boundaries.
+- [Better performance with `tf.data`](https://www.tensorflow.org/guide/data_performance) documents prefetch, parallel reads and maps, cache, vectorization, and memory trade-offs.
+- [Custom layers and models](https://www.tensorflow.org/guide/keras/making_new_layers_and_models_via_subclassing) documents tracked state, training behavior, losses, and serialization.
+- [Distributed training](https://www.tensorflow.org/guide/distributed_training) documents the current strategy set and API support.
+- [Keras serialization and export](https://www.tensorflow.org/guide/keras/serialization_and_saving) distinguishes reloadable Keras artifacts from inference export.
+- [SavedModel](https://www.tensorflow.org/guide/saved_model) documents tracked objects, functions, signatures, loading, and inspection.
+- [TensorFlow Serving configuration](https://www.tensorflow.org/tfx/serving/serving_config) documents version policies, labels, batching, and Prometheus monitoring.
+- [TensorFlow Profiler](https://www.tensorflow.org/guide/profiler) documents current capture APIs and analysis views.
+- [TensorFlow migration](https://www.tensorflow.org/guide/migrate) documents supported TensorFlow 1 to TensorFlow 2 migration paths.
+
+These pages describe moving APIs and support levels. Recheck them against the exact TensorFlow, Keras, TensorBoard, and TensorFlow Serving versions pinned by the release.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/tensorflow/quiz/tensorflow-production-systems.json" lessonSlug="tensorflow" title="TensorFlow Production Systems Review" /%}

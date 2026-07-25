@@ -1,0 +1,111 @@
+{
+  "title": "Trace authoritative data through a failure",
+  "description": "Switch scenarios to see which path owns the order, where stale data can appear, and what recovery work remains after a component fails.",
+  "nodes": [
+    {
+      "id": "customer",
+      "label": "Customer request",
+      "eyebrow": "Checkout",
+      "detail": "Carries an idempotency key so the service can recognize a retried checkout instead of creating another logical order after a timeout.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 50
+    },
+    {
+      "id": "checkout-service",
+      "label": "Checkout service",
+      "eyebrow": "Write coordinator",
+      "detail": "Owns request validation and the small business decision. It commits the order and an outbox record together rather than independently writing several databases.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 27,
+      "y": 50
+    },
+    {
+      "id": "order-primary",
+      "label": "Order primary",
+      "eyebrow": "Authoritative SQL",
+      "detail": "Stores the order, reservation, idempotency key, and outbox record inside the protected write. One elected writer preserves a clear ordering and failover boundary.",
+      "kind": "database",
+      "tone": "green",
+      "x": 52,
+      "y": 22
+    },
+    {
+      "id": "outbox-relay",
+      "label": "Outbox relay",
+      "eyebrow": "Retryable publish",
+      "detail": "Reads only committed outbox records and publishes them with retry. Delivery can be delayed; consumers must deduplicate repeated events.",
+      "kind": "stream",
+      "tone": "amber",
+      "x": 52,
+      "y": 78
+    },
+    {
+      "id": "order-replica",
+      "label": "Order replica",
+      "eyebrow": "Lag-tolerant read",
+      "detail": "Copies primary changes for read capacity or failover. It can be behind the primary, so a read-after-write confirmation must not be routed here without a freshness guarantee.",
+      "kind": "database",
+      "tone": "blue",
+      "x": 77,
+      "y": 19
+    },
+    {
+      "id": "order-view",
+      "label": "Order read model",
+      "eyebrow": "Derived document view",
+      "detail": "Provides a document-shaped customer history or search view. It is derived from committed events and can be rebuilt or reconciled from the authoritative order data.",
+      "kind": "analytics",
+      "tone": "violet",
+      "x": 77,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "customer-service", "from": "customer", "to": "checkout-service", "label": "checkout" },
+    { "id": "service-primary", "from": "checkout-service", "to": "order-primary", "label": "transaction" },
+    { "id": "primary-replica", "from": "order-primary", "to": "order-replica", "label": "replicate", "mode": "async" },
+    { "id": "primary-relay", "from": "order-primary", "to": "outbox-relay", "label": "committed outbox", "mode": "async" },
+    { "id": "relay-view", "from": "outbox-relay", "to": "order-view", "label": "apply event", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-checkout",
+      "label": "Healthy checkout",
+      "summary": "The order, inventory reservation, idempotency key, and outbox record commit together. The service can confirm the result from the primary before derived systems catch up.",
+      "activeEdges": ["customer-service", "service-primary", "primary-replica", "primary-relay", "relay-view"],
+      "focusNode": "order-primary",
+      "result": "The primary owns the business result. The replica and document view improve reads, but neither is required before the customer receives a successful, durable checkout response."
+    },
+    {
+      "id": "replica-lag",
+      "label": "Replica is stale",
+      "summary": "A customer refreshes immediately after checkout, but the replica has not applied the committed transaction yet. The authoritative primary already has the order.",
+      "activeEdges": ["customer-service", "service-primary", "primary-replica"],
+      "degradedNodes": ["order-replica"],
+      "focusNode": "order-replica",
+      "result": "Route this read-after-write confirmation to the primary, use a session-consistency mechanism, or show a pending state. A replica is useful only when the requested freshness permits its lag."
+    },
+    {
+      "id": "relay-outage",
+      "label": "Read-model relay outage",
+      "summary": "The transaction still commits, but the relay cannot publish to the document read model. The outbox records remain durable in the authoritative store for a later retry.",
+      "activeEdges": ["customer-service", "service-primary", "primary-relay"],
+      "failedNodes": ["outbox-relay"],
+      "focusNode": "outbox-relay",
+      "result": "Do not undo a committed order merely because a derived view is behind. Alert on backlog, restore the relay, replay idempotently, and reconcile the view from the authoritative order data."
+    },
+    {
+      "id": "primary-failover",
+      "label": "Primary fails over",
+      "summary": "The current writer is unavailable. A recovery procedure promotes one sufficiently current candidate, prevents the old primary from accepting writes, and redirects clients.",
+      "activeEdges": ["customer-service", "primary-replica", "primary-relay", "relay-view"],
+      "failedNodes": ["order-primary"],
+      "degradedNodes": ["order-replica"],
+      "focusNode": "order-replica",
+      "result": "Promotion without fencing can create two writers and conflicting order histories. Failover is complete only after one writer is elected, client routing is verified, and replica or view lag is assessed."
+    }
+  ]
+}

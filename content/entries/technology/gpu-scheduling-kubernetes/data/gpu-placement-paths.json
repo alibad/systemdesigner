@@ -1,0 +1,112 @@
+{
+  "title": "Follow a GPU request from admission to a healthy device",
+  "description": "Select a scheduling or runtime condition to see which control-plane and node components participate, where the request stops, and what the workload observes.",
+  "nodes": [
+    {
+      "id": "pod",
+      "label": "GPU Pod",
+      "eyebrow": "Resource contract",
+      "detail": "Declares an integer accelerator limit, host CPU and memory, eligible hardware labels, tolerations, topology constraints, priority, and a restart policy.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 48
+    },
+    {
+      "id": "scheduler",
+      "label": "Scheduler",
+      "eyebrow": "Filter and score",
+      "detail": "Filters nodes by allocatable resources and placement policy, scores the remaining nodes, and records one Pod-to-node binding. It does not initialize the GPU.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 30,
+      "y": 48
+    },
+    {
+      "id": "kubelet",
+      "label": "Kubelet",
+      "eyebrow": "Node admission",
+      "detail": "Watches the binding, asks the registered device plugin to allocate healthy device IDs, and prepares the Pod through the container runtime.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 51,
+      "y": 48
+    },
+    {
+      "id": "device-plugin",
+      "label": "Device plugin",
+      "eyebrow": "Inventory and health",
+      "detail": "Registers a vendor resource with the kubelet, reports healthy devices, and returns device allocation instructions for an admitted container.",
+      "kind": "service",
+      "tone": "green",
+      "x": 71,
+      "y": 18
+    },
+    {
+      "id": "runtime",
+      "label": "Container runtime",
+      "eyebrow": "Device visibility",
+      "detail": "Creates the container with the allocated device nodes, libraries, mounts, and environment supplied by the plugin and vendor runtime integration.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 71,
+      "y": 76
+    },
+    {
+      "id": "gpu",
+      "label": "GPU or partition",
+      "eyebrow": "Runtime boundary",
+      "detail": "Executes the workload under whole-device, MIG-profile, or time-sliced semantics. Device memory, fault isolation, and performance guarantees depend on that mode.",
+      "kind": "analytics",
+      "tone": "rose",
+      "x": 90,
+      "y": 48
+    }
+  ],
+  "edges": [
+    {"id": "pod-scheduler", "from": "pod", "to": "scheduler", "label": "requests + policy"},
+    {"id": "scheduler-kubelet", "from": "scheduler", "to": "kubelet", "label": "node binding"},
+    {"id": "plugin-kubelet", "from": "device-plugin", "to": "kubelet", "label": "healthy inventory"},
+    {"id": "kubelet-plugin", "from": "kubelet", "to": "device-plugin", "label": "allocate IDs"},
+    {"id": "kubelet-runtime", "from": "kubelet", "to": "runtime", "label": "container spec"},
+    {"id": "runtime-gpu", "from": "runtime", "to": "gpu", "label": "assigned device"}
+  ],
+  "scenarios": [
+    {
+      "id": "exclusive-success",
+      "label": "Whole-GPU success",
+      "summary": "The Pod requests one vendor GPU, matches a labeled and tolerated node, and receives one healthy exclusive device.",
+      "activeEdges": ["pod-scheduler", "scheduler-kubelet", "plugin-kubelet", "kubelet-plugin", "kubelet-runtime", "runtime-gpu"],
+      "focusNode": "gpu",
+      "result": "The container starts with the assigned device. Scheduling success proves resource allocation, so readiness must still check that the model, driver, runtime, and application initialized correctly."
+    },
+    {
+      "id": "label-mismatch",
+      "label": "No eligible profile",
+      "summary": "Free accelerator capacity exists, but no node has the model, MIG profile, zone, and tolerations required by the Pod.",
+      "activeEdges": ["pod-scheduler"],
+      "failedNodes": ["scheduler"],
+      "focusNode": "scheduler",
+      "result": "The Pod remains Pending. Inspect scheduler events and the complete eligibility intersection; adding an incompatible GPU node does not resolve the constraint."
+    },
+    {
+      "id": "unhealthy-device",
+      "label": "Device becomes unhealthy",
+      "summary": "The vendor plugin stops reporting one device as healthy after an error, reducing allocatable capacity on the node.",
+      "activeEdges": ["plugin-kubelet"],
+      "failedNodes": ["gpu"],
+      "degradedNodes": ["device-plugin", "kubelet"],
+      "focusNode": "device-plugin",
+      "result": "New Pods must not receive that device. Existing workload recovery depends on the application, controller, checkpoint, node remediation, and vendor behavior; Kubernetes does not migrate GPU process memory."
+    },
+    {
+      "id": "time-slice-contention",
+      "label": "Time-slice contention",
+      "summary": "Several Pods receive shared resource tokens for one physical GPU and then compete for compute and device memory.",
+      "activeEdges": ["pod-scheduler", "scheduler-kubelet", "plugin-kubelet", "kubelet-plugin", "kubelet-runtime", "runtime-gpu"],
+      "degradedNodes": ["gpu"],
+      "focusNode": "gpu",
+      "result": "All Pods can be Running while latency and memory pressure degrade. Time slicing shares access; it does not provide MIG-style memory or fault isolation or a proportional compute entitlement."
+    }
+  ]
+}

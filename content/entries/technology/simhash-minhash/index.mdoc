@@ -1,0 +1,202 @@
+---
+registryId: simhash-minhash
+---
+
+{% section-card tone="intro" %}
+## What are SimHash and MinHash?
+
+**SimHash and MinHash are compact, probabilistic summaries used to retrieve similar
+objects without comparing every pair in a collection.** They solve different similarity
+problems:
+
+- **SimHash** summarizes a weighted feature vector as bits. Similar vectors tend to
+  have a small Hamming distance between fingerprints.
+- **MinHash** summarizes a set, such as a document's shingles. The fraction of matching
+  signature rows estimates the sets' Jaccard similarity.
+
+In plain language, both methods build a cheap first-stage filter. They can reduce a
+collection of millions of objects to a manageable candidate set, but neither compact
+signature proves that two original objects meet the product's duplicate policy.
+
+{% callout variant="info" %}
+### Core invariant
+
+Use one versioned feature contract for indexed objects and queries, retrieve candidates
+with the matching approximate index, then verify the declared similarity metric from
+the original evidence before merging, suppressing, or deleting anything.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose the metric before the hashing method
+
+"Similar" is not one universal relationship. Start with the representation that makes
+the product decision meaningful.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Weighted feature vector" eyebrow="SimHash" icon="binary" tone="blue" %}
+Represent each token, phrase, field, or signal with a weight. Use when direction in a
+high-dimensional vector captures the intended resemblance and near duplicates differ
+by small edits or feature-weight changes.
+{% /concept-card %}
+{% concept-card title="Set of shingles" eyebrow="MinHash" icon="braces" tone="green" %}
+Represent each object as a set of normalized features. Use when overlap relative to the
+union is the intended metric, such as Jaccard similarity between document shingles.
+{% /concept-card %}
+{% concept-card title="Images or learned embeddings" eyebrow="Choose another family" icon="scan-search" tone="violet" %}
+Perceptual hashes, vector indexes, or domain-specific models can be a better fit when
+pixel structure or learned semantic distance matters. A text shingle sketch does not
+become semantic because it is compact.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% metric-strip %}
+{% metric value="d / b" label="SimHash distance" detail="Differing bits divided by fingerprint width" tone="blue" /%}
+{% metric value="m / k" label="MinHash estimate" detail="Matching rows divided by signature rows" tone="green" /%}
+{% metric value="b x r" label="LSH signature" detail="Bands times rows per band" tone="violet" /%}
+{% metric value="Verify" label="Final decision" detail="Recompute the exact declared metric and policy" tone="amber" /%}
+{% /metric-strip %}
+
+Do not compare a SimHash Hamming threshold with a MinHash Jaccard threshold as if the
+numbers had the same meaning. Establish labeled positive and negative pairs, choose the
+feature representation, and measure precision and recall for the complete pipeline.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Lab 1: read the evidence in a compact signature
+
+Change the observed agreement and signature width. Every displayed quantity follows
+from the selected inputs. Storage excludes language-runtime, index, replication, and
+object metadata overhead, while the MinHash interval assumes independent rows.
+
+{% interactive-block id="technology/simhash-minhash-calculator" /%}
+
+### Interpret SimHash without overstating it
+
+For random-hyperplane SimHash, the probability that one bit differs equals the angle
+between two feature vectors divided by pi. With `d` differing bits out of `b`, the
+observed Hamming fraction `d / b` estimates that probability; the corresponding cosine
+estimate is `cos(pi * d / b)`. Finite fingerprints have sampling variation, and a
+different feature extractor changes the objects being compared.
+
+### Interpret MinHash as an estimator
+
+For ordinary MinHash on sets, the collision probability of one independent row equals
+Jaccard similarity. If `m` of `k` rows match, `m / k` is the estimate. More rows reduce
+sampling variance but increase signature computation, storage, and indexing cost.
+
+These properties follow from the original
+[SimHash rounding construction](https://www.cs.princeton.edu/courses/archive/spring05/cos598E/bib/p380-charikar.pdf)
+and [MinHash work on near-duplicate documents](https://research.google/pubs/identifying-and-filtering-near-duplicate-documents/).
+They do not supply a universal duplicate threshold for a specific product.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Lab 2: trace candidates through an approximate index
+
+An all-pairs comparison over `N` objects grows as `N(N - 1) / 2`. Production systems
+therefore index compact signatures and verify only returned candidates. Switch between
+the healthy and failure paths below, then inspect each component's responsibility.
+
+{% topology-lab dataFile="/api/content/technology/simhash-minhash/data/candidate-pipeline.json" /%}
+
+### Understand MinHash banding
+
+Split a `k = b x r` row signature into `b` bands with `r` rows in each band. If two sets
+have Jaccard similarity `s`, the standard independence model gives:
+
+`P(candidate) = 1 - (1 - s^r)^b`
+
+- Increasing **rows per band** makes a single band harder to match. Candidate volume
+  and false-positive work usually fall, but recall can fall too.
+- Increasing **bands** creates more chances to match. Recall and candidate volume
+  usually rise, along with index and verification work.
+- This probability models candidate generation, not final precision. Feature
+  correlations, uneven bucket sizes, and real data distributions must be measured.
+
+SimHash needs a different index: partitioned bit tables, multi-index hashing, or another
+Hamming-neighborhood structure that retrieves fingerprints within the chosen radius.
+Scanning every stored fingerprint preserves the metric but loses the scaling benefit.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Build one reproducible feature contract
+
+Small preprocessing changes can move more pairs than a threshold adjustment. Treat the
+feature pipeline as versioned production data, not as incidental string cleanup.
+
+{% process-flow %}
+{% process-step number="1" title="Declare the unit" label="Object contract" %}
+Choose whole documents, fields, passages, users, sessions, or another bounded object.
+Keep a stable object ID and retain the evidence needed for verification.
+{% /process-step %}
+{% process-step number="2" title="Normalize consistently" label="Feature version" %}
+Fix Unicode handling, case folding, tokenization, boilerplate rules, shingle width,
+stop-word policy, and SimHash feature weights. Version every behavior change.
+{% /process-step %}
+{% process-step number="3" title="Generate and index" label="Candidate stage" %}
+Use deterministic hash functions and seeds. Store the signature version with each
+record, partition buckets, and cap or isolate pathological hot buckets.
+{% /process-step %}
+{% process-step number="4" title="Verify and decide" label="Policy stage" %}
+Load original features, calculate the exact metric, apply domain rules, and record the
+threshold, feature version, and reason for each consequential decision.
+{% /process-step %}
+{% /process-flow %}
+
+A safe migration either rebuilds the index or dual-writes and dual-reads old and new
+feature versions until labeled recall, candidate volume, and verification load pass a
+release gate. Comparing a new query signature with an old feature space silently loses
+candidates.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Implement deterministic reference versions
+
+The examples emphasize invariants that toy snippets often hide: deterministic hashing,
+explicit feature extraction, a fixed signature width, a checked `bands x rows`
+relationship, and exact verification after candidate retrieval.
+
+{% code-block file="/api/content/technology/simhash-minhash/code/python-sim-hash-example.txt" language="python" title="Deterministic weighted SimHash and Hamming comparison" /%}
+
+{% code-block file="/api/content/technology/simhash-minhash/code/python-min-hash-lsh-implementation.txt" language="python" title="Deterministic MinHash LSH with exact Jaccard verification" /%}
+
+These are educational single-process implementations. A production index still needs
+durable buckets, concurrency control, versioned rebuilds, bounded bucket reads,
+replication, deletion handling, and telemetry.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the pipeline as a retrieval system
+
+Track each stage separately so one aggregate "accuracy" number cannot hide the failure:
+
+- **Feature health:** objects processed by version, empty-feature rate, shingle-count
+  distribution, and migration coverage.
+- **Candidate health:** candidates per query, bucket-size distribution, hot buckets,
+  query time, and the fraction of candidates rejected by exact verification.
+- **Quality health:** candidate recall on labeled pairs, final precision and recall by
+  content slice, threshold margin, and false merge or missed duplicate investigations.
+- **Capacity health:** signature bytes, index bytes, rebuild duration, verification
+  reads per query, and peak queue age.
+- **Policy health:** merge, suppress, quarantine, and review outcomes. Destructive
+  actions should require stronger evidence and an auditable recovery path.
+
+### Common failure modes
+
+1. **Feature-version drift:** query and index signatures describe different feature
+   spaces, so true neighbors never become candidates.
+2. **Hot buckets:** boilerplate or empty features send unrelated objects to one bucket,
+   causing verification spikes.
+3. **Threshold transfer:** a value tuned on one language, source, or content length is
+   applied globally without slice validation.
+4. **Candidate equals duplicate:** an approximate collision bypasses exact verification
+   and creates user-visible false positives.
+5. **Unmeasured recall:** the system reports fast queries but has no labeled pair set to
+   reveal neighbors the index never returned.
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/simhash-minhash/quiz/simhash-minhash.json"
+   lessonSlug="simhash-minhash"
+   title="SimHash and MinHash Decisions" /%}

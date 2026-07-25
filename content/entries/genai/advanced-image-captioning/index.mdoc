@@ -1,0 +1,239 @@
+---
+registryId: advanced-image-captioning
+---
+
+{% section-card tone="intro" %}
+## What is advanced image captioning?
+
+**Advanced image captioning is the controlled generation of useful language from visual evidence.** A vision encoder represents the image, a language decoder proposes a sequence of words, and an evidence-and-policy layer decides which claims may be released.
+
+In plain language, the system must do more than produce a fluent sentence. It must notice the right objects and relationships, choose details that fit the product's purpose, avoid turning model confidence into visual fact, and stop or ask for review when the evidence is weak.
+
+The core invariant is **every released claim must be supported by permitted evidence and useful for the declared captioning task**. A likely token, a wide beam, an attention map, or a strong reference-overlap score cannot establish that an object is present.
+
+Review [CLIP architecture](/genai/clip-architecture) and [transformers](/genai/transformers) first if image-text embeddings or cross-attention are unfamiliar.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="1 purpose" label="Before generation" detail="Accessibility, search, editorial copy, and structured extraction need different captions" tone="blue" /%}
+{% metric value="2 signals" label="Keep separate" detail="Decoder preference estimates likely wording; grounding evidence supports or rejects claims" tone="violet" /%}
+{% metric value="4 failure axes" label="Release evidence" detail="Hallucination, coverage, safety, and slice behavior must be measured independently" tone="amber" /%}
+{% metric value="0 silent guesses" label="Safety boundary" detail="Weak evidence becomes omission, qualified wording, review, or abstention" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Define the caption contract before choosing a model
+
+The same image can need different correct descriptions. W3C accessibility guidance makes the text alternative depend on the image's purpose and context, not only its pixels. A product contract must therefore state what information the caption is for, which evidence is permitted, and what failure response the user will receive.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Purpose and audience" eyebrow="Usefulness" icon="users" tone="blue" %}
+Name whether the output is alt text, search metadata, a structured catalog record, or an editable creative suggestion. Define the expected language, length, reading level, and required details.
+{% /concept-card %}
+{% concept-card title="Evidence boundary" eyebrow="Factuality" icon="scan" tone="cyan" %}
+List the visual regions, verified OCR, product metadata, or trusted context that may support claims. Keep unverified model inferences outside that boundary.
+{% /concept-card %}
+{% concept-card title="Policy boundary" eyebrow="Safety" icon="shield" tone="amber" %}
+Forbid unsupported identity, protected-attribute, emotion, diagnosis, intent, and other sensitive inferences. Define when a specialist or human reviewer is required.
+{% /concept-card %}
+{% concept-card title="Terminal outcomes" eyebrow="Failure" icon="route" tone="green" %}
+Return a grounded caption, a conservative partial caption, a review state, or an explicit no-caption result. Never hide weak evidence behind fluent prose.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Record the contract as testable fields
+
+1. **Input:** image format, resolution, locale, use case, and authorized contextual metadata.
+2. **Output:** caption, claim-to-evidence links, policy verdict, model version, and evidence version.
+3. **Required content:** salient objects, relationships, visible text, or structured fields that the use case needs.
+4. **Forbidden content:** unsupported or disallowed claims, even when the decoder assigns them high probability.
+5. **Service limits:** maximum generation length, latency, review capacity, and fallback behavior.
+{% /section-card %}
+
+{% section-card %}
+## Keep generation and release as separate stages
+
+{% system-flow title="Evidence-controlled caption path" caption="The decoder proposes language. Independent evidence and policy checks decide what may leave the system." %}
+{% system-node title="Image and task" eyebrow="Contract" icon="image" tone="blue" %}
+Normalize the image without discarding small text or objects needed by the declared use case.
+{% /system-node %}
+{% system-node title="Visual representation" eyebrow="Perception" icon="layers" tone="cyan" %}
+A convolutional network, Vision Transformer, detector, or multimodal encoder creates patch, region, and global features.
+{% /system-node %}
+{% system-node title="Candidate decoding" eyebrow="Language" icon="git-branch" tone="violet" %}
+Greedy, beam, sampling, or constrained decoding produces one or more bounded caption candidates.
+{% /system-node %}
+{% system-node title="Claim grounding" eyebrow="Evidence" icon="search-check" tone="amber" %}
+Parse objects, attributes, actions, relations, and text; link each claim to regions, verified OCR, or trusted context.
+{% /system-node %}
+{% system-node title="Policy and release" eyebrow="Decision" icon="badge-check" tone="green" %}
+Retain supported claims, remove unsafe detail, escalate uncertain cases, and log the complete verdict.
+{% /system-node %}
+{% /system-flow %}
+
+### What the model learns
+
+- The **vision encoder** maps pixels to representations that preserve objects, attributes, spatial relationships, and text-bearing areas.
+- The **language decoder** estimates the next token conditioned on visual features and preceding text.
+- **Cross-attention** lets decoder states read visual tokens. It can expose a useful alignment trace, but the attention weight is not proof that a claim is true.
+- **Sequence training** usually begins with teacher-forced likelihood. Sequence-level objectives can optimize non-differentiable metrics, but the chosen reward also becomes a behavior-shaping pressure.
+- The **release layer** is application logic, not a final decoder prompt. It owns evidence thresholds, forbidden claims, review routes, and abstention.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Separate decoder preference from visual evidence
+
+The lab uses one hand-authored scene, six exact evidence records, and five candidate captions. Change the decoding strategy, search width or sampling mass, lexical constraint, and evidence threshold. The candidate's decoder confidence is a synthetic preference signal; it is deliberately evaluated separately from claim evidence.
+
+{% interactive-block id="genai/advanced-image-captioning" dataFile="/api/content/genai/advanced-image-captioning/data/decoding-grounding-scenario.json" /%}
+
+### Read the outcome correctly
+
+- **Greedy decoding** keeps the locally preferred continuation and does not compare complete alternatives.
+- **Beam search** retains several partial sequences. A wider beam exposes more candidates to a reranker, but it also increases decoder work and still optimizes model-defined scores.
+- **Nucleus sampling** draws from the smallest token set whose cumulative probability reaches `top_p`. It introduces controlled variation, not additional visual evidence.
+- **Lexical constraints** can require a word or phrase. They are useful for terminology and structure, but a constraint can force an unsupported object into an otherwise fluent caption.
+- **Grounding thresholds** act on claim evidence after generation. They must be calibrated per evidence source and use case, not interpreted as universal probabilities of truth.
+
+{% code-block file="/api/content/genai/advanced-image-captioning/code/grounded-decoding.py" language="python" title="Keep candidate selection separate from claim release" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose an architecture for the evidence you need
+
+{% concept-grid columns="3" %}
+{% concept-card title="Region-attention encoder-decoder" eyebrow="Explicit regions" icon="scan-line" tone="blue" %}
+A CNN or detector emits spatial features and an LSTM or transformer attends to them while decoding. Region-to-word maps are inspectable, but limited visual features can miss small objects and relations.
+{% /concept-card %}
+{% concept-card title="Vision Transformer encoder-decoder" eyebrow="Patch tokens" icon="grid-3x3" tone="cyan" %}
+A ViT represents the image as patch tokens and a transformer decoder reads them through cross-attention. Training is parallel, while autoregressive serving still emits tokens sequentially.
+{% /concept-card %}
+{% concept-card title="Pretrained multimodal generator" eyebrow="Broad transfer" icon="sparkles" tone="violet" %}
+A vision-language model reuses large-scale image-text pretraining and instruction tuning. Broader capability also brings inherited data bias, open-ended wording, and more behaviors to constrain.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve evidence through the representation
+
+1. Keep enough input resolution for the smallest supported object or text region.
+2. Retain spatial identities for patches or regions so claims can link back to evidence.
+3. Store OCR text separately with region coordinates and verification status.
+4. Preserve the original image, preprocessing version, and detector or encoder version for replay.
+5. Treat generated rationales and captions as derived outputs, never as source annotations by default.
+
+The early *Show, Attend and Tell* model demonstrated learned region-to-word attention. Modern architectures can represent richer context, but the engineering question remains the same: which visual evidence supports each released phrase?
+{% /section-card %}
+
+{% section-card %}
+## Train for wording without rewarding the wrong shortcut
+
+Cross-entropy training teaches the decoder to imitate reference captions token by token. It is a useful starting objective, but references are incomplete descriptions written under particular annotation practices. A model can learn common language priors even when the corresponding object is absent.
+
+### Build the dataset contract
+
+- Record image license, consent, provenance, collection context, and deletion identity.
+- Separate train, tuning, and evaluation images by source and near-duplicate group.
+- Balance languages, geographies, lighting, scene density, disability representation, and supported domains.
+- Add hard negatives where a plausible object, attribute, count, action, or relationship is absent.
+- Annotate salient required facts and forbidden sensitive inferences for the target use case.
+
+### Use sequence objectives cautiously
+
+Self-critical sequence training is one way to optimize a sequence-level reward such as CIDEr using the model's own test-time output as a baseline. This can align training with a metric, but it does not make that metric complete. If the reward favors reference consensus without a hallucination or safety term, the model can improve the target while preserving a release-critical failure.
+
+{% callout variant="warn" %}
+Do not train directly on unreviewed production captions or acceptance clicks. They mix factual corrections with tone preferences, overrepresent active users, and can feed model-generated errors back into the next model.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate sentence quality, grounding, and usefulness separately
+
+No single automatic score represents caption quality. Use a portfolio whose members answer different questions.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Reference consensus" eyebrow="CIDEr" icon="messages-square" tone="blue" %}
+Compares weighted n-grams with several human references to estimate consensus wording. It is useful for corpus comparison, but a reference set cannot enumerate every valid caption or every unsupported claim.
+{% /concept-card %}
+{% concept-card title="Semantic propositions" eyebrow="SPICE" icon="network" tone="violet" %}
+Parses candidate and reference captions into scene-graph tuples and compares objects, attributes, and relations. Parser errors and incomplete references still limit the result.
+{% /concept-card %}
+{% concept-card title="Image-text compatibility" eyebrow="Reference-free" icon="scan-search" tone="cyan" %}
+Metrics such as CLIPScore compare the caption with the image representation. They add a distinct signal, but fine-grained negation, counting, relations, and metric bias still require targeted tests.
+{% /concept-card %}
+{% concept-card title="Claim failures" eyebrow="CHAIR and labels" icon="shield-alert" tone="amber" %}
+CHAIR measures object mentions that are absent from ground-truth objects. Production evaluation should extend beyond objects to attributes, actions, relations, OCR, and sensitive inference.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Add task and human evidence
+
+- Measure **claim precision**: supported released claims divided by all released claims.
+- Measure **coverage**: required facts included divided by required facts for that task.
+- Review factuality, salience, clarity, and usefulness with task-aware human rubrics.
+- Track results by language, lighting, scene density, image type, accessibility need, and other declared slices.
+- Report abstentions and review volume alongside quality; hiding difficult cases can make released-caption scores look better.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Gate releases on exact failures, not one average
+
+This lab contains eight named synthetic cases. Every coverage percentage, hallucination rate, safety violation, and slice gap is computed from those records. Select a candidate run, change the gate policy and thresholds, and inspect the exact cases responsible for the verdict.
+
+{% interactive-block id="genai/advanced-image-captioning-release-gate-lab" dataFile="/api/content/genai/advanced-image-captioning/data/release-evaluation-cases.json" /%}
+
+### Keep hard requirements conjunctive
+
+1. **Hallucination gate:** block when unsupported claims exceed the declared case or claim limit.
+2. **Coverage gate:** block when the system omits too much task-required information, even if every remaining claim is true.
+3. **Safety gate:** block forbidden sensitive inferences independently of reference or similarity scores.
+4. **Slice gate:** block when a required slice falls below its floor or diverges too far from the best slice.
+5. **Operational gate:** separately check latency, availability, cost per released caption, and review capacity.
+
+{% code-block file="/api/content/genai/advanced-image-captioning/code/caption-release-gate.py" language="python" title="Compute a traceable multi-axis release verdict" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate the full evidence path
+
+### Log enough to replay a decision
+
+- Request and use-case IDs, image hash, preprocessing version, model and tokenizer versions.
+- Decoding strategy, beam or sampling parameters, lexical constraints, and candidate IDs.
+- Extracted claims, evidence source and region, evidence confidence, threshold, and policy verdict.
+- Released text, removed claims, review reason, latency by stage, and fallback route.
+
+### Monitor user-visible failure
+
+- Empty, truncated, repetitive, and language-mismatched captions.
+- Unsupported-object, attribute, action, relation, count, and OCR rates.
+- Required-fact coverage and review rate by declared slice.
+- Sensitive-inference blocks, reviewer reversals, and correction categories.
+- Cost and latency per released caption, not only per attempted generation.
+
+### Degrade without bypassing trust
+
+1. Reduce candidate count or maximum length while keeping evidence and safety checks.
+2. Route eligible catalog work to a batch tier with a durable job state.
+3. Return a conservative partial caption when supported facts remain useful.
+4. Route regulated or ambiguous cases to the approved reviewer.
+5. Return an explicit no-caption result when grounding or policy dependencies are unavailable.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and official guidance
+
+- [Show, Attend and Tell](https://arxiv.org/abs/1502.03044) introduced soft and hard visual attention for caption generation and visualized word-to-region alignment.
+- [CIDEr](https://arxiv.org/abs/1411.5726) defines a consensus-based image-description metric against multiple human references.
+- [SPICE](https://arxiv.org/abs/1607.08822) compares semantic propositions represented as scene-graph tuples.
+- [Object Hallucination in Image Captioning](https://arxiv.org/abs/1809.02156) introduces CHAIR and shows that standard sentence metrics do not fully capture image relevance.
+- [Self-Critical Sequence Training](https://arxiv.org/abs/1612.00563) optimizes non-differentiable sequence metrics using the model's own inference output as a baseline.
+- [CLIPScore](https://arxiv.org/abs/2104.08718) adds a reference-free image-text compatibility signal and documents where it complements reference metrics.
+- [Attention is not Explanation](https://arxiv.org/abs/1902.10186) cautions against treating attention weights as sufficient explanations.
+- [Hugging Face generation documentation](https://huggingface.co/docs/transformers/main_classes/text_generation) documents greedy, sampling, beam, and beam-sampling controls exposed by `generate`.
+- [W3C's image tutorial](https://www.w3.org/WAI/tutorials/images/) explains that useful text alternatives depend on image purpose, context, and content.
+
+These sources establish mechanisms and evaluation methods. They do not supply universal production thresholds; calibrate evidence and release policies on the actual use case and population.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/advanced-image-captioning/quiz/advanced-image-captioning-review.json" lessonSlug="advanced-image-captioning" /%}

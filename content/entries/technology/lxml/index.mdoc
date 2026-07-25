@@ -1,0 +1,269 @@
+---
+registryId: lxml
+---
+
+{% section-card tone="intro" %}
+## What is lxml?
+
+**lxml is a Python library for parsing, querying, validating, transforming, and
+serializing XML and HTML.** Its `etree` API follows Python's ElementTree model while
+using the libxml2 and libxslt libraries for standards support such as XPath 1.0, XSLT
+1.0, DTD, Relax NG, and XML Schema.
+
+It matters when markup is more than a string: elements are nested, XML namespaces
+change names, business feeds need validation, malformed HTML needs a defined recovery
+policy, and large documents may not fit comfortably as retained trees.
+
+The core invariant is **the parser creates a tree under an explicit input contract;
+queries and transformations operate on that tree, not on the original bytes**. Choose
+XML or HTML semantics deliberately, decide how long nodes must remain resident, and
+validate the result required by the application.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Structured markup" icon="network" tone="blue" %}
+Use lxml for namespaced XML, XPath-heavy extraction, XSLT transformations, schema
+validation, malformed HTML recovery, or event-driven processing of large XML files.
+{% /concept-card %}
+{% concept-card title="Wrong boundary" eyebrow="Acquisition" icon="globe" tone="amber" %}
+lxml does not fetch pages, execute JavaScript, authorize access, enforce response-size
+limits, or decide whether a remote resource may be collected.
+{% /concept-card %}
+{% concept-card title="Correctness rule" eyebrow="Explicit policy" icon="shield" tone="green" %}
+Pin parser settings, namespace mappings, validation rules, and representative fixtures.
+Changing any of them can change accepted input or selected nodes.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose the interface from the document contract
+
+The convenient APIs overlap, but they do not imply the same input semantics or memory
+lifetime.
+
+{% concept-grid columns="4" %}
+{% concept-card title="XMLParser" eyebrow="Strict XML" icon="braces" tone="blue" %}
+Use for well-formed XML where case, namespaces, entity handling, and syntax errors are
+part of a precise contract. Keep `recover=False` when malformed XML must fail.
+{% /concept-card %}
+{% concept-card title="HTMLParser" eyebrow="Recover HTML" icon="globe" tone="cyan" %}
+Use for HTML syntax and recovery. The output is an lxml tree, but repaired structure
+must be tested rather than assumed to match a browser's live DOM.
+{% /concept-card %}
+{% concept-card title="parse / fromstring" eyebrow="Retained tree" icon="layers" tone="violet" %}
+Build a complete tree when the algorithm needs arbitrary navigation, document-wide
+XPath, mutation, validation after parsing, XSLT, or full serialization.
+{% /concept-card %}
+{% concept-card title="iterparse" eyebrow="Event-driven XML" icon="activity" tone="green" %}
+Receive parser events while XML is read. Process complete elements on `end` events and
+clear no-longer-needed subtrees when the algorithm can operate record by record.
+{% /concept-card %}
+{% /concept-grid %}
+
+Bytes are usually the clearest input at a file or transport boundary because the XML
+declaration can participate in encoding detection. If an upstream layer already
+decoded text, its encoding decision has become part of the contract.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose the smallest tree lifetime that satisfies the algorithm
+
+`iterparse()` is not a magic streaming result set: it emits events while constructing
+a tree. Memory becomes bounded only when application logic finishes a subtree, emits
+the needed result, clears that element, and removes preceding siblings that would
+otherwise remain attached.
+
+Change the workload, mode, size, and concurrency below. The component uses visible
+teaching factors instead of pretending to benchmark a deployment it cannot observe.
+
+{% interactive-block id="technology/lxml-performance" dataFile="/api/content/technology/lxml/data/workload-envelope.json" /%}
+
+### Make the access pattern explicit
+
+- Retain the full tree when later logic must revisit arbitrary ancestors or siblings,
+  run document-wide expressions, mutate distant branches, or serialize the complete
+  result.
+- Stream records when each target element can be completed independently and old
+  elements are not needed for future decisions.
+- Keep aggregate Python state intentionally. Clearing XML elements does not release
+  lists, dictionaries, strings, or output buffers retained by application code.
+- Measure peak resident memory with representative documents. Element count, text
+  length, attributes, namespaces, Python objects, and concurrent workers all matter.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Process complete records, then release their subtrees
+
+The example listens only for `end` events on namespaced `order` elements. At that point
+the element and its descendants are complete, so the function can validate and emit a
+plain Python record before clearing the XML subtree.
+
+{% code-block file="/api/content/technology/lxml/code/stream-orders.py" language="python" title="Stream namespaced order records and clear completed subtrees" /%}
+
+### Respect event boundaries
+
+- On a `start` event, attributes are available but descendants, following siblings,
+  and complete text are not guaranteed to exist yet.
+- On an `end` event, the current element and descendants can be read and modified.
+- Do not move or delete ancestors the parser still needs. Clear the completed element,
+  then remove only preceding siblings that will never be visited again.
+- Pass `tag=` when only a bounded element type matters. It reduces application events,
+  but skipped siblings may still need explicit cleanup.
+
+The official [parsing guide](https://lxml.de/parsing.html) documents parser options,
+incremental events, `iterparse()`, and the safe modification boundary.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Treat XPath as a namespaced query contract
+
+lxml supports XPath 1.0 through `xpath()` and compiled `etree.XPath` objects. Compiling
+once is useful when the same expression runs repeatedly with different variable
+values. It avoids rebuilding the expression and keeps query text separate from data.
+
+{% code-block file="/api/content/technology/lxml/code/compiled-xpath.py" language="python" title="Compile one namespaced XPath and bind variables safely" /%}
+
+### Namespaces change element names
+
+An element written as `<order xmlns="urn:orders">` has the expanded name
+`{urn:orders}order`; it is not an unqualified `order`. XPath has no default element
+namespace. Bind a local prefix such as `o` to the document namespace and use
+`//o:order` in the expression.
+
+- Use ElementPath methods such as `.find()` for simple child paths when they express
+  the query clearly.
+- Use XPath for predicates, axes, functions, document-wide selection, or queries whose
+  variables change between evaluations.
+- Bind application values as XPath variables. Do not concatenate untrusted text into
+  an expression.
+- Assert cardinality and types after evaluation. A syntactically valid query can still
+  return zero, one, or many nodes when the document contract drifts.
+
+See the official [XPath and XSLT guide](https://lxml.de/xpathxslt.html) for namespace
+bindings, variables, return values, compiled evaluators, and XSLT behavior.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Build parser settings from trust, format, and failure policy
+
+A parser constructor is part of the system boundary. `recover`, `load_dtd`,
+`resolve_entities`, `no_network`, and `huge_tree` change what input is accepted and
+what work the parser may perform. Select an input contract and profile to see where
+the combinations align or conflict.
+
+{% interactive-block id="technology/lxml-parser-policy-lab" dataFile="/api/content/technology/lxml/data/parser-policy-scenarios.json" /%}
+
+{% callout variant="warn" %}
+`huge_tree=True` disables parser security restrictions so very deep trees and long
+text can be processed. It is an exception for independently bounded, trusted input,
+not a generic performance switch and never a remedy for untrusted uploads.
+{% /callout %}
+
+Parser options are only one layer. Enforce transport byte limits, timeouts, controlled
+concurrency, worker isolation, output limits, and application-level validation around
+the parse. The official [parser option reference](https://lxml.de/parsing.html#parser-options)
+defines the flags; the current [API reference](https://lxml.de/apidoc/lxml.etree.html)
+provides constructor signatures.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate well-formedness from schema validity
+
+A document can be well-formed XML and still violate the business contract. lxml
+supports DTD, Relax NG, XML Schema, and Schematron workflows. Select a schema language
+because it expresses the required constraints and fits the producer ecosystem, not
+because every document should carry every validator.
+
+{% concept-grid columns="4" %}
+{% concept-card title="DTD" eyebrow="Grammar + entities" icon="file" tone="amber" %}
+Useful for legacy document grammars and declared entities. DTD loading and entity
+behavior must be deliberate at external input boundaries.
+{% /concept-card %}
+{% concept-card title="Relax NG" eyebrow="Structural grammar" icon="git-branch" tone="green" %}
+Expresses document structure with a regular, composable model. lxml exposes a
+`RelaxNG` validator with an error log.
+{% /concept-card %}
+{% concept-card title="XML Schema" eyebrow="Typed contract" icon="shield" tone="blue" %}
+Adds typed values and detailed structural constraints. Compile a trusted schema once
+when many documents share the same contract.
+{% /concept-card %}
+{% concept-card title="Schematron" eyebrow="Rule assertions" icon="search" tone="violet" %}
+Checks assertion-style rules that depend on document context. It can complement a
+grammar when business conditions cross structural boundaries.
+{% /concept-card %}
+{% /concept-grid %}
+
+This executable example compiles a local XSD, validates while parsing, accepts a valid
+inventory feed, and rejects a well-formed document whose quantity has the wrong type.
+
+{% code-block file="/api/content/technology/lxml/code/validate-partner-feed.py" language="python" title="Validate a partner feed against a compiled XML Schema" /%}
+
+Use the validator or parser error log for diagnosis, but bound what reaches logs and
+clients. The official [validation guide](https://lxml.de/validation.html) covers
+validator construction, parse-time validation, `validate()`, `assertValid()`, and
+error logs.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Put lxml inside an observable document pipeline
+
+The parser should receive bounded bytes and emit either a validated application result
+or a diagnosable failure. Keep acquisition, tree mechanics, business validation, and
+publication as separate ownership boundaries.
+
+{% system-flow title="A production lxml boundary" caption="Each stage narrows what the next stage is allowed to trust." %}
+{% system-node title="Acquire bounded bytes" eyebrow="I/O boundary" icon="download" tone="blue" %}
+Read an allowed file or response with timeouts, byte limits, expected content type,
+controlled redirects, and a known source identity. lxml starts after acquisition.
+{% /system-node %}
+{% system-node title="Parse by explicit policy" eyebrow="Syntax boundary" icon="braces" tone="cyan" %}
+Choose XML or HTML, tree or events, recovery behavior, entity handling, network policy,
+and parser limits. Record the profile with failures and metrics.
+{% /system-node %}
+{% system-node title="Query and validate" eyebrow="Contract boundary" icon="search" tone="violet" %}
+Bind namespaces and XPath variables, enforce schema or record rules, check cardinality,
+and quarantine documents that are syntactically valid but semantically wrong.
+{% /system-node %}
+{% system-node title="Publish typed results" eyebrow="Output boundary" icon="check" tone="green" %}
+Emit bounded application records or a transformed document. Escape or sanitize output
+for its destination; parsing input does not make later HTML rendering safe.
+{% /system-node %}
+{% /system-flow %}
+
+### Operate the contract, not only the happy path
+
+- Record document bytes, element or record counts, parse duration, peak memory, parser
+  profile, validator version, and output count.
+- Classify syntax, validation, resource-limit, namespace, selector-cardinality, and
+  downstream write failures separately.
+- Store sanitized failing fixtures for malformed input, unknown namespaces, missing
+  required fields, oversized text, and schema-version transitions.
+- Re-run those fixtures when upgrading lxml, libxml2, schemas, XPath expressions, or
+  producer versions.
+- Keep transformed markup out of a browser or template context until the output layer
+  applies the correct escaping or sanitization policy.
+{% /section-card %}
+
+{% section-card %}
+## Review the parser contract before release
+
+Before shipping an lxml pipeline, make these decisions explicit:
+
+- Input and trust
+  - Is the source XML or HTML, and who controls it?
+  - Which byte, time, concurrency, and output limits bound the job?
+- Tree lifetime
+  - Does the algorithm need arbitrary retained-tree access, or can records be completed
+    and cleared on `end` events?
+  - Which Python objects remain resident after elements are cleared?
+- Correctness
+  - Which namespaces, XPath cardinalities, schemas, and application invariants define
+    a valid result?
+  - Must malformed input fail, or is HTML recovery part of the contract?
+- Operations
+  - Which fixtures and metrics expose input drift, resource pressure, and partial or
+    over-broad extraction?
+  - How are invalid documents quarantined, diagnosed, replayed, and safely discarded?
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/lxml/quiz/lxml-production-design.json" lessonSlug="lxml" title="lxml Production Design Review" /%}

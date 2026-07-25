@@ -1,0 +1,163 @@
+---
+registryId: checksum-security-cdn
+---
+
+{% section-card tone="intro" %}
+## What is checksum security for a CDN?
+
+**Checksum security** verifies that bytes delivered through a Content Delivery Network (CDN) are exactly the bytes a trusted release produced. A cryptographic hash turns a file into a fixed-size digest. The verifier hashes the downloaded file and blocks it when that result differs from the expected digest.
+
+This matters because a CDN copies assets across many edge locations. A corrupted cache entry, stale deployment, compromised edge, or altered third-party script can otherwise reach users at global scale. The core invariant is: **verify delivered bytes against a digest obtained through a trust path the asset distributor cannot silently rewrite**.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Digest" eyebrow="Detect changed bytes" icon="shield" tone="blue" %}
+A cryptographic hash such as SHA-256 or SHA-384 maps any file size to a fixed-size value. Even a small byte change should produce a different digest.
+{% /concept-card %}
+{% concept-card title="Trusted reference" eyebrow="Anchor the comparison" icon="key" tone="violet" %}
+The expected digest must come from authenticated HTML, a signed release manifest, or another protected control plane. A digest beside the asset in the same writable location is only a claim.
+{% /concept-card %}
+{% concept-card title="Enforcement" eyebrow="Stop unsafe execution" icon="shield" tone="green" %}
+The browser, origin, or deployment pipeline must fail closed on mismatch. Detection without blocking, alerting, and recovery leaves the user on the unsafe path.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="A verified asset has two paths" caption="The asset bytes travel through the CDN. The expected digest travels through a protected release path. Verification is meaningful because those paths do not share the same write authority." %}
+{% system-node title="Build job" eyebrow="Produce" icon="code" tone="blue" %}
+Create immutable asset bytes and compute the digest once.
+{% /system-node %}
+{% system-node title="Release record" eyebrow="Trust" icon="key" tone="violet" %}
+Bind the asset URL, digest, algorithm, and release identity.
+{% /system-node %}
+{% system-node title="CDN edge" eyebrow="Distribute" icon="cloud" tone="cyan" %}
+Cache and serve the versioned object near users.
+{% /system-node %}
+{% system-node title="Verifier" eyebrow="Enforce" icon="shield" tone="green" %}
+Recompute, compare, block mismatch, and report evidence.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Integrity is not authenticity by itself
+
+A checksum answers a narrow question: “Did these bytes match this expected value?” It does not answer “Who published the expected value?” If an attacker can replace both the file and its digest, the comparison still succeeds.
+
+Use the controls as a stack:
+
+- **TLS** authenticates the endpoint and protects the digest or signed manifest while it travels.
+- **A release signature** lets a verifier authenticate a manifest even when storage and CDN operators are not trusted to author releases.
+- **Subresource Integrity (SRI)** tells a browser which digest an external script or stylesheet must match before execution or application.
+- **Immutable versioned URLs** prevent one cache key from referring to different releases over time.
+- **Authorization and protected build credentials** limit who may create a release in the first place.
+
+{% callout variant="info" %}
+### The decisive boundary
+
+Keep the expected digest outside the asset's writable failure domain. Separate buckets are not separate trust boundaries when the same compromised credential can rewrite both.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Lab 1: separate byte matching from publisher trust
+
+The lab computes real Web Crypto digests. Change one instruction in the asset, switch the algorithm, and move the expected value between an independent release record and an edge-controlled sidecar. Watch how “digest match” and “safe to execute” become different decisions.
+
+{% interactive-block id="fundamentals/checksum-security-cdn-calculator" dataFile="/api/content/fundamentals/checksum-security-cdn/data/integrity-boundary-lab.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Publish integrity metadata as part of the release
+
+Treat asset bytes, integrity metadata, and the document that references them as one versioned release. A safe sequence is:
+
+{% process-flow %}
+{% process-step number="1" title="Build immutable bytes" label="Create" %}
+Use a content-hashed filename such as `app.7f3a.js`. Once published, never overwrite that key with new bytes.
+{% /process-step %}
+{% process-step number="2" title="Compute and attest" label="Bind" %}
+Generate SHA-256 or SHA-384 from the exact artifact. Put the URL and digest in authenticated HTML or a signed manifest.
+{% /process-step %}
+{% process-step number="3" title="Distribute before reference" label="Stage" %}
+Upload the asset, warm or verify representative edges, then publish the HTML that references it. Retain the previous release for rollback.
+{% /process-step %}
+{% process-step number="4" title="Verify and observe" label="Enforce" %}
+Block mismatches, record release and edge identifiers, and alert on a rate that distinguishes isolated corruption from a broad deployment fault.
+{% /process-step %}
+{% /process-flow %}
+
+For browser SRI, place the generated token in the script or stylesheet's `integrity` attribute. Use `crossorigin="anonymous"` for a cross-origin asset and configure the asset response so the CORS check succeeds. Browsers accept SRI algorithms from the SHA-2 family: SHA-256, SHA-384, and SHA-512.
+
+### Example 1: generate an SRI token
+
+This dependency-free Python CLI hashes the exact file that will be uploaded. Its Base64 output can be inserted into authenticated HTML.
+
+{% code-block file="/api/content/fundamentals/checksum-security-cdn/code/generate-sri.py" language="python" title="Generate an SRI token from a release asset" /%}
+
+### Example 2: verify a signed release record
+
+This Node.js example signs a manifest in the build role and verifies both its signature and asset digest in the serving role. The generated key pair keeps the example executable; production keeps the private key offline from the CDN and pins or securely distributes the public key.
+
+{% code-block file="/api/content/fundamentals/checksum-security-cdn/code/verify-signed-release.mjs" language="javascript" title="Authenticate the expected digest, then verify bytes" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose algorithms for an adversarial setting
+
+{% metric-strip %}
+{% metric value="256 bits" label="SHA-256 digest" detail="32 raw bytes; suitable general-purpose cryptographic integrity." tone="blue" /%}
+{% metric value="384 bits" label="SHA-384 digest" detail="48 raw bytes; a common SRI choice for browser assets." tone="violet" /%}
+{% metric value="512 bits" label="SHA-512 digest" detail="64 raw bytes; larger metadata without replacing trust." tone="cyan" /%}
+{% metric value="0 identities" label="Hash alone" detail="A digest does not authenticate its publisher." tone="rose" /%}
+{% /metric-strip %}
+
+Algorithm speed is rarely the main CDN design decision because release artifacts are normally hashed once and verified from local bytes. Choose for collision and preimage resistance, interoperability, and lifecycle support:
+
+- Use **SHA-256 or SHA-384** for new security-sensitive integrity checks.
+- Do not use **MD5 or SHA-1** against an attacker. Their collision resistance is broken, even though they can still detect many accidental changes.
+- Use a non-cryptographic hash only for partitioning, deduplication hints, or accidental-error checks where no adversary can choose the input.
+- Store the algorithm with the digest so verifiers can reject unknown or retired algorithms and support controlled migration.
+{% /section-card %}
+
+{% section-card %}
+## Lab 2: trace CDN failures without weakening the boundary
+
+A mismatch can mean an attack, disk corruption, a stale edge, or a deployment ordering bug. The browser should still block first. Switch delivery scenarios, inspect the active path, and select nodes to see which component owns each response.
+
+{% topology-lab dataFile="/api/content/fundamentals/checksum-security-cdn/data/cdn-integrity-topology.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Respond to a production mismatch
+
+Design the failure path before the first incident:
+
+1. **Contain:** prevent the asset from executing or being applied. Do not retry the same unverified mutable URL until it happens to work.
+2. **Scope:** group reports by release ID, asset digest, CDN point of presence, cache status, and time window.
+3. **Compare:** hash the build artifact, origin object, and sampled edge response. Verify the release record's signature or authenticated source separately.
+4. **Recover:** route to a separately verified copy, purge the affected object, or roll back the HTML and asset references as one release.
+5. **Preserve evidence:** retain mismatched bytes, headers, manifest, edge ID, and deployment events before deletion or purge removes the evidence.
+6. **Close the gap:** rotate exposed credentials, repair deployment ordering, and test the exact failure in staging and canary edges.
+
+{% callout variant="warn" %}
+### A fallback needs its own proof
+
+Loading `/fallback.js` after an SRI failure is safe only when that fallback has an independently trusted digest or is covered by the authenticated application release. “Local” is a location, not a security property.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Production review checklist
+
+Before shipping a CDN integrity design, verify that:
+
+- Asset URLs are immutable and a release never overwrites bytes under an existing versioned key.
+- The expected digest is generated from the uploaded artifact, not from a different build workspace output.
+- The asset and its expected digest cannot both be rewritten by one CDN or storage credential.
+- Browser SRI and CORS behavior is tested for the actual cross-origin response headers.
+- A mismatch blocks execution and emits enough release, edge, and asset context to investigate.
+- Rollback restores a complete known-good document and asset set instead of mixing release generations.
+- The previous verified release remains available during cache propagation and incident response.
+- Hash algorithm migration supports overlap without silently accepting retired algorithms forever.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/checksum-security-cdn/quiz/checksum-security-cdn.json" lessonSlug="checksum-security-cdn" title="CDN Integrity Production Review" /%}

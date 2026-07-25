@@ -1,0 +1,218 @@
+---
+registryId: advanced-search-systems
+---
+
+{% section-card tone="intro" %}
+## What is an advanced search system?
+
+An advanced search system turns an imperfect query into a small, ordered set of useful results. It combines exact term matching, semantic similarity, hard filters, learned ranking, and product policy because no single signal handles every query well.
+
+The core invariant is simple: **ranking can reorder only the candidates that retrieval found**. Retrieval must preserve enough recall within a strict time and cost budget; ranking then spends more computation to improve the order. A production design must also keep results fresh, authorized, observable, and available when one stage fails.
+{% /section-card %}
+
+{% section-card %}
+## Separate evidence from decisions
+
+Search has several stages because each one answers a different question. Treating a vector score as the final product decision hides these boundaries.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Lexical retrieval" eyebrow="Which documents contain the evidence?" icon="search" tone="cyan" %}
+An inverted index is strong for names, identifiers, quoted phrases, rare terms, and field-aware matching. BM25 is a common scoring function, but the durable idea is term-based evidence.
+{% /concept-card %}
+{% concept-card title="Semantic retrieval" eyebrow="Which documents express the intent?" icon="database" tone="green" %}
+An embedding model maps queries and documents into vectors. Approximate nearest-neighbor search trades some recall for lower latency and memory than an exact scan.
+{% /concept-card %}
+{% concept-card title="Structured constraints" eyebrow="Which documents are eligible?" icon="shield" tone="amber" %}
+Permissions, tenant, geography, availability, and safety policy are not soft relevance features. Enforce them as fail-closed filters at every path that can return a document.
+{% /concept-card %}
+{% concept-card title="Ranking and policy" eyebrow="Which eligible results should lead?" icon="scale" tone="violet" %}
+Fusion combines retrieval evidence. A reranker adds richer query-document features, while diversity and product rules shape the final page without silently overriding safety constraints.
+{% /concept-card %}
+{% /concept-grid %}
+
+If embeddings, tokenization, or online model serving are unfamiliar, review [NLP Systems Architecture](/ml-systems/nlp-systems-architecture) and [Real-Time ML Inference](/ml-systems/real-time-ml-inference) before tuning an index.
+{% /section-card %}
+
+{% section-card %}
+## Define the search contract before the architecture
+
+A query path is correct only relative to a product contract. Write that contract in user-visible terms before choosing engines or models.
+
+{% process-flow %}
+{% process-step number="1" title="Clarify intent" label="Input" %}
+Define query types, languages, filters, permissions, and the behavior for empty, ambiguous, misspelled, and adversarial input.
+{% /process-step %}
+{% process-step number="2" title="Set budgets" label="Constraints" %}
+Allocate end-to-end latency across understanding, retrieval, feature access, reranking, assembly, and network time, including a deadline for each child call.
+{% /process-step %}
+{% process-step number="3" title="Name quality" label="Evidence" %}
+Choose labeled-query metrics, traffic slices, and product outcomes. Define the candidate depth at which retrieval recall will be judged.
+{% /process-step %}
+{% process-step number="4" title="Choose failure behavior" label="Fallback" %}
+Specify what happens when semantic retrieval, the feature store, or the reranker is late, and which constraints may never be bypassed.
+{% /process-step %}
+{% /process-flow %}
+
+{% metric-strip %}
+{% metric value="Recall@K" label="Candidate coverage" detail="Did retrieval include a relevant result before ranking?" tone="cyan" /%}
+{% metric value="NDCG@K" label="Ordered relevance" detail="Did highly relevant results appear near the top?" tone="violet" /%}
+{% metric value="p95/p99" label="Tail latency" detail="Did slow queries stay inside the user deadline?" tone="amber" /%}
+{% metric value="Lag" label="Index freshness" detail="How old is the newest searchable committed change?" tone="green" /%}
+{% /metric-strip %}
+
+Do not optimize these numbers as one undifferentiated score. A relevance gain does not cancel a permission leak, and a fast response does not make stale inventory correct.
+{% /section-card %}
+
+{% section-card %}
+## Budget retrieval before buying capacity
+
+Start with quantities that have an owner and can be measured:
+
+- **Corpus:** searchable documents, vector dimensions, bytes per dimension, graph bytes, metadata, replicas, and growth rate.
+- **Traffic:** peak queries per second, burst factor, fan-out, concurrency per serving copy, and target utilization.
+- **Per-query work:** retrieval depth, filters, shard count, feature reads, reranker depth, and model cost.
+- **Service objective:** the end-to-end percentile target and the smaller deadline assigned to each stage.
+
+The planning relationship is `required serving copies = ceil(peak QPS x burst headroom / measured QPS per copy)`. Index bytes and copies determine memory; per-query work and queueing determine latency. Replicas can absorb more concurrent queries, but they do not make one expensive query cheaper.
+
+### Change the retrieval budget
+
+Choose a workload and vector representation, then change candidate depth and the latency target. Watch memory, shard copies, and modeled latency move for different reasons.
+
+{% interactive-block id="ml-systems/advanced-search-systems-calculator" dataFile="/api/content/ml-systems/advanced-search-systems/data/retrieval-capacity-lab.json" /%}
+
+{% callout variant="warn" %}
+The lab is a planning model, not a benchmark. Measure QPS per serving copy, recall at the chosen candidate depth, memory residency, filter selectivity, and tail latency on your engine, hardware, and production-like query distribution.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Give every stage a deadline and a fallback
+
+Hybrid retrieval should run independent branches concurrently, preserve their source ranks, and stop waiting when a child deadline expires. Fusion and reranking then operate on whatever valid evidence arrived before their budgets closed.
+
+### Inject a production failure
+
+Switch among a healthy request, a degraded vector index, a failed reranker, and stale indexes. Select any node to inspect its responsibility and compare the correct response.
+
+{% topology-lab dataFile="/api/content/ml-systems/advanced-search-systems/data/search-path-scenarios.json" /%}
+
+The fallback ladder must be deterministic and tested:
+
+1. Return the learned reranker order when all required evidence arrives on time.
+2. Return the fused lexical and semantic order when the reranker misses its deadline.
+3. Return a healthy single-retriever order when the other retriever is unavailable.
+4. Return an explicit empty or unavailable state when authorization, deletion state, or minimum result integrity cannot be proven.
+
+Failing open on permissions is not graceful degradation. Safety and authorization remain hard constraints even when relevance stages are shed.
+{% /section-card %}
+
+{% section-card %}
+## Fuse ranks before applying expensive models
+
+Lexical and vector scores usually have different scales and distributions. Adding their raw scores makes the result sensitive to engine-specific calibration. Reciprocal rank fusion (RRF) instead combines positions: each result receives `1 / (rank constant + source rank)` from every retriever that found it.
+
+RRF is a strong baseline because it is deterministic, handles missing candidates, and does not require the score distributions to match. Its limits are equally important: it does not learn query-specific weights, and it cannot recover a relevant document that both retrievers missed.
+
+{% code-block file="/api/content/ml-systems/advanced-search-systems/code/hybrid-retrieval.py" language="python" title="Dependency-free lexical, semantic, and reciprocal-rank fusion" /%}
+
+After fusion, rerank only a bounded set. Rich features may include exact-term evidence, semantic similarity, freshness, popularity, personalization, document quality, and query-document interactions. Version every feature and model used in a response so an offline replay can reconstruct the decision.
+{% /section-card %}
+
+{% section-card %}
+## Keep indexing reproducible and freshness visible
+
+Search is a derived view of authoritative data. A safe indexing pipeline can replay changes, produce matching lexical and vector versions, and prove when a deletion or permission update became searchable.
+
+{% system-flow title="One versioned indexing path" caption="Publish a document version only after every required representation is ready and validated." %}
+{% system-node title="Capture changes" eyebrow="Source of truth" icon="database" tone="blue" %}
+Read a durable change log or outbox with stable document IDs, versions, tenant boundaries, and tombstones.
+{% /system-node %}
+{% system-node title="Transform once" eyebrow="Deterministic build" icon="braces" tone="violet" %}
+Normalize fields, chunk text, compute embeddings, and record the transformer and model versions.
+{% /system-node %}
+{% system-node title="Write shadow indexes" eyebrow="Atomic generation" icon="layers" tone="amber" %}
+Build lexical and vector artifacts under a generation ID instead of mutating an untracked mixture of versions.
+{% /system-node %}
+{% system-node title="Validate and publish" eyebrow="Serving boundary" icon="check" tone="green" %}
+Check counts, sampled documents, deletion coverage, freshness, and retrieval quality before switching the serving alias.
+{% /system-node %}
+{% /system-flow %}
+
+Track at least three freshness clocks:
+
+- **Source lag:** time from an authoritative commit to ingestion.
+- **representation lag:** time from ingestion to lexical fields and embeddings being ready.
+- **serving lag:** time from a complete index generation to every serving replica using it.
+
+Use idempotent writes keyed by document version. Keep tombstones long enough for lagging workers and replay jobs to observe them, and make permission or deletion checks fail closed when index generations disagree.
+{% /section-card %}
+
+{% section-card %}
+## Gate quality, latency, freshness, and safety together
+
+Offline evaluation answers whether a candidate is worth exposing. Online evaluation answers whether it helps real users under production traffic. Neither layer is sufficient alone.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Retrieval set" eyebrow="Before ranking" icon="database" tone="cyan" %}
+Measure recall at the exact candidate depth sent to fusion and reranking. Slice by head and tail queries, locale, filters, new content, and zero-result history.
+{% /concept-card %}
+{% concept-card title="Ranking set" eyebrow="Ordered judgments" icon="scale" tone="violet" %}
+Use graded judgments for metrics such as NDCG and inspect pairwise errors. Keep judgment policy and assessor agreement versioned with the dataset.
+{% /concept-card %}
+{% concept-card title="Online outcomes" eyebrow="User task" icon="users" tone="green" %}
+Measure reformulation, successful click or conversion, abandonment, long click, and task completion where they represent the product goal.
+{% /concept-card %}
+{% concept-card title="Operational guardrails" eyebrow="Release boundary" icon="shield" tone="rose" %}
+Reject regressions in tail latency, timeout rate, zero-result rate, freshness, authorization, deletion handling, or infrastructure cost beyond explicit limits.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/ml-systems/advanced-search-systems/code/search-release-gate.py" language="python" title="A fail-closed release gate over independent search metrics" /%}
+
+Clicks are biased labels: users can click only what the old ranker exposed, position changes click probability, and attractive snippets can hide poor task completion. Use randomized exploration or debiasing where appropriate, and keep human judgments for critical and low-traffic slices.
+{% /section-card %}
+
+{% section-card %}
+## Diagnose symptoms at the owning stage
+
+Production incidents become easier to reason about when every symptom maps to a stage, a measurement, and a safe first action.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Relevant item never appears" eyebrow="Retrieval failure" icon="search" tone="cyan" %}
+Inspect recall by retriever, filter selectivity, tokenization, embedding versions, ANN parameters, and candidate depth. Reranker tuning cannot repair a missing candidate.
+{% /concept-card %}
+{% concept-card title="Good candidates are ordered badly" eyebrow="Ranking failure" icon="scale" tone="violet" %}
+Replay source ranks and feature values, check model and feature versions, then compare the fused fallback with the learned order on the affected slice.
+{% /concept-card %}
+{% concept-card title="Only tail latency regresses" eyebrow="Capacity or fan-out" icon="timer" tone="amber" %}
+Break down child deadlines, queue time, shard fan-out, cold segments, feature calls, reranker batches, and fallback rate instead of relying on average latency.
+{% /concept-card %}
+{% concept-card title="Fast results are stale or forbidden" eyebrow="Indexing failure" icon="warning" tone="rose" %}
+Inspect source, representation, and serving lag plus generation skew. Stop serving results whose authorization or deletion state cannot be established.
+{% /concept-card %}
+{% /concept-grid %}
+
+Log one traceable record per query with the normalized and original query, filters, tenant, experiment, index generation, embedding and reranker versions, source candidate ranks, stage timings, fallback reason, returned document IDs, and exposure ID. Sample payloads carefully, but keep aggregate counters for every request.
+{% /section-card %}
+
+{% section-card %}
+## Make architecture trade-offs explicit
+
+- **One engine or specialized services:** one engine simplifies operations and filtering; specialized lexical, vector, and ranking services allow independent tuning but add network, consistency, and ownership boundaries.
+- **Pre-filter or post-filter:** pre-filtering protects eligibility and saves work but can reduce ANN recall when the eligible set is sparse; post-filtering may need deeper retrieval and must never be the only authorization check.
+- **Larger candidates or a stronger retriever:** larger sets can improve recall but increase fan-out and reranker cost; better embeddings or routing may improve recall without linear candidate growth.
+- **Fresh updates or efficient segments:** aggressive refresh improves visibility but fragments indexes and consumes merge capacity; generation-based publishing improves reproducibility at the cost of controlled lag.
+- **Personalization or shared caching:** personalized features can improve ordering while lowering cache reuse and increasing privacy obligations; preserve a non-personalized fallback.
+
+### Production readiness checklist
+
+- Define candidate depth, relevance datasets, traffic slices, and release thresholds before tuning.
+- Allocate child deadlines and load-test every fallback, including partial retriever responses.
+- Version indexes, embeddings, features, rerankers, experiments, and judgment sets.
+- Make permissions, tombstones, and tenant isolation fail closed across all serving paths.
+- Monitor recall proxies, NDCG on judged traffic, task outcomes, p95/p99 latency, timeout rate, zero-result rate, fallback rate, and all three freshness clocks.
+- Rehearse rollback for index generations and model versions without requiring a full reindex.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/advanced-search-systems/quiz/advanced-search-systems.json" lessonSlug="advanced-search-systems" title="Advanced Search Systems Production Check" /%}

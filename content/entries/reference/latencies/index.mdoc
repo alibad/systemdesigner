@@ -1,0 +1,168 @@
+---
+registryId: latencies
+---
+
+{% section-card tone="intro" %}
+## What is latency?
+
+**Latency is the time an operation takes from the caller's start until the caller can use its result.** A person experiences the full request: connection setup, network travel, queueing, application work, storage, response transfer, and browser work. A service may report a fast average while some users still wait long enough to abandon the task or hit a timeout.
+
+Latency matters because it constrains what a product can promise. A typeahead result, payment confirmation, and background report have different acceptable waits. The core invariant is: **end-to-end user latency is determined by the critical path and its percentile distribution, not by a list of component averages.** The slowest required chain of dependent work sets the result; a p95 or p99 target asks about the slow users, not the typical one.
+
+This page uses order-of-magnitude ranges for planning. They are not universal constants: hardware generation, cache locality, queue depth, payload size, congestion, region pair, and measurement method can move a number substantially. Replace every planning estimate with measurements from the actual request and user cohort.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with orders of magnitude, not false precision
+
+Local work, storage, and network travel live on very different time scales. That gap helps you reject designs that cannot meet a target before tuning code.
+
+{% metric-strip %}
+{% metric value="sub-10 ns" label="CPU cache" detail="A nearby cache hit can be nanoseconds; cache level and contention matter." tone="blue" /%}
+{% metric value="50-150 ns" label="DRAM access" detail="Locality, NUMA placement, and memory pressure change the observed range." tone="cyan" /%}
+{% metric value="50-500 microseconds" label="NVMe random read" detail="Queue depth, device, filesystem, and read size matter as much as the media." tone="violet" /%}
+{% metric value="20-250+ ms" label="Wide-area round trip" detail="Distance, routing, congestion, and mobile access dominate this range." tone="rose" /%}
+{% /metric-strip %}
+
+### Local CPU and memory work
+
+- **CPU cache:** A value already near the executing core can be available in a few nanoseconds. A cache miss is still local, but it can force a much slower lookup in another cache or memory.
+- **Main memory:** Tens to hundreds of nanoseconds is a useful planning range for a DRAM access. Pointer-heavy code, remote NUMA memory, and contention can turn a simple-looking operation into many accesses.
+- **Synchronization:** An uncontended lock can be cheap; lock contention is waiting, not just instruction cost. Measure lock wait time separately from useful CPU time.
+
+### Storage and network work
+
+- **Storage:** A modern NVMe read is often measured in tens or hundreds of microseconds, while a rotational seek is commonly milliseconds. The tail also changes with queue depth, page cache state, and concurrent writers.
+- **Same-site networking:** A well-managed same-zone or same-datacenter round trip can be sub-millisecond to a few milliseconds, but load balancers, TLS setup, and service hops add work around the wire.
+- **Regional and long-haul networking:** A cross-region request can consume tens of milliseconds; an intercontinental path can consume hundreds. No CPU optimization can remove the distance floor, so placement and caching become architectural choices.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace the critical path before adding component numbers
+
+A **critical path** is the longest chain of work that must finish for this user response. Work that is optional or asynchronous cannot improve the response by becoming faster, because it was never required for the response in the first place.
+
+### Serial work adds waiting
+
+If a gateway calls service A and waits before calling service B, both waits sit on the path. A planning estimate is `gateway + A + B + response`. Remove a required call, shorten it, or move a safely optional activity out of the synchronous path to change that sum.
+
+### Parallel work waits for the slowest required branch
+
+If the gateway starts A and B together and needs both answers, the planning shape is `gateway + max(A, B) + response`. Parallelism can remove a serial wait, but it also introduces fanout: the request now has more chances to meet a slow dependency. It consumes more concurrency and does not make either downstream service intrinsically faster.
+
+{% callout variant="info" %}
+Adding component p95 values is a useful conservative planning exercise, not a mathematical definition of end-to-end p95. Percentiles do not compose by averaging, and dependencies can be correlated during an incident. Use trace-derived distributions and cohort-specific histograms to validate the real end-to-end percentile.
+{% /callout %}
+
+## Lab 1: compose a p95 request budget
+
+Change the cache outcome, required stages, execution shape, and per-stage p95 estimates. The lab shows the modeled critical path, its dominant contributor, the remaining SLO budget, and an explicit warning when the plan has no room for normal variation.
+
+{% interactive-block id="reference/latencies-request-path-budget-lab" dataFile="/api/content/reference/latencies/data/request-path-budget-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Queueing turns busy systems into tail-latency systems
+
+A queue forms when work arrives faster than a bounded resource can start it. At modest utilization, a new request can often start quickly. Near saturation, a small burst or one slow request leaves later work waiting. That wait is why an otherwise fast service can have a much worse p95 or p99 under load.
+
+- **Service time** is time actively using the resource: CPU, a connection, a worker, or a database slot.
+- **Queue delay** is time waiting to acquire that resource. It is often the largest and least visible term in an overloaded request.
+- **Utilization** is the share of a resource's capacity being used. A fleet average can hide a full hot shard, connection pool, or partition.
+- **Tail latency** describes the slow end of the distribution. `p99 = 300 ms` means 1% of measured requests took longer than 300 ms in the selected cohort and window.
+
+Fanout changes the consequence. When one response needs five downstream answers, its latency follows the slowest one. A retry or hedge can improve the chance of an answer before a deadline, but it also creates extra work. During saturation, that extra work can worsen the queue that triggered it.
+
+## Lab 2: see queue pressure amplify a fanout tail
+
+Adjust utilization, service time, fanout, target percentile, replay behavior, and timeout policy. This simplified model exposes queue delay, the downstream percentile needed to meet the request percentile, deadline success probability, extra attempted work, and the mitigation that fits the pressure.
+
+{% interactive-block id="reference/latencies-queue-tail-consequence-lab" dataFile="/api/content/reference/latencies/data/queue-tail-consequence-model.json" /%}
+
+{% callout variant="warn" %}
+Do not use a longer timeout as the first response to saturation. It can make the dashboard show fewer timeouts while requests, connections, and memory wait longer. Set a bounded deadline from the caller's remaining budget, then reduce offered work, add measured capacity, narrow the fanout, or return an approved degraded result.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Budget cross-region paths as a product decision
+
+Cross-region calls can dominate a request even when every service is healthy. A cache near the user, regional read replica, local write acceptance, or asynchronous replication can reduce a path's distance cost. Each option changes the data contract.
+
+1. **Serve safe cached or replicated reads locally:** This can remove a long round trip, but the product must state what staleness is acceptable and how invalidation works.
+2. **Keep a strongly coordinated write on one path:** This can preserve an ordering or authorization invariant, but the user pays the location of the authoritative decision.
+3. **Accept locally, reconcile asynchronously:** This can improve perceived response time, but it needs an idempotency key, durable intent, status visibility, and a defined conflict or failure outcome.
+
+For a global audience, measure real-user latency by country, network type, cache state, and client version. A fast server-side trace does not prove that a mobile user received and rendered the result quickly.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Carry one deadline through the request
+
+A latency budget assigns the user-facing SLO across required work and preserves time for a useful fallback or explicit failure. The caller owns an end-to-end deadline; every downstream call receives only what remains. Independent 500 ms timeouts at each hop can create a multi-second request that was already too late for the user.
+
+{% process-flow %}
+{% process-step number="1" title="Set the user target" label="SLO" %}
+Choose a cohort and percentile, such as mobile checkout p95 under 500 ms. Reserve time for transfer, rendering, and a safe error path.
+{% /process-step %}
+{% process-step number="2" title="Trace required work" label="Path" %}
+Separate serial dependencies, parallel branches, cache hit and miss paths, queues, and optional side effects. The longest required chain is the starting budget.
+{% /process-step %}
+{% process-step number="3" title="Pass the remaining time" label="Deadline" %}
+Before each call, calculate the caller's time left and cap the dependency below it. Stop work that cannot produce a useful answer in time.
+{% /process-step %}
+{% process-step number="4" title="Choose the bounded outcome" label="Fallback" %}
+Return an approved cached, partial, deferred, or unavailable result. Never invent a fallback for a correctness-critical decision without a product rule.
+{% /process-step %}
+{% /process-flow %}
+
+### Example: bound a dependency by the caller's remaining time
+
+{% code-block file="/api/content/reference/latencies/code/deadline-aware-fetch.ts" language="ts" title="Pass the remaining latency budget to a downstream read" /%}
+
+The exact client library is not important. The contract is: use the original deadline, leave a small reserve for the response, cancel work that can no longer help, and record whether the caller observed a timeout while the server completed work.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Measure distributions, not only averages
+
+Start at the user boundary and keep the request identity through the path. A useful latency investigation compares the same request cohort at each boundary:
+
+- **Client and edge:** time to first usable result, full response completion, abandonment, network type, region, and cache status.
+- **Application and dependencies:** trace spans for queue wait, connection wait, execution, remote calls, retries, and cancellation. Include the remaining deadline at each call.
+- **Resources:** queue age and depth, pool saturation, CPU runnable time, storage tail latency, lock wait, packet loss, retransmissions, and bandwidth use.
+- **Outcome:** success, explicit fallback, timeout, cancellation, and duplicate suppression. A server completion after the user deadline is not a user success.
+
+Report p50 for the common experience and p95/p99 for the tail, with counts and a fixed time window. Segment by route, region, cache hit or miss, payload size, and dependency outcome. An overall percentile can hide a route that is failing a smaller but important customer cohort.
+{% /section-card %}
+
+{% section-card %}
+## Optimize the largest measured term and name the trade-off
+
+Prioritize architectural gaps before micro-optimizations. The correct priority depends on the measured critical path, not a generic list of tricks.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Remove required remote work" eyebrow="Path design" icon="route" tone="blue" %}
+Use a safe cache, co-locate a read, or move non-critical fanout off the response path. Trade-off: freshness, consistency, and failure visibility must remain explicit.
+{% /concept-card %}
+{% concept-card title="Protect a saturated resource" eyebrow="Queue control" icon="gauge" tone="amber" %}
+Bound queues and pools, shed low-priority work, batch where it preserves the contract, or add capacity with headroom. Trade-off: rejection, fairness, cost, or stale work.
+{% /concept-card %}
+{% concept-card title="Make the expensive operation selective" eyebrow="Execution" icon="database" tone="violet" %}
+Fix a measured query plan, index, payload, lock, or serialization hot spot. Trade-off: write amplification, memory use, storage cost, or code complexity.
+{% /concept-card %}
+{% /concept-grid %}
+
+Micro-optimizing a memory copy is valuable only after a trace shows it matters to the target cohort. It cannot recover a 150 ms cross-region round trip, an unbounded queue, or a 500 ms database miss. Conversely, adding a cache or replica is not automatically a win when it violates a freshness, authorization, or ordering requirement.
+{% /section-card %}
+
+{% section-card %}
+## Sources and further reading
+
+- [Latency Numbers Every Programmer Should Know](https://colin-scott.github.io/personal_website/research/latency.html) collects representative, explicitly approximate hardware and network figures.
+- [The Tail at Scale](https://research.google/pubs/the-tail-at-scale/) explains why large fanout systems must treat tail latency as a first-class design concern.
+- [Google SRE Book: Addressing Cascading Failures](https://sre.google/sre-book/addressing-cascading-failures/) covers overload, retries, hedging, and bounded work in distributed systems.
+- [Google SRE Book: Service Level Objectives](https://sre.google/sre-book/service-level-objectives/) explains percentile-based service targets and error budgets.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/latencies/quiz/latency-decisions.json" lessonSlug="latencies" title="Latency Decisions Check" /%}

@@ -1,0 +1,195 @@
+---
+registryId: database-sharding
+---
+
+{% section-card tone="intro" %}
+## What is database sharding?
+
+**Database sharding** splits one logical dataset across multiple database owners called shards. Each shard stores only part of the rows and serves the reads and writes for that part. The application still presents one product, but a router uses a **shard key** such as `tenant_id` to find the current owner.
+
+In plain language: sharding gives a database more write, storage, and connection capacity by dividing ownership. It also turns one database operation into a distributed-systems decision. Use it only after a measured limit cannot be solved more simply with query tuning, a larger primary, caching, archiving, or read replicas.
+
+The core invariant is: **for every logical partition and routing epoch, the system can name one authoritative owner, and every acknowledged write remains reachable after routing changes**. Distribution is useful only if routing, migration, and recovery preserve that promise.
+
+{% callout variant="info" %}
+Sharding and replication solve different problems. Sharding divides different data among owners; replication keeps extra copies of the same data for reads or failover. A production shard normally has replicas of its own.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Route one request to one owner
+
+A shard key is a stable field used to choose the logical partition. The router may compute the owner with a range or hash, or look it up in a directory. A request that includes the key can usually reach one shard; a request without it may fan out to every shard and merge the results.
+
+{% system-flow title="Shard-aware request path" caption="The routing decision belongs before query execution, and its ownership metadata must be versioned during migration." %}
+{% system-node title="Application request" eyebrow="Carries the key" icon="search" tone="blue" %}
+Send `tenant_id` with a tenant-scoped read or write instead of asking the storage layer to discover it.
+{% /system-node %}
+{% system-node title="Shard router" eyebrow="Computes an owner" icon="route" tone="cyan" %}
+Map the key through a range, hash ring, virtual bucket, or versioned directory entry.
+{% /system-node %}
+{% system-node title="Owning shard" eyebrow="Executes locally" icon="database" tone="violet" %}
+Apply indexes, constraints, transactions, and replication inside the selected partition.
+{% /system-node %}
+{% system-node title="Result or merge" eyebrow="Returns evidence" icon="repeat" tone="amber" %}
+Return one local result, or explicitly bound and observe the rare query that fans out.
+{% /system-node %}
+{% /system-flow %}
+
+Three terms keep the design precise:
+
+- A **logical shard** or virtual bucket is the smallest unit the router can assign to an owner.
+- A **physical shard** is the database server or replicated database group that hosts many logical shards.
+- A **routing epoch** is a monotonically increasing ownership version that helps stale routers and old owners detect an invalid route.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: expose distribution and hotspot trade-offs
+
+Choose a shard key for a four-shard order workload. Increase total writes or the largest tenant's traffic share. The model updates per-shard load, capacity pressure, tenant-query fanout, and the consequence of the selected key.
+
+{% interactive-block id="reference/database-sharding-key-distribution-lab" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Select a key with four tests
+
+No shard key is universally best. A useful candidate balances distribution against locality while remaining stable enough to support years of growth.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Cardinality" eyebrow="Enough buckets" icon="key" tone="blue" %}
+The key needs enough distinct values to spread data. A boolean, plan tier, or small region list cannot use hundreds of shards evenly.
+{% /concept-card %}
+{% concept-card title="Access locality" eyebrow="One request, one owner" icon="route" tone="green" %}
+Frequent reads and writes should carry the key and keep facts that change together on one shard whenever correctness requires it.
+{% /concept-card %}
+{% concept-card title="Skew resistance" eyebrow="Load, not row count" icon="gauge" tone="amber" %}
+Measure requests, bytes, CPU, lock time, and storage by key. Equal row counts can hide one celebrity, tenant, or current time range receiving most traffic.
+{% /concept-card %}
+{% concept-card title="Stability" eyebrow="Ownership changes rarely" icon="shield" tone="violet" %}
+Prefer an immutable key. Changing a customer's region or plan should not silently require moving every record they own.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Match the placement strategy to the query
+
+- **Range sharding** keeps adjacent values together, so bounded range scans are direct. Monotonic keys such as timestamps can send all current writes to the newest range.
+- **Hash sharding** spreads high-cardinality keys evenly and works well for point lookups. It destroys natural ordering, so a range query may contact every shard.
+- **Directory sharding** stores an explicit key-to-owner mapping. It can move a hot tenant independently, but the directory needs caching, replication, versioning, and a defined outage behavior.
+- **Consistent hashing** reduces key movement when the owner set changes. Virtual nodes improve balance, but the ring does not remove hot keys or cross-shard transactions.
+
+{% callout variant="warn" %}
+Do not choose a key from data distribution alone. `hash(order_id)` may look perfectly balanced while every tenant dashboard fans out to all shards. Record the top read, write, transaction, range, and administrative queries before committing to the key.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Turn averages into a capacity envelope
+
+Suppose an order service peaks at `120,000` writes per second across four shards. A perfectly balanced average is `30,000` writes per second per shard. If one shard receives `48%` of traffic, it instead receives `57,600` writes per second. That shard can saturate while the fleet average still looks healthy.
+
+{% metric-strip %}
+{% metric value="120k" label="Peak writes/s" detail="State the burst window and retry assumptions" tone="blue" /%}
+{% metric value="30k" label="Balanced writes/shard" detail="120,000 divided by four owners" tone="green" /%}
+{% metric value="57.6k" label="Hot-shard writes/s" detail="48% of the same workload" tone="rose" /%}
+{% metric value="< 70%" label="Target steady use" detail="Reserve room for skew, failover, and migration" tone="amber" /%}
+{% /metric-strip %}
+
+Capacity planning must include more than requests per second:
+
+- Measure p95 and p99 latency, CPU, IOPS, connection and lock waits, replication lag, storage growth, and the largest logical shard.
+- Size for one physical owner being unavailable. Reassigning its logical shards must not overload every survivor.
+- Reserve bandwidth and IOPS for backup, compaction, index creation, replica catch-up, and live migration.
+- Track both the hottest key and the hottest shard. Splitting a shard does not fix one indivisible tenant that exceeds a server's capacity.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: rebalance ownership without losing writes
+
+Switch scenarios to trace normal routing, snapshot copy and catch-up, cutover, a source failure, and a stale router. The highlighted path and component state show why copying rows is only one part of a safe migration.
+
+{% topology-lab dataFile="/api/content/reference/database-sharding/data/rebalancing-failure-topology.json" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Migrate a logical shard as a resumable protocol
+
+Moving ownership must preserve writes that arrive while old rows are being copied. A common online sequence uses a snapshot plus a change stream, but the exact database mechanism can be change-data capture, an ordered log, or application-owned dual writes.
+
+{% process-flow %}
+{% process-step number="1" title="Prepare and checkpoint" label="Source owns" %}
+Create the target schema, record the source ownership epoch, choose a snapshot position, and make every copy batch idempotent and restartable.
+{% /process-step %}
+{% process-step number="2" title="Copy and catch up" label="No write gap" %}
+Backfill the logical shard, including tombstones, while replaying ordered changes after the snapshot position. Keep serving from the source.
+{% /process-step %}
+{% process-step number="3" title="Verify and cut over" label="Advance epoch" %}
+Compare counts, checksums, sampled records, and lag. Fence old writes, atomically publish the new owner and epoch, then refresh routers.
+{% /process-step %}
+{% process-step number="4" title="Observe and retire" label="Rollback window" %}
+Watch errors, stale routes, lag, and invariant checks. Keep the source read-only until the rollback window closes, then delete it through an audited job.
+{% /process-step %}
+{% /process-flow %}
+
+The migration protocol must define these failure decisions:
+
+- If a copy worker restarts, resume from a durable checkpoint without duplicating effects.
+- If the source fails before verification, do not promote an incomplete target; recover the source owner or its replica and continue.
+- If a stale router sends a write to the old owner, the old owner rejects the newer epoch or returns a moved response instead of accepting a split-brain write.
+- If verification disagrees, stop the cutover, retain evidence, and reconcile before changing ownership.
+- If a delete occurred during the copy, replay its tombstone so the target cannot resurrect the row.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Keep correctness local, then make fanout explicit
+
+The safest transaction boundary is usually one shard. Co-locate records that must change atomically, such as an order and its line items, under the same shard key. A database transaction can then protect the invariant without coordinating independent owners.
+
+Cross-shard work needs an explicit contract:
+
+1. Use an idempotent workflow or saga when each shard can commit a local step and compensate or reconcile later.
+2. Use two-phase commit only when its blocking, coordinator, and latency costs are acceptable and tested under failure.
+3. Build derived read models for global search, analytics, and leaderboards instead of scanning every primary shard on each user request.
+4. Bound unavoidable scatter-gather with deadlines, concurrency limits, partial-result semantics, and a maximum shard count.
+
+Global uniqueness also changes. A per-shard unique index can protect `(tenant_id, email)` when tenant-scoped uniqueness is enough. A globally unique username may need a dedicated ownership service, a globally coordinated store, or an allocation workflow before the sharded write.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate skew, routing, and recovery
+
+A sharded database is a fleet with moving ownership. Operators need to answer which shard owns a key, why a request reached it, and whether the owner is healthy without reconstructing the answer during an incident.
+
+### Monitor the data plane
+
+- Per-shard and per-key throughput, bytes, latency, errors, queue depth, CPU, IOPS, connections, locks, storage, and replication lag.
+- Fanout rate and fanout width by query type, including timeouts and partial results.
+- Imbalance ratios such as maximum-to-average QPS, storage, and logical-shard size.
+- Invariant violations, duplicate or missing migration events, and stale-epoch rejections.
+
+### Monitor the control plane
+
+- Directory availability, cache age, ownership epoch, and router refresh failures.
+- Migration checkpoint age, copy rate, change-stream lag, verification mismatches, and time spent in each state.
+- Logical-shard placement, spare capacity, replica health, backup age, and restore evidence per owner.
+- Audit history for every move, cutover, rollback, and deletion.
+
+Rehearse a hot-key response, physical-shard loss, directory outage, aborted migration, and point-in-time restore. A backup that has never been restored through the router is not yet recovery evidence.
+{% /section-card %}
+
+{% section-card %}
+## Know when not to shard
+
+Sharding is justified when a measured primary limit remains after simpler options and the workload has an ownership key that keeps important operations local. It is a poor default when query patterns are still changing, global joins dominate, one hot entity is indivisible, or the team cannot operate versioned routing and online migration.
+
+Before sharding, test these alternatives:
+
+- Scale the primary vertically and fix query plans, indexes, connection pooling, and oversized transactions.
+- Add read replicas for lag-tolerant reads and caches for reconstructable hot data.
+- Archive cold data or partition one database for maintenance and pruning without creating independent owners.
+- Separate a measured workload, such as analytics or search, through an asynchronous derived store.
+
+The practical default is to shard only the smallest dataset and request path that need independent ownership. Keep the router contract explicit, use many movable logical shards per physical owner, and preserve a tested route back during every change. Review [database fundamentals](/fundamentals/database-fundamentals) before this lesson when transactions, replicas, or indexes are unfamiliar; continue to [consistent hashing](/reference/consistent-hashing) for placement mechanics.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/database-sharding/quiz/database-sharding-operations.json" lessonSlug="database-sharding" title="Database Sharding Decision Review" /%}

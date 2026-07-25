@@ -1,0 +1,329 @@
+---
+registryId: streaming
+---
+
+{% section-card tone="intro" %}
+## What is stream processing?
+
+**Stream processing continuously turns an unbounded sequence of events into useful
+results while the events are still arriving.** A processor reads durable event records,
+updates calculations or keyed state, and emits alerts, projections, or new events
+without waiting for a complete dataset.
+
+It matters when freshness changes the decision: blocking a suspicious payment,
+updating inventory, detecting an equipment fault, or refreshing a live recommendation.
+If scheduled data movement is unfamiliar, review [Data Pipelines](/ml-systems/data-pipelines)
+before continuing.
+
+The core invariant is: **accepted events must update bounded, recoverable state according
+to an explicit time and delivery contract, even when arrival is late, duplicated, bursty,
+or interrupted by failure.** Low latency without that invariant only produces wrong
+answers faster.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Events keep arriving" eyebrow="Input" icon="activity" tone="blue" %}
+The input has no natural end. Retention, replay position, and admission policy replace
+the idea of one complete file.
+{% /concept-card %}
+{% concept-card title="Keys own state" eyebrow="Partition" icon="database" tone="violet" %}
+Events with the same key reach the same logical owner so ordering and state updates can
+be reasoned about locally.
+{% /concept-card %}
+{% concept-card title="Time is declared" eyebrow="Semantics" icon="clock" tone="amber" %}
+Event time, processing time, windows, watermarks, and allowed lateness define when a
+result is complete enough to publish.
+{% /concept-card %}
+{% concept-card title="Recovery replays work" eyebrow="Failure" icon="shield" tone="green" %}
+Checkpoints restore operator state and source offsets; idempotent or transactional sinks
+prevent replay from becoming a duplicate business effect.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Decide whether the workload needs a stream
+
+Batch and streaming are execution models, not competing storage formats. Both can read
+the same durable events. Choose the model from the decision deadline and correctness
+contract.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Scheduled batch" eyebrow="Complete input" icon="database" tone="blue" %}
+Process a bounded dataset after a schedule or trigger. This is a strong fit for daily
+reconciliation, model training, and historical recomputation.
+{% /concept-card %}
+{% concept-card title="Continuous stream" eyebrow="Fresh result" icon="activity" tone="green" %}
+Update results as events arrive. This is a strong fit when seconds or minutes of delay
+change user experience, risk, or operational response.
+{% /concept-card %}
+{% concept-card title="Stream plus batch" eyebrow="Reconcile" icon="workflow" tone="violet" %}
+Serve a fresh streaming view, then compare it with a periodic authoritative batch. The
+second path detects drift and repairs long-lived projections.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Ask four questions first
+
+1. **Freshness:** how old may a result be before it loses value?
+2. **Completeness:** how much late data may be omitted from an initial answer, and can
+   the answer be revised?
+3. **Ordering:** which events require order: all events, one customer, one device, or
+   one transaction?
+4. **Recovery:** after replay, must the sink contain one logical effect, or are
+   duplicates acceptable and removable later?
+
+Do not add a streaming platform merely because events arrive through a queue. If a
+five-minute job satisfies the deadline and simplifies recovery, the batch design may be
+the better system.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Trace the production data path
+
+The durable log and the processor have different responsibilities. The log preserves
+ordered partitions and replay positions. The processor owns business transformations,
+state, timers, and output commits.
+
+{% system-flow title="A recoverable streaming path" caption="Durability and replay surround the live computation instead of depending on one in-memory worker." %}
+{% system-node title="Event producers" eyebrow="Create" icon="activity" tone="blue" %}
+Services and devices emit an immutable event ID, event-time timestamp, partition key,
+schema version, and bounded payload.
+{% /system-node %}
+{% system-node title="Durable log" eyebrow="Retain" icon="database" tone="violet" %}
+Partitions preserve per-key order, absorb bursts, and retain enough history for replay,
+recovery, and controlled backfills.
+{% /system-node %}
+{% system-node title="Stream operators" eyebrow="Compute" icon="workflow" tone="cyan" %}
+Stateless transforms, keyed aggregations, joins, and timers consume partitions in
+parallel while exposing lag and backpressure.
+{% /system-node %}
+{% system-node title="State and checkpoints" eyebrow="Recover" icon="shield" tone="amber" %}
+Durable snapshots bind operator state to source positions so a replacement worker can
+resume from one consistent point.
+{% /system-node %}
+{% system-node title="Serving sinks" eyebrow="Publish" icon="gauge" tone="green" %}
+Databases, caches, alerting systems, and downstream topics receive idempotent,
+transactional, or explicitly deduplicated effects.
+{% /system-node %}
+{% /system-flow %}
+
+### Partition by the state that must stay together
+
+- A partition key should colocate the events needed for one state update or ordering
+  decision.
+- High-cardinality keys usually distribute load better, but a celebrity, tenant, or
+  shared device can still create a hot partition.
+- More consumers than active partitions do not add useful parallelism; the extra
+  consumers wait idle.
+- Repartitioning enables a new key but adds serialization, network, another failure
+  boundary, and another ordering scope.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size throughput, lag, and recovery together
+
+A healthy steady state requires processing capacity above sustained input. A
+recoverable system needs additional headroom to drain the backlog created during an
+outage.
+
+{% metric-strip %}
+{% metric label="Ingress" value="events/s x bytes" detail="Include protocol, schema, replication, and compression assumptions" tone="blue" /%}
+{% metric label="Useful workers" value="min(consumers, partitions)" detail="One partition has one active consumer in a consumer group" tone="violet" /%}
+{% metric label="Lag growth" value="max(0, input - capacity)" detail="Positive growth means the system never catches up" tone="rose" /%}
+{% metric label="Recovery" value="backlog / spare capacity" detail="No spare capacity means outage backlog has no finite drain time" tone="green" /%}
+{% /metric-strip %}
+
+Suppose input is `120,000 events/s`, each event is `700 bytes`, and ten useful consumers
+can each sustain `15,000 events/s`. The live path ingests about `84 MB/s`, provides
+`150,000 events/s` of capacity, and runs at `80%` utilization. A 60-second processor
+outage creates `7.2 million` queued events. With `30,000 events/s` of spare capacity,
+catch-up takes another `240 seconds` after service returns.
+
+Use the lab to challenge the steady state with bursts, limited partitions, and an
+outage. Watch how one sizing decision changes queue growth, idle workers, retained
+window bytes, and recovery time.
+
+{% interactive-block id="technology/streaming-performance" dataFile="/api/content/technology/streaming/data/capacity-envelope.json" /%}
+
+{% code-block file="/api/content/technology/streaming/code/estimate-stream-capacity.py" language="python" title="Estimate stream capacity, lag growth, and recovery" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make event time explicit
+
+An event has several clocks. **Event time** records when the fact occurred at the
+source. **Ingestion time** records when the platform accepted it. **Processing time**
+records when an operator handled it. Network delay, offline clients, retries, and clock
+skew make these timestamps diverge.
+
+{% process-flow %}
+{% process-step number="1" title="Stamp the event" label="At the source" %}
+Record event time, a stable event ID, partition key, and schema version before transport
+delay obscures the original fact.
+{% /process-step %}
+{% process-step number="2" title="Assign key and window" label="At the processor" %}
+Route the event to its keyed state and place it into the event-time window defined by
+the business question.
+{% /process-step %}
+{% process-step number="3" title="Advance the watermark" label="Observe progress" %}
+Estimate how far event time has progressed. A watermark is a completeness claim, not a
+promise that no older event can arrive.
+{% /process-step %}
+{% process-step number="4" title="Publish or revise" label="At the sink" %}
+Close the initial result, then drop, side-output, or use late events to revise it
+according to the declared contract.
+{% /process-step %}
+{% /process-flow %}
+
+### Match the window to the question
+
+- **Tumbling window:** fixed, non-overlapping periods such as orders per minute.
+- **Sliding window:** overlapping periods such as failures in the last ten minutes,
+  recalculated every minute.
+- **Session window:** activity separated by an inactivity gap, such as one user visit.
+- **Global or custom window:** application-defined grouping that needs explicit
+  triggers and cleanup to remain bounded.
+
+Allowed lateness trades decision speed for completeness. A longer delay accepts more
+stragglers but keeps state and the user waiting longer. A shorter delay publishes
+quickly but requires a late-event path and possibly revised results.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Combine time and delivery into one correctness contract
+
+Transport guarantees describe what the runtime does with records. Business correctness
+also depends on the sink. An at-least-once source with a blind append sink can produce
+duplicate charges, alerts, or inventory decrements after recovery.
+
+Use the lab to choose an allowed-lateness budget, delivery mode, and sink behavior. The
+arrival timeline shows which unique facts make the first result; the outcome panel shows
+whether retry creates loss or duplicate side effects.
+
+{% interactive-block id="technology/streaming-event-time-lab" dataFile="/api/content/technology/streaming/data/event-time-delivery.json" /%}
+
+{% concept-grid columns="3" %}
+{% concept-card title="At most once" eyebrow="Possible loss" icon="activity" tone="rose" %}
+Do not replay uncertain work. This avoids duplicates but can lose records around
+failure. Use it only when loss is explicitly acceptable.
+{% /concept-card %}
+{% concept-card title="At least once" eyebrow="Possible replay" icon="workflow" tone="amber" %}
+Retry until acknowledged. This protects delivery but requires event IDs, idempotent
+updates, or downstream deduplication.
+{% /concept-card %}
+{% concept-card title="Effectively once" eyebrow="Business invariant" icon="shield" tone="green" %}
+Coordinate source position, state, and output where supported, or make each sink effect
+idempotent under a stable business key. Verify the boundary end to end.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/streaming/code/process-event-time-window.py" language="python" title="Close an event-time window and deduplicate replay" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement bounded state and safe evolution
+
+### State has a lifecycle
+
+- Assign a time-to-live or cleanup trigger to every keyed state structure.
+- Budget state by active keys, bytes per key, windows retained, and replication or
+  checkpoint overhead.
+- Keep external calls out of the synchronous operator path when they have unbounded
+  latency; use asynchronous I/O with deadlines or enrich from replicated state.
+- Treat large backfills separately from live traffic so replay does not starve fresh
+  events.
+
+### Schemas are production contracts
+
+- Add fields compatibly and preserve defaults for older producers and consumers.
+- Reject or quarantine malformed and poison events with an owner, reason, and replay
+  procedure.
+- Avoid logging full sensitive payloads while diagnosing a schema failure.
+- Test mixed producer and consumer versions during rolling deployment.
+
+### Publish outputs safely
+
+1. Give every logical event and business command a stable identity.
+2. Persist the deduplication record with the side effect, not in an unrelated cache.
+3. Bound retry attempts and time; route exhausted work to a reviewable failure stream.
+4. Preserve enough source history to rebuild derived views from a known schema and code
+   version.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design for overload and failure before launch
+
+### Failure modes that change the answer
+
+- **Backpressure:** a slow operator or sink fills queues upstream. Bound buffers,
+  propagate pressure, shed only declared low-value work, and scale from measured
+  saturation and lag.
+- **Hot partition:** one key consumes most of one worker while aggregate capacity looks
+  healthy. Monitor partition-level lag and use key salting only when the resulting merge
+  semantics are correct.
+- **Checkpoint failure:** state cannot be snapshotted within the recovery objective.
+  Track duration, age, bytes, failures, and restore tests rather than only job health.
+- **Poison event:** one malformed record restarts or blocks a partition repeatedly.
+  Quarantine with immutable context and a controlled replay path.
+- **Sink ambiguity:** a timeout does not prove the write failed. Retry only with an
+  idempotency key or transactional boundary that survives process restart.
+- **Late-event flood:** an offline source reconnects and expands old windows. Enforce
+  lateness policy, state limits, source quotas, and a separate correction path.
+
+### Degrade deliberately
+
+Protect the durable log and correctness-critical paths first. Under overload, a system
+may reduce enrichment, sample low-value telemetry, delay non-urgent projections, or
+serve a marked stale view. It must not silently change delivery semantics or discard
+high-value events simply to keep a green latency graph.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the stream as a security-sensitive service
+
+### Observe the complete operating envelope
+
+- Input rate, processed rate, per-partition lag, queue age, and backpressure duration.
+- Event-time delay, late-event rate, dropped-event rate, and correction volume.
+- Checkpoint age, duration, size, failure rate, and measured restore time.
+- Active keys, state bytes, timer count, serialization latency, and garbage collection.
+- Sink success, retry, duplicate suppression, dead-letter growth, and end-to-end result
+  latency.
+
+### Protect events and control planes
+
+- Authenticate producers and consumers; authorize topic, stream, schema, and savepoint
+  operations with least privilege.
+- Encrypt event transport, state snapshots, replay logs, and sink credentials.
+- Minimize personal and secret data at the producer; apply retention and deletion rules
+  to logs, checkpoints, failure streams, and materialized views.
+- Separate tenant quotas so one producer cannot consume every partition, byte, or state
+  budget.
+- Audit code, schema, watermark, retention, and delivery-contract changes because each
+  can alter business outcomes without changing an API response.
+
+### Rehearse recovery
+
+Restore from a checkpoint, replay retained events, verify sink deduplication, measure
+catch-up, and compare rebuilt state with an independent source of truth. A checkpoint
+that has never been restored is only a recovery hypothesis.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the simplest engine that preserves the contract
+
+- Use an embedded stream library when processing belongs to one service, the durable log
+  already provides the state model, and independent cluster operations add little value.
+- Use a distributed stateful engine when event-time joins, large keyed state,
+  checkpoints, timers, and horizontal rescaling are central requirements.
+- Use micro-batch execution when its interval satisfies the freshness objective and the
+  shared batch ecosystem materially simplifies implementation.
+- Keep a periodic reconciliation path when money, entitlement, inventory, or compliance
+  requires an independent correctness check.
+
+Framework labels do not decide the guarantee. Validate the exact source, state backend,
+checkpoint mode, sink connector, and deployment configuration under process failure,
+network delay, replay, and schema evolution.
+{% /section-card %}
+
+{% quiz quizId="streaming" lessonSlug="streaming" title="Stream Processing Production Review" questionsFile="/api/content/technology/streaming/quiz/stream-processing-production.json" /%}

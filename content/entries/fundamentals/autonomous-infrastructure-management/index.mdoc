@@ -1,0 +1,323 @@
+---
+registryId: autonomous-infrastructure-management
+---
+
+{% section-card tone="intro" %}
+## What is Autonomous Infrastructure Management?
+
+**Autonomous infrastructure management is bounded, policy-controlled automation that
+observes a system, chooses an allowed response, applies it, and verifies the
+user-visible result.** It is not an AI model with unrestricted production access. A
+safe controller works only inside authority, blast-radius, and rollback limits that
+people define in advance.
+
+The goal is to handle frequent, well-understood operational events consistently while
+keeping novel, ambiguous, or high-impact decisions accountable to people. Kubernetes
+controllers are a familiar example of the underlying pattern: they repeatedly compare
+desired state with observed state and act to move the system toward the declared goal.
+
+{% callout variant="info" %}
+### Core invariant
+
+An action receipt does not prove recovery. Every autonomous action belongs to a closed
+loop: **observe, authorize, act, verify, and either settle or escalate**. If the
+controller cannot establish the outcome, the outcome is unknown rather than successful.
+{% /callout %}
+{% /section-card %}
+
+{% process-flow %}
+{% process-step number="1" title="Observe service evidence" label="Sense" %}
+Collect fresh service-level indicators, resource state, deployment context, and
+dependency health. A single noisy metric is rarely enough to justify a mutation.
+{% /process-step %}
+{% process-step number="2" title="Authorize a bounded action" label="Decide" %}
+Match the incident and proposed response against explicit policy: allowed action,
+maximum scope, required evidence, rollback readiness, and human approval.
+{% /process-step %}
+{% process-step number="3" title="Apply one controlled step" label="Act" %}
+Use a stable action identity, limited concurrency, and one owner for each target so a
+retry cannot silently multiply or conflict with another controller.
+{% /process-step %}
+{% process-step number="4" title="Verify and settle" label="Learn" %}
+Wait for the system's response, compare user-facing outcomes with a baseline or
+control, and stop, compensate, or escalate before another action begins.
+{% /process-step %}
+{% /process-flow %}
+
+{% section-card accent="blue" %}
+## Reconcile desired state instead of running one-off scripts
+
+A script usually says, "perform this action now." A reconciler says, "keep this
+condition true." The second contract is more resilient because the controller can
+recover from interruption, detect later drift, and repeat an idempotent step until the
+observed state converges.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Desired state" eyebrow="Durable intent" icon="target" tone="blue" %}
+The approved target: replica count, rollout version, routing policy, or health
+condition. Store it durably and version changes so operators can explain what the
+controller is trying to achieve.
+{% /concept-card %}
+{% concept-card title="Observed state" eyebrow="Fresh evidence" icon="search" tone="cyan" %}
+The controller's current evidence about resources and service outcomes. Observations
+can be delayed, incomplete, or contradictory, so record freshness and provenance.
+{% /concept-card %}
+{% concept-card title="Reconciliation" eyebrow="Bounded convergence" icon="repeat" tone="violet" %}
+Compute the smallest safe difference, apply one permitted step, and observe again.
+Rate limits, cooldowns, and generation checks prevent stale or repeated work.
+{% /concept-card %}
+{% /concept-grid %}
+
+Self-healing still needs a failure contract. Kubernetes can restart failed containers,
+replace failed Pods, and remove unhealthy endpoints, but it does not repair arbitrary
+application bugs or choose a correct business outcome. The application and platform
+team must define what safe recovery means.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate evidence, recommendation, and authority
+
+Detection answers **what appears to be happening**. Diagnosis proposes **why it may be
+happening**. Authority determines **what the controller may change**. Combining these
+into one confidence score makes review difficult and allows a strong prediction to
+masquerade as permission.
+
+Use the lab to change incident, evidence, action, and authority independently. Try a
+single-replica replacement first, then attempt a fleet patch or regional failover. The
+important result is not the color of the outcome; it is the specific policy boundary
+that allows or blocks execution.
+
+{% interactive-block id="fundamentals/autonomous-infrastructure-management-authority-lab" dataFile="/api/content/fundamentals/autonomous-infrastructure-management/data/remediation-authority-model.json" /%}
+
+### Prefer an authority ladder
+
+- **Observe:** collect and correlate evidence, but make no recommendation.
+- **Recommend:** propose a runbook and supporting evidence for an operator to review.
+- **Bounded canary:** apply a reversible action to a small target set, then verify it
+  against a stable control.
+- **Bounded automatic action:** execute only named actions inside explicit scope,
+  evidence, concurrency, and rollback limits.
+- **Human decision:** require accountable approval for irreversible, ambiguous,
+  security-sensitive, or regional actions.
+
+"Full autonomy" is not a useful maturity target. Increasing authority should follow
+demonstrated evidence quality, containment, and operational ownership, not a desire to
+remove humans from every decision.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make every production action conflict-safe
+
+Controllers fail in ordinary distributed-systems ways: workers restart, queues redeliver
+tasks, observations arrive late, and two policies can target the same resource. The
+action path therefore needs stronger guarantees than the diagnosis path.
+
+- **Stable identity:** derive an action ID from the incident, target, action type, and
+  policy version. A retry must find the prior result instead of creating another effect.
+- **Single target owner:** use a lease, generation check, or compare-and-swap so
+  competing controllers cannot mutate the same target concurrently.
+- **Bounded attempts:** distinguish transient execution failures from an unknown
+  outcome. Escalate instead of retrying destructive work indefinitely.
+- **Monotonic policy:** capture the policy version used for authorization. Do not let
+  an in-flight action silently inherit broader permissions.
+- **Durable audit:** record evidence, decision, actor, action, result, verification,
+  and override events without storing unnecessary secrets.
+
+{% code-block file="/api/content/fundamentals/autonomous-infrastructure-management/code/remediation-policy.ts" language="typescript" title="Authorize one remediation against explicit policy" /%}
+
+The example returns an `actionId`, but production code must persist that identity at
+the side-effect boundary. Generating a key without recording the completed result does
+not make an operation idempotent.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design the feedback timing before enabling action
+
+A controller sees the effect of an action only after several delays: telemetry
+collection, aggregation, transport, system settling, and query evaluation. Acting
+again before those delays pass can turn a healthy correction into oscillation.
+
+- **Sampling interval:** how often the controller receives a new observation.
+- **Signal delay:** how old the newest usable evidence is when a decision runs.
+- **Settling time:** how long the system needs before the action's consequence becomes
+  observable.
+- **Cooldown:** the minimum delay before another mutation of the same objective.
+- **Step size:** the fraction of capacity, traffic, or targets changed at once.
+- **Attempt envelope:** step size multiplied by the number of attempts that policy
+  permits before escalation.
+
+Horizontal Pod Autoscaling illustrates this concern. It runs as a periodic control
+loop, computes a desired replica count from observed metrics, and applies tolerance
+and stabilization behavior to reduce rapid fluctuations. The same control-theory
+discipline applies to custom remediation.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Verify the service outcome, not the resource mutation
+
+A successful API call can still produce a failed recovery. A rollout may complete
+while latency regresses, a replacement may become ready while requests fail, and a
+traffic shift may overload the destination. Verification must therefore rise from the
+action receipt to the user-facing objective.
+
+Use the recovery lab to inject a demand spike, bad rollout, or zone loss. Choose a
+response and verification signal, then tune scope, delay, cooldown, and attempts.
+Notice how a correct action can still become unsafe when the loop reacts too early or
+repeats too broadly.
+
+{% interactive-block id="fundamentals/autonomous-infrastructure-management-verification-lab" dataFile="/api/content/fundamentals/autonomous-infrastructure-management/data/closed-loop-recovery-model.json" /%}
+
+### Build a verification hierarchy
+
+1. **Action receipt:** the API accepted the request. This proves very little.
+2. **Resource state:** the target reports the expected configuration or health.
+3. **Service indicators:** success rate, latency, freshness, and saturation recover.
+4. **Business outcome:** the workflow users depend on is correct and complete.
+5. **Control comparison:** a canary or affected cohort improves relative to a stable
+   baseline, strengthening causal attribution.
+
+Argo Rollouts can run analysis during progressive delivery and abort or pause a rollout
+when a metric fails. That pattern is useful beyond deployment: evaluate a bounded
+candidate, preserve a control, and promote only after the evidence supports the change.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Put every action inside a safety envelope
+
+Safety does not come from a sufficiently accurate model. It comes from layered limits
+that remain effective when detection, diagnosis, execution, or telemetry is wrong.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Limit authority" eyebrow="Before execution" icon="shield" tone="blue" %}
+Allow-list action types, targets, identities, time windows, and policy versions.
+Require human approval when impact or uncertainty exceeds the approved envelope.
+{% /concept-card %}
+{% concept-card title="Limit propagation" eyebrow="During execution" icon="layers" tone="amber" %}
+Use canaries, small steps, concurrency caps, regional isolation, rate limits, and
+cooldowns. Stop expansion when verification is absent, stale, or degrading.
+{% /concept-card %}
+{% concept-card title="Preserve independent control" eyebrow="Emergency path" icon="warning" tone="rose" %}
+Keep rollback, pause, and kill-switch paths observable and usable even when the
+autonomous controller or its primary dependency chain is unhealthy.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+An emergency stop that shares the controller's credentials, deployment, network path,
+or datastore may fail with the system it must stop. Give the stop path independent
+authority, auditability, and routine tests.
+{% /callout %}
+
+{% code-block file="/api/content/fundamentals/autonomous-infrastructure-management/code/autonomy-policy.yaml" language="yaml" title="Express evidence, authority, execution, and verification limits separately" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Use machine learning as evidence, not permission
+
+Machine learning can rank likely causes, forecast demand, cluster incidents, or detect
+unusual behavior. Those capabilities can reduce investigation time, but their outputs
+are uncertain and can drift as workloads, software, and traffic change.
+
+- Validate models on incidents and operating regimes that resemble production.
+- Calibrate confidence and define an explicit out-of-distribution response.
+- Track false positives, missed incidents, evidence freshness, and downstream action
+  outcomes by scenario.
+- Keep the authority policy outside the model so model changes cannot silently broaden
+  production permissions.
+- Preserve human review for high-impact decisions and provide enough evidence for a
+  reviewer to disagree.
+- Fall back to recommendation or observation when model health, telemetry, or causal
+  attribution is weak.
+
+The NIST AI Risk Management Framework organizes AI risk work around **govern, map,
+measure, and manage**. For autonomous operations, this means naming accountable owners,
+understanding the context and affected systems, measuring failure behavior, and
+managing risk throughout the controller's lifecycle.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Secure the controller as a privileged control plane
+
+An autonomous controller can become one of the most powerful identities in the
+platform. Compromise or policy error can turn remediation into an outage, data-loss
+event, or persistence mechanism.
+
+- Give each action class its own least-privilege workload identity.
+- Separate observation permissions from mutation permissions.
+- Require stronger approval and short-lived credentials for regional or destructive
+  actions.
+- Sign policy and release artifacts; reject unsigned or stale controller versions.
+- Treat incident payloads, prompts, logs, and model features as untrusted input.
+- Protect audit records from the controller identity that performs the action.
+- Test policy bypass, forged telemetry, replayed work, secret exposure, and kill-switch
+  failure.
+
+OpenTelemetry can carry traces, metrics, logs, and baggage across the decision and
+execution path. Use correlation to connect evidence with one action identity, but do
+not put secrets or sensitive personal data in propagated context.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the controller as part of incident response
+
+Measure whether automation improves outcomes without hiding failures or transferring
+toil into policy debugging.
+
+{% metric-strip %}
+{% metric value="Coverage" label="Eligible events" detail="Incidents that match an approved, tested response contract" tone="blue" /%}
+{% metric value="Containment" label="Blast radius" detail="Maximum targets, traffic, or regions changed per action" tone="violet" /%}
+{% metric value="Evidence" label="Verified outcomes" detail="Actions with fresh user-facing recovery proof, not only receipts" tone="green" /%}
+{% metric value="Escalation" label="Unknown outcomes" detail="Actions stopped for ambiguity, stale evidence, or exhausted attempts" tone="rose" /%}
+{% /metric-strip %}
+
+### Review the whole lifecycle
+
+- **Before release:** replay representative incidents, inject stale and contradictory
+  evidence, test rollback, and prove the controller stops at every policy boundary.
+- **During operation:** alert on unauthorized attempts, conflict-lock failures,
+  repeated actions, verification timeouts, and unusual authority use.
+- **During an incident:** make autonomous actions visible in the same timeline as
+  deployments, alerts, operator changes, and customer impact.
+- **After an incident:** review whether detection, policy, execution, verification, or
+  human handoff failed. Do not report a lower alert count as success if the system
+  merely suppressed evidence.
+
+Google SRE guidance treats automation as software that must be maintained and warns
+against automating processes that have not first been understood and simplified. AWS
+operational guidance similarly emphasizes predefined plans, automated responses for
+well-understood events, and manual escalation when automated recovery is unsuccessful.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Adopt autonomy by earned authority
+
+Start with one frequent event whose cause, response, verification, owner, and rollback
+are already well understood. Expand only after production evidence shows that the
+controller stays inside its envelope and operators can explain every outcome.
+
+1. **Declare the invariant:** name the user-facing condition the loop protects.
+2. **Write the policy:** separate evidence, action scope, authority, attempts, and
+   escalation.
+3. **Prove the mechanism:** test interruption, duplicate work, conflict, stale
+   telemetry, and rollback.
+4. **Run in recommendation mode:** compare proposed decisions with actual incident
+   outcomes.
+5. **Canary the authority:** allow one reversible action against a narrow target set.
+6. **Expand deliberately:** broaden one dimension at a time and keep human ownership
+   for novel or irreversible decisions.
+
+### Primary references
+
+- [Kubernetes controllers](https://kubernetes.io/docs/concepts/architecture/controller/)
+  and [self-healing behavior](https://kubernetes.io/docs/concepts/architecture/self-healing/)
+- [Kubernetes Horizontal Pod Autoscaling](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/)
+- [Google SRE: Automation at Google](https://sre.google/sre-book/automation-at-google/)
+  and [Canarying Releases](https://sre.google/workbook/canarying-releases/)
+- [AWS: Responding to events](https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/responding-to-events.html)
+- [NIST AI Risk Management Framework](https://www.nist.gov/itl/ai-risk-management-framework)
+  and [AI RMF Core](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/)
+- [OpenTelemetry signals](https://opentelemetry.io/docs/concepts/signals/)
+- [Argo Rollouts analysis](https://argoproj.github.io/argo-rollouts/features/analysis/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/autonomous-infrastructure-management/quiz/autonomous-infrastructure-management.json" lessonSlug="autonomous-infrastructure-management" title="Autonomous Infrastructure Design Review" /%}

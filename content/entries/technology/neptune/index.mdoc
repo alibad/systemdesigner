@@ -1,0 +1,303 @@
+---
+registryId: neptune
+---
+
+{% section-card tone="intro" %}
+## What is Amazon Neptune?
+
+**Amazon Neptune is a managed graph database for applications whose important
+questions follow relationships.** Instead of repeatedly joining intermediate tables,
+an application starts from a vertex or RDF resource and follows typed connections to
+the entities it needs.
+
+Neptune supports two graph models:
+
+- **Property graph:** nodes and directed relationships can carry properties. Query the
+  same property-graph data with openCypher or Apache TinkerPop Gremlin.
+- **RDF:** subject-predicate-object statements use web identifiers and can be grouped
+  in named graphs. Query RDF data with SPARQL 1.1.
+
+The core design invariant is **bound the graph question before choosing capacity**.
+Model choice, starting selectivity, relationship labels, direction, hop count, result
+limit, and concurrency determine the work. A graph engine does not make an unbounded
+traversal safe.
+
+Neptune Database is the operational database covered here. Neptune Analytics is a
+separate in-memory graph analytics engine and should not be treated as another replica
+of the database cluster.
+
+New to indexes, replicas, and recovery points? Start with
+[Database Fundamentals](/fundamentals/database-fundamentals).
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose the graph model from the question
+
+A graph model is the contract between domain meaning and query shape. Property graph
+and RDF both represent relationships, but they optimize for different authoring and
+integration needs.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Property graph" eyebrow="Operational paths" icon="network" tone="cyan" %}
+Use vertices, directed edges, and properties when the application walks concrete
+entities such as accounts, devices, products, services, or people. openCypher expresses
+declarative patterns; Gremlin expresses step-by-step traversals.
+{% /concept-card %}
+{% concept-card title="RDF" eyebrow="Shared semantics" icon="braces" tone="violet" %}
+Use IRIs, triples or quads, vocabularies, and named graphs when identifiers and
+predicates must interoperate across governed datasets. SPARQL matches these graph
+patterns directly.
+{% /concept-card %}
+{% concept-card title="Another database" eyebrow="Relationship is incidental" icon="database" tone="amber" %}
+Keep a relational, document, search, or key-value store when requests mainly retrieve
+records by key, scan columns, search text, or aggregate facts without traversing
+changing relationships.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use the workbench to turn three business questions into a graph model and a bounded
+query. Its fan-out arithmetic is explanatory, not a Neptune throughput or latency
+forecast.
+
+{% interactive-block id="technology/neptune-performance" dataFile="/api/content/technology/neptune/data/graph-query-decision-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Make the traversal shape explicit
+
+A traversal is the relationship path a query asks Neptune to evaluate. Write its
+boundary in the design review before selecting an instance:
+
+- **Seed:** exact vertex ID or IRI, selective property pattern, tenant, named graph, or
+  other bounded starting set.
+- **Direction:** outgoing, incoming, or both. Reverse traversal without a known edge
+  label or RDF predicate can require broader index work.
+- **Labels or predicates:** name the relationships that carry business meaning instead
+  of crossing every possible relationship type.
+- **Depth:** cap variable-length paths and explain why each additional hop is required.
+- **Cycle behavior:** use simple-path or deduplication rules when revisiting vertices
+  would multiply work.
+- **Result boundary:** project only the required properties and set a product-owned
+  result, time, or memory limit.
+
+### Property-graph path
+
+This openCypher example begins from one account, permits only two relationship types,
+caps the path at three hops, applies a time boundary, and limits the returned paths.
+
+{% code-block file="/api/content/technology/neptune/code/fraud-path-query.cypher" language="text" title="Bounded fraud-path query in openCypher" /%}
+
+### RDF graph pattern
+
+This SPARQL example binds two catalog resources, selects one named graph, names each
+predicate, and limits the result set.
+
+{% code-block file="/api/content/technology/neptune/code/catalog-query.rq" language="text" title="Bounded catalog query in SPARQL" /%}
+
+Use Neptune's explain and profile APIs to inspect the selected plan and actual
+execution evidence. In Gremlin, a step that cannot be converted to a Neptune-native
+step can move it and subsequent steps to the TinkerPop engine; that is a plan fact to
+measure, not an automatic reason to rewrite the query.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Understand Neptune's indexes before loading data
+
+Neptune stores graph statements internally as quads: subject, predicate, object, and
+graph. It maintains three statement indexes by default:
+
+{% metric-strip %}
+{% metric label="SPOG" value="Subject first" detail="Efficient when the starting resource, and often its predicate, is bound" tone="blue" /%}
+{% metric label="POGS" value="Predicate first" detail="Efficient when an edge label or RDF predicate is known" tone="violet" /%}
+{% metric label="GPSO" value="Graph first" detail="Supports access beginning from a named graph" tone="green" /%}
+{% metric label="OSGP" value="Optional" detail="Can improve object-first reverse lookups across many predicates" tone="amber" /%}
+{% /metric-strip %}
+
+The optional OSGP index is a cluster-creation decision:
+
+- It can improve incoming-edge or object-first access when the query does not bind a
+  predicate and the graph has many distinct predicates.
+- It must be enabled on an **empty** cluster before data is loaded.
+- AWS documents possible trade-offs of up to 23% slower insert rates and up to 20%
+  more storage. Benchmark the actual graph before accepting those costs.
+- Adding OSGP does not repair a broad seed, excessive hop count, or oversized result.
+
+### Bulk-load a prepared graph
+
+For large initial or batch ingestion, put a supported graph format in Amazon S3 and
+use Neptune's loader instead of sending one mutation per record. The bucket must be in
+the same AWS Region as the cluster, and Neptune assumes an associated IAM role with
+read access to the objects.
+
+{% process-flow %}
+{% process-step number="1" title="Shape and validate" label="Before S3" %}
+Create stable identifiers, labels or predicates, cardinality rules, and referential
+checks. Reject malformed records before they reach the loader.
+{% /process-step %}
+{% process-step number="2" title="Stage and authorize" label="S3 boundary" %}
+Place versioned files in a same-Region bucket, grant the loader role only the required
+read and KMS permissions, and provide S3 network access from the VPC.
+{% /process-step %}
+{% process-step number="3" title="Load and inspect" label="Loader API" %}
+Start the job with the explicit format and parallelism, poll loader status, and retain
+failed-feed evidence. The loader is not a substitute for an atomic application
+transaction.
+{% /process-step %}
+{% process-step number="4" title="Prove the queries" label="Before traffic" %}
+Check counts and graph invariants, refresh statistics, explain representative queries,
+and compare result sets before switching application traffic.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/neptune/code/start-bulk-load.sh" language="bash" title="Start a same-Region openCypher bulk load" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Separate read scaling, failover, and recovery
+
+A Neptune DB cluster has one primary writer and can have up to 15 read-replica
+instances. The instances share one distributed cluster volume; each storage segment
+has six copies across three Availability Zones.
+
+Those mechanisms solve different problems:
+
+- **Read replicas** add read query capacity and can become failover targets.
+- **Cross-AZ promotion** replaces an unavailable writer but briefly interrupts
+  requests while clients reconnect.
+- **Storage replication** protects the cluster volume from infrastructure failure.
+- **Continuous backup and snapshots** recover earlier logical state into a new cluster.
+- **A Neptune global database** can pre-position a read-only cluster in another Region
+  for an explicitly operated regional recovery process.
+
+Choose each scenario below. The active route and selected component show why a healthy
+replica count is not proof of restore readiness.
+
+{% topology-lab dataFile="/api/content/technology/neptune/data/replica-recovery-topology.json" /%}
+
+The reader endpoint changes the DNS target for new connections; it does not distribute
+individual queries over long-lived connections. For explicit load balancing, recycle
+connections deliberately or connect to replica instance endpoints. After failover,
+discard stale connections and resolve the cluster endpoint again.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Build security around the data path
+
+Security is the combination of network reachability, authenticated requests, encrypted
+data, least privilege, and auditable operation.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Network boundary" eyebrow="VPC and security groups" icon="shield" tone="green" %}
+Place the cluster in a VPC and allow port 8182 only from approved application or
+administration paths. Treat any public endpoint choice as a deliberate exposure
+decision, not a development convenience.
+{% /concept-card %}
+{% concept-card title="Request identity" eyebrow="IAM database authentication" icon="key" tone="blue" %}
+When IAM authentication is enabled, sign every data request with Signature Version 4
+and use temporary role credentials. Separate data-plane permissions from cluster
+management permissions.
+{% /concept-card %}
+{% concept-card title="Encryption boundary" eyebrow="TLS and KMS" icon="lock" tone="violet" %}
+Use Neptune's HTTPS endpoints and validate their certificates. Encrypt the cluster,
+snapshots, and S3 load files with governed KMS keys whose grants are monitored and
+recoverable.
+{% /concept-card %}
+{% /concept-grid %}
+
+Review these failure-specific controls:
+
+- Revoking an IAM credential does not necessarily terminate an already-open connection;
+  bound connection lifetime and test revocation behavior.
+- Losing Neptune's access to a cluster KMS key can place the encrypted cluster in a
+  terminal state recoverable only from backup; protect key policy changes accordingly.
+- Give the loader role read access only to the required S3 prefix and KMS key. It does
+  not need write access to the bucket.
+- Publish audit logs where required, protect their retention, and alert on
+  authentication, policy, and management-plane changes.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate from query, replica, and cost evidence
+
+An operational signal is useful when it distinguishes one user-visible failure from
+another. Start with a small evidence set:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Query pressure" eyebrow="Plan and queue" icon="gauge" tone="amber" %}
+Track request latency and errors with CPU, freeable memory, buffer-cache hit ratio, and
+slow-query logs. Slow-query fields such as waiting time, execution time, memory, and
+statements scanned separate queueing from expensive traversal work.
+{% /concept-card %}
+{% concept-card title="Replica health" eyebrow="Availability" icon="activity" tone="green" %}
+Track cluster replica lag, replica restarts, endpoint errors, connection churn, and
+failover duration. Exercise forced failover and confirm clients recover without
+duplicating writes.
+{% /concept-card %}
+{% concept-card title="Capacity and storage" eyebrow="Cost boundary" icon="scale" tone="blue" %}
+Track instance utilization or ServerlessDatabaseCapacity and NCUUtilization, plus
+VolumeBytesUsed, I/O, backup storage, and loader errors. Attribute cost to workload and
+retention choices.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose a billing model from measured demand
+
+- **Provisioned instances** fit sustained, predictable demand when the selected class
+  keeps the working graph and concurrency inside an acceptable envelope.
+- **Neptune Serverless** scales each writer or reader between configured NCU limits.
+  One NCU includes 2 GiB of memory plus associated compute and network. Set the minimum
+  high enough for the working set and the maximum high enough for tested peaks; low
+  floors can make sudden scale-up slower.
+- **Standard storage** charges for storage and I/O and can fit moderate I/O.
+- **I/O-Optimized storage** has higher instance and storage prices but no I/O charge.
+  Compare the complete bill and remember that storage type can be changed only once
+  every 30 days.
+- **Storage high-water mark** does not fall after deleting graph data or restoring a
+  snapshot. Shrinking allocated storage requires exporting the live graph and loading
+  it into a new cluster.
+
+### Prove recovery as a separate workflow
+
+Neptune continuously retains point-in-time restore data for the configured backup
+retention period of one to 35 days; the default is one day. A restore always creates a
+new cluster. It does not restore instances, custom parameter groups, or custom security
+groups.
+
+Run a timed recovery exercise that creates the new instances and controls, validates
+counts and graph invariants, tests application queries, and rehearses the endpoint
+cutover. Replication health, snapshot existence, and a successful API call are not the
+same as a proven recovery time objective.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Verify service behavior in primary documentation
+
+These current AWS references define the service-specific behavior used in this lesson:
+
+- [What is Amazon Neptune?](https://docs.aws.amazon.com/neptune/latest/userguide/intro.html)
+  defines the two graph models, query languages, and the distinction from Neptune
+  Analytics.
+- [Querying a Neptune graph](https://docs.aws.amazon.com/neptune/latest/userguide/access-graph-queries.html)
+  documents Gremlin, openCypher, and SPARQL access.
+- [How statements are indexed](https://docs.aws.amazon.com/neptune/latest/userguide/feature-overview-storage-indexing.html)
+  defines SPOG, POGS, GPSO, optional OSGP, and its trade-offs.
+- [Neptune loader command](https://docs.aws.amazon.com/neptune/latest/userguide/load-api-reference-load.html)
+  defines supported formats, same-Region S3 input, IAM role access, and loader
+  parameters.
+- [DB clusters and instances](https://docs.aws.amazon.com/neptune/latest/userguide/feature-overview-db-clusters.html)
+  defines the writer, read replicas, query threads, lag, and failover targets.
+- [Connecting to Neptune endpoints](https://docs.aws.amazon.com/neptune/latest/userguide/feature-overview-endpoints.html)
+  explains writer, reader, and instance endpoint behavior.
+- [Backup and restore](https://docs.aws.amazon.com/neptune/latest/userguide/backup-restore.html)
+  defines continuous backups, retention, snapshots, and point-in-time recovery.
+- [Neptune security](https://docs.aws.amazon.com/neptune/latest/userguide/security.html)
+  links the current VPC, IAM authentication, TLS, KMS, logging, and resilience
+  contracts.
+- [Slow-query logging](https://docs.aws.amazon.com/neptune/latest/userguide/slow-query-logs.html)
+  defines query fingerprints, timing, memory, concurrency, and scanned-statement
+  evidence.
+- [Serverless capacity scaling](https://docs.aws.amazon.com/neptune/latest/userguide/neptune-serverless-capacity-scaling.html)
+  defines NCU limits, scaling behavior, metrics, and failover-tier considerations.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/neptune/quiz/neptune-production-decisions.json" lessonSlug="neptune" title="Neptune Production Decisions" /%}

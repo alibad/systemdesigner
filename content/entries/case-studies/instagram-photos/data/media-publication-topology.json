@@ -1,0 +1,289 @@
+{
+  "title": "Trace a photo from durable upload to feed delivery",
+  "description": "Switch scenarios to see which promise changes when processing, moderation, fan-out, or CDN delivery fails. Select any node to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Creator or viewer app",
+      "eyebrow": "User boundary",
+      "detail": "Uploads resumable chunks, reads authoritative creator state, requests feed metadata, and fetches an eligible derivative from the CDN.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 42
+    },
+    {
+      "id": "ingest",
+      "label": "Upload gateway",
+      "eyebrow": "Durable receipt",
+      "detail": "Authorizes the session, verifies chunks and checksum, commits the original, and acknowledges only confirmed durable state.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 25,
+      "y": 18
+    },
+    {
+      "id": "original",
+      "label": "Original object store",
+      "eyebrow": "Immutable source",
+      "detail": "Preserves the accepted source so failed jobs can retry and future derivative profiles can be rebuilt without quality loss.",
+      "kind": "database",
+      "tone": "green",
+      "x": 44,
+      "y": 17
+    },
+    {
+      "id": "jobs",
+      "label": "Media job stream",
+      "eyebrow": "Replayable handoff",
+      "detail": "Carries stable photo and processing versions. Consumer progress and queue age make retries and backlog visible.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 42,
+      "y": 70
+    },
+    {
+      "id": "processor",
+      "label": "Derivative workers",
+      "eyebrow": "Versioned outputs",
+      "detail": "Generate required sizes and formats under deterministic keys. Conditional manifest commits make repeated jobs idempotent.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 60,
+      "y": 70
+    },
+    {
+      "id": "moderation",
+      "label": "Moderation gate",
+      "eyebrow": "Eligibility",
+      "detail": "Combines policy version, automated evidence, audience rules, and human review. Uncertain or blocked media is not publishable.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 78,
+      "y": 70
+    },
+    {
+      "id": "publication",
+      "label": "Post and feed fan-out",
+      "eyebrow": "Versioned references",
+      "detail": "Commits creator-visible state, emits one publication event, fans out ordinary accounts, and leaves very large accounts for read-time merge.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 63,
+      "y": 18
+    },
+    {
+      "id": "cdn",
+      "label": "CDN and origin shield",
+      "eyebrow": "Immutable delivery",
+      "detail": "Serves an eligible device-sized derivative from a healthy edge or prepared origin path. It is never authoritative for publication state.",
+      "kind": "edge",
+      "tone": "green",
+      "x": 88,
+      "y": 22
+    }
+  ],
+  "edges": [
+    {
+      "id": "client-ingest",
+      "from": "client",
+      "to": "ingest",
+      "label": "resumable upload"
+    },
+    {
+      "id": "ingest-original",
+      "from": "ingest",
+      "to": "original",
+      "label": "seal original"
+    },
+    {
+      "id": "original-jobs",
+      "from": "original",
+      "to": "jobs",
+      "label": "media.accepted",
+      "mode": "async"
+    },
+    {
+      "id": "jobs-processor",
+      "from": "jobs",
+      "to": "processor",
+      "label": "versioned job",
+      "mode": "async"
+    },
+    {
+      "id": "processor-moderation",
+      "from": "processor",
+      "to": "moderation",
+      "label": "manifest and evidence",
+      "mode": "async"
+    },
+    {
+      "id": "moderation-publication",
+      "from": "moderation",
+      "to": "publication",
+      "label": "eligible version",
+      "mode": "async",
+      "via": {
+        "x": 84,
+        "y": 43
+      }
+    },
+    {
+      "id": "publication-client",
+      "from": "publication",
+      "to": "client",
+      "label": "profile or feed reference",
+      "via": {
+        "x": 30,
+        "y": 5
+      }
+    },
+    {
+      "id": "publication-cdn",
+      "from": "publication",
+      "to": "cdn",
+      "label": "versioned derivative URL"
+    },
+    {
+      "id": "cdn-client",
+      "from": "cdn",
+      "to": "client",
+      "label": "image bytes",
+      "via": {
+        "x": 92,
+        "y": 48
+      }
+    },
+    {
+      "id": "moderation-cdn",
+      "from": "moderation",
+      "to": "cdn",
+      "label": "deny and purge version",
+      "mode": "async",
+      "via": {
+        "x": 94,
+        "y": 66
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-publish",
+      "label": "Healthy publication",
+      "summary": "The original is sealed, workers create one derivative manifest, moderation permits the version, fan-out distributes references, and the CDN returns prepared bytes.",
+      "activeEdges": [
+        "client-ingest",
+        "ingest-original",
+        "original-jobs",
+        "jobs-processor",
+        "processor-moderation",
+        "moderation-publication",
+        "publication-client",
+        "publication-cdn",
+        "cdn-client"
+      ],
+      "focusNode": "publication",
+      "result": "The creator sees a monotonic published version. Follower feeds may converge later, but every reference names the same eligible immutable manifest."
+    },
+    {
+      "id": "processor-outage",
+      "label": "Processor outage",
+      "summary": "Ingest remains available, but derivative workers cannot consume the durable job stream. The system preserves accepted originals and honest processing state.",
+      "activeEdges": [
+        "client-ingest",
+        "ingest-original",
+        "original-jobs"
+      ],
+      "failedNodes": [
+        "processor"
+      ],
+      "degradedNodes": [
+        "jobs"
+      ],
+      "focusNode": "processor",
+      "result": "Publication stops and queue age rises. Scaling or failover resumes deterministic jobs later; no feed or CDN path receives an incomplete manifest."
+    },
+    {
+      "id": "duplicate-retry",
+      "label": "Duplicate job retry",
+      "summary": "A lease expires after outputs were written, so another worker receives the same photo and processing version. Deterministic keys and a conditional commit elect one publisher.",
+      "activeEdges": [
+        "jobs-processor",
+        "processor-moderation",
+        "moderation-publication",
+        "publication-client",
+        "publication-cdn",
+        "cdn-client"
+      ],
+      "degradedNodes": [
+        "processor"
+      ],
+      "focusNode": "processor",
+      "result": "The retry verifies or reuses existing objects. Only the winning manifest transition emits publication, preventing duplicate posts and feed amplification."
+    },
+    {
+      "id": "moderation-hold",
+      "label": "Moderation hold",
+      "summary": "Derivatives are ready, but policy evidence is uncertain and requires review. Performance dependencies are healthy; eligibility is not.",
+      "activeEdges": [
+        "client-ingest",
+        "ingest-original",
+        "original-jobs",
+        "jobs-processor",
+        "processor-moderation"
+      ],
+      "degradedNodes": [
+        "moderation"
+      ],
+      "focusNode": "moderation",
+      "result": "The creator sees review state, and broad discovery waits. A warm derivative or high rank score cannot bypass the policy gate."
+    },
+    {
+      "id": "fanout-lag",
+      "label": "Follower fan-out lag",
+      "summary": "Publication commits successfully, but follower inbox consumers are behind. Authoritative profile state and derivative delivery remain healthy.",
+      "activeEdges": [
+        "moderation-publication",
+        "publication-client",
+        "publication-cdn",
+        "cdn-client"
+      ],
+      "degradedNodes": [
+        "publication"
+      ],
+      "focusNode": "publication",
+      "result": "The creator can read the published post immediately while follower feeds converge. The system reports publication-to-follower lag instead of rolling back durable state."
+    },
+    {
+      "id": "cdn-region-outage",
+      "label": "CDN region outage",
+      "summary": "A delivery region cannot serve the selected derivative. Publication and feed metadata are still correct, so delivery routes to a healthy edge or prepared origin shield.",
+      "activeEdges": [
+        "publication-client",
+        "publication-cdn",
+        "cdn-client"
+      ],
+      "degradedNodes": [
+        "cdn"
+      ],
+      "focusNode": "cdn",
+      "result": "Image start may slow or use a smaller prepared derivative. The fallback never serves the unprocessed original or changes publication authority."
+    },
+    {
+      "id": "urgent-takedown",
+      "label": "Urgent takedown",
+      "summary": "A published version is removed after a new moderation decision. Authoritative state advances first, then feed tombstones and CDN purge requests propagate asynchronously.",
+      "activeEdges": [
+        "moderation-publication",
+        "moderation-cdn",
+        "publication-client"
+      ],
+      "degradedNodes": [
+        "publication",
+        "cdn"
+      ],
+      "focusNode": "moderation",
+      "result": "New reads deny the removed version before every cache purge completes. Tombstones clean follower feeds, and stale URLs do not restore authorization."
+    }
+  ]
+}

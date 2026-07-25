@@ -1,0 +1,219 @@
+{
+  "blockId": "technology/couchdb-revision-conflict-lab",
+  "title": "Make concurrent branches converge by business meaning",
+  "description": "Compare revision histories, choose a domain resolution rule, and close the conflict instead of trusting the deterministic winner.",
+  "defaults": {
+    "scenarioId": "contact-fields",
+    "resolverId": "field-authority",
+    "writeBack": true
+  },
+  "scenarios": [
+    {
+      "id": "contact-fields",
+      "label": "Independent contact edits",
+      "detail": "A laptop changes an email address while a disconnected phone changes a phone number.",
+      "documentId": "customer:1842",
+      "baseRevision": "3-base",
+      "branches": [
+        {
+          "revision": "4-email",
+          "source": "Laptop database",
+          "changes": [
+            "email = alex@new.example",
+            "phone remains +974 5550 0100"
+          ]
+        },
+        {
+          "revision": "4-phone",
+          "source": "Phone database",
+          "changes": [
+            "email remains alex@old.example",
+            "phone = +974 5550 0199"
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "winner-only",
+          "status": "lossy",
+          "preservedChanges": 1,
+          "lostChanges": 1,
+          "canWriteBack": true,
+          "result": "One valid contact change disappears because revision ordering does not encode field ownership.",
+          "fields": [
+            "email = alex@new.example",
+            "phone = +974 5550 0100"
+          ]
+        },
+        {
+          "resolverId": "field-authority",
+          "status": "safe",
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "canWriteBack": true,
+          "result": "The resolver keeps the newest authorized value for each independently owned field.",
+          "fields": [
+            "email = alex@new.example",
+            "phone = +974 5550 0199"
+          ]
+        },
+        {
+          "resolverId": "manual-review",
+          "status": "review",
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "canWriteBack": false,
+          "result": "Both branches remain available, but the conflict stays open until a reviewer chooses a result.",
+          "fields": [
+            "Review 4-email",
+            "Review 4-phone"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inventory-count",
+      "label": "Concurrent inventory decrements",
+      "detail": "Two disconnected sellers reserve the last units from the same absolute stock field.",
+      "documentId": "sku:blue-42",
+      "baseRevision": "8-stock-2",
+      "branches": [
+        {
+          "revision": "9-seller-a",
+          "source": "Seller A database",
+          "changes": [
+            "available = 1",
+            "reservation = order-771"
+          ]
+        },
+        {
+          "revision": "9-seller-b",
+          "source": "Seller B database",
+          "changes": [
+            "available = 1",
+            "reservation = order-884"
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "winner-only",
+          "status": "lossy",
+          "preservedChanges": 1,
+          "lostChanges": 1,
+          "canWriteBack": true,
+          "result": "One accepted reservation vanishes from the winner even though both sellers promised stock.",
+          "fields": [
+            "available = 1",
+            "reservation = order-771"
+          ]
+        },
+        {
+          "resolverId": "field-authority",
+          "status": "review",
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "canWriteBack": false,
+          "result": "Field merging detects two reservations but cannot invent stock; compensation or manual allocation is required.",
+          "fields": [
+            "available would be 0",
+            "reservations = order-771, order-884",
+            "one promise requires compensation"
+          ]
+        },
+        {
+          "resolverId": "manual-review",
+          "status": "review",
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "canWriteBack": false,
+          "result": "Escalation preserves evidence and prevents an automatic resolver from hiding an oversell.",
+          "fields": [
+            "Review order-771",
+            "Review order-884"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "approval-state",
+      "label": "Conflicting approval decisions",
+      "detail": "A risk reviewer rejects a request while an operations reviewer approves it offline.",
+      "documentId": "access-request:992",
+      "baseRevision": "2-pending",
+      "branches": [
+        {
+          "revision": "3-risk-reject",
+          "source": "Risk database",
+          "changes": [
+            "decision = rejected",
+            "reason = identity mismatch"
+          ]
+        },
+        {
+          "revision": "3-ops-approve",
+          "source": "Operations database",
+          "changes": [
+            "decision = approved",
+            "reason = manager confirmation"
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "winner-only",
+          "status": "lossy",
+          "preservedChanges": 1,
+          "lostChanges": 1,
+          "canWriteBack": true,
+          "result": "A hash-order winner could grant access while hiding the risk rejection.",
+          "fields": [
+            "decision = approved",
+            "reason = manager confirmation"
+          ]
+        },
+        {
+          "resolverId": "field-authority",
+          "status": "safe",
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "canWriteBack": true,
+          "result": "The documented deny-wins policy produces one conservative decision and retains both reasons.",
+          "fields": [
+            "decision = rejected",
+            "reasons = identity mismatch, manager confirmation"
+          ]
+        },
+        {
+          "resolverId": "manual-review",
+          "status": "review",
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "canWriteBack": false,
+          "result": "The request stays blocked while a reviewer examines both signed decisions.",
+          "fields": [
+            "decision = review-required",
+            "access remains blocked"
+          ]
+        }
+      ]
+    }
+  ],
+  "resolvers": [
+    {
+      "id": "winner-only",
+      "label": "Accept the default winner",
+      "detail": "Return CouchDB's deterministic winner and ignore conflict leaves."
+    },
+    {
+      "id": "field-authority",
+      "label": "Apply a domain rule",
+      "detail": "Merge independent fields or apply a named authority and safety policy."
+    },
+    {
+      "id": "manual-review",
+      "label": "Escalate every branch",
+      "detail": "Preserve both leaves and block completion until a person decides."
+    }
+  ]
+}

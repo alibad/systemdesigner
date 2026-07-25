@@ -1,0 +1,335 @@
+---
+registryId: practice-gmail-smart-compose
+---
+
+{% section-card tone="intro" %}
+## What is a Smart Compose system?
+
+A Smart Compose system predicts a short continuation while someone writes. The product succeeds only when a suggestion is useful **and** arrives before the writer has moved on. Unlike a chatbot response, a completion is optional: returning nothing is better than showing text that is late, unsafe, private, or irrelevant.
+
+For this interview, design a web-first service for an assumed **150 million concurrent compose sessions**. Treat that number as a capacity scenario, not a claim about Gmail production traffic. The target is an inline suggestion within **100 ms at p95** while preserving the rule that only the writer can insert or send text.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Predict, never act" eyebrow="Product invariant" icon="shield" tone="blue" %}
+The model may propose text. It must never send, commit, or silently mutate a draft.
+{% /concept-card %}
+{% concept-card title="Spend one typing budget" eyebrow="Critical path" icon="timer" tone="violet" %}
+Network, context preparation, inference, safety, and rendering all consume the same 100 ms.
+{% /concept-card %}
+{% concept-card title="No suggestion is healthy" eyebrow="Degraded mode" icon="activity" tone="green" %}
+Suppress a completion when confidence, policy, capacity, or latency misses its gate.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Guardrails" %}
+
+
+### Frame the user action
+
+The client sends a debounced request after a useful typing boundary, such as a pause or completed token. The service returns zero or one short continuation. The UI renders it as uncommitted ghost text; acceptance requires an explicit key press.
+
+**Functional requirements**
+
+- Generate a context-aware continuation of roughly one to five words.
+- Use the current draft, subject, and a bounded amount of recent thread context.
+- Adapt to language and writing style without exposing one user's content to another.
+- Let the writer accept, ignore, or dismiss the suggestion without interrupting typing.
+
+**Non-functional requirements**
+
+- Keep end-to-end p95 latency under 100 ms for the default path.
+- Remain available across regions, with a no-suggestion fallback during overload.
+- Minimize content in transit and retention; encrypt it and isolate enterprise tenants.
+- Measure quality and safety by language, account type, context type, and model version.
+
+### State exclusions before architecture
+
+- The system does not compose a whole email, search private mailboxes, or take actions.
+- It does not need RAG for ordinary phrase completion; the bounded draft and thread are the primary context.
+- It does not train directly on raw request payloads by default.
+- It does not promise a suggestion after every keystroke.
+
+### Clarifying questions that change the design
+
+1. **Which clients and regions are in scope?** Web first permits a consistent debounce policy; mobile later changes network and device constraints.
+2. **Which context is legally permitted?** Thread text, recipient metadata, and personalization signals need separate retention and access decisions.
+3. **What is the product objective?** Prefer accepted characters and reduced composition effort over raw suggestion impressions.
+4. **Which mistakes are intolerable?** PII leakage, cross-tenant context, harmful text, and text inserted without consent are hard failures.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Token Volume, Throughput, and Latency" %}
+
+
+### Convert sessions into inference requests
+
+Start with explicit assumptions so the interviewer can replace any number:
+
+- **Concurrent compose sessions:** 150 million.
+- **Raw opportunities:** 20 eligible typing events per minute per active session.
+- **Client suppression:** debounce, minimum-prefix, and unchanged-context checks remove 75% of opportunities.
+- **Peak factor:** 2x the filtered average.
+
+The arithmetic is:
+
+1. Raw opportunity rate = 150M x 20 / 60 = **50M opportunities/s**.
+2. Filtered inference rate = 50M x 25% = **12.5M requests/s**.
+3. Peak provisioned rate = 12.5M x 2 = **25M requests/s**.
+
+{% metric-strip %}
+{% metric value="25M/s" label="Peak inference requests" detail="After client-side suppression and 2x peak headroom." tone="blue" /%}
+{% metric value="~1 KiB" label="Bounded request payload" detail="Token IDs and compact metadata, not an unlimited mailbox." tone="cyan" /%}
+{% metric value="100 ms" label="End-to-end p95" detail="The complete user-visible path, not model time alone." tone="violet" /%}
+{% metric value="0" label="Required fallback output" detail="No suggestion is valid during uncertainty or overload." tone="green" /%}
+{% /metric-strip %}
+
+### Size replicas from a benchmark
+
+Do not divide requests by “concurrent requests per GPU.” Benchmark one serving replica with the intended model, accelerator, batch policy, and sequence lengths. If it sustains 2,000 requests/s at the target p95, then 25M / 2,000 = **12,500 replicas before regional and failure headroom**. The actual number is hardware-dependent and must come from load tests.
+
+### Explore the budget
+
+{% interactive-block id="practice/gmail-smart-compose-latency-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the Online Architecture and Model Tiers" %}
+
+
+### Keep the synchronous path narrow
+
+{% system-flow title="Smart Compose request path" caption="Only latency-critical work stays inline. Logging, retraining, and aggregate analytics remain asynchronous." %}
+{% system-node title="Compose client" eyebrow="Trigger" icon="keyboard" tone="blue" %}
+Debounce typing, build a bounded context fingerprint, and cancel stale requests.
+{% /system-node %}
+{% system-node title="Regional gateway" eyebrow="Protect" icon="globe" tone="cyan" %}
+Authenticate, enforce tenant policy, rate-limit, and route to the nearest healthy region.
+{% /system-node %}
+{% system-node title="Context service" eyebrow="Minimize" icon="braces" tone="amber" %}
+Tokenize allowed fields, mask sensitive spans, and reject stale draft versions.
+{% /system-node %}
+{% system-node title="Tiered inference" eyebrow="Predict" icon="sparkles" tone="violet" %}
+Route between cached phrases, a compact transformer, and an optional richer tier.
+{% /system-node %}
+{% system-node title="Output gate" eyebrow="Decide" icon="shield" tone="green" %}
+Apply confidence, safety, duplication, and latency checks before returning ghost text.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate model tiers by responsibility
+
+- **Local or cached fallback**
+    - Handles common phrases and outage-safe continuations.
+    - Offers the lowest latency and cost but limited context sensitivity.
+- **Compact transformer**
+    - Serves the default interactive path with quantized weights and bounded context.
+    - Optimizes accepted characters under the p95 budget.
+- **Quality tier**
+    - Runs only when richer context, healthy capacity, and enough latency headroom justify it.
+    - Must fall back without delaying the response.
+
+### Make request freshness explicit
+
+Attach a draft version and request ID. The client discards a response when the draft has changed, a newer request exists, or the suggestion arrives after the display deadline. This prevents technically correct but obsolete completions from flashing in the UI.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive on Context, Modeling, and Safety" %}
+
+
+### Build context by priority, not by accumulation
+
+1. **Current prefix:** Preserve the exact text immediately before the cursor.
+2. **Local sentence and paragraph:** Capture grammar, tone, and the current intent.
+3. **Subject and recent thread turns:** Include a small, recency-weighted window when policy permits.
+4. **Privacy-preserving style signal:** Use a coarse embedding or device-learned preference, never raw text from another account.
+
+When the token budget is full, remove old quoted content and signatures before truncating the current draft. The model should know which tokens belong to the writer, quoted mail, subject, and metadata through typed segment markers.
+
+### Choose the modeling objective
+
+- Use an autoregressive decoder trained to predict continuation tokens.
+- Distill from a stronger teacher and quantize the serving model only after measuring slice regressions.
+- Train on eligible, governed corpora and use interaction labels such as accepted, partially accepted, ignored, or quickly deleted.
+- Optimize for expected accepted characters, not BLEU alone; many valid completions differ from one reference.
+
+> **Why not RAG by default?** Smart Compose completes the text already in front of the writer. General document retrieval adds latency and a new privacy boundary without reliably helping short continuations. Retrieval becomes a separate product decision only for explicit, permissioned knowledge assistance.
+
+### Layer safety around generation
+
+{% process-flow %}
+{% process-step number="1" title="Minimize input" label="Privacy" %}
+Send only permitted, bounded context and isolate tenant-specific policy.
+{% /process-step %}
+{% process-step number="2" title="Constrain generation" label="Model" %}
+Limit length, stop sequences, repetition, and disallowed token patterns.
+{% /process-step %}
+{% process-step number="3" title="Classify the candidate" label="Safety" %}
+Detect sensitive data, toxicity, harassment, phishing, and policy-specific risks.
+{% /process-step %}
+{% process-step number="4" title="Apply display policy" label="Decision" %}
+Suppress unsafe, low-confidence, stale, duplicate, or late output without retrying indefinitely.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep personalization bounded
+
+- Learn style signals on device or through privacy-reviewed aggregation.
+- Clip contributions, limit retention, and prevent a single user from dominating shared updates.
+- Version the base model, personalization adapter, and policy independently.
+- Provide opt-out and deletion behavior that can be verified operationally.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Quality, Safety, and Launch Gates" %}
+
+
+### Evaluate the product behavior, not one reference string
+
+**Offline quality**
+
+- Next-token log loss and exact-prefix continuation accuracy diagnose modeling progress.
+- Human raters score relevance, fluency, tone, and whether the completion changes intended meaning.
+- Counterfactual sets vary names, languages, roles, and recipient relationships to expose unequal behavior.
+
+**Online value**
+
+- Accepted characters per eligible compose session is the primary usefulness metric.
+- Suggestion acceptance, partial acceptance, immediate deletion, and composition time explain the effect.
+- Display rate is a diagnostic, not a goal; showing more low-quality suggestions can raise exposure while harming trust.
+
+**Hard guardrails**
+
+- Unsafe or privacy-violating outputs per million suggestions.
+- p95 and p99 end-to-end latency, stale-response rate, and service errors.
+- Regressions by language, enterprise policy, sensitive context, and new-user cohorts.
+
+### Make a release decision
+
+{% interactive-block id="practice/gmail-smart-compose-evaluation-lab" /%}
+
+### Use staged evidence
+
+1. Run deterministic unit and policy tests on every artifact.
+2. Evaluate representative and adversarial slices offline.
+3. Shadow the candidate on production-shaped traffic without displaying output.
+4. Canary by stable user assignment with automated stop conditions.
+5. Expand only after practical improvement and every hard guardrail pass.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Control Cost and Govern Data" %}
+
+
+### Price the useful outcome
+
+Track both **cost per inference** and **cost per accepted character**. The second exposes wasted work from low-confidence requests, poor suggestions, and overpowered model tiers.
+
+- Reduce invocation before optimizing kernels: debounce, cancel stale requests, and skip weak prefixes.
+- Batch only inside a bounded queue delay; throughput that breaks p95 is not a saving.
+- Route common phrases to a cheap tier and reserve richer models for cases with expected value.
+- Autoscale from queue age and deadline risk, not GPU utilization alone.
+
+### Assign governance owners
+
+{% concept-grid columns="3" %}
+{% concept-card title="Data owner" eyebrow="Permission" icon="database" tone="blue" %}
+Defines allowed sources, retention, deletion, residency, and tenant isolation.
+{% /concept-card %}
+{% concept-card title="Model owner" eyebrow="Behavior" icon="brain" tone="violet" %}
+Owns training lineage, evaluation slices, model cards, and rollback artifacts.
+{% /concept-card %}
+{% concept-card title="Policy owner" eyebrow="Release" icon="shield" tone="rose" %}
+Sets safety thresholds, exception review, incident response, and audit requirements.
+{% /concept-card %}
+{% /concept-grid %}
+
+Every response log should use request and model identifiers without retaining raw message text by default. Audit records need the model, policy, feature, and experiment versions that produced the decision.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Plan Scaling, Reliability, and Retraining" %}
+
+
+### Degrade in a deliberate order
+
+{% process-flow %}
+{% process-step number="1" title="Cancel obsolete work" label="Freshness" %}
+Drop queued requests for draft versions the client has already replaced.
+{% /process-step %}
+{% process-step number="2" title="Shrink optional context" label="Latency" %}
+Remove old thread turns while preserving the current prefix and policy signals.
+{% /process-step %}
+{% process-step number="3" title="Route to a cheaper tier" label="Capacity" %}
+Use the compact model or safe phrase fallback when the quality tier saturates.
+{% /process-step %}
+{% process-step number="4" title="Return no suggestion" label="Safety" %}
+Protect typing, privacy, and policy when no tier can meet the deadline.
+{% /process-step %}
+{% /process-flow %}
+
+### Design for regional failure
+
+- Keep warmed model replicas and policy bundles in multiple regions.
+- Use deadline-aware load shedding before queues consume the whole latency budget.
+- Fail over only when the extra network trip still leaves enough time; otherwise suppress.
+- Cache model artifacts and common safe completions, but never treat another user's private completion as reusable content.
+
+### Observe the full loop
+
+- **Serving:** queue age, batch size, accelerator saturation, p50/p95/p99 stage latency, cancellations, and tier routing.
+- **Product:** eligible requests, display rate, accepted characters, immediate deletion, and opt-out rate.
+- **Safety:** blocked output reason, policy version, slice-specific violation rate, and red-team escape rate.
+- **Training:** feature drift, label delay, slice coverage, artifact lineage, and rollback readiness.
+
+### Retrain without creating a silent feedback loop
+
+Accepted text is a useful but biased label: users accept common phrases more often, and ignored suggestions reveal little about the desired alternative. Combine privacy-reviewed interaction signals with curated evaluation sets, human review, and holdout cohorts. Promote a new artifact only through the same release gates as a code deployment.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Summarize Trade-offs, Risks, and Extensions" %}
+
+
+### Present the design in 90 seconds
+
+1. The client debounces typing, versions the draft, and sends only bounded permitted context.
+2. A regional service authenticates and routes each request through context preparation, a tiered model, and an output gate.
+3. The default compact transformer targets useful continuations inside a 100 ms p95 budget.
+4. Safety, privacy, freshness, and latency are hard gates; no suggestion is the normal degraded response.
+5. Launch decisions require accepted-character improvement across slices with no guardrail regression.
+
+### Name the central trade-offs
+
+- **Quality versus latency:** Larger context and models can improve relevance but consume the typing deadline.
+- **Personalization versus privacy:** Richer user signals may improve style matching but expand retention and isolation risk.
+- **Batch efficiency versus queue delay:** Larger batches raise throughput while waiting consumes p95.
+- **Coverage versus trust:** Lower confidence thresholds show more suggestions but increase irrelevant and unsafe exposure.
+- **Regional redundancy versus cost:** More warm replicas improve resilience and latency at a direct infrastructure cost.
+
+### Keep unresolved risks visible
+
+- Sparse feedback and selection bias can make acceptance look better than true usefulness.
+- Lower-resource languages and specialized domains may fail aggregate gates.
+- Personal or quoted text can leak through memorization, logs, caches, or operator tooling.
+- A stale completion can be confusing even when its language is otherwise correct.
+- Product expansion into retrieval or full-email generation changes the privacy and safety model.
+
+### Extend only with new evidence
+
+- Add mobile support after measuring device, battery, and variable-network behavior.
+- Add multilingual specialists when slice data justifies routing complexity.
+- Explore speculative decoding when verification is cheaper than direct generation at equal quality.
+- Treat calendar, document, or enterprise retrieval as explicit permissioned features, not invisible context expansion.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/gmail-smart-compose/quiz/gmail-smart-compose-design-review.json"
+   lessonSlug="practice-gmail-smart-compose"
+   title="Gmail Smart Compose Design Review" /%}

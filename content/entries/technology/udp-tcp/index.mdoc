@@ -1,0 +1,162 @@
+---
+registryId: udp-tcp
+---
+
+{% section-card tone="intro" %}
+## What are TCP and UDP?
+
+**Transmission Control Protocol (TCP) and User Datagram Protocol (UDP) are transport-layer protocols that carry application data between network endpoints identified by IP addresses and ports.** TCP exposes a reliable, ordered byte stream with connection state, flow control, and congestion control. UDP exposes independent best-effort datagrams with a small fixed header and no built-in delivery, ordering, or pacing contract.
+
+The choice matters because responsibility moves between layers. TCP can recover missing stream bytes, but it cannot define application messages or prove a payment committed. UDP preserves message boundaries, but the application must decide what loss, reordering, duplication, expiry, congestion, and retries mean.
+
+The core invariant is **the application must state the delivery value of its data before choosing a transport**. Complete bytes, latest state, live media, commands, and replicated events need different recovery behavior.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose from application semantics, not protocol slogans
+
+{% concept-grid columns="3" %}
+{% concept-card title="Complete ordered data" eyebrow="Files, database streams" icon="file" tone="blue" %}
+Every byte matters and later bytes cannot be interpreted before missing earlier bytes. A reliable ordered stream is a natural fit.
+{% /concept-card %}
+{% concept-card title="Timely replaceable state" eyebrow="Position, sensors, live media" icon="activity" tone="cyan" %}
+New state may supersede old state. Sequence numbers and expiry can be more useful than retransmitting stale payloads.
+{% /concept-card %}
+{% concept-card title="Business commands" eyebrow="Payments, mutations" icon="shield" tone="amber" %}
+Transport success does not prove one business effect. Use message IDs, authorization, idempotency, durable state, and reconciliation.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% interactive-block id="technology/udp-tcp-performance" /%}
+
+The calculator is an explanatory envelope. Real throughput depends on operating-system buffers, congestion algorithm, security, packet pacing, path variation, middleboxes, implementation, and competing flows.
+{% /section-card %}
+
+{% section-card %}
+## Follow TCP from connection to close
+
+{% process-flow %}
+{% process-step number="1" title="Establish connection state" label="SYN" %}
+The client and server exchange initial sequence state through the three-way handshake. TLS or another application-security handshake may add more round trips.
+{% /process-step %}
+{% process-step number="2" title="Send a byte stream" label="Sequence" %}
+TCP numbers bytes, acknowledges received ranges, retransmits missing data, and exposes ordered bytes rather than original write boundaries.
+{% /process-step %}
+{% process-step number="3" title="Respect receiver capacity" label="Flow control" %}
+The advertised receive window limits in-flight data so a fast sender does not overrun one receiver's buffers.
+{% /process-step %}
+{% process-step number="4" title="Respect path capacity" label="Congestion control" %}
+The sender adapts its congestion window and pacing to loss, delay, and acknowledgements so one connection does not assume the network is infinite.
+{% /process-step %}
+{% process-step number="5" title="Close each direction" label="FIN or reset" %}
+A graceful half-close lets each direction finish independently; reset and timeout paths can leave the application uncertain about remote processing.
+{% /process-step %}
+{% /process-flow %}
+
+### Size the path window
+
+Bandwidth-delay product estimates how many bytes must be in flight to fill a path. A 1 Gbit/s path with 100 ms RTT holds roughly 12.5 MB in flight. Socket buffers and window scaling must support the required envelope, but excessive buffers can add queueing delay.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat UDP as a primitive, not a complete protocol
+
+UDP preserves datagram boundaries and avoids connection establishment in the transport layer. It does not promise that a datagram arrives, arrives once, arrives before later datagrams, fits through the path, or is accepted by the application.
+
+### Build only the semantics the workload needs
+
+- Add sequence numbers when receivers must reject stale or reordered state.
+- Add IDs and bounded deduplication when duplicates would change an outcome.
+- Add selective acknowledgement and retransmission only for data still valuable after one RTT.
+- Add expiry for media or state that becomes useless while queued.
+- Pace traffic and respond to congestion; UDP is not permission to overwhelm the network.
+- Authenticate and encrypt the application protocol, including replay protection where required.
+
+Keep datagrams below the effective path MTU. IP fragmentation makes one datagram depend on every fragment and is frequently fragile across tunnels, firewalls, NAT, and heterogeneous paths.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Inject delivery failures against real data meaning
+
+{% interactive-block id="technology/udp-tcp-delivery-lab" dataFile="/api/content/technology/udp-tcp/data/delivery-failure-scenarios.json" /%}
+
+### Separate three guarantees
+
+1. **Transport:** byte or datagram movement, connection state, order, flow, and congestion behavior.
+2. **Application protocol:** message framing, sequence, acknowledgement, retry, expiry, and deduplication.
+3. **Business operation:** authorization, idempotency, transaction commit, external side effects, and reconciliation.
+
+TCP can deliver the same application request again after a client retry. UDP can carry a perfectly idempotent command. Exactly-once business effects require durable application state, not a transport label.
+{% /section-card %}
+
+{% section-card %}
+## Frame messages on a TCP stream
+
+One call to `send` does not map to one call to `recv`. The network stack can split one write, combine multiple writes, or return any currently available byte prefix. Define framing with a fixed size, delimiter, length prefix, or self-describing format, and enforce maximum lengths before allocation.
+
+{% code-block file="/api/content/technology/udp-tcp/code/frame-tcp-stream.py" language="python" title="Decode length-prefixed messages across arbitrary TCP reads" /%}
+
+### Defend the stream parser
+
+- Bound frame length, nesting, decompression, and per-connection buffered bytes.
+- Apply read, idle, write, and total request deadlines separately.
+- Handle half-close, reset, partial frame, duplicate application request, and slow-reader behavior.
+- Use TLS for peer authentication, confidentiality, and integrity where the threat model requires it.
+{% /section-card %}
+
+{% section-card %}
+## Sequence latest-state UDP updates
+
+For replaceable state, keep the highest accepted sequence per source and discard stale or duplicate updates. Define wraparound, source restart, authentication, expiry, and bounded state cleanup before production.
+
+{% code-block file="/api/content/technology/udp-tcp/code/apply-udp-updates.py" language="python" title="Accept only newer sequenced state" /%}
+
+This pattern is not suitable for non-idempotent commands by itself. A charge, booking, or inventory mutation needs an authenticated logical operation ID and durable deduplication at the business boundary.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Account for middleboxes and abuse
+
+{% concept-grid columns="4" %}
+{% concept-card title="NAT and state" icon="route" tone="blue" %}
+Idle mappings expire, addresses change, and inbound UDP may require discovery or relay. Reconnect and rebinding must preserve identity safely.
+{% /concept-card %}
+{% concept-card title="Amplification" icon="alert" tone="rose" %}
+Spoofable UDP requests can reflect larger responses. Authenticate reachability, limit amplification, rate-limit, and avoid unauthenticated expensive work.
+{% /concept-card %}
+{% concept-card title="Resource exhaustion" icon="gauge" tone="amber" %}
+TCP connections consume queues, buffers, descriptors, and application state. Bound handshake, idle, and per-peer resources.
+{% /concept-card %}
+{% concept-card title="Encryption" icon="shield" tone="green" %}
+Use TLS over TCP or a proven secure protocol over UDP. Encryption does not replace authorization, framing, replay protection, or input validation.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Operate from transport and application evidence
+
+### Monitor TCP
+
+- Connection attempts, handshake failure, resets, closes, idle age, descriptors, accept queue, and per-peer limits
+- RTT distribution, retransmission, duplicate acknowledgements, congestion window, receive window, zero-window events, and buffer pressure
+- Message parse failure, partial frames, request deadlines, response completion, application retries, and idempotency outcomes
+
+### Monitor UDP
+
+- Datagrams and bytes by source, loss inferred from sequence gaps, reordering, duplication, jitter, and expiry
+- Socket receive drops, kernel buffers, MTU and fragmentation signals, NAT rebinding, relay use, and path changes
+- Application acknowledgements, retries, deduplication state, pacing, congestion response, and business outcomes
+
+### Test the path
+
+- Inject delay, jitter, loss, duplication, reordering, corruption, fragmentation, black holes, and asymmetric connectivity.
+- Test mobile handoff, NAT expiry, firewall policy, load balancer behavior, peer restart, process pause, and rolling deployment.
+- Verify that retries stay bounded and cannot duplicate external effects.
+
+{% callout variant="tip" %}
+Choose TCP or UDP only after defining which data must arrive, how late is too late, what may be replaced, and which correctness guarantees belong above the transport.
+{% /callout %}
+{% /section-card %}
+
+{% quiz quizId="udp-tcp" lessonSlug="udp-tcp" title="TCP and UDP Production Review" questionsFile="/api/content/technology/udp-tcp/quiz/udp-tcp-production.json" /%}

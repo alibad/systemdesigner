@@ -1,0 +1,134 @@
+{
+  "title": "Trace a RocketMQ delivery from route lookup to recovery",
+  "description": "Select an operating condition to see which path is active, what RocketMQ can know, and where the application must preserve business correctness.",
+  "nodes": [
+    {
+      "id": "producer",
+      "label": "Producer",
+      "eyebrow": "Business event",
+      "detail": "Creates a typed message with a topic, stable business event ID, and a message group when per-entity FIFO is required. A send timeout is an unknown outcome until reconciled.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 22
+    },
+    {
+      "id": "proxy",
+      "label": "RocketMQ Proxy",
+      "eyebrow": "5.x gRPC access",
+      "detail": "Provides the current gRPC client endpoint. It can run with a Broker or as a stateless cluster, depending on the deployment mode.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 28,
+      "y": 42
+    },
+    {
+      "id": "nameserver",
+      "label": "NameServer cluster",
+      "eyebrow": "Routing metadata",
+      "detail": "Receives Broker registrations and supplies topic routing metadata. Run multiple instances so one failed NameServer does not remove route discovery.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 30,
+      "y": 10
+    },
+    {
+      "id": "broker",
+      "label": "Broker topic",
+      "eyebrow": "Store and deliver",
+      "detail": "Persists messages in MessageQueues, serves matching consumers, tracks retry state, and keeps messages according to node storage duration rather than consumption status.",
+      "kind": "stream",
+      "tone": "amber",
+      "x": 51,
+      "y": 36
+    },
+    {
+      "id": "consumer",
+      "label": "Consumer group",
+      "eyebrow": "Process and report",
+      "detail": "Runs one logical subscriber with shared behavior. A success result advances processing; a failure or timeout can make the message available for another delivery.",
+      "kind": "service",
+      "tone": "green",
+      "x": 72,
+      "y": 33
+    },
+    {
+      "id": "business-store",
+      "label": "Order store",
+      "eyebrow": "Business effect",
+      "detail": "Applies the domain mutation. A unique event receipt committed with the mutation turns repeated delivery into one visible business result.",
+      "kind": "database",
+      "tone": "blue",
+      "x": 92,
+      "y": 16
+    },
+    {
+      "id": "retry-state",
+      "label": "Retry state",
+      "eyebrow": "Broker-managed wait",
+      "detail": "Represents a failed or timed-out delivery waiting to become ready again. Retry timing and state transitions depend on the consumer type.",
+      "kind": "stream",
+      "tone": "rose",
+      "x": 72,
+      "y": 73
+    },
+    {
+      "id": "dlq",
+      "label": "Dead-letter queue",
+      "eyebrow": "Quarantine",
+      "detail": "Receives a message after the configured retry limit. It isolates repeatedly failing work but requires diagnosis, repair, and a controlled replay procedure.",
+      "kind": "database",
+      "tone": "neutral",
+      "x": 92,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "producer-proxy", "from": "producer", "to": "proxy", "label": "send" },
+    { "id": "proxy-nameserver", "from": "proxy", "to": "nameserver", "label": "discover route" },
+    { "id": "broker-nameserver", "from": "broker", "to": "nameserver", "label": "register topic", "mode": "async", "via": { "x": 52, "y": 5 } },
+    { "id": "proxy-broker", "from": "proxy", "to": "broker", "label": "publish" },
+    { "id": "broker-consumer", "from": "broker", "to": "consumer", "label": "deliver", "mode": "async" },
+    { "id": "consumer-store", "from": "consumer", "to": "business-store", "label": "commit effect" },
+    { "id": "broker-retry", "from": "broker", "to": "retry-state", "label": "wait to retry", "mode": "async", "via": { "x": 53, "y": 79 } },
+    { "id": "retry-consumer", "from": "retry-state", "to": "consumer", "label": "redeliver" },
+    { "id": "retry-dlq", "from": "retry-state", "to": "dlq", "label": "retry limit" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-delivery",
+      "label": "Healthy delivery",
+      "summary": "The producer reaches the 5.x Proxy, routing metadata identifies the Broker, and the consumer commits one business effect before reporting success.",
+      "activeEdges": ["producer-proxy", "proxy-nameserver", "broker-nameserver", "proxy-broker", "broker-consumer", "consumer-store"],
+      "focusNode": "broker",
+      "result": "The message path completes, but correctness still depends on the consumer reporting success only after its business work is durable. Monitor the final effect, not only the broker acknowledgement."
+    },
+    {
+      "id": "route-lookup-unavailable",
+      "label": "Route lookup unavailable",
+      "summary": "The NameServer cluster cannot answer a new route lookup. Existing cached routes may be temporary, but clients cannot rely on learning a new or changed Broker route.",
+      "activeEdges": ["producer-proxy", "proxy-nameserver"],
+      "failedNodes": ["nameserver"],
+      "focusNode": "nameserver",
+      "result": "Run multiple NameServers and alert on registration and route-refresh failures. Treat cached routing as a bounded continuity aid, not a replacement for a healthy routing control plane."
+    },
+    {
+      "id": "timeout-after-commit",
+      "label": "Timeout after commit",
+      "summary": "The consumer commits the order update, but its success result is lost or late. RocketMQ cannot observe the external commit and makes the message available again.",
+      "activeEdges": ["producer-proxy", "proxy-broker", "broker-consumer", "consumer-store", "broker-retry", "retry-consumer"],
+      "degradedNodes": ["consumer"],
+      "focusNode": "business-store",
+      "result": "Redelivery is the correct broker behavior for an unknown outcome. A stable event ID and an atomic receipt in the order store prevent the replay from applying a second charge or state transition."
+    },
+    {
+      "id": "poison-message",
+      "label": "Poison message",
+      "summary": "A permanent schema or business-rule error fails every attempt. After the configured retry limit, the broker isolates the message in the consumer group's DLQ.",
+      "activeEdges": ["proxy-broker", "broker-consumer", "broker-retry", "retry-consumer", "retry-dlq"],
+      "degradedNodes": ["consumer"],
+      "focusNode": "dlq",
+      "result": "Quarantine lets healthy traffic continue. Diagnose the payload and handler version, repair the cause, preserve the event ID, and replay at a bounded rate with reconciliation."
+    }
+  ]
+}

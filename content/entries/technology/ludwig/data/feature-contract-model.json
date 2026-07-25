@@ -1,0 +1,177 @@
+{
+  "kind": "ludwig-feature-contract",
+  "blockId": "technology/ludwig-feature-contract-lab",
+  "title": "Build a configuration that survives contact with production data",
+  "description": "Choose a prediction job, an input profile, and a split strategy. The lab checks leakage, serving parity, and whether the evaluation split matches the way examples repeat over time.",
+  "defaults": {
+    "scenarioId": "support-routing",
+    "featureProfileId": "all-columns",
+    "splitId": "random"
+  },
+  "featureProfiles": [
+    {
+      "id": "baseline",
+      "label": "Small baseline",
+      "detail": "Use the first two request-time fields to establish a simple, reproducible reference."
+    },
+    {
+      "id": "production",
+      "label": "Production inputs",
+      "detail": "Use every field that is available at prediction time, but exclude post-outcome and offline-only fields."
+    },
+    {
+      "id": "all-columns",
+      "label": "Every dataset column",
+      "detail": "Pass every non-target column into the model, including fields that may leak or disappear at serving time."
+    }
+  ],
+  "splits": [
+    {
+      "id": "random",
+      "label": "Random rows",
+      "detail": "Let rows from the same account or future period land in different partitions.",
+      "configType": "random",
+      "configColumn": ""
+    },
+    {
+      "id": "fixed-group",
+      "label": "Fixed, group-aware",
+      "detail": "Create a split column upstream so one account or entity stays in exactly one partition.",
+      "configType": "fixed",
+      "configColumn": "entity_split"
+    },
+    {
+      "id": "fixed-time",
+      "label": "Fixed, time-aware",
+      "detail": "Create a split column upstream so validation and test rows occur after the training window.",
+      "configType": "fixed",
+      "configColumn": "time_split"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "support-routing",
+      "label": "Route support tickets",
+      "detail": "Predict the queue that should receive a new ticket. The same customer can open several closely related tickets.",
+      "target": "destination_queue",
+      "outputType": "category",
+      "recommendedSplitId": "fixed-group",
+      "splitReason": "Keeping one customer in one partition prevents near-duplicate account history from inflating held-out performance.",
+      "fields": [
+        {
+          "name": "ticket_text",
+          "type": "text",
+          "availability": "request",
+          "detail": "The text submitted with the new ticket."
+        },
+        {
+          "name": "product_area",
+          "type": "category",
+          "availability": "request",
+          "detail": "The product selected when the ticket is opened."
+        },
+        {
+          "name": "customer_tier",
+          "type": "category",
+          "availability": "request",
+          "detail": "The customer's current support plan."
+        },
+        {
+          "name": "resolution_code",
+          "type": "category",
+          "availability": "post-outcome",
+          "detail": "Recorded only after the ticket is resolved; it leaks the downstream workflow."
+        },
+        {
+          "name": "analyst_notes",
+          "type": "text",
+          "availability": "offline-only",
+          "detail": "Added during offline review and absent from the live request."
+        }
+      ]
+    },
+    {
+      "id": "renewal-risk",
+      "label": "Predict renewal risk",
+      "detail": "Estimate whether an account will renew in the next 30 days using monthly snapshots.",
+      "target": "will_renew",
+      "outputType": "binary",
+      "recommendedSplitId": "fixed-time",
+      "splitReason": "A future holdout reveals temporal drift and prevents later snapshots from informing an earlier training example.",
+      "fields": [
+        {
+          "name": "usage_30d",
+          "type": "number",
+          "availability": "request",
+          "detail": "Usage measured before the prediction cutoff."
+        },
+        {
+          "name": "seat_change_30d",
+          "type": "number",
+          "availability": "request",
+          "detail": "Recent seat expansion or contraction."
+        },
+        {
+          "name": "open_support_cases",
+          "type": "number",
+          "availability": "request",
+          "detail": "Open cases at the prediction cutoff."
+        },
+        {
+          "name": "renewal_invoice_status",
+          "type": "category",
+          "availability": "post-outcome",
+          "detail": "Created by the renewal workflow after the prediction cutoff."
+        },
+        {
+          "name": "finance_risk_override",
+          "type": "category",
+          "availability": "offline-only",
+          "detail": "Available in the training export but not in the online feature contract."
+        }
+      ]
+    },
+    {
+      "id": "quality-triage",
+      "label": "Triage manufacturing defects",
+      "detail": "Classify a newly inspected part when each row represents an independently sampled item.",
+      "target": "defect_class",
+      "outputType": "category",
+      "recommendedSplitId": "random",
+      "splitReason": "Rows are independent samples from the same operating window, so a stratified random partition is a defensible baseline.",
+      "fields": [
+        {
+          "name": "sensor_vector",
+          "type": "vector",
+          "availability": "request",
+          "detail": "Calibrated measurements collected at inspection time."
+        },
+        {
+          "name": "line_id",
+          "type": "category",
+          "availability": "request",
+          "detail": "The production line that made the part."
+        },
+        {
+          "name": "material_lot",
+          "type": "category",
+          "availability": "request",
+          "detail": "The material lot known before classification."
+        },
+        {
+          "name": "rework_action",
+          "type": "category",
+          "availability": "post-outcome",
+          "detail": "Chosen after the defect is classified and therefore leaks the outcome."
+        },
+        {
+          "name": "lab_microscopy_code",
+          "type": "category",
+          "availability": "offline-only",
+          "detail": "Produced by a later lab process that the online inspection path cannot call."
+        }
+      ]
+    }
+  ],
+  "notice": "This lab validates experiment design, not model quality. Confirm the generated Ludwig configuration against the installed version's schema and measure the trained model on genuinely held-out data."
+}

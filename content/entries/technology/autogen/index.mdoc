@@ -1,0 +1,323 @@
+---
+registryId: autogen
+---
+
+{% section-card tone="intro" %}
+## What is AutoGen?
+
+**AutoGen is an open-source framework for building applications in which model-backed agents exchange messages, call tools, and work alone or in teams.** Its current architecture separates a high-level AgentChat API, an event-driven Core runtime, and extension packages for model clients, executors, and other integrations.
+
+In plain language, AutoGen can run the conversation loop around one or more agents. It does not decide which data is trustworthy, which actions a user may take, whether a task succeeded, or how a failed side effect should be recovered. Those remain application responsibilities.
+
+The core invariant is **the runtime coordinates messages, while the application owns authority and correctness**. Keep model proposals, runtime routing, tool execution, durable state, and business records as distinct boundaries.
+{% /section-card %}
+
+{% section-card %}
+## Check the project status before adopting it
+
+The official AutoGen repository currently describes the project as being in maintenance mode. Existing systems still need correct operation, testing, and upgrade discipline, but a new production decision should compare maintenance horizon and migration cost alongside technical fit.
+
+{% callout variant="warn" %}
+Do not treat framework adoption as an architecture goal. Start with a single bounded agent or deterministic application workflow. Add a team only when measured task evidence shows that multiple roles or dynamic handoffs improve the result enough to justify more state, messages, latency, and failure paths.
+{% /callout %}
+
+This lesson follows the current AgentChat and Core documentation rather than the incompatible AutoGen 0.2 API used by many older examples. If agent fundamentals are new, review [AI Agents](/genai/ai-agents) before implementing tools or autonomous loops.
+{% /section-card %}
+
+{% section-card %}
+## Separate the framework layers
+
+{% concept-grid columns="3" %}
+{% concept-card title="AgentChat" eyebrow="Task-level API" icon="users" tone="blue" %}
+Application code creates agents and teams, calls `run()` or `run_stream()`, and receives messages plus a stop reason. Use it for conversational single-agent and multi-agent workflows.
+{% /concept-card %}
+{% concept-card title="Core" eyebrow="Message runtime" icon="network" tone="violet" %}
+Core supplies agent identities, lifecycle management, direct messages, publish-subscribe topics, and local or distributed runtime implementations. It exposes lower-level control than AgentChat.
+{% /concept-card %}
+{% concept-card title="Extensions" eyebrow="External adapters" icon="boxes" tone="cyan" %}
+Extension packages implement model clients, code executors, MCP workbenches, and runtime integrations. Their credentials, network access, and side effects belong behind application policy.
+{% /concept-card %}
+{% /concept-grid %}
+
+AutoGen Studio is a prototyping interface built on AgentChat. A prototype configuration is not a production control plane; the deployed application still needs identity, policy, persistence, evaluation, telemetry, and incident handling.
+{% /section-card %}
+
+{% section-card %}
+## Draw the agent and runtime boundary first
+
+The word *runtime* has a specific ownership implication. In Core, the runtime creates registered agent instances when messages arrive, routes messages, and manages their lifecycle. In AgentChat, application code creates `AssistantAgent` and team objects; AgentChat uses a Core runtime internally, but those high-level agents are not automatically Core-managed agents.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Application-owned AgentChat object" eyebrow="High-level boundary" icon="workflow" tone="blue" %}
+Your service constructs the agent, model client, tools, team, and termination conditions. It also decides when to save state, reset, resume, or close dependencies.
+{% /concept-card %}
+{% concept-card title="Runtime-owned Core agent" eyebrow="Low-level boundary" icon="server" tone="violet" %}
+Your service registers an agent type and factory. The runtime resolves an `AgentId`, creates the instance when needed, dispatches serializable messages, and applies the runtime's delivery semantics.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not hide business state inside either object. An agent can hold conversation context, but the authoritative ticket, payment, account, or deployment record remains in its system of record.
+{% /section-card %}
+
+{% section-card %}
+## Trace teams, messages, and ownership
+
+A team is a control policy over participants and a shared task. Round-robin teams take turns in a fixed order. Selector teams choose the next speaker after each response. Swarm-style teams use handoff messages. Core also supports direct request-response messages and one-way broadcast through topics.
+
+Use the trace lab to compare those boundaries. Step through the path, inject a failure, and change recovery controls. The visible result shows who owns each transition and whether the run can safely continue.
+
+{% interactive-block id="technology/autogen-runtime-trace-lab" dataFile="/api/content/technology/autogen/data/runtime-trace-model.json" /%}
+
+### Message semantics that change failure behavior
+
+- A Core direct message is addressed to one agent and can return a response. If the receiving handler raises while the sender is awaiting, the exception propagates to the sender.
+- A Core broadcast publishes to a topic and is one-way. Subscriber return values are discarded, and a subscriber failure is logged rather than returned to the publisher.
+- An AgentChat group response can contain inner events and a final chat message. Team termination is evaluated after an agent response, not after every inner event.
+- Shared team context increases coordination but also increases disclosure. Do not place a secret in a shared thread unless every participant is allowed to receive it.
+{% /section-card %}
+
+{% section-card %}
+## Choose a team only for a measured reason
+
+{% concept-grid columns="3" %}
+{% concept-card title="Single agent" eyebrow="Smallest useful loop" icon="workflow" tone="green" %}
+Use one agent when one instruction set and one bounded tool set can complete the task. It has the smallest routing, state, and evaluation surface.
+{% /concept-card %}
+{% concept-card title="Round-robin team" eyebrow="Fixed speaker order" icon="repeat" tone="cyan" %}
+Use fixed turns when each role must inspect the same evolving thread in a known order. Every extra turn adds latency and context growth, even when a role has nothing useful to add.
+{% /concept-card %}
+{% concept-card title="Selector or handoff team" eyebrow="Dynamic control" icon="route" tone="amber" %}
+Use dynamic selection only when the next role cannot be chosen reliably in application code. Evaluate routing accuracy, loops, skipped roles, and unsafe handoffs separately from final answers.
+{% /concept-card %}
+{% /concept-grid %}
+
+The comparison baseline should be a direct model call, a deterministic workflow, or a single agent. A multi-agent candidate earns release only when it improves task-level outcomes on representative cases after accounting for added model calls, tail latency, and operational complexity.
+{% /section-card %}
+
+{% section-card %}
+## Put tools behind an authority boundary
+
+An AutoGen tool schema tells the model what arguments a callable accepts. It does not prove that the caller may perform the action, that the resource belongs to the caller, or that retrying the call is safe.
+
+### Build the boundary in this order
+
+1. Derive tenant, user, role, and request identity from authenticated application context.
+2. Select the smallest tool set allowed for that identity and current workflow stage.
+3. Validate model-supplied arguments against schema and business invariants.
+4. Require approval for consequential effects, showing the exact proposed action.
+5. Execute with bounded time, network, filesystem, and credential scope.
+6. Record an idempotency key before a repeatable write and reconcile ambiguous outcomes before retrying.
+7. Return a bounded, typed result that cannot silently become a new instruction.
+
+{% code-block file="/api/content/technology/autogen/code/guarded-support-team.py" language="python" title="Bind trusted scope outside model-visible tool arguments" /%}
+
+Code execution is a separate trust boundary. AutoGen documents both Docker and local command-line executors and warns that the local executor runs on the host. A container reduces host exposure, but production isolation also needs an unprivileged user, read-only inputs, resource limits, restricted egress, short-lived credentials, and cleanup.
+{% /section-card %}
+
+{% section-card %}
+## Give state a lifetime, schema, and owner
+
+State exists at several levels, and each level needs a different contract.
+
+- **Message context:** The model-facing history used by an agent for the current conversation.
+- **Agent state:** Internal context exported by an agent's `save_state()` implementation.
+- **Team state:** Participant state plus manager state such as the shared message thread and next speaker.
+- **Application state:** Authenticated workflow facts, approvals, idempotency records, and business data outside AutoGen.
+
+### Persist state at a quiescent boundary
+
+{% process-flow %}
+{% process-step number="1" title="Stop or finish the turn" label="Consistency" %}
+Do not snapshot a team while handlers are still mutating it. Official team references warn that saving a running team can produce inconsistent state.
+{% /process-step %}
+{% process-step number="2" title="Wrap the snapshot" label="Envelope" %}
+Store a schema version, framework version, configuration digest, tenant, run ID, and creation time beside the exported team state.
+{% /process-step %}
+{% process-step number="3" title="Validate before load" label="Recovery" %}
+Reject the wrong tenant, unsupported schema, or mismatched agent configuration before calling `load_state()`.
+{% /process-step %}
+{% process-step number="4" title="Reconcile effects" label="Resume" %}
+Check tool receipts and idempotency records before continuing from an interrupted or timed-out action.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/autogen/code/checkpoint-envelope.py" language="python" title="Validate a portable checkpoint envelope before restore" /%}
+
+Saved state is an internal compatibility surface. AutoGen's reference notes that state formats have changed across releases, so replay representative snapshots before an upgrade and retain a rollback path.
+{% /section-card %}
+
+{% section-card %}
+## Termination is a policy, not a keyword
+
+AgentChat termination conditions are stateful callables that inspect the new messages since their previous check. Conditions can be combined with AND and OR and reset automatically after a completed `run()` or `run_stream()`.
+
+### Use more than one stop boundary
+
+- **Task completion:** A reviewed structured result, explicit handoff, or domain-specific completion predicate.
+- **Budget:** Maximum messages or turns, token use, tool calls, elapsed time, and spend.
+- **External control:** User cancellation, deployment draining, or incident response through an external termination signal.
+- **Safety:** A policy event that blocks further tools and returns an incomplete or escalated result.
+
+`TextMentionTermination("APPROVE")` is useful for a tutorial, but natural-language text is a weak production completion contract. Prefer a typed result or a termination function over a magic word that may appear accidentally in ordinary content.
+
+Termination also differs from cancellation. An external termination request normally allows the current response to finish before the team stops, preserving a consistent turn boundary. Hard process cancellation can interrupt a tool after its effect but before its result is recorded.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the whole trajectory
+
+A final answer can look correct even when the team used the wrong data, called an unnecessary tool, leaked context to another participant, or recovered a write unsafely. Evaluate outcomes and trajectories separately.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Task outcome" eyebrow="Did the work succeed?" icon="check" tone="green" %}
+Measure domain correctness, completeness, evidence quality, refusal behavior, and a clearly labeled incomplete result when the task cannot be completed safely.
+{% /concept-card %}
+{% concept-card title="Routing trajectory" eyebrow="Did control move correctly?" icon="route" tone="blue" %}
+Score speaker selection, handoffs, repeated turns, unnecessary agents, tool choice, tool arguments, and convergence within the budget.
+{% /concept-card %}
+{% concept-card title="Policy behavior" eyebrow="Was authority respected?" icon="shield" tone="amber" %}
+Test denied tools, cross-tenant resources, prompt injection in tool results, missing approval, duplicate delivery, and ambiguous writes.
+{% /concept-card %}
+{% concept-card title="Operational envelope" eyebrow="Can it run reliably?" icon="gauge" tone="violet" %}
+Measure model and tool latency, message and token counts, error rate, queue time, checkpoint recovery, cost, and saturation under concurrent runs.
+{% /concept-card %}
+{% /concept-grid %}
+
+Run each important case more than once because model routing and generation can vary. Keep the evaluator version, dataset revision, prompt and tool schemas, model identifier, and framework package versions with every result.
+{% /section-card %}
+
+{% section-card %}
+## Make observability reconstruct the run
+
+AutoGen exposes human-readable trace logging and structured event logging, and its runtime can emit OpenTelemetry traces. Production telemetry should answer what happened without requiring raw prompts to be stored everywhere.
+
+### Correlate these identifiers
+
+- Request, tenant, user, run, team, agent, message, model call, tool call, and checkpoint IDs.
+- Framework, model, prompt, tool schema, policy, and evaluation-dataset versions.
+- Start and end time, queue time, token usage, retries, stop reason, and final disposition.
+
+### Record boundaries, not unrestricted secrets
+
+- Log tool name, authorization decision, argument schema status, effect class, latency, and result status.
+- Redact or tokenize credentials, personal data, retrieved documents, prompts, tool arguments, and tool results according to policy.
+- Sample successful content traces deliberately, but retain aggregate counts and critical policy events needed for alerting.
+- Emit an explicit status for completed, blocked, escalated, cancelled, timed out, and failed runs.
+
+Structured logs are an integration contract; trace logs are for human debugging. Do not build production automation by parsing human-readable debug strings.
+{% /section-card %}
+
+{% section-card %}
+## Contain failures at the boundary that owns them
+
+### Model or selector failure
+
+- Bound retries with backoff and a wall-clock deadline.
+- Fall back to a deterministic route or return an explicit incomplete result.
+- Do not let repeated selector calls create an unbounded team loop.
+
+### Tool timeout or malformed result
+
+- Treat a timed-out write as *unknown*, not failed.
+- Reconcile the external system by idempotency key before retrying.
+- Validate returned shape, size, provenance, and instruction content before adding it to shared context.
+
+### Agent or runtime failure
+
+- Stop dispatching new side effects, preserve the last consistent checkpoint, and mark in-flight operations for reconciliation.
+- Isolate broadcast subscriber failures from unrelated consumers, but alert because the publisher cannot infer subscriber success.
+- Quarantine a run when state cannot be loaded under the expected schema or configuration digest.
+
+### Human approval interruption
+
+- Persist the proposed effect before returning control to the user.
+- Bind approval to the authenticated reviewer, exact arguments, resource version, and expiry.
+- Revalidate authorization and business state when execution resumes.
+{% /section-card %}
+
+{% section-card %}
+## Upgrade as a stateful system change
+
+AutoGen 0.4 was a breaking rewrite of the 0.2 API, and later state-format changes show why package upgrades must be treated as data and behavior migrations rather than dependency refreshes.
+
+{% process-flow %}
+{% process-step number="1" title="Inventory the contract" label="Freeze" %}
+Pin the package family and capture agent configuration, message types, tools, termination logic, extension packages, and saved-state versions.
+{% /process-step %}
+{% process-step number="2" title="Replay offline" label="Compare" %}
+Run representative tasks, denied actions, failure injections, and stored checkpoints against old and candidate environments.
+{% /process-step %}
+{% process-step number="3" title="Canary fresh runs" label="Limit" %}
+Start with new runs that can be routed back. Do not mix old and new workers against one state format unless compatibility is proven.
+{% /process-step %}
+{% process-step number="4" title="Migrate resumptions" label="Control" %}
+Transform checkpoint envelopes explicitly, verify tool receipts, and keep the old reader available until the migration window closes.
+{% /process-step %}
+{% /process-flow %}
+
+Because the project is in maintenance mode, also maintain an exit plan. Document the framework-independent contracts for messages, tools, state, telemetry, evaluations, and approvals so a replacement does not require rewriting business policy from prompts.
+{% /section-card %}
+
+{% section-card %}
+## Gate every production change with evidence
+
+Choose a change type, tune measured outcomes, and complete the required evidence. The gate blocks a release when the candidate lacks task quality, policy safety, trace coverage, checkpoint compatibility, failure containment, or rollback proof.
+
+{% interactive-block id="technology/autogen-release-gate-lab" dataFile="/api/content/technology/autogen/data/release-gate-model.json" /%}
+
+### Minimum release record
+
+- Immutable candidate ID with framework, extension, model, prompt, tool, and policy versions.
+- Representative evaluation dataset and per-slice results, not only one aggregate score.
+- Complete trajectories for offline cases and sampled, privacy-reviewed production traces.
+- Failure-injection results for model errors, tool timeouts, denied actions, loops, restarts, and incompatible state.
+- Canary scope, stop thresholds, rollback owner, and a tested rollback procedure.
+
+A release gate is useful only when failure blocks promotion. A dashboard with no decision owner or rollback action is observability, not release control.
+{% /section-card %}
+
+{% section-card %}
+## Review the production contract
+
+### Architecture and control
+
+- Prove that a team outperforms a single agent or deterministic workflow for the target task.
+- Name the owner of each agent, runtime, message, checkpoint, business record, and external effect.
+- Bound turns, messages, tokens, tools, time, spend, and concurrent runs.
+
+### Tools and state
+
+- Derive authority from authenticated context and enforce it again inside every tool.
+- Isolate generated code and network access; never use a host executor for untrusted code.
+- Save only at a consistent boundary and version the checkpoint envelope.
+- Reconcile side effects before retrying or resuming.
+
+### Evidence and operations
+
+- Evaluate task, trajectory, policy, and operational outcomes on representative slices.
+- Correlate structured events and traces while redacting sensitive content.
+- Test stop behavior, degraded modes, checkpoint restore, canary limits, and rollback.
+- Reassess maintenance horizon and migration readiness at every significant upgrade.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+The API and project-lifecycle claims in this lesson were checked against primary AutoGen documentation and the official repository. Release thresholds and production controls are engineering recommendations that must be calibrated to the risk of your application.
+
+- [Official AutoGen repository and maintenance status](https://github.com/microsoft/autogen)
+- [AutoGen architecture: AgentChat, Core, and Extensions](https://microsoft.github.io/autogen/stable/index.html)
+- [Agent and runtime ownership](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/framework/agent-and-agent-runtime.html)
+- [Core direct and broadcast message semantics](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/framework/message-and-communication.html)
+- [AgentChat teams and control operations](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/teams.html)
+- [Termination conditions](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/termination.html)
+- [AgentChat state management](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/state.html)
+- [Team state compatibility cautions](https://microsoft.github.io/autogen/stable/reference/python/autogen_agentchat.teams.html)
+- [Core and AgentChat logging](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/framework/logging.html)
+- [Tracing and OpenTelemetry](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tracing.html)
+- [Command-line code executors](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/components/command-line-code-executors.html)
+- [AutoGen 0.2 to 0.4 migration guide](https://microsoft.github.io/autogen/0.4.4/user-guide/agentchat-user-guide/migration-guide.html)
+- [AutoGenBench design and evaluation workflow](https://microsoft.github.io/autogen/0.2/blog/2024/01/25/AutoGenBench/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/autogen/quiz/autogen-production-boundaries.json" lessonSlug="autogen" title="AutoGen Production Boundaries Review" /%}

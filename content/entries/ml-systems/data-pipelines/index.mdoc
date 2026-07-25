@@ -1,0 +1,217 @@
+---
+registryId: data-pipelines
+---
+
+{% section-card tone="intro" %}
+## What is an ML data pipeline?
+
+An ML data pipeline is a repeatable system that turns raw observations into versioned datasets, features, and quality evidence that models can safely consume. It coordinates **what data is read, which transformations run, when outputs become visible, and how a result can be reproduced later**.
+
+This matters because a model is only as trustworthy as the path that produced its inputs. A correct notebook run is not enough: production data arrives late, schemas change, tasks retry, and historical partitions need repair. The pipeline must preserve meaning through all of those events.
+
+{% callout variant="info" %}
+The core invariant is **replay equivalence**: the same logical input interval, transformation version, schema contract, and parameters should produce the same committed output. Retries and backfills must not silently duplicate, omit, or reinterpret records.
+{% /callout %}
+
+Review [Data Pipeline Design](/ml-systems/data-pipeline-design) first if bounded versus unbounded inputs, partitioning, or pipeline topology are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Treat every stage as a data contract
+
+A production pipeline is a chain of contracts, not a chain of scripts. Each boundary should name the data identity, expected shape, completion rule, and owner.
+
+{% system-flow title="A traceable path from observation to model input" caption="Raw input remains recoverable; every derived artifact carries enough identity to explain and reproduce it." %}
+{% system-node title="Capture" eyebrow="Source identity" icon="cloud" tone="cyan" %}
+Record source, event time, ingestion time, record key, and immutable raw location.
+{% /system-node %}
+{% system-node title="Validate" eyebrow="Quality gate" icon="shield" tone="amber" %}
+Check schema, freshness, uniqueness, ranges, and domain invariants before transformation.
+{% /system-node %}
+{% system-node title="Transform" eyebrow="Versioned logic" icon="workflow" tone="violet" %}
+Normalize, join, aggregate, and compute features using deterministic code and parameters.
+{% /system-node %}
+{% system-node title="Materialize" eyebrow="Atomic output" icon="database" tone="blue" %}
+Write a partition or feature view, then publish it only after validation succeeds.
+{% /system-node %}
+{% system-node title="Consume" eyebrow="Bound contract" icon="server" tone="green" %}
+Training, batch scoring, and online serving read an explicit dataset or feature version.
+{% /system-node %}
+{% /system-flow %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Identity" eyebrow="Which logical data?" icon="key" tone="blue" %}
+Use a stable record key plus an interval, partition, or offset range. A wall-clock run timestamp alone cannot identify the intended data.
+{% /concept-card %}
+{% concept-card title="Schema" eyebrow="What shape and meaning?" icon="braces" tone="violet" %}
+Version field names, types, nullability, units, categorical vocabularies, and semantic constraints.
+{% /concept-card %}
+{% concept-card title="Completeness" eyebrow="When is it ready?" icon="check" tone="green" %}
+Define expected partitions, minimum row coverage, lateness policy, and the evidence required before publication.
+{% /concept-card %}
+{% concept-card title="Lineage" eyebrow="How was it produced?" icon="route" tone="amber" %}
+Attach input versions, code version, parameters, run identity, quality results, and output location.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Choose processing mode from the decision deadline
+
+Batch and streaming are execution modes, not quality levels. Start with the time at which a consumer must act, subtract unavoidable source and processing delay, and choose the simplest mode that still fits the remaining freshness budget.
+
+### Bounded batch
+
+- Reads a finite input such as one date partition or one snapshot.
+- Suits retraining, historical features, bulk scoring, and repair jobs.
+- Simplifies completeness checks and cost-efficient parallel processing.
+- Delivers freshness in scheduled steps rather than continuously.
+
+### Unbounded streaming
+
+- Reads a source that can continue indefinitely.
+- Suits decisions whose value falls quickly, such as fraud blocking or live ranking signals.
+- Requires explicit event time, windows, watermarks, state, checkpointing, and late-data policy.
+- Adds continuous operational load even when business traffic is quiet.
+
+### Micro-batch
+
+- Collects short bounded intervals from an ongoing source.
+- Often meets minute-level freshness without a fully event-at-a-time design.
+- Keeps partition-oriented replay while reducing the wait between publications.
+
+### Route the freshness budget
+
+Choose a consumer decision, processing mode, and publication interval. The lab shows where the freshness budget is spent and whether the selected topology can meet the service-level objective.
+
+{% interactive-block id="ml-systems/data-pipelines-freshness-routing-lab" dataFile="/api/content/ml-systems/data-pipelines/data/freshness-routing-lab.json" /%}
+
+{% callout variant="tip" %}
+Do not adopt streaming only because the source emits events. A continuous source can still feed a bounded hourly or daily decision. The consumer's deadline determines the required mode.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Separate event time from processing time
+
+**Event time** is when the real-world action occurred. **Processing time** is when a worker observed it. Network delay, disconnected devices, retries, and upstream outages make those clocks diverge.
+
+{% process-flow %}
+{% process-step number="1" title="Assign event time" label="Meaning" %}
+Take the timestamp from the event's domain contract rather than from the worker clock whenever the source can provide it reliably.
+{% /process-step %}
+{% process-step number="2" title="Group into windows" label="Aggregate" %}
+Place records into fixed, sliding, or session windows according to the business question being answered.
+{% /process-step %}
+{% process-step number="3" title="Advance a watermark" label="Estimate" %}
+Estimate how complete event-time progress is. A watermark is an operational estimate, not proof that no earlier record can arrive.
+{% /process-step %}
+{% process-step number="4" title="Apply lateness policy" label="Correct" %}
+Update a prior result, emit a correction, quarantine the record, or drop it with a measured reason after the allowed-lateness boundary.
+{% /process-step %}
+{% /process-flow %}
+
+The same aggregate can have multiple valid publications: an early low-latency result, an on-time result when the watermark passes, and later corrections. Consumers must know whether updates replace, retract, or append to earlier output.
+
+{% code-block file="/api/content/ml-systems/data-pipelines/code/event-time-window-simulator.py" language="python" title="Runnable event-time and allowed-lateness simulation" /%}
+{% /section-card %}
+
+{% section-card %}
+## Make quality gates part of publication
+
+Validation is useful only when it changes pipeline behavior. A dashboard that turns red after corrupt features are published is an observation system, not a gate.
+
+{% metric-strip %}
+{% metric value="100%" label="Schema compatibility" detail="Required fields, types, units, and semantic version match the consumer contract" tone="blue" /%}
+{% metric value="SLO" label="Freshness" detail="The newest complete event-time interval is within the promised age" tone="cyan" /%}
+{% metric value="Key" label="Uniqueness" detail="Duplicate rate is measured against the declared record or entity key" tone="violet" /%}
+{% metric value="Delta" label="Distribution" detail="Volume, missingness, categories, and feature distributions stay inside reviewed bounds" tone="amber" /%}
+{% /metric-strip %}
+
+### Fail, quarantine, or warn deliberately
+
+- **Fail closed** when the output would violate a consumer contract, leak labels, corrupt identifiers, or train on an incomplete interval.
+- **Quarantine** malformed records when the valid majority can be published without biasing the result or breaking referential integrity.
+- **Warn and continue** only when the deviation is understood, bounded, and attached to the published artifact for downstream review.
+
+Track both system metrics and data metrics. CPU, memory, and task duration reveal execution health; row counts, null rates, duplicate rates, freshness, and distribution changes reveal whether the resulting data is usable.
+{% /section-card %}
+
+{% section-card %}
+## Build retry-safe partition commits
+
+Retries are normal. A worker can finish its transformation and fail before acknowledging completion, so the orchestrator may run the same logical task again. Output semantics must make that replay harmless.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Stable run identity" eyebrow="Name the work" icon="key" tone="blue" %}
+Derive identity from the dataset, logical interval, transform version, schema version, and parameters. Keep attempt number separate.
+{% /concept-card %}
+{% concept-card title="Shadow then publish" eyebrow="Avoid partial reads" icon="layers" tone="violet" %}
+Write to a temporary location, validate the complete result, and atomically swap a manifest or pointer that readers resolve.
+{% /concept-card %}
+{% concept-card title="Deterministic replacement" eyebrow="Make replay harmless" icon="repeat" tone="green" %}
+Replace one partition or merge by a stable record key. Blind append turns ordinary task retries into duplicate data.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/ml-systems/data-pipelines/code/idempotent-partition-commit.py" language="python" title="Runnable idempotent partition commit with a manifest" /%}
+
+The example uses a local atomic file replacement to expose the protocol. Production object stores and warehouses have different commit primitives, but the sequence remains: build an isolated candidate, validate it, then publish one reader-visible reference.
+{% /section-card %}
+
+{% section-card %}
+## Recover with a bounded, evidence-driven replay
+
+A backfill reprocesses a historical logical interval. It is not merely "run the job again": the operator must decide which input snapshot and transformation version define the corrected truth, how writes reconcile with existing output, and what evidence permits publication.
+
+### Plan the recovery before touching production output
+
+1. Identify the first bad output, last known-good output, affected consumers, and exact interval range.
+2. Freeze an immutable input snapshot and choose the transformation and schema versions intentionally.
+3. Rebuild into a shadow location with bounded concurrency so repair work does not starve current production.
+4. Compare counts, keys, distributions, and representative records against both the bad output and a trusted baseline.
+5. Publish atomically, preserve the previous manifest for rollback, and notify consumers whose derived artifacts need replay.
+
+### Design a safe replay
+
+Inject an incident, then choose the recovery source, write semantics, and validation posture. The lab calculates duplication, completeness, exposure, and rollback consequences.
+
+{% interactive-block id="ml-systems/data-pipelines-replay-recovery-lab" dataFile="/api/content/ml-systems/data-pipelines/data/replay-recovery-lab.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Observe lineage and operate the pipeline
+
+Lineage connects a published artifact to the run, job, input datasets, and transformation that produced it. It answers "what should be rebuilt?" after a source correction, code bug, or schema change.
+
+### Minimum run record
+
+- Logical interval or offset range and attempt identity
+- Input dataset versions and checksums or snapshot identifiers
+- Transformation, configuration, and schema versions
+- Row counts, quality results, quarantine counts, and freshness
+- Output partition or manifest plus publication time
+- Owner, alert route, and links to logs or traces
+
+### Alert on user-visible consequences
+
+- **Freshness debt:** newest complete interval age versus the consumer SLO
+- **Backlog:** queued work in records, bytes, or event-time duration
+- **Bad-record pressure:** rejected and quarantined rates by reason and source
+- **Retry amplification:** attempts per logical task and duplicate-write detection
+- **Consumer readiness:** last validated artifact available to training or serving
+
+An orchestrator such as [Apache Airflow](/technology/airflow) manages dependency and run state. [Apache Kafka](/technology/kafka) can retain event streams, and [Apache Spark](/technology/spark) can execute distributed transformations. None of them defines your record identity, quality contract, or publication semantics for you.
+{% /section-card %}
+
+{% section-card %}
+## Use primary specifications for time and replay semantics
+
+- [Apache Beam model basics](https://beam.apache.org/documentation/basics/) explains bounded and unbounded collections, event time, watermarks, windows, and triggers.
+- [Apache Airflow core concepts](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/) documents DAG runs, data intervals, retries, and backfills in current Airflow releases.
+- [OpenLineage example events](https://openlineage.io/docs/spec/examples/) show how jobs, runs, inputs, outputs, and column-level lineage can be represented.
+
+These sources describe framework contracts. Apply the invariants in this lesson even when your stack uses different schedulers, stream processors, or metadata systems.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/data-pipelines/quiz/data-pipelines.json" lessonSlug="data-pipelines" title="ML Data Pipeline Decision Check" /%}

@@ -1,0 +1,221 @@
+---
+registryId: text-to-image
+---
+
+{% section-card tone="intro" %}
+## What is text-to-image generation?
+
+**Text-to-image generation** turns a written description into a newly synthesized image. A production pipeline encodes the prompt, starts from a noisy image representation, repeatedly predicts how to remove noise while consulting the prompt, and decodes the final representation into pixels.
+
+In plain language: the model is not searching for a matching picture or drawing one object at a time. It is refining a field of noise into a candidate that should satisfy the requested subjects, attributes, relationships, and style.
+
+**Core invariant: the prompt is a conditioning signal, not a pixel-level specification.** Every candidate still needs evaluation against the intended composition, visual quality, safety policy, and release context.
+
+Named systems such as DALL-E and Stable Diffusion use different model recipes, conditioning paths, and release policies. Treat the current product name as metadata, then verify the exact versioned architecture behind it.
+
+Review [Transformers](/genai/transformers) first if tokens, embeddings, or attention are unfamiliar. Continue to [Text-to-Image System Design](/genai/text-to-image-system-design) for queues, GPU capacity, idempotency, and durable delivery.
+{% /section-card %}
+
+{% section-card %}
+## One request crosses five model boundaries
+
+The outer pipeline is stable even when the denoiser backbone, sampler, or conditioning method changes.
+
+{% system-flow title="From words to candidate pixels" caption="Text conditions a sequential denoising process; the decoder produces candidate pixels, not an automatically releasable result." %}
+{% system-node title="Tokenize and encode" eyebrow="Meaning" icon="braces" tone="blue" %}
+Convert the prompt into contextual vectors. Token limits, truncation, and text-encoder behavior define what conditioning reaches the image model.
+{% /system-node %}
+{% system-node title="Create noisy latents" eyebrow="Variation" icon="refresh" tone="cyan" %}
+Initialize a spatial representation from a recorded seed. Different noise produces different candidates for the same prompt.
+{% /system-node %}
+{% system-node title="Predict a cleaner state" eyebrow="Denoiser" icon="workflow" tone="violet" %}
+A U-Net, diffusion transformer, or hybrid predicts the update while attending to the timestep and conditioning signals.
+{% /system-node %}
+{% system-node title="Apply the schedule" eyebrow="Sampler" icon="activity" tone="amber" %}
+The scheduler turns each model prediction into the next, slightly cleaner state. Sampling is a sequential loop.
+{% /system-node %}
+{% system-node title="Decode and inspect" eyebrow="Pixels" icon="image" tone="green" %}
+Map the final latent through a decoder, then evaluate the actual image before release.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep training and generation separate
+
+- **Training adds noise to known images** and teaches a model to predict a denoising target at many noise levels.
+- **Generation starts from sampled noise** and uses the learned predictor repeatedly without seeing a target image.
+- **The denoiser predicts an update**, while the scheduler decides how that prediction changes the current sample.
+- **The decoder reconstructs pixels** from the final latent; it does not repair a composition the denoising loop never formed.
+
+[Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239) establishes the learned reverse process. [Latent Diffusion Models](https://openaccess.thecvf.com/content/CVPR2022/html/Rombach_High-Resolution_Image_Synthesis_With_Latent_Diffusion_Models_CVPR_2022_paper.html) move that process into a compressed representation to reduce spatial compute.
+{% /section-card %}
+
+{% section-card %}
+## The denoiser may be convolutional or transformer-based
+
+The word **diffusion** describes the training and sampling process. It does not require one backbone architecture.
+
+{% concept-grid columns="2" %}
+{% concept-card title="U-Net denoiser" eyebrow="Multi-scale feature maps" icon="layers" tone="cyan" %}
+Downsampling and upsampling paths mix local detail with broad spatial context. Cross-attention can inject text features at several resolutions.
+{% /concept-card %}
+{% concept-card title="Diffusion transformer" eyebrow="Latent patch tokens" icon="braces" tone="violet" %}
+The latent is patchified into a token sequence. Transformer blocks mix spatial tokens with timestep and conditioning information before predicting the denoising update.
+{% /concept-card %}
+{% /concept-grid %}
+
+Both can operate inside a latent diffusion pipeline. A diffusion transformer is not necessarily an autoregressive image decoder: it can predict a parallel update for all latent patches at one diffusion step. The [Diffusion Transformer paper](https://openaccess.thecvf.com/content/ICCV2023/html/Peebles_Scalable_Diffusion_Models_with_Transformers_ICCV_2023_paper.html) studies this replacement directly.
+{% /section-card %}
+
+{% interactive-block id="genai/text-to-image-generation-trace-lab" dataFile="/api/content/genai/text-to-image/data/generation-trace.json" /%}
+
+{% section-card %}
+## Conditioning steers the sample
+
+Text conditioning commonly reaches the denoiser through attention or related modulation. The model can also receive image-derived controls such as edges, depth, segmentation, or pose.
+
+### Classifier-free guidance changes a trade-off
+
+Classifier-free guidance combines an unconditional prediction with a prompt-conditioned prediction. Raising guidance usually pushes the sample toward the prompt signal, but it can reduce variation or amplify artifacts. The useful range is model- and workload-specific; it is not a universal quality dial.
+
+- **Positive prompt:** describes desired content and relationships.
+- **Negative prompt:** supplies another conditioning signal; it is not a hard prohibition.
+- **Structural control:** constrains geometry more directly than prose can, but excessive strength can make the result rigid or conflict with the text.
+- **Seed:** controls the sampled starting state for a given implementation. It does not guarantee identical pixels across changed models, runtimes, precision, or hardware.
+
+[Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598) formalizes the fidelity-diversity trade-off. [ControlNet](https://openaccess.thecvf.com/content/ICCV2023/html/Zhang_Adding_Conditional_Control_to_Text-to-Image_Diffusion_Models_ICCV_2023_paper.html) demonstrates learned spatial conditions including edges, depth, segmentation, and pose.
+
+{% code-block file="/api/content/genai/text-to-image/code/conditioning-budget.py" language="python" title="Model competing text and structure signals" /%}
+{% /section-card %}
+
+{% interactive-block id="genai/text-to-image-conditioning-lab" dataFile="/api/content/genai/text-to-image/data/conditioning-scenarios.json" /%}
+
+{% section-card %}
+## Latent decoding has its own quality ceiling
+
+A latent pipeline uses an encoder-decoder model, often a variational autoencoder, to map between pixels and a smaller spatial representation. The denoiser works in that compressed space; the decoder turns the final latent back into an image.
+
+{% metric-strip %}
+{% metric value="Prompt" label="Semantic conditions" tone="blue" /%}
+{% metric value="Latent" label="Compressed image state" tone="violet" /%}
+{% metric value="Pixels" label="Decoded candidate" tone="green" /%}
+{% metric value="Evidence" label="Release decision" tone="amber" /%}
+{% /metric-strip %}
+
+Compression makes high-resolution generation more practical, but it can lose information. Fine text, tiny objects, sharp boundaries, and repeated patterns may fail because of the denoising model, the decoder, or both. Diagnose the stage before tuning prompt wording.
+
+### A useful trace records more than the seed
+
+- normalized prompt and text-encoder version;
+- model, denoiser backbone, autoencoder, scheduler, and adapter versions;
+- seed policy, dimensions, step count, guidance, precision, and runtime;
+- input and output policy versions plus the final decision;
+- timings for queueing, encoding, denoising, decoding, evaluation, and storage.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the failure you care about
+
+No single automatic metric proves that a text-to-image model is useful. Evaluate a fixed model recipe against a versioned prompt suite, candidate set, and release policy.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Prompt alignment" eyebrow="Did it follow the request?" icon="search" tone="blue" %}
+Check objects, counts, colors, attributes, spatial relations, and omitted requirements. Aggregate similarity can hide binding errors.
+{% /concept-card %}
+{% concept-card title="Visual quality" eyebrow="Is the image coherent?" icon="image" tone="cyan" %}
+Inspect anatomy, edges, text rendering, texture, compression, and decoder artifacts at the product's actual resolution.
+{% /concept-card %}
+{% concept-card title="Diversity" eyebrow="Does the model cover the task?" icon="refresh" tone="violet" %}
+Compare multiple seeds and prompt paraphrases. High average quality can coexist with repetitive composition or missing modes.
+{% /concept-card %}
+{% concept-card title="Safety and rights" eyebrow="May it be released?" icon="shield" tone="amber" %}
+Measure policy misses and false positives by content class, language, demographic slice, identity risk, and intended audience.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Build slices before averaging scores
+
+- object count, attribute binding, and left/right or above/below relations;
+- short prompts, long prompts, negation, and prompt paraphrases;
+- people, hands, faces, typography, diagrams, and product-specific imagery;
+- supported languages and scripts rather than English-only aggregates;
+- safety boundary cases, benign look-alikes, and adversarial wording;
+- latency and memory at every supported resolution and batch shape.
+
+CLIP-like similarity can contribute an alignment signal, but [CLIPScore](https://arxiv.org/abs/2104.08718) was introduced as an image-caption compatibility metric, not a complete image-generation judge. [GenEval](https://openreview.net/pdf?id=Wbr51vK331) shows why object count, color, position, and co-occurrence need more targeted checks.
+
+{% code-block file="/api/content/genai/text-to-image/code/release-scorecard.py" language="python" title="Gate a release on required evaluation slices" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Safety surrounds generation
+
+Prompt filtering and output filtering protect different boundaries. A permitted prompt can still produce a disallowed candidate, while an overbroad prompt rule can reject a harmless request before evidence exists.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the request" label="Before compute" %}
+Authenticate, enforce product scope, inspect prompt and reference inputs, and reject clearly prohibited work before scheduling GPU time.
+{% /process-step %}
+{% process-step number="2" title="Generate a candidate" label="Untrusted pixels" %}
+Run the pinned model recipe. Keep the candidate private until required checks complete.
+{% /process-step %}
+{% process-step number="3" title="Inspect the output" label="Actual evidence" %}
+Apply content, identity, privacy, and product-specific checks to the image that was actually generated.
+{% /process-step %}
+{% process-step number="4" title="Release with context" label="Governed result" %}
+Record the decision, attach supported provenance, label the experience where appropriate, or route the candidate to review.
+{% /process-step %}
+{% /process-flow %}
+
+Content Credentials can bind provenance claims to an asset and describe its history. They do not prove that the depicted scene is true, safe, authorized, or unbiased. Use the current [C2PA specifications](https://spec.c2pa.org/specifications/) for implementation details and [NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) for broader generative-AI risk management.
+{% /section-card %}
+
+{% section-card %}
+## Deploy a measured model recipe
+
+A production recipe is the model plus every component that can change output, performance, or policy behavior. Benchmark and roll back the bundle as one unit.
+
+{% process-flow %}
+{% process-step number="1" title="Pin the recipe" label="Compatibility" %}
+Version the text encoder, denoiser, autoencoder, scheduler, adapters, precision, kernels, and safety policy together.
+{% /process-step %}
+{% process-step number="2" title="Profile matched quality" label="Capacity" %}
+Measure queue time, denoising time, decode time, peak memory, images per GPU-second, and cost per accepted result at a fixed quality bar.
+{% /process-step %}
+{% process-step number="3" title="Admit bounded jobs" label="Reliability" %}
+Validate dimensions and image count, cap work, isolate interactive and batch queues, and make expensive retries idempotent.
+{% /process-step %}
+{% process-step number="4" title="Canary every change" label="Operations" %}
+Compare quality slices, policy outcomes, latency, memory, and user retries before expanding traffic. Preserve a complete rollback bundle.
+{% /process-step %}
+{% /process-flow %}
+
+### Capacity follows sequential work
+
+For one measured deployment profile, a first planning approximation is:
+
+`job time = fixed overhead + denoising steps x measured time per step`
+
+Resolution, classifier-free guidance implementation, batching, backbone, attention kernels, precision, and hardware all change the measured time per step. The [Diffusers scheduler documentation](https://huggingface.co/docs/diffusers/using-diffusers/schedulers) describes how schedulers and timestep schedules update the sample; test each supported configuration instead of assuming that more steps are always better.
+
+### Watch product outcomes, not GPU utilization alone
+
+- queue age and deadline misses by quality tier;
+- accepted images per GPU-second and cost per accepted image;
+- user retries, regeneration rate, edits, downloads, and abandonment;
+- policy rejection, review, appeal, and detector-unavailable rates;
+- quality and safety regressions by prompt slice and exact recipe version.
+{% /section-card %}
+
+{% section-card %}
+## Primary papers and maintained documentation
+
+- [Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239) introduces the learned reverse diffusion process.
+- [High-Resolution Image Synthesis with Latent Diffusion Models](https://openaccess.thecvf.com/content/CVPR2022/html/Rombach_High-Resolution_Image_Synthesis_With_Latent_Diffusion_Models_CVPR_2022_paper.html) explains compressed latent denoising and cross-attention conditioning.
+- [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598) describes the conditional-unconditional guidance trade-off.
+- [Scalable Diffusion Models with Transformers](https://openaccess.thecvf.com/content/ICCV2023/html/Peebles_Scalable_Diffusion_Models_with_Transformers_ICCV_2023_paper.html) replaces the usual U-Net backbone with a transformer over latent patches.
+- [Adding Conditional Control to Text-to-Image Diffusion Models](https://openaccess.thecvf.com/content/ICCV2023/html/Zhang_Adding_Conditional_Control_to_Text-to-Image_Diffusion_Models_ICCV_2023_paper.html) presents ControlNet for spatial conditioning.
+- [Hugging Face Diffusers text-to-image documentation](https://huggingface.co/docs/diffusers/main/api/pipelines/stable_diffusion/text2img) documents the maintained pipeline component contract.
+- [C2PA specifications](https://spec.c2pa.org/specifications/) and [NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) provide maintained provenance and risk-management guidance.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/text-to-image/quiz/text-to-image-review.json" lessonSlug="text-to-image" /%}

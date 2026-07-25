@@ -1,0 +1,208 @@
+---
+registryId: concurrency
+---
+
+{% section-card tone="intro" %}
+## What is concurrency?
+
+**Concurrency is the design of a program so multiple tasks can make progress during
+overlapping periods.** One processor can interleave those tasks; several processors
+can also execute some of them at the same instant.
+
+Concurrency matters whenever a system must keep serving work while it waits for
+networks, disks, users, timers, or other tasks. The core invariant is:
+**every shared state transition and every unit of queued work needs an explicit
+ownership, ordering, and overload rule**.
+
+Concurrency is not automatically parallelism. Concurrency describes how in-progress
+tasks are coordinated. Parallelism describes work that executes simultaneously.
+{% /section-card %}
+
+{% section-card %}
+## Separate task coordination from simultaneous execution
+
+{% concept-grid columns="3" %}
+{% concept-card title="Concurrency" eyebrow="Coordinate progress" icon="workflow" tone="blue" %}
+Tasks overlap in time through interleaving, waiting, scheduling, or communication.
+Even one CPU core can run a concurrent program.
+{% /concept-card %}
+{% concept-card title="Parallelism" eyebrow="Execute together" icon="speed" tone="violet" %}
+Two or more operations run at the same instant on different cores or processors.
+Parallel work still needs concurrency rules when it shares state.
+{% /concept-card %}
+{% concept-card title="Asynchrony" eyebrow="Do not wait here" icon="timer" tone="green" %}
+The caller can continue while an operation completes later. Async APIs help with
+waiting, but they do not remove races, queue growth, cancellation, or overload.
+{% /concept-card %}
+{% /concept-grid %}
+
+A web server may concurrently manage thousands of connections while only a bounded
+worker pool performs CPU work in parallel. Naming both limits prevents “one task per
+request” from becoming an accidental resource policy.
+{% /section-card %}
+
+{% section-card %}
+## Trace a lost update one operation at a time
+
+The expression `counter = counter + 1` is a read, a calculation, and a write. Two
+workers can both read `0`, both calculate `1`, and both write `1`. No instruction is
+corrupted, but one logical increment disappears.
+
+Choose an attempted interleaving and a synchronization strategy. The lab shows the
+exact operation order, final counter value, and any waiting or retry work.
+
+{% interactive-block id="technology/concurrency-performance" dataFile="/api/content/technology/concurrency/data/interleaving-synchronization-model.json" /%}
+
+The unsafe schedule is deterministic evidence of the bug, not a claim that a scheduler
+will choose that order every time. A race detector can report conflicting accesses
+that actually execute, but passing one run cannot prove that every possible
+interleaving is safe.
+{% /section-card %}
+
+{% section-card %}
+## Choose synchronization from the invariant
+
+{% concept-grid columns="2" %}
+{% concept-card title="Mutex" eyebrow="One critical section" icon="lock" tone="blue" %}
+Use a mutex when several fields or steps must change as one invariant. Unlocking must
+happen on every path, and all callers must use the same protection discipline.
+{% /concept-card %}
+{% concept-card title="Atomic operation" eyebrow="One small state transition" icon="repeat" tone="violet" %}
+Use an atomic read-modify-write or compare-and-swap when the state and retry rule are
+small enough to reason about. A group of atomic fields is not automatically one atomic
+transaction.
+{% /concept-card %}
+{% concept-card title="Single owner" eyebrow="Move commands, not memory" icon="boxes" tone="green" %}
+Send commands to one task that owns the mutable state. This removes concurrent writes
+to that state, while making mailbox capacity and command ordering part of the design.
+{% /concept-card %}
+{% concept-card title="Semaphore" eyebrow="Bound a resource" icon="gauge" tone="amber" %}
+Use permits to cap concurrent access to a connection pool, API, or expensive operation.
+A semaphore limits admission; it does not protect a multi-step state invariant by
+itself.
+{% /concept-card %}
+{% /concept-grid %}
+
+The following Java example protects one counter with one lock. The lock surrounds the
+whole read-modify-write operation, and `finally` guarantees release.
+
+{% code-block file="/api/content/technology/concurrency/code/safe-counter.java" language="java" title="Protect one counter invariant with ReentrantLock" /%}
+{% /section-card %}
+
+{% section-card %}
+## Pick a concurrency model with an ownership rule
+
+- **Threads with shared memory** can run CPU work in parallel and share objects
+  directly. Every shared mutable object still needs a documented synchronization
+  contract.
+- **Event loops and async tasks** multiplex waiting work with few threads. Blocking a
+  loop delays unrelated tasks, so CPU work and blocking libraries need an explicit
+  offload boundary.
+- **Actors and single-owner loops** isolate mutable state behind messages. Mailbox
+  ordering, bounded capacity, cancellation, and restart behavior become part of the
+  protocol.
+- **Channels and pipelines** make handoff visible between stages. Channel capacity,
+  closure ownership, fan-out, and fan-in determine whether the pipeline drains or
+  stalls.
+
+Prefer the model that makes ownership and cancellation easiest to explain. Syntax such
+as `async`, a goroutine, or a thread constructor does not choose a safe lifecycle for
+you.
+{% /section-card %}
+
+{% section-card %}
+## Turn worker capacity into a backpressure decision
+
+A queue absorbs a temporary mismatch between arrivals and service. It cannot make a
+sustained mismatch disappear. For identical workers:
+
+`service capacity = worker count × 1000 / service time in milliseconds`
+
+The lab runs eight one-second windows. In every window, workers take up to their exact
+service capacity, then the selected policy places, blocks, or rejects the remainder.
+Change the arrival rate, worker count, service time, queue capacity, and overload
+policy; inspect every second rather than trusting an average.
+
+{% interactive-block id="technology/concurrency-backpressure-lab" dataFile="/api/content/technology/concurrency/data/bounded-queue-model.json" /%}
+
+A bounded queue keeps memory bounded. It does not make the system healthy by itself:
+blocking transfers waiting to the caller, while rejection requires a retry, fallback,
+or explicit error contract.
+{% /section-card %}
+
+{% section-card %}
+## Implement the overload contract at admission
+
+Java's `BlockingQueue` API exposes distinct full-queue behaviors: insertion can throw,
+return a special value, wait, or wait with a timeout. The caller must deliberately
+choose which behavior matches the product contract.
+
+This example configures two workers and a queue of two tasks. The first two tasks hold
+the workers, the next two occupy the queue, and the fifth submission is rejected.
+
+{% code-block file="/api/content/technology/concurrency/code/bounded-worker-pool.java" language="java" title="Reject work when a bounded executor is saturated" /%}
+
+Before production, replace demo constants with measured service-time distributions and
+test bursts, slow dependencies, retries, cancellation, and shutdown. Average service
+time alone does not predict tail latency.
+{% /section-card %}
+
+{% section-card %}
+## Prevent deadlock and other failures of progress
+
+Correct values are not enough; the system must continue making progress.
+
+- **Deadlock:** tasks form a wait cycle. Prevent it with one global lock order, or
+  remove simultaneous ownership of multiple locks.
+- **Livelock:** tasks keep changing state but repeatedly undo one another's progress.
+  Bound retries and add randomized or coordinated backoff where appropriate.
+- **Starvation:** one task waits indefinitely while others repeatedly win access.
+  Inspect scheduler, queue, lock-fairness, and priority behavior instead of assuming
+  equal service.
+- **Leak:** a task outlives its request, owner, or cancellation scope. Propagate
+  cancellation and wait for child work during shutdown.
+
+For a two-lock operation, write the order as an invariant such as “always acquire
+account ID 17 before account ID 42.” A timeout detects excessive waiting; it does not
+make a partially completed operation atomic.
+{% /section-card %}
+
+{% section-card %}
+## Test schedules, limits, and lifecycle boundaries
+
+Use several forms of evidence because each finds a different class of failure:
+
+1. run deterministic tests that force known harmful interleavings;
+2. run the language or runtime race detector on realistic exercised paths;
+3. stress cancellation, timeout, and shutdown while work is queued and running;
+4. record queue depth, admission outcomes, active workers, lock wait time, task age,
+   retries, and completion latency;
+5. inject dependency slowdown and confirm backpressure reaches the intended boundary;
+6. capture deadlock diagnostics and thread or task dumps before restarting a failed
+   process.
+
+Treat “no race was observed” and “no request failed” as observations, not proofs. The
+design proof is the ownership, happens-before, capacity, and lifecycle contract.
+{% /section-card %}
+
+{% section-card %}
+## Verify semantics against primary documentation
+
+The examples and claims in this lesson follow current runtime documentation:
+
+- [the Go memory model](https://go.dev/ref/mem) defines data races and synchronization
+  through channels, locks, and atomic operations;
+- [Go's data race detector](https://go.dev/doc/articles/race_detector) documents what
+  `-race` observes and its exercised-path limitation;
+- [Java `BlockingQueue`](https://docs.oracle.com/en/java/javase/26/docs/api/java.base/java/util/concurrent/BlockingQueue.html)
+  distinguishes throwing, special-value, blocking, and timed queue operations;
+- [Java `ThreadPoolExecutor`](https://docs.oracle.com/en/java/javase/26/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html)
+  defines bounded work queues and rejected-execution handlers;
+- [Java `ThreadMXBean`](https://docs.oracle.com/en/java/javase/26/docs/api/java.management/java/lang/management/ThreadMXBean.html)
+  exposes deadlock detection for monitors and ownable synchronizers.
+
+Pin the language and runtime version in operational documentation. Memory-model,
+diagnostic, scheduler, and executor details are runtime contracts, not folklore.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/concurrency/quiz/concurrency-production-decisions.json" lessonSlug="concurrency" title="Concurrency Design Decisions" /%}

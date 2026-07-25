@@ -1,0 +1,296 @@
+---
+registryId: document-parsing
+---
+
+{% section-card tone="intro" %}
+## What is document parsing?
+
+Document parsing turns files made for people, such as PDFs, scans, forms, and office documents, into structured records that software can validate and use. OCR can recover characters from pixels, but parsing also has to recover reading order, headings, tables, fields, relationships, and the evidence behind each value.
+
+The core invariant is: **never separate an extracted value from its source, schema version, and decision state**. A value is only a candidate until the system can show where it came from, which checks it passed, and whether it was accepted automatically or by a reviewer.
+
+This lesson follows one document from untrusted ingestion to production release. It explains native extraction, layout and OCR, structure recovery, typed schemas, confidence, review, evaluation, privacy, queue capacity, observability, and release gates.
+{% /section-card %}
+
+{% system-flow title="From file bytes to an accepted record" caption="Each stage adds evidence. Later stages may reject or route a candidate, but they must not erase the original source or earlier decisions." %}
+{% system-node title="Ingest safely" eyebrow="Source" icon="shield" tone="blue" %}
+Verify file signatures and limits, assign a stable document ID, hash the original bytes, and store them immutably.
+{% /system-node %}
+{% system-node title="Recover page content" eyebrow="Pixels and objects" icon="search" tone="cyan" %}
+Use native objects when trustworthy; render and OCR only the pages or regions that need recognition.
+{% /system-node %}
+{% system-node title="Build structure" eyebrow="Relationships" icon="layers" tone="violet" %}
+Resolve reading order, sections, key-value pairs, tables, and cross-page continuations while retaining coordinates.
+{% /system-node %}
+{% system-node title="Apply the contract" eyebrow="Schema" icon="braces" tone="amber" %}
+Normalize typed values, validate required fields and relationships, and attach field-level confidence and provenance.
+{% /system-node %}
+{% system-node title="Accept or review" eyebrow="Decision" icon="check" tone="green" %}
+Release safe candidates, send bounded uncertainty to review, or quarantine an unsafe or incomplete source.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Ingestion is a trust boundary
+
+A parser processes attacker-controlled bytes and may invoke complex PDF, image, archive, font, and XML libraries. Treat upload handling as its own security boundary before any ML model sees a page.
+
+{% process-flow %}
+{% process-step number="1" title="Identify the source" label="Immutable intake" %}
+Assign a document ID and tenant, hash the original bytes, preserve page or attachment order, and make retries refer to the same revision.
+{% /process-step %}
+{% process-step number="2" title="Verify the file" label="Do not trust the suffix" %}
+Compare the allowlisted extension, declared MIME type, file signature, and parser probe. Reject malformed or unsupported combinations.
+{% /process-step %}
+{% process-step number="3" title="Enforce budgets" label="Bound the work" %}
+Limit bytes, pages, dimensions, attachments, decompressed size, nesting depth, and processing time before fan-out.
+{% /process-step %}
+{% process-step number="4" title="Isolate processing" label="Contain failure" %}
+Run parsers with least privilege, restricted network and filesystem access, patched dependencies, and separate quarantine storage.
+{% /process-step %}
+{% /process-flow %}
+
+The intake record should distinguish at least four outcomes:
+
+- **Accepted for parsing:** the source identity and safety checks passed.
+- **Unsupported:** the file is valid but no approved route can process it.
+- **Quarantined:** corruption, malware, suspicious expansion, or incomplete transfer makes inspection unsafe.
+- **Rejected by policy:** the file violates a product limit such as size, page count, or tenant authorization.
+
+{% callout variant="warn" %}
+Extracted text is still untrusted input. If it later enters an LLM, search index, template engine, or browser, preserve that trust label and apply the downstream system's escaping and instruction-isolation rules.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Choose native extraction, layout analysis, and OCR deliberately
+
+OCR means optical character recognition: converting pixels that look like text into characters and word regions. It is necessary for scans and photos, but a digital PDF may already contain characters, fonts, drawing objects, and coordinates. Re-rendering a good text layer throws away evidence and adds recognition error.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Native objects" eyebrow="Digital source" icon="file" tone="blue" %}
+Use embedded text, document XML, form controls, and table objects when coverage and encoding checks pass. Preserve object coordinates and source order even when later layout repair is needed.
+{% /concept-card %}
+{% concept-card title="OCR regions" eyebrow="Scans and gaps" icon="scan" tone="cyan" %}
+Render only pages or regions without usable text. Record image transform, OCR engine and model version, language, word boxes, and confidence.
+{% /concept-card %}
+{% concept-card title="Layout model" eyebrow="Page meaning" icon="layout" tone="violet" %}
+Classify blocks such as title, paragraph, list, table, figure, caption, and footer; then infer reading order and relationships across blocks.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Probe each page, not only the file
+
+A single PDF can mix born-digital pages, scanned signatures, rotated appendices, and image-only attachments. Route at page or region granularity when the output contract permits it.
+
+- Measure native character coverage and whether the text decodes into plausible language.
+- Detect rotation, skew, low contrast, blur, compression artifacts, and tiny text before OCR.
+- Keep the original coordinate system plus every crop, rotation, and scale transform.
+- Remove repeated headers and footers only after preserving their source blocks.
+- Compare native and OCR text on sampled hybrid pages instead of assuming either source is authoritative.
+
+The Tesseract project documents how rescaling, binarization, noise removal, deskewing, borders, and page-segmentation mode can change recognition quality. These are hypotheses to evaluate on your own slices, not a universal preprocessing recipe.
+
+{% code-block file="/api/content/ml-systems/document-parsing/code/parsing_pipeline.py" language="python" title="Dependency-free parsing control plane" /%}
+{% /section-card %}
+
+{% section-card %}
+## Structure extraction turns blocks into relationships
+
+Recognized words are not yet a document. Structure extraction answers which words belong together and what role each region plays.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Reading order" eyebrow="Sequence" icon="list" tone="blue" %}
+Order blocks through columns, sidebars, captions, footnotes, and page breaks. Store explicit predecessor relationships when simple coordinates are ambiguous.
+{% /concept-card %}
+{% concept-card title="Hierarchy" eyebrow="Sections" icon="layers" tone="violet" %}
+Connect titles, headings, paragraphs, and list items. Do not infer heading level from font size alone; repeated styles and numbering also matter.
+{% /concept-card %}
+{% concept-card title="Fields and forms" eyebrow="Semantics" icon="key" tone="cyan" %}
+Link each key to its value, preserve check-box state and nearby labels, and distinguish a missing field from a present but empty field.
+{% /concept-card %}
+{% concept-card title="Tables" eyebrow="Topology" icon="table" tone="amber" %}
+Keep cells, row and column indexes, spans, headers, units, and continuation links. Flatten to CSV only after structural validation.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve evidence before normalizing values
+
+For a date such as `04/05/26`, keep the raw text and locale evidence before emitting a normalized date. For a table total, keep the source cells and formula check before emitting a number. This makes a correction inspectable and lets a newer parser replay the same source.
+
+A useful field candidate contains:
+
+- a stable field ID, schema path, raw text, and normalized typed value;
+- page number, text span, polygon or bounding box, and surrounding block IDs;
+- parser, OCR, model, prompt, configuration, and schema versions where applicable;
+- confidence plus the calibration cohort that gives that score meaning;
+- validation results, review state, reviewer correction, and decision timestamp.
+{% /section-card %}
+
+{% section-card %}
+## A schema defines what downstream software may trust
+
+The extraction schema is a versioned contract, not a convenient JSON shape discovered after model inference. It states field types, required status, cardinality, units, normalization, relationships, evidence requirements, and compatibility rules.
+
+{% code-block file="/api/content/ml-systems/document-parsing/code/extraction-record.schema.json" language="json" title="Versioned extraction record schema" /%}
+
+### Validate at more than one level
+
+1. **Syntactic validation:** the output parses and conforms to expected types and enumerations.
+2. **Field validation:** identifiers, dates, currencies, units, and allowed values satisfy domain rules.
+3. **Structural validation:** required sections, table headers, row relationships, page coverage, and source anchors exist.
+4. **Cross-field validation:** totals reconcile, date ranges are ordered, and identifiers agree across pages.
+5. **Action validation:** the evidence is sufficient for the specific downstream decision.
+
+Schema evolution needs explicit compatibility. Additive optional fields are usually easier to roll out than renamed or retyped fields. Keep old readers in mind, version breaking changes, and never reinterpret an accepted record silently.
+{% /section-card %}
+
+{% section-card %}
+## Confidence routes work; it does not prove correctness
+
+A confidence score ranks uncertainty according to one model's output space. Its meaning can shift by model version, document family, language, field type, and image quality. Calibrate it against labeled outcomes for the route where it will be used.
+
+{% metric-strip %}
+{% metric value="Accept" label="High evidence" detail="Required fields, source anchors, schema checks, and business invariants pass" tone="green" /%}
+{% metric value="Review" label="Bounded uncertainty" detail="A reviewer can inspect specific fields and their source regions without rebuilding the document" tone="amber" /%}
+{% metric value="Quarantine" label="Unsafe source" detail="The source is corrupt, incomplete, suspicious, or lacks evidence needed for trustworthy correction" tone="rose" /%}
+{% metric value="Reject" label="Contract violation" detail="An explicit product rule says this input or candidate must not proceed" tone="blue" /%}
+{% /metric-strip %}
+
+### Design the review path as a product
+
+- Route fields, rows, or pages when possible; sending every uncertain document as one large task wastes reviewer capacity.
+- Show the source crop, neighboring context, raw and normalized values, failed rules, and model suggestion together.
+- Measure correction rate, reviewer agreement, handling time, queue age, and errors that reviewers miss.
+- Sample some high-confidence auto-accepted records to estimate false accepts that normal review never sees.
+- Store corrections as new labeled revisions with actor and reason; do not overwrite the original candidate.
+
+Do not use one threshold for every action. Search indexing, invoice payment, identity verification, and medical abstraction have different consequences and therefore need different field gates and review policies.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/document-parsing-confidence-review-lab" dataFile="/api/content/ml-systems/document-parsing/data/confidence-review-scenarios.json" /%}
+
+{% section-card %}
+## Size parser and review queues together
+
+Capacity planning starts with work units. Documents per minute is not enough: page count, OCR share, layout complexity, and review rate change service demand. A faster parser can also overload the human queue if automation policy is unchanged.
+
+For a planning interval:
+
+- `incoming pages/min = documents/min x average pages/document`
+- `parser utilization = incoming pages/min / parser capacity pages/min`
+- `review load/hour = documents/min x 60 x review routing rate`
+- a queue grows when arrival work exceeds sustainable service capacity;
+- operate below the theoretical ceiling so bursts, retries, slow pages, and worker loss have headroom.
+
+The lab is an explicit planning model, not a vendor benchmark. Change the assumptions to find the bottleneck and the point where either queue starts growing.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/document-parsing-calculator" dataFile="/api/content/ml-systems/document-parsing/data/capacity-scenarios.json" /%}
+
+{% section-card %}
+## Evaluate the pipeline by stage, slice, and decision
+
+Build a labeled corpus from the traffic the product expects, then freeze a release set that new parser versions cannot train on. Keep adversarial and rare documents in separate challenge sets so their identity does not leak into tuning.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Content quality" eyebrow="Did we recover it?" icon="search" tone="cyan" %}
+- Character and word error rates for OCR
+- Block type and reading-order accuracy
+- Cell, header, span, and table-topology scores
+- Field exact match after declared normalization
+{% /concept-card %}
+{% concept-card title="Decision quality" eyebrow="Did we route it safely?" icon="shield" tone="green" %}
+- Precision of auto-accepted fields
+- Recall of known bad candidates into review
+- False-accept and false-review rates
+- Calibration error by field and document family
+{% /concept-card %}
+{% concept-card title="System quality" eyebrow="Can it operate?" icon="activity" tone="amber" %}
+- End-to-end and stage latency percentiles
+- Queue age, throughput, retries, and timeouts
+- Cost per page and per accepted record
+- Reviewer load and correction time
+{% /concept-card %}
+{% /concept-grid %}
+
+### Slice before averaging
+
+Report the metrics above across meaningful intersections, not only one dimension at a time:
+
+- source type: native PDF, scan, phone photo, office file, and mixed bundle;
+- image condition: resolution band, skew, blur, compression, shadow, and handwriting;
+- layout: single column, multi-column, form, borderless table, merged cells, and multi-page table;
+- language and script, including mixed-language pages and locale-dependent values;
+- document family, template age, page-count band, and previously unseen layouts;
+- risk: required versus optional fields and low- versus high-consequence downstream actions.
+
+Track both macro averages, which weight slices equally, and traffic-weighted averages. A large easy slice can otherwise hide a complete failure on a small critical slice.
+
+{% code-block file="/api/content/ml-systems/document-parsing/code/evaluate_parser.py" language="python" title="Compute field metrics by evaluation slice" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Privacy and security continue after upload
+
+Documents often contain personal, financial, legal, health, or authentication data. Minimize what the pipeline stores and what operators can see.
+
+- Encrypt original files, intermediate page images, candidates, and accepted records in transit and at rest.
+- Isolate tenants in storage, queues, caches, review tools, logs, and authorization checks.
+- Give parsers and reviewers least-privilege access with short-lived credentials and auditable access events.
+- Set retention and deletion rules separately for originals, crops, OCR text, caches, review artifacts, and backups.
+- Redact or tokenize sensitive values before logs, traces, analytics, and support tooling.
+- Review processor region, subprocessors, training and retention terms, and data-residency obligations before sending documents to an external service.
+- Test parser libraries and renderers with malicious, oversized, recursive, and malformed files in an isolated environment.
+
+Privacy can conflict with debugging. Resolve that deliberately: keep low-cardinality operational telemetry by default, and use time-bounded, access-controlled evidence retrieval for incident investigation rather than copying document text into logs.
+{% /section-card %}
+
+{% section-card %}
+## Observability should explain every document decision
+
+Give each attempt a correlation ID tied to a source hash and candidate version. Emit one trace across intake, rendering, OCR, layout, extraction, validation, review routing, and publication without placing raw document content in span attributes.
+
+### Monitor four signal planes
+
+1. **Traffic:** documents, pages, bytes, source formats, OCR route share, and document families.
+2. **Saturation:** queue depth and oldest age, worker utilization, reviewer backlog, memory, and external quota consumption.
+3. **Reliability:** rejects, quarantines, retries, poison messages, timeouts, parser crashes, and duplicate attempts.
+4. **Quality:** confidence distributions, schema failures, review rate, corrections, false accepts from audit samples, and slice regressions.
+
+Every alert needs an owner and action. Queue age should page only when an operator can add capacity, shed work, activate a fallback, or pause intake. A quality regression should identify the parser version and affected slices, then link to replay and rollback procedures.
+{% /section-card %}
+
+{% section-card %}
+## Release only when the complete operating contract passes
+
+A parser release changes more than model accuracy. It can alter schema shape, queue pressure, review demand, privacy exposure, and downstream decisions. Run old and new versions on the same immutable inputs, compare candidates, and promote through a reversible shadow or canary path.
+
+{% interactive-checklist
+   checklistId="document-parsing-release-readiness"
+   dataFile="/api/content/ml-systems/document-parsing/data/release-readiness.json" /%}
+
+### A failed gate has an explicit outcome
+
+- **Hold:** evidence is incomplete; gather labels, load results, or approvals without exposing production traffic.
+- **Fix and replay:** a bounded implementation defect can be corrected and rerun on immutable inputs.
+- **Canary with limits:** evidence passes, but exposure remains capped by document family, tenant, or action while monitors run.
+- **Rollback:** live guardrails fail; stop new work, preserve in-flight state, and replay affected source IDs with the previous version.
+
+Release records should include source-corpus version, parser and model versions, schema and policy versions, evaluation results by slice, capacity assumptions, security review, approvers, canary limits, rollback trigger, and replay procedure.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [Tesseract documentation: improving OCR output quality](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html) describes preprocessing and page-segmentation controls.
+- [Google Cloud Document AI response model](https://docs.cloud.google.com/document-ai/docs/handle-response) shows text anchors, page geometry, layout objects, and confidence in an official document response.
+- [Amazon Textract best practices](https://docs.aws.amazon.com/textract/latest/dg/textract-best-practices.html) explains confidence as a use-case-sensitive routing signal.
+- [JSON Schema Draft 2020-12 Core](https://json-schema.org/draft/2020-12/json-schema-core) defines the object-validation contract used by the schema example.
+- [NIST IR 8199](https://nvlpubs.nist.gov/nistpubs/ir/2017/NIST.IR.8199.pdf) defines normalized character and word edit-distance measures used in text-recognition evaluation.
+- [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html) covers file validation, storage isolation, limits, and parser threats.
+- [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/concepts/semantic-conventions/) provide common naming principles for traces, metrics, logs, and resources.
+- [NIST AI Risk Management Framework 1.0](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10) provides a lifecycle framework for governing, mapping, measuring, and managing AI risk.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/document-parsing/quiz/document-parsing.json" lessonSlug="document-parsing" title="Document Parsing Production Check" /%}

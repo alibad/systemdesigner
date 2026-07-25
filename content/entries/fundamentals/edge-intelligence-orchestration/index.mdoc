@@ -1,0 +1,325 @@
+---
+registryId: edge-intelligence-orchestration
+---
+
+{% section-card tone="intro" %}
+## What is edge intelligence orchestration?
+
+**Edge intelligence orchestration decides which model and policy run on each device or nearby edge node, proves that the placement is compatible, and keeps the fleet safe through updates, disconnections, and failures.** It connects an ML artifact lifecycle to distributed-systems controls such as scheduling, admission, signed rollout intent, local state, reconciliation, telemetry, and rollback.
+
+In plain language, the cloud can prepare and govern a fleet, but an edge system must still make bounded decisions when the network disappears. The orchestrator therefore answers five questions:
+
+1. **Where should inference run?** Device, site edge, or cloud each changes latency, bandwidth, privacy, cost, and failure behavior.
+2. **Can this node run it safely?** Hardware features, memory, accelerator capacity, runtime version, model input signature, and current load must clear admission.
+3. **Who owns each decision?** Fleet policy, site admission, immediate safety, and observed device state need explicit authority.
+4. **How does change move outward?** Signed artifacts advance through representative rings only after compatibility and task evidence clear.
+5. **What happens without the cloud?** Offline leases, cached known-good state, expiring commands, deterministic reconciliation, and local fallbacks bound the damage.
+
+{% callout variant="warn" %}
+### Core invariant
+
+The fast local decision path must not depend on a slower or less available authority. Cloud policy may govern what is allowed, but a device or site must keep an explicitly bounded safe behavior when the cloud, artifact service, telemetry backend, or new model is unavailable.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate authority before choosing technology
+
+Edge is a location and failure boundary, not a single product. A camera, gateway, on-premises rack, regional service, and cloud control plane have different responsibilities.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Device authority" eyebrow="Immediate path" icon="cpu" tone="cyan" %}
+Own sensor capture, actuator interlocks, bounded local inference, a last-known-good model, and the minimum safety fallback. Append observations with stable event IDs; do not invent fleet policy while isolated.
+{% /concept-card %}
+{% concept-card title="Site-edge authority" eyebrow="Local coordination" icon="network" tone="blue" %}
+Own node capability discovery, workload admission, shared accelerator scheduling, site privacy policy, local buffering, and failure containment across devices in one facility.
+{% /concept-card %}
+{% concept-card title="Cloud authority" eyebrow="Fleet governance" icon="server" tone="violet" %}
+Own model registry, signing policy, desired versions, rollout rings, cross-site evidence, long-term analysis, and promotion or recall. Cloud intent is versioned and expires rather than silently becoming eternal truth.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Desired, observed, and safety state are different
+
+- **Desired state** says which signed model, runtime, policy, and rollout ring the cloud authorizes.
+- **Admitted state** says what a site can actually schedule against fresh hardware and capacity evidence.
+- **Observed state** records what a device ran, saw, predicted, and did. It is append-oriented evidence, not a writable copy of desired state.
+- **Safety state** records local interlocks and degraded behavior. A reconnect must not erase it merely because the cloud snapshot has a later wall-clock timestamp.
+
+[KubeEdge's architecture](https://kubeedge.io/docs/) illustrates this split with cloud controllers, an edge agent, local metadata storage, an event bus, and a device twin. Its [Device Management Interface](https://kubeedge.io/docs/developer/dmi/) also separates device management traffic from the device data plane, allowing device data to remain at the edge. Those are useful implementation patterns, not proof that one framework fits every safety or ML workload.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Place models and policies by dependency
+
+Start with the decision deadline and the smallest authority that can satisfy it. Then place supporting policy according to how often it changes and what happens if it is stale.
+
+{% process-flow %}
+{% process-step number="1" title="Name the local contract" label="Latency and consequence" %}
+State the end-to-end deadline, tolerated jitter, task outcome, safe fallback, and maximum time the system may use stale policy.
+{% /process-step %}
+{% process-step number="2" title="Constrain the data boundary" label="Bandwidth and privacy" %}
+Decide whether raw input may leave the device or site. Estimate sustained and burst traffic before assuming a remote model is affordable.
+{% /process-step %}
+{% process-step number="3" title="Match the runtime" label="Capability and capacity" %}
+Require enough memory, accelerator capacity, supported operators, device access, local storage, and thermal headroom from a fresh node snapshot.
+{% /process-step %}
+{% process-step number="4" title="Bind a fallback" label="Partition and recovery" %}
+Pin a tested previous model or deterministic rule path, define the offline lease, and state who may activate degraded behavior.
+{% /process-step %}
+{% /process-flow %}
+
+### Model placement and policy placement are separate choices
+
+- A model may run on a device while thresholds and rollout eligibility come from site policy.
+- A site may run inference while the device retains an independent actuator interlock.
+- The cloud may train and approve a model without receiving raw inputs.
+- A device may cache fleet policy but must stop accepting new commands after their expiry.
+- A remote model can assist a local model, but the local path owns the deadline when connectivity is not part of the service guarantee.
+
+Do not call every edge workload federated learning. Federated learning is one training pattern. Many production edge systems use centralized training with distributed inference, and some never train on devices at all.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: admit a placement against real constraints
+
+Choose a workload, execution tier, hardware profile, connectivity condition, and privacy policy. The lab rejects a placement when any hard contract fails instead of averaging unrelated failures into a reassuring score.
+
+{% interactive-block id="fundamentals/edge-intelligence-orchestration-calculator" dataFile="/api/content/fundamentals/edge-intelligence-orchestration/data/placement-admission-model.json" /%}
+
+Read the result in this order:
+
+1. **Authority and reachability:** the selected tier must survive the current partition for as long as the workload requires it.
+2. **Capability:** the node must belong to that tier and support the model's memory, accelerator, and operator-set contract.
+3. **Service budget:** path plus compute time must clear the deadline, and raw-data egress must fit a bounded fraction of the link.
+4. **Privacy:** raw input cannot cross a scope that policy forbids, even if the network and hardware are fast enough.
+5. **Fallback:** a cloud-only decision cannot own an immediate safety action during a cloud partition.
+
+{% callout variant="info" %}
+### What this model does not prove
+
+The lab uses declared service times, TOPS, memory, bandwidth, and ONNX operator-set compatibility. TOPS is not an application benchmark, and operator support is not numerical parity. Real admission also needs measured preprocessing, thermal behavior, device contention, driver and kernel versions, accelerator memory, task accuracy, and failure tests on each supported hardware cohort.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Discover capability, then schedule against freshness
+
+A node label is a claim about a node, not permanent truth. Drivers change, accelerators reset, storage fills, thermal limits reduce throughput, and a disconnected node stops reporting.
+
+### Build a capability contract
+
+- hardware family, accelerator type, count, memory, and topology
+- operating system, kernel, driver, container runtime, and inference runtime versions
+- supported model format, ONNX IR and operator sets, precision, custom operators, and input schema
+- attached cameras, sensors, actuators, and device-plugin resources
+- allocatable CPU, memory, accelerator slots, local storage, and power or thermal limits
+- observation timestamp, discovery-agent version, attestation or trust state, and expiry
+
+[Node Feature Discovery](https://kubernetes-sigs.github.io/node-feature-discovery/master/get-started/introduction.html) detects node hardware features and advertises labels, extended resources, annotations, and taints.
+
+Kubernetes [node affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) can express required and preferred placement, while [taints and tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) keep unsuitable workloads away. These mechanisms help filter candidates; they do not replace workload-specific admission.
+
+### Admission should be fail-closed for hard constraints
+
+- Reject stale capability snapshots beyond a workload-specific age.
+- Require resource requests and reserve accelerator slots rather than detecting capacity after startup.
+- Keep soft preferences such as image locality separate from hard privacy, runtime, and safety constraints.
+- Re-check the model input signature and runtime on startup; scheduler labels can change after placement.
+- Surface the exact failed gate. A composite “edge readiness” score hides whether the failure is privacy, latency, memory, or compatibility.
+
+The [ONNX versioning specification](https://onnx.ai/onnx/repo-docs/Versioning.html) distinguishes IR, operator-set, and model versions. A model declares the operator sets it needs, but a compatible operator set still does not guarantee equal numerical results across runtimes or accelerators.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design for disconnected operation before rollout
+
+Offline operation is a controlled mode, not “keep doing everything forever.” The edge needs durable local state and a bounded lease for what it may continue doing.
+
+{% system-flow title="Connected intent, local execution, deterministic reconnect" caption="The cloud sends signed desired state. The site admits it. Devices execute and append observations. Reconnect merges by owner, version, event ID, and expiry." %}
+{% system-node title="Publish desired state" eyebrow="Cloud authority" icon="lock" tone="violet" %}
+Issue a signed artifact digest, model and runtime contract, rollout ring, policy version, activation window, expiry, and fallback reference.
+{% /system-node %}
+{% system-node title="Admit and cache" eyebrow="Site authority" icon="check" tone="blue" %}
+Verify trust and freshness, test compatibility, reserve capacity, and persist both the desired release and previous known-good release.
+{% /system-node %}
+{% system-node title="Execute and buffer" eyebrow="Device authority" icon="cpu" tone="cyan" %}
+Run the admitted model, retain immediate safety control, append bounded events with stable IDs and sequences, and expire commands locally.
+{% /system-node %}
+{% system-node title="Reconcile by contract" eyebrow="Reconnect" icon="workflow" tone="green" %}
+Deduplicate observations, reject stale commands, preserve field owners, report gaps, and resume promotion only after evidence is current.
+{% /system-node %}
+{% /system-flow %}
+
+KubeEdge's [MetaManager](https://kubeedge.io/docs/architecture/edge/metamanager) stores metadata in a local SQLite database and tracks cloud connection state. Its [DeviceTwin](https://kubeedge.io/docs/architecture/edge/devicetwin) stores device status locally and synchronizes device state and attributes between edge and cloud. These examples show why local durable state is necessary; application teams still need to define conflict and expiry semantics for their own fields.
+
+### Use field-level reconciliation
+
+- Cloud owns desired model digest, rollout ring, policy version, and command intent.
+- Site edge owns admission decisions, local reservations, and site-level quarantine.
+- Device owns observations, sequence numbers, and immediate safety override state.
+- Events are append-only and idempotent by event ID. Gaps remain visible instead of being filled with guesses.
+- Commands carry issuer, target, policy version, sequence, activation time, and expiry.
+- Clock time supports diagnostics, but authority and monotonic versions decide conflicts.
+
+Last-write-wins can be acceptable for a low-risk display preference. It is a poor default for safety state, commands, rollout intent, or event evidence.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Roll out signed artifacts through representative rings
+
+Treat the model, runtime, preprocessing, feature schema, policy, and fallback as one release contract. A new model on an old feature pipeline can fail even when both artifacts work independently.
+
+### Verify before installation
+
+- Pin container and model artifacts by digest.
+- Verify the signer identity and the policy that authorized that signer.
+- Validate update metadata freshness and reject rollback, freeze, and mix-and-match conditions.
+- Check model input and output signatures, runtime and operator-set support, required custom operators, and memory envelope.
+- Run a local startup probe against representative input before declaring readiness.
+
+The [TUF specification](https://theupdateframework.github.io/specification/v1.0.26/) defines signed metadata roles and explicit checks for signature, rollback, freeze, and mix-and-match attacks. [Sigstore's verification guidance](https://docs.sigstore.dev/cosign/verifying/verify/) shows identity-based signature verification and digest claim checking for artifacts. Artifact trust is one gate; task quality and compatibility remain separate gates.
+
+### Make rings represent risk, not only percentages
+
+1. **Lab:** hardware-in-the-loop fixtures and replay data catch packaging and compatibility failures.
+2. **Canary:** representative hardware, geography, privacy policy, network quality, and workload mix catch cohort failures.
+3. **Site ring:** one bounded facility tests local operations, recovery time, and fallback ownership.
+4. **Fleet:** eligible sites advance only after enough observation time and task outcome evidence.
+
+Kubernetes [rolling updates](https://kubernetes.io/docs/tasks/run-application/update-deployment-rolling/) bound unavailable and surge replicas and expose pause, resume, status, and progress deadlines. Edge fleets need additional ring logic because disconnected nodes, heterogeneous hardware, model outcomes, and local authority are outside a basic Deployment health check.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: inject a rollout or reconnect failure
+
+Select a ring, artifact state, connectivity condition, reconciliation policy, and failure. The lab distinguishes five independent gates: artifact trust, offline authority, sync semantics, outcome evidence, and tested fallback.
+
+{% interactive-block id="fundamentals/edge-intelligence-orchestration-rollout-recovery-lab" dataFile="/api/content/fundamentals/edge-intelligence-orchestration/data/rollout-recovery-model.json" /%}
+
+Try these cases:
+
+- Select a signed artifact with a schema break. Authentic bytes still fail the release contract.
+- Select expired update metadata. A valid old signature cannot prove the release is current.
+- Use field-level authority during an intermittent link. Local inference can continue inside its lease, but the site cannot promote fleet intent.
+- Use last-write-wins during reconnect. The system cannot prove that safety state, command expiry, and observations reconcile correctly.
+- Inject silent drift. CPU, memory, and readiness stay healthy while task evidence requires rollback.
+- Break the fallback contract. Promotion stops because restoring old bytes would not restore a runnable system.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Observe outcomes without leaking the fleet
+
+Infrastructure signals answer whether the process is running. ML and orchestration signals answer whether the right model is running, whether its evidence is trustworthy, and whether the local result remains useful.
+
+### Keep metric dimensions bounded
+
+- model version, runtime version, hardware family, rollout ring, site class, and bounded outcome category
+- admission result and a bounded rejection-reason enum
+- inference latency, queue time, fallback rate, task error, drift summary, and offline queue depth
+- artifact verification failure, rollback, lease expiry, sync conflict, and dropped-event counts
+
+Do not put raw user IDs, device serial numbers, exact input paths, free-form error messages, or model-generated text on metric attributes. The OpenTelemetry [metrics guidance](https://opentelemetry.io/docs/concepts/signals/metrics/) explains that memory cost follows distinct attribute combinations rather than request volume; high-cardinality identifiers can create unbounded aggregation state. OpenTelemetry also treats attributes with privacy, security, or cardinality cost as candidates for opt-in collection.
+
+### Preserve drill-down without high-cardinality metrics
+
+- Aggregate metrics by bounded cohorts.
+- Put sampled device-level diagnostics in access-controlled logs or traces with retention limits.
+- Redact or transform sensitive fields at a site-local collector before export.
+- Track telemetry drop and transform rules as versioned policy.
+- Correlate incidents with short-lived opaque IDs, not permanent personal or device identity.
+
+NIST's [IoT device cybersecurity capability baseline](https://csrc.nist.gov/pubs/ir/8259/a/final) includes device identification, configuration, data protection, interface access control, secure software update, and cybersecurity state awareness. Apply those capabilities to both the edge runtime and its model artifacts.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement explicit release and sync contracts
+
+The Kubernetes example pins the runtime image by digest, binds the workload to a site and discovered accelerator feature, reserves resources, limits rollout unavailability, and checks a model-contract readiness endpoint. The annotations are application metadata; an admission controller or operator must enforce them.
+
+{% code-block file="/api/content/fundamentals/edge-intelligence-orchestration/code/edge-inference-deployment.yaml" language="yaml" title="Schedule a digest-pinned edge inference workload" /%}
+
+The TypeScript example admits one release against a fresh node snapshot. It fails closed on signature, snapshot age, memory headroom, accelerator capacity, operator-set support, and required labels.
+
+{% code-block file="/api/content/fundamentals/edge-intelligence-orchestration/code/admit-edge-release.ts" language="typescript" title="Admit a release without hiding failed gates" /%}
+
+The Python example demonstrates field ownership, monotonic versions, idempotent observation IDs, per-device sequences, and command expiry. It intentionally avoids wall-clock last-write-wins.
+
+{% code-block file="/api/content/fundamentals/edge-intelligence-orchestration/code/reconcile-offline-state.py" language="python" title="Reconcile offline state by owner and sequence" /%}
+
+Production controllers also need authenticated transport, durable transactions around local activation, download resumption, disk quotas, key rotation, revocation behavior, staged garbage collection, and auditable terminal states.
+{% /section-card %}
+
+{% section-card %}
+## Contain failure and make recovery testable
+
+### Failures to separate
+
+- **Artifact failure:** invalid signature, stale metadata, wrong digest, corrupted download, or insufficient disk.
+- **Compatibility failure:** unsupported operator, driver mismatch, input schema change, custom operator absence, or numerical parity regression.
+- **Runtime failure:** crash loop, memory pressure, accelerator reset, thermal throttling, or queue overload.
+- **Model failure:** drift, calibration loss, task-quality regression, bias change, or unsafe confidence behavior.
+- **Control failure:** stale command, split authority, duplicate activation, expired lease, or bad reconciliation.
+- **Observation failure:** missing model version, unbounded cardinality, privacy leak, collector outage, or outcome labels arriving too late.
+
+### Recovery order
+
+1. Stop promotion and bound the affected ring or site.
+2. Keep or restore the last tested local path; do not delete it until the new release clears.
+3. Preserve evidence: artifact identity, capability snapshot, policy version, event sequence, task outcomes, and timestamps.
+4. Quarantine incompatible cohorts rather than retrying the same release fleet-wide.
+5. Re-establish connectivity and freshness, then reconcile by owner and sequence.
+6. Resume only after the fallback, new release, and rollback path have all passed the same representative cohort tests.
+
+{% callout variant="warn" %}
+### A cached model is not a rollback plan
+
+Rollback is credible only when the previous model, runtime, preprocessing, feature schema, device access, local policy, and activation mechanism were tested together. Schema migrations and garbage collection can silently destroy recovery even while the old model file remains on disk.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Choose edge intelligence for the right reason
+
+### Benefits
+
+- local deadlines can survive WAN latency and cloud partitions
+- raw data can remain inside a device or site privacy boundary
+- cloud bandwidth can carry bounded evidence rather than every sensor sample
+- site-level admission can match workloads to heterogeneous accelerators
+- rollout rings can contain hardware- and geography-specific failures
+
+### Costs and trade-offs
+
+- every supported hardware and runtime cohort multiplies testing and operations work
+- offline state, command expiry, reconciliation, and local storage become product behavior
+- local privacy can improve while physical device exposure and key management risk increase
+- quantization and smaller models reduce resource pressure but may change task quality
+- strict admission lowers utilization but prevents unpredictable oversubscription
+- rich telemetry improves diagnosis but increases bandwidth, cardinality, and privacy risk
+- long offline leases improve availability but extend exposure to stale policy and revoked artifacts
+
+Use cloud inference when the network is part of the service guarantee and centralized operations matter more than locality. Use device or site inference when deadline, privacy, bandwidth, or disconnected operation makes remote dependency unacceptable. Hybrid designs are common, but each path still needs one clear owner and failure contract.
+{% /section-card %}
+
+{% section-card %}
+## Primary and official references
+
+- [KubeEdge architecture and components](https://kubeedge.io/docs/)
+- [KubeEdge MetaManager](https://kubeedge.io/docs/architecture/edge/metamanager)
+- [KubeEdge DeviceTwin](https://kubeedge.io/docs/architecture/edge/devicetwin)
+- [KubeEdge Device Management Interface](https://kubeedge.io/docs/developer/dmi/)
+- [Kubernetes: assigning Pods to nodes](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/)
+- [Kubernetes: taints and tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/)
+- [Node Feature Discovery introduction](https://kubernetes-sigs.github.io/node-feature-discovery/master/get-started/introduction.html)
+- [Kubernetes rolling updates](https://kubernetes.io/docs/tasks/run-application/update-deployment-rolling/)
+- [The Update Framework specification](https://theupdateframework.github.io/specification/v1.0.26/)
+- [Sigstore: verifying signatures](https://docs.sigstore.dev/cosign/verifying/verify/)
+- [ONNX versioning](https://onnx.ai/onnx/repo-docs/Versioning.html)
+- [OpenTelemetry metrics and cardinality](https://opentelemetry.io/docs/concepts/signals/metrics/)
+- [NISTIR 8259A: IoT Device Cybersecurity Capability Core Baseline](https://csrc.nist.gov/pubs/ir/8259/a/final)
+
+Product documentation describes mechanisms and defaults, not proof that a workload is safe. Validate every threshold, privacy boundary, and recovery claim against the actual device cohort and application consequence.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/edge-intelligence-orchestration/quiz/edge-intelligence-orchestration.json" lessonSlug="edge-intelligence-orchestration" title="Edge Intelligence Orchestration Decisions" /%}

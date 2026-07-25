@@ -1,0 +1,268 @@
+---
+registryId: case-study-netflix-streaming
+---
+
+{% section-card tone="intro" %}
+## What is Netflix streaming architecture?
+
+Netflix streaming architecture is the system that prepares a studio video, decides that a member may watch it, and delivers small video pieces to a player that can adapt as its network changes. It separates the **control plane** (identity, title availability, manifests, and policy) from the **media plane** (the high-bandwidth video segments delivered close to viewers).
+
+In plain language: pressing Play does not mean downloading one giant movie file. The player receives a menu of prepared qualities, starts with a safe choice, and repeatedly asks a nearby cache for the next few seconds of video.
+
+This matters because a stream can be technically available while still feeling broken. A slow start, repeated pauses, sudden quality drops, or an origin overload are all failures of the viewing experience.
+
+{% callout variant="info" %}
+### Core invariant
+
+Playback must continue within startup, rebuffering, quality, and origin-protection budgets despite variable networks and failures. A control-plane problem, cache miss, or degraded route may change the experience, but it should not turn one popular title into an uncontrolled origin stampede.
+{% /callout %}
+{% /section-card %}
+
+Netflix has publicly described Open Connect, its content-delivery network, as a way to place popular media close to internet service providers. The case study uses that public architectural shape, but treats fleet sizes, traffic, and capacity values as **illustrative planning inputs**, not current private Netflix metrics. Review [CDN and network basics](/reference/cdn-and-network) and [latency versus throughput](/fundamentals/latency-vs-throughput) first if caching or bandwidth budgets are new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the playback contract before choosing services" %}
+
+## A viewer needs a continuous session, not just a successful HTTP response
+
+Streaming has several paths with different failure costs. The browse page can be personalized and eventually consistent. The selected title needs an authorization and manifest decision. Media segments need low-latency, high-throughput delivery that avoids the central origin whenever possible.
+
+### Functional requirements
+
+- Ingest a licensed source, validate it, encode multiple device-compatible renditions, and publish them only when the package is complete.
+- Let an entitled member discover a title, select an audio or subtitle track, and receive a time-limited playback manifest.
+- Deliver sequential media segments from a nearby cache, with a fallback route when the preferred edge cannot serve them.
+- Adapt bitrate and resolution to measured throughput, device capability, buffer level, and decoder limits.
+- Record playback events so operators can distinguish an application failure from a network, device, encode, or delivery problem.
+
+### Experience and protection budgets
+
+- **Startup:** begin quickly enough that a valid Play action feels responsive; measure the full path from intent to first rendered frame.
+- **Continuity:** keep the playback buffer ahead of consumption and minimize rebuffer time, especially during route or rendition changes.
+- **Quality:** choose the highest sustainable rendition, but prefer uninterrupted lower quality over a repeated pause.
+- **Origin protection:** keep cache-hit traffic at the edge and bound miss concurrency, retries, and failover so a release or outage does not overload package storage.
+
+### Scope boundary
+
+This lesson focuses on on-demand video ingest, catalog decisions, delivery, playback adaptation, and operations. Studio production, billing, DRM internals, advertising, and the complete recommendation-model stack are adjacent systems.
+
+{% callout variant="warn" %}
+Do not use average bandwidth as proof of a healthy stream. A player needs enough throughput over time to refill its buffer, and a delivery fleet needs enough reserve to survive a regional spike or a cache miss burst.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Turn viewers, renditions, and cache hit rate into a delivery budget" %}
+
+## Media capacity is a bandwidth problem and a request-rate problem
+
+One viewer at a selected rendition consumes a continuous stream of bits, but it also requests discrete segments. A shorter segment can react to changing networks sooner, while creating more requests and manifest decisions. A lower cache hit rate pushes both bytes and segment requests toward the origin.
+
+{% metric-strip %}
+{% metric value="4 s" label="Illustrative segment" detail="One small independently retrievable media piece" tone="blue" /%}
+{% metric value="96%" label="Illustrative edge hit rate" detail="Most segment bytes avoid the origin" tone="green" /%}
+{% metric value="25%" label="Planning headroom" detail="Reserve for bursts, skew, and recovery" tone="amber" /%}
+{% metric value="1.3x" label="Peak factor" detail="Above the smooth concurrent-viewer average" tone="violet" /%}
+{% /metric-strip %}
+
+### Video bitrate and CDN capacity lab
+
+Adjust the audience, rendition, segment duration, cache hit rate, peak factor, and safety headroom. The model calculates the edge and origin bandwidth, segment request rates, cache-miss pressure, and which budget fails first.
+
+{% interactive-block id="case-studies/netflix-streaming-bitrate-cdn-capacity-lab" dataFile="/api/content/case-studies/netflix-streaming/data/bitrate-cdn-capacity-model.json" /%}
+
+### Read the model as a planning conversation
+
+1. Increase concurrent viewers while leaving the hit rate high. Edge bandwidth rises even when the origin remains protected.
+2. Lower the hit rate. Origin bytes and miss requests rise together; extra origin bandwidth alone may not protect the request path.
+3. Shorten segments. The bitrate stays roughly constant, but requests per second increase and make a miss storm harder to absorb.
+4. Raise peak factor or headroom. The usable capacity shrinks before an incident, which is intentional: recovery traffic does not arrive as a smooth average.
+
+{% callout variant="tip" %}
+The lab counts media payload only. Real capacity planning also accounts for encryption, HTTP overhead, retries, multi-CDN or ISP placement, uneven title popularity, and the fact that a cache may need time to fill.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="ingest" title="3. Prepare one source for many devices and networks" %}
+
+## Ingest converts a source asset into a publishable playback package
+
+An uploaded or studio-delivered source is not ready for the player. The system must validate the asset, create multiple encodings, package timed segments and manifests, and distribute immutable outputs before making the title discoverable.
+
+{% process-flow %}
+{% process-step number="1" title="Validate the source" label="Ingest" %}
+Check file integrity, duration, audio and subtitle tracks, rights window, and technical metadata. Preserve a stable asset identity so retries do not create competing packages.
+{% /process-step %}
+{% process-step number="2" title="Encode a rendition ladder" label="Transcode" %}
+Produce multiple bitrate and resolution choices for supported codecs and devices. Each rung trades visual fidelity against the bandwidth needed to sustain it.
+{% /process-step %}
+{% process-step number="3" title="Package and verify" label="Segment" %}
+Split each rendition into aligned segments and manifests. Verify timing alignment, playback continuity, captions, audio selection, and content protection metadata before promotion.
+{% /process-step %}
+{% process-step number="4" title="Publish immutable outputs" label="Distribute" %}
+Write versioned media objects, expose the approved package to delivery caches, and only then allow the catalog to advertise its availability in a region.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep three records separate
+
+{% concept-grid columns="3" %}
+{% concept-card title="Source asset" eyebrow="Studio input" icon="file-video" tone="blue" %}
+Owns the original file, rights metadata, and validation state. It is not a segment-delivery object.
+{% /concept-card %}
+{% concept-card title="Playback package" eyebrow="Versioned output" icon="layers" tone="violet" %}
+Owns rendition IDs, segment maps, audio and subtitle variants, checksums, and publication status.
+{% /concept-card %}
+{% concept-card title="Catalog availability" eyebrow="Viewer decision" icon="calendar-check" tone="green" %}
+Owns whether a profile in a region may discover and start a particular approved package.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Encoding choices affect delivery
+
+- More rungs can let a player make smaller quality steps, but increase encode, storage, validation, and cache-fill work.
+- Shorter segments can shorten adaptation time and recovery granularity, but raise request rates and manifest overhead.
+- Codec choice changes quality per bit and device reach; a more efficient codec is only useful where the client can decode it reliably.
+- Publish must be atomic from the viewer's perspective: a manifest must not advertise segment URLs that have not passed validation or distribution gates.
+{% /accordion-item %}
+
+{% accordion-item id="delivery" title="4. Keep control decisions separate from Open Connect delivery" %}
+
+## The control plane starts playback; the edge carries most bytes
+
+Open Connect is Netflix's CDN approach for delivering video near viewers. The control-plane response is comparatively small and policy-heavy. Segment delivery is large and repetitive, so it belongs on cache nodes near the network path rather than repeatedly traversing a central application tier.
+
+{% system-flow title="Playback request path" caption="The player receives a permitted package and then fetches sequential segments from a chosen edge. Telemetry closes the loop without sitting on the segment critical path." %}
+{% system-node title="Netflix client" eyebrow="Intent and buffer" icon="play" tone="blue" %}
+Authenticates a session, reports device capability, asks for a title, maintains a playback buffer, and measures each segment transfer.
+{% /system-node %}
+{% system-node title="Playback control" eyebrow="Authorize and choose" icon="shield-check" tone="violet" %}
+Checks entitlement, regional availability, policy, and package version, then returns a manifest and delivery location guidance.
+{% /system-node %}
+{% system-node title="Open Connect edge" eyebrow="Serve cached media" icon="server" tone="cyan" %}
+Returns the selected media segments close to the viewer. Cache admission and eviction decide which title versions remain local.
+{% /system-node %}
+{% system-node title="Package origin" eyebrow="Bounded fallback" icon="database" tone="amber" %}
+Supplies a validated segment only when the edge misses or is being filled. It is protected by request coalescing, quotas, and controlled failover.
+{% /system-node %}
+{% /system-flow %}
+
+### A segment request should have a bounded fallback
+
+- **Cache hit:** the edge returns the requested segment. This is the normal media path.
+- **Cache miss:** one controlled fill obtains the object while similar requests wait or receive a safe fallback; do not let every viewer independently retry origin.
+- **Edge health problem:** steer new work to a healthy edge or route, then let the player keep using buffered media while the switch settles.
+- **Manifest or authorization problem:** retry only within a bounded policy. Segment caches cannot repair a missing or invalid playback decision.
+
+{% callout variant="info" %}
+The manifest is a control artifact, not the movie itself. Keeping its availability, signing, and versioning healthy matters because a perfect cache cannot start a session without a usable playback description.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="adaptation" title="5. Adapt bitrate from buffer evidence, not optimism" %}
+
+## Adaptive bitrate streaming chooses the next segment's quality
+
+Adaptive bitrate, or ABR, means the player picks among pre-encoded renditions as it downloads. It estimates sustainable throughput and considers how many seconds are already buffered. A player should lower quality before the buffer runs out, then recover cautiously after several good measurements.
+
+### A simple playback loop
+
+1. Start with a conservative rendition that the device can decode.
+2. Measure download time, bytes delivered, buffer depth, segment errors, and route changes.
+3. Choose the next rendition that fits the estimated throughput with reserve.
+4. Step down quickly when the buffer is threatened; step up only after sustained evidence to avoid oscillation.
+5. Emit a quality-change reason so operations can tell device limits from network loss or edge pressure.
+
+{% code-block file="/api/content/case-studies/netflix-streaming/code/abr-controller.ts" language="typescript" title="Illustrative ABR choice with buffer protection and cautious upgrades" /%}
+
+### Why quality and continuity conflict
+
+- A high rendition can look better while it fits, but one underestimated bandwidth drop can drain the buffer and cause a pause.
+- A very low rendition protects continuity, but persistent low quality may indicate an edge, transit, device, or encoding issue that needs investigation.
+- Quality decisions are per player. One viewer on a constrained network should not downgrade unrelated viewers served by the same edge.
+- The player must treat a segment error differently from slow throughput: retries, alternate edges, and a lower rendition have different costs and evidence requirements.
+{% /accordion-item %}
+
+{% accordion-item id="personalization" title="6. Personalize discovery without placing it on the media path" %}
+
+## Recommendations decide what to show, not whether a valid segment can arrive
+
+Personalization ranks titles, rows, artwork, and search suggestions for a profile. It can use viewing history, context, and experiments, but it should not be required to keep an already authorized title playing. That boundary prevents a slow or incorrect ranking response from becoming a media outage.
+
+### Useful ownership boundaries
+
+- **Catalog and rights:** title metadata, maturity rules, regional windows, language options, and package availability.
+- **Profile and personalization:** profile settings, viewing history, candidate generation, ranking, artwork selection, and experiment assignment.
+- **Playback control:** entitlement, selected package, manifest issuance, device policy, session state, and delivery steering.
+- **Media delivery:** immutable segments, cache placement, edge health, controlled origin fills, and byte-serving telemetry.
+
+### Graceful degradation rules
+
+1. If personalization is slow, show a cached or generic catalog surface and let a member search or resume a known title.
+2. If experiment assignment is unavailable, use a stable default treatment rather than blocking discovery.
+3. If catalog metadata is temporarily stale, do not let it override stronger entitlement or regional availability checks at playback.
+4. If playback is already active, continue segment delivery independently of ranking, training, or analytics work.
+
+{% callout variant="warn" %}
+Viewing events are valuable for recommendations, but they are also privacy-sensitive. Limit access by purpose, retain only what is needed, separate operational telemetry from product analysis, and avoid turning a playback identifier into a broad tracking key.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate from viewer symptoms back to edge and origin causes" %}
+
+## Observability must connect a pause to the path that produced it
+
+An edge can report healthy CPU while one device cohort repeatedly stalls because of a manifest version, ISP route, codec bug, or cache-fill behavior. Measure the experience at the client, then correlate it with delivery and control-plane dimensions.
+
+### Playback scorecard
+
+- **Startup and availability:** play attempts, authorization success, manifest success, time to first frame, and start-abandon rate.
+- **Continuity:** rebuffer ratio, rebuffer count, buffer depth, segment timeout, retry count, and time spent recovering.
+- **Quality:** rendered bitrate and resolution, bitrate-switch direction, time at each rung, decoder errors, and audio or subtitle failures.
+- **Delivery:** edge hit rate, segment latency by percentile, cache-fill wait, origin miss rate, bytes by edge and ISP, and route-steering changes.
+- **Control plane:** manifest generation latency, entitlement denial reason, policy version, package version, token failure, and regional availability mismatch.
+
+### Playback and edge failure lab
+
+Inject a cache miss storm, edge outage, origin degradation, manifest failure, or local network loss. Then choose a mitigation to see the request path, startup and rebuffer risk, blast radius, and recovery sequence change together.
+
+{% interactive-block id="case-studies/netflix-streaming-playback-edge-failure-lab" dataFile="/api/content/case-studies/netflix-streaming/data/playback-edge-failure-model.json" /%}
+
+### Incident sequence
+
+1. Classify the smallest failing scope from player telemetry, edge health, and origin or control-plane signals.
+2. Protect the origin and healthy edges first: stop unsafe retries, coalesce fills, lower admission, or steer new sessions away.
+3. Preserve playback where the buffer allows it, using a lower rendition or alternate route only when that choice improves continuity.
+4. Repair the failed dependency, verify experience percentiles by region and device cohort, then restore capacity gradually.
+5. Record the package version, steering decision, mitigation, and user-visible outcome so the next release or cache policy can be tested against it.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Balance cost, resilience, and video quality deliberately" %}
+
+## Every delivery improvement spends capacity, storage, or complexity
+
+The objective is not maximum bitrate, maximum cache retention, or maximum redundancy in isolation. It is a predictable viewing experience within a bounded cost and recovery envelope.
+
+### Core trade-offs
+
+- **Pre-positioning versus origin fill:** pre-positioning popular packages reduces startup and origin risk, while on-demand fill reduces storage and can make long-tail content slower on its first local request.
+- **More renditions versus package cost:** a denser ladder gives ABR more choices but grows encode time, storage, validation, and cache churn.
+- **Shorter versus longer segments:** short segments adapt and retry sooner but increase request rate; long segments reduce request overhead but make a bad quality choice last longer.
+- **High utilization versus recovery reserve:** fuller edge caches and links reduce idle cost, but reserve is what absorbs failover, popularity spikes, and refill traffic without degrading viewers.
+- **Central policy versus local autonomy:** centralized rights and package policy improve control, while local cached data and bounded leases keep playback resilient during a remote control-plane disturbance.
+
+### A practical release and capacity checklist
+
+- Test a new package with representative devices, codecs, access networks, subtitles, and audio tracks before wide publication.
+- Model a title-release spike, degraded hit rate, one edge or ISP loss, origin slowdown, and retry amplification rather than only normal averages.
+- Roll out manifest, steering, encoding, and cache-policy changes by region or cohort with playback guardrails and a compatible rollback.
+- Keep origin and control-plane overload signals separate from client quality signals; one may trigger the other but they need different mitigations.
+- Revisit the budgets as codecs, device mix, title popularity, and ISP placement change.
+
+The reusable lesson is simple: streaming systems protect a finite playback buffer and a finite delivery reserve. Encoding ladders, edge caching, ABR, bounded origin fallback, and observability must all reinforce that same contract.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/netflix-streaming/quiz/netflix-streaming.json" lessonSlug="netflix-streaming" title="Review the streaming architecture" /%}

@@ -1,0 +1,335 @@
+---
+registryId: crewai
+---
+
+{% section-card tone="intro" %}
+## What is CrewAI?
+
+**CrewAI is a Python framework for coordinating model-powered agents, role-based crews, and event-driven flows.** An agent performs a task with a goal and a bounded tool set. A crew coordinates agents and tasks. A flow controls when work starts, which branch runs, what state survives, and where a crew is allowed to act autonomously.
+
+In plain language, CrewAI gives application developers two complementary building blocks: **crews for open-ended collaboration** and **flows for explicit control**.
+
+The production invariant is **the framework may coordinate work, but the application still owns authority and correctness**. Your code must authenticate the caller, constrain tools, validate outputs, control side effects, bound retries, and decide how an interrupted run recovers.
+{% /section-card %}
+
+{% section-card %}
+## Start with the execution decision
+
+Do not create multiple agents merely because the framework supports them. Choose the smallest execution model that matches where decisions must be made.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Agent" eyebrow="One autonomous worker" icon="bot" tone="blue" %}
+Use an agent when one role needs to reason over a bounded task, call a small set of tools, and produce a defined result. The agent should still have iteration, time, and request limits.
+{% /concept-card %}
+{% concept-card title="Crew" eyebrow="Collaborative work" icon="users" tone="violet" %}
+Use a crew when specialist roles genuinely improve an open-ended result, such as research followed by synthesis and review. The crew process coordinates task order and delegation.
+{% /concept-card %}
+{% concept-card title="Flow" eyebrow="Application control" icon="route" tone="green" %}
+Use a flow when the path needs typed state, deterministic steps, conditional routing, persistence, external events, or a human checkpoint. A flow can invoke an agent or crew at one controlled step.
+{% /concept-card %}
+{% /concept-grid %}
+
+The official [production architecture guide](https://docs.crewai.com/en/concepts/production-architecture) recommends starting production applications with a flow. That keeps ordinary Python logic and control-plane decisions outside an autonomous loop.
+{% /section-card %}
+
+{% section-card %}
+## Trace the runtime boundary
+
+The useful unit of design is not the agent persona. It is the complete path from trusted input to an accepted result.
+
+{% system-flow title="A controlled CrewAI run" caption="A flow owns state and routing; a crew receives a bounded assignment; application policy owns every external effect." %}
+{% system-node title="Trigger and identity" eyebrow="Trusted context" icon="users" tone="blue" %}
+Authenticate the caller, bind tenant and request identity, validate inputs, and set the run budget before model work begins.
+{% /system-node %}
+{% system-node title="Flow" eyebrow="State and routing" icon="route" tone="green" %}
+Carry typed state, run deterministic Python steps, route on explicit results, and persist only at meaningful recovery boundaries.
+{% /system-node %}
+{% system-node title="Crew" eyebrow="Bounded autonomy" icon="bot" tone="violet" %}
+Assign specialist agents and tasks where collaboration is useful. Return structured evidence to the surrounding flow.
+{% /system-node %}
+{% system-node title="Policy boundary" eyebrow="Authority" icon="shield" tone="amber" %}
+Recheck identity, scope, business invariants, approval, and idempotency before any tool changes an external system.
+{% /system-node %}
+{% system-node title="Result and trace" eyebrow="Evidence" icon="check" tone="cyan" %}
+Validate the output contract, record the trajectory and costs, and return success, rejection, or escalation explicitly.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Choose crew, flow, or both
+
+Select a workload and an orchestration shape. Then add state persistence or a human release gate and watch the contract widen.
+
+{% interactive-block id="technology/crewai-orchestration-boundary-lab" dataFile="/api/content/technology/crewai/data/orchestration-boundaries.json" /%}
+
+The best design is not the one with the most agents. It is the one that exposes the smallest sufficient decision surface while keeping recovery and authority visible.
+{% /section-card %}
+
+{% section-card %}
+## Keep CrewAI primitives separate
+
+Each primitive owns a different concern. Blurring them creates state leaks and failure paths that are difficult to test.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Agent" eyebrow="Capability" icon="bot" tone="blue" %}
+Defines a role, goal, model, tools, and execution limits. A backstory can shape model behavior, but it is not an authorization policy or proof of expertise.
+{% /concept-card %}
+{% concept-card title="Task" eyebrow="Work contract" icon="check" tone="cyan" %}
+Defines the work, expected output, assigned agent, input context, and optional structured output or guardrail. A task should be independently observable and testable.
+{% /concept-card %}
+{% concept-card title="Crew" eyebrow="Collaboration" icon="users" tone="violet" %}
+Collects agents and tasks under a process. Sequential processes preserve declared order; hierarchical processes add a manager that assigns and reviews work.
+{% /concept-card %}
+{% concept-card title="Flow" eyebrow="Control plane" icon="route" tone="green" %}
+Connects `@start`, `@listen`, and `@router` methods around structured state. It is the natural owner for deterministic branches, durable progress, and external integration.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use memory for relevant recall, not as a substitute for flow state. Use flow state for the current run, a durable system of record for business truth, and memory only for context that can be safely retrieved and forgotten.
+{% /section-card %}
+
+{% section-card %}
+## Define tasks as contracts
+
+A task should make completion machine-checkable before it reaches another agent or application service.
+
+### A production task defines
+
+- One bounded objective and an explicit owner.
+- Trusted input fields plus the outputs of named prerequisite tasks.
+- An `expected_output` that describes evidence and completeness.
+- `output_pydantic` or `output_json` when another program consumes the result.
+- Deterministic guardrails for format, ranges, required evidence, and forbidden values.
+- A finite guardrail retry budget and an explicit failed outcome.
+
+### A task contract does not prove
+
+- That a factual claim is correct merely because the schema is valid.
+- That the current caller may read or modify a resource.
+- That a retried write will execute only once.
+- That an LLM-based reviewer is independent evidence.
+
+The [task documentation](https://docs.crewai.com/en/concepts/tasks) supports structured Pydantic or JSON outputs and function-based or model-based guardrails. Prefer deterministic checks for invariants that code can decide exactly.
+{% /section-card %}
+
+{% section-card %}
+## Choose a crew process deliberately
+
+CrewAI currently exposes sequential and hierarchical crew processes. They make different ownership promises.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Sequential process" eyebrow="Declared dependency order" icon="route" tone="blue" %}
+Tasks run in list order, and later tasks can consume earlier outputs through explicit context. Use it when responsibilities and handoffs are known before the run.
+{% /concept-card %}
+{% concept-card title="Hierarchical process" eyebrow="Manager-controlled delegation" icon="users" tone="amber" %}
+A manager model or manager agent assigns work, reviews outcomes, and decides what remains. Use it only when dynamic assignment is worth the additional model calls and evaluation surface.
+{% /concept-card %}
+{% /concept-grid %}
+
+Parallelism is a scheduling decision, not a crew process. Run only independent tasks concurrently, cap fan-out, and merge results through a defined schema. A synthesis task should not silently accept whichever dependency finishes first.
+
+{% callout variant="warn" %}
+Delegation widens authority. An agent that can delegate must not be able to grant another agent tools, credentials, or data scopes that the original request did not authorize.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Let a flow own state and recovery
+
+CrewAI flows can use unstructured dictionaries or a Pydantic state model. Structured state is the safer default once multiple steps, branches, or operators depend on the same fields.
+
+{% process-flow %}
+{% process-step number="1" title="Admit the run" label="Identity" %}
+Create a stable run ID, bind tenant and caller context, validate the event payload, and record the versioned workflow contract.
+{% /process-step %}
+{% process-step number="2" title="Advance one state transition" label="Execute" %}
+Run one deterministic method or one bounded crew. Store explicit outputs rather than relying on an agent transcript as application state.
+{% /process-step %}
+{% process-step number="3" title="Route on validated evidence" label="Decide" %}
+Use `@router` for named outcomes such as approved, revise, reject, or escalate. Do not parse an unconstrained paragraph to choose a consequential branch.
+{% /process-step %}
+{% process-step number="4" title="Persist a recovery point" label="Recover" %}
+Save state after an accepted transition, including side-effect identity. Resume from durable evidence instead of replaying all prior work.
+{% /process-step %}
+{% /process-flow %}
+
+The [flow documentation](https://docs.crewai.com/en/concepts/flows) describes structured state, routing, `@persist`, resume, and fork behavior. Persistence protects progress; it does not automatically make external writes transactional or idempotent.
+{% /section-card %}
+
+{% section-card %}
+## Model the orchestration contract in plain Python
+
+Before wiring models and tools, encode why a workload needs a crew, a flow, or both. This executable model fails closed when the selected shape lacks a required capability.
+
+{% code-block file="/api/content/technology/crewai/code/orchestration-contract.py" language="python" title="Check the orchestration boundary before implementation" /%}
+
+The model is deliberately dependency-free. It tests the architecture decision without spending tokens or hiding control logic inside a prompt.
+{% /section-card %}
+
+{% section-card %}
+## Treat every tool call as a permit request
+
+An agent proposes a tool name and arguments. The application decides whether that proposal may run for this caller, resource, and moment.
+
+### Before execution
+
+- Derive identity and tenant from authenticated runtime context, never model output.
+- Expose only the tools allowed for the current flow step.
+- Validate argument shape, resource ownership, scope, and current business state.
+- Require approval for consequential or difficult-to-reverse actions.
+- Attach a caller-scoped idempotency key to repeatable writes.
+
+### After execution
+
+- Bound and redact the result before returning it to the model.
+- Reconcile ambiguous outcomes before retrying a write.
+- Record tool name, policy decision, latency, outcome, and safe metadata.
+- Stop the run when its call, time, token, or cost budget is exhausted.
+
+Tool schemas reduce ambiguity, but they do not establish authorization. Tool caching is also not universally safe: cache keys must include every input that changes the answer, including tenant and access scope where relevant.
+{% /section-card %}
+
+{% section-card %}
+## Build and challenge a tool permit
+
+Choose an operation, bind an execution identity and scope, then change approval, idempotency, and retry behavior. The permit tape shows exactly where an unsafe proposal should stop.
+
+{% interactive-block id="technology/crewai-tool-permit-lab" dataFile="/api/content/technology/crewai/data/tool-permits.json" /%}
+
+The framework can run hooks and guardrails around a tool, but the underlying application service remains the final enforcement point because it owns authoritative identity and resource state.
+{% /section-card %}
+
+{% section-card %}
+## Enforce the tool contract outside the model
+
+This executable policy model checks caller identity, resource scope, approval, and idempotency before a simulated side effect. A repeated request returns the recorded outcome instead of charging twice.
+
+{% code-block file="/api/content/technology/crewai/code/tool-permit-boundary.py" language="python" title="Authorize and deduplicate a side-effecting tool" /%}
+
+In a CrewAI project, wrap the same policy around a custom tool or tool-call hook. Keep credentials and trusted context out of model-visible arguments.
+{% /section-card %}
+
+{% section-card %}
+## Design reliability around side effects
+
+Retries are safe only when the repeated operation has the same intended effect and the system can identify the original attempt.
+
+{% metric-strip %}
+{% metric label="Run budget" value="Finite" detail="Model calls, tool calls, wall time, tokens, and cost all need limits." tone="blue" /%}
+{% metric label="Recovery unit" value="Accepted transition" detail="Persist after validated progress, not after arbitrary internal thoughts." tone="green" /%}
+{% metric label="Write identity" value="Caller scoped" detail="Idempotency keys must not collide across tenants or operations." tone="amber" /%}
+{% metric label="Failure result" value="Explicit" detail="Return rejected, incomplete, or escalated instead of inventing success." tone="rose" /%}
+{% /metric-strip %}
+
+### Failure drills to run before release
+
+- The model provider times out before returning a result.
+- A tool commits but its response is lost.
+- A flow resumes after the previous worker died.
+- A guardrail keeps rejecting the same malformed output.
+- A manager repeatedly delegates without converging.
+- A memory or knowledge lookup returns another tenant's content.
+- An operator rejects a human checkpoint after downstream state changed.
+
+CrewAI documents checkpointing as an early-release capability. Version-gate it, test restore semantics against your installed release, and keep external side-effect recovery in application-owned storage.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the trajectory, not only the final prose
+
+A fluent final response can hide an incorrect route, an unnecessary agent, a policy violation, or a duplicated tool call.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Task evidence" eyebrow="Did each unit finish correctly?" icon="check" tone="green" %}
+Score schema validity, required facts, citation support, refusal behavior, and deterministic guardrail outcomes for each task.
+{% /concept-card %}
+{% concept-card title="Trajectory evidence" eyebrow="Was the path acceptable?" icon="route" tone="blue" %}
+Measure agent and tool choice, arguments, handoffs, retries, loops, human decisions, and state transitions against expected paths.
+{% /concept-card %}
+{% concept-card title="System evidence" eyebrow="Can the service operate?" icon="gauge" tone="amber" %}
+Track completion and escalation rates, latency percentiles, token and tool cost, queue age, recovery success, and side-effect incidents.
+{% /concept-card %}
+{% concept-card title="Change evidence" eyebrow="Is the new version better?" icon="git-branch" tone="violet" %}
+Replay a reviewed dataset across prompt, model, tool, and flow changes. Promote important production failures into regression cases.
+{% /concept-card %}
+{% /concept-grid %}
+
+The built-in `crewai test` command can repeat a crew and report scores and timing. Treat it as one signal, not a complete release gate: production evaluation still needs domain-specific assertions and policy checks.
+{% /section-card %}
+
+{% section-card %}
+## Operate CrewAI as a versioned service
+
+### Version together
+
+- Agent, task, and crew configuration.
+- Flow code and typed state schema.
+- Model and provider settings.
+- Tool schemas, authorization policy, and downstream API contracts.
+- Memory, knowledge, and retrieval configuration.
+- Evaluation datasets, graders, and release thresholds.
+
+### Trace with purpose
+
+- Run ID, parent flow step, crew, agent, task, and model version.
+- Tool proposal, policy decision, latency, retries, and bounded outcome.
+- State transition name and persistence result.
+- Token usage, cost, queue delay, and end-to-end latency.
+- Final disposition: completed, rejected, incomplete, timed out, or escalated.
+
+### Protect the trace
+
+- Redact secrets, credentials, personal data, and unnecessary prompt content.
+- Sample successful runs intentionally while retaining security and correctness failures.
+- Set retention and access rules independently from product conversation history.
+- Verify what telemetry or hosted tracing is enabled for each environment.
+
+CrewAI's [tracing documentation](https://docs.crewai.com/en/observability/tracing) covers agent decisions, task timelines, tool usage, and model calls. Observability shows what happened; tests and reviewed policies decide whether it was acceptable.
+{% /section-card %}
+
+{% section-card %}
+## Production review checklist
+
+### Orchestration and state
+
+- Start with a flow when production work needs routing, persistence, or external events.
+- Use a crew only where role specialization or dynamic collaboration improves measured outcomes.
+- Keep typed flow state distinct from conversation transcripts, memory, and the business system of record.
+- Define resume, fork, cancellation, timeout, and schema-migration behavior.
+
+### Tools and authority
+
+- Expose the smallest tool set for the authenticated caller and current step.
+- Enforce identity, tenant, resource scope, business rules, approval, and idempotency in application code.
+- Reconcile ambiguous writes before retrying and cap every autonomous loop.
+- Sandbox untrusted code or browser execution outside the application process.
+
+### Quality and operations
+
+- Validate structured outputs and factual evidence separately.
+- Evaluate task quality, complete trajectories, safety, latency, and cost before release.
+- Trace enough to reproduce failures without leaking sensitive content.
+- Roll out gradually with explicit rollback and human escalation paths.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+CrewAI changes quickly. This lesson follows maintained official documentation available during authoring and avoids the deprecated LangChain imports and undocumented process types used by the previous page.
+
+- [CrewAI documentation home](https://docs.crewai.com/)
+- [Agents](https://docs.crewai.com/en/concepts/agents)
+- [Tasks and structured outputs](https://docs.crewai.com/en/concepts/tasks)
+- [Crews](https://docs.crewai.com/en/concepts/crews)
+- [Processes](https://docs.crewai.com/en/concepts/processes)
+- [Flows, state, routing, and persistence](https://docs.crewai.com/en/concepts/flows)
+- [Tools and custom tools](https://docs.crewai.com/en/concepts/tools)
+- [Memory](https://docs.crewai.com/en/concepts/memory)
+- [Production architecture](https://docs.crewai.com/en/concepts/production-architecture)
+- [Testing](https://docs.crewai.com/en/concepts/testing)
+- [Checkpointing status and recovery APIs](https://docs.crewai.com/en/concepts/checkpointing)
+- [Tracing](https://docs.crewai.com/en/observability/tracing)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/crewai/quiz/crewai-production-decisions.json" lessonSlug="crewai" title="CrewAI Production Architecture Review" /%}

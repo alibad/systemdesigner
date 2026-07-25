@@ -1,0 +1,237 @@
+---
+registryId: production-deployment
+---
+
+{% section-card tone="intro" %}
+## What is production deployment for GenAI?
+
+**Production deployment for GenAI is the controlled release and operation of an application whose behavior depends on models, prompts, retrieval, tools, policies, and external services.** It turns a tested candidate into a versioned serving path, gives that path only the traffic its evidence and capacity justify, and preserves a known-good route for recovery.
+
+This matters because a GenAI system can be available while producing worse answers, can exhaust token or concurrency budgets without exhausting CPU, and can regress when a prompt, model alias, index, tool, or policy changes.
+
+The core invariant is that every request and release remains **bounded, observable, attributable to a version, and reversible to a known-good path**.
+
+If service-level signals or safety gates are unfamiliar, review [GenAI monitoring](/genai/genai-monitoring) and [AI safety](/genai/ai-safety) first.
+{% /section-card %}
+
+{% section-card %}
+## Treat deployment as two connected control loops
+
+A production deployment is not one container launch. The **serving loop** keeps admitted demand inside measured capacity. The **release loop** limits how much user traffic a candidate receives until production evidence supports wider exposure.
+
+{% process-flow %}
+{% process-step number="1" title="Identify the artifact" label="Version" %}
+Pin the application image, model or provider route, prompt, retrieval index, tool contracts, policy, and runtime configuration.
+{% /process-step %}
+{% process-step number="2" title="Bound each request" label="Serving" %}
+Apply authentication, deadlines, context and output limits, admission control, retry budgets, and explicit degraded behavior.
+{% /process-step %}
+{% process-step number="3" title="Bound the release" label="Evidence" %}
+Start with shadow or canary traffic, compare the candidate with a stable control, and stop on predeclared quality, policy, latency, or efficiency gates.
+{% /process-step %}
+{% process-step number="4" title="Recover deliberately" label="Operations" %}
+Route users to the known-good version, preserve traces and decision evidence, and recover mutable state with its own tested plan.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Write the production contract before choosing infrastructure
+
+A **production contract** names what can change, what must stay bounded, and which signal triggers each operational action. Infrastructure choices are useful only when they enforce that contract.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Release identity" icon="fingerprint" tone="blue" %}
+Record application digest, model route, prompt version, retrieval snapshot, tool schema, policy version, and feature-flag assignment on every trace.
+{% /concept-card %}
+{% concept-card title="Request envelope" icon="gauge" tone="cyan" %}
+Declare input and output limits, deadlines, allowed concurrency, token budget, queue bound, retry budget, and tenant quota.
+{% /concept-card %}
+{% concept-card title="Evidence gates" icon="shield" tone="violet" %}
+Predeclare task-success tolerance, protected slices, policy limits, latency and efficiency budgets, minimum sample size, and owner.
+{% /concept-card %}
+{% concept-card title="Recovery boundary" icon="route" tone="green" %}
+Keep a known-good route and name how schemas, indexes, caches, policies, and external side effects recover when application rollback is not enough.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Inventory every independently deployable change
+
+- **Application artifact:** immutable image digest, dependencies, runtime, and API contracts
+- **Model behavior:** provider and model identifier, decoding settings, fallback route, and alias-resolution policy
+- **Knowledge path:** embedding model, retrieval index, chunking, ranking, and freshness watermark
+- **Control path:** system prompt, tool permissions, safety policy, rate limits, and feature flags
+- **Stateful dependencies:** schemas, queues, caches, audit stores, and external side effects
+{% /section-card %}
+
+{% section-card %}
+## Turn measured demand into an admission envelope
+
+A **capacity envelope** is the highest request rate the serving path can admit while keeping every declared bottleneck below its planning target. It is not a prediction from CPU alone.
+
+The lab uses three measured inputs: mean service time, average tokens per request, and concurrency that one ready replica can sustain. Change the workload and capacity controls to find whether local serving slots or the upstream token budget constrains admission first.
+
+{% interactive-block id="genai/production-deployment-capacity-envelope-lab" dataFile="/api/content/genai/production-deployment/data/serving-capacity-model.json" /%}
+
+### Read the envelope in a fixed order
+
+1. **Calculate offered concurrency.** Multiply arrival rate by measured mean service time. This is the average active work implied by Little's Law.
+2. **Calculate ready slots.** Multiply ready replicas by measured concurrency per replica; do not count starting or unready capacity.
+3. **Calculate token demand.** Multiply request rate by average input-plus-output tokens and by 60 seconds.
+4. **Take the minimum boundary.** The safe admission rate is constrained by whichever capacity becomes saturated first.
+5. **Bound overflow.** Queue only within an explicit time and depth budget; reject or degrade excess work before an unbounded queue hides overload.
+
+{% callout variant="warn" %}
+This arithmetic is a planning envelope, not a latency forecast. Bursts, cold starts, batching, cache behavior, model scheduling, tool calls, and provider variance still require load tests and production telemetry.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Build a request path that can degrade deliberately
+
+A **degradation path** preserves the most important user outcome when a dependency, quota, or latency budget fails. Each boundary owns one deadline and one fallback; nested retries must not outlive the caller.
+
+{% system-flow title="A bounded GenAI serving request" caption="The route carries version identity and one remaining deadline. Optional work is removed before the request exceeds its contract." %}
+{% system-node title="Edge admission" eyebrow="Protect" icon="shield" tone="blue" %}
+Authenticate, assign tenant and release identity, enforce body and rate limits, and reject work that cannot enter a bounded queue.
+{% /system-node %}
+{% system-node title="Request orchestrator" eyebrow="Budget" icon="workflow" tone="violet" %}
+Allocate the deadline across retrieval, tools, generation, and post-processing; cap retries under one idempotency key.
+{% /system-node %}
+{% system-node title="Context and tools" eyebrow="Enrich" icon="database" tone="cyan" %}
+Retrieve authorized context, execute allowlisted tools, redact sensitive data, and return partial evidence when an optional dependency times out.
+{% /system-node %}
+{% system-node title="Model route" eyebrow="Generate" icon="sparkles" tone="amber" %}
+Choose the versioned primary or fallback route, enforce token limits, and preserve provider request identity for debugging.
+{% /system-node %}
+{% system-node title="Policy and response" eyebrow="Verify" icon="check" tone="green" %}
+Validate structure and policy, attach citations or uncertainty where required, emit trace outcomes, and return a bounded response.
+{% /system-node %}
+{% /system-flow %}
+
+### Define failure behavior before traffic arrives
+
+- **Queue full:** reject with a retryable response and backoff guidance; do not accept work that cannot meet its deadline.
+- **Retrieval unavailable:** return an explicitly ungrounded or no-answer response only when the product contract permits it.
+- **Tool timeout:** stop under the remaining deadline and avoid retrying a non-idempotent side effect without a stable key.
+- **Primary model unavailable:** route to a tested fallback with known capability differences, or fail closed for unsupported high-risk tasks.
+- **Telemetry unavailable:** preserve the user path only when a durable local buffer or explicit sampling policy prevents silent loss of required audit evidence.
+{% /section-card %}
+
+{% section-card %}
+## Make orchestration enforce the contract
+
+Container orchestration can replace unhealthy processes and add replicas, but it cannot infer model quality, upstream quotas, or safe fallbacks. Configure it around application-level signals.
+
+{% code-block file="/api/content/genai/production-deployment/code/genai-serving-deployment.yaml" language="yaml" title="Digest-pinned deployment with distinct probes and queue-aware autoscaling" /%}
+
+### Keep the health signals separate
+
+- **Startup** answers whether initialization has completed. While it fails, Kubernetes does not run liveness or readiness probes.
+- **Readiness** answers whether this replica should receive new traffic. It may fail during overload, warm-up, or a required dependency outage without demanding a restart.
+- **Liveness** answers whether the process is irrecoverably stuck and should restart. It should not fail merely because an optional dependency is slow.
+- **Rollout progress** answers whether the new ReplicaSet is becoming ready before `progressDeadlineSeconds`.
+
+The example scales on a queue-related external metric because pending work is closer to the serving bottleneck than CPU for many remote-model gateways. It requires an external metrics adapter. Use the metric that load tests show predicts saturation, and keep token or provider quotas in admission control because adding Pods cannot raise those limits.
+{% /section-card %}
+
+{% section-card %}
+## Promote only from versioned production evidence
+
+A **canary release** sends a bounded share of representative traffic to a candidate while a stable version remains available as the control and rollback target. Small exposure limits blast radius, but it also gathers evidence more slowly.
+
+Use the lab to compare a healthy candidate with quality, policy, and operational regressions. Change traffic share and observation time to see why more exposure can satisfy a sample gate but cannot repair a hard failure.
+
+{% interactive-block id="genai/production-deployment-canary-release-lab" dataFile="/api/content/genai/production-deployment/data/canary-release-evidence.json" /%}
+
+### Separate hard blockers from operational warnings
+
+- **Roll back:** a candidate violates a hard task-quality, protected-slice, safety, policy, privacy, or correctness boundary.
+- **Hold:** hard boundaries pass, but sample size, latency, efficiency, instrumentation, or diagnosis is incomplete.
+- **Expand gradually:** every declared gate passes, the stable route remains healthy, and the same abort rules apply to the next traffic step.
+- **Never average away a critical failure:** a higher global task score cannot compensate for a failed policy boundary or high-impact cohort.
+{% /section-card %}
+
+{% section-card %}
+## Match the rollout pattern to the failure boundary
+
+A **rollout pattern** controls who sees a candidate, how quickly exposure grows, and how traffic returns to the stable route. It does not replace evidence gates.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Shadow" icon="eye" tone="cyan" %}
+Copy representative inputs to a candidate without using its response. This tests integration and performance with no direct user exposure, but it may not reproduce stateful side effects.
+{% /concept-card %}
+{% concept-card title="Canary" icon="route" tone="violet" %}
+Send a small, attributable cohort to the candidate. This reveals user outcomes while a feature flag or traffic router keeps the blast radius bounded.
+{% /concept-card %}
+{% concept-card title="Blue-green" icon="layers" tone="blue" %}
+Maintain two complete environments and switch traffic between them. Rollback is fast, but duplicate capacity and state compatibility must be planned.
+{% /concept-card %}
+{% concept-card title="Rolling update" icon="refresh" tone="green" %}
+Replace replicas gradually inside one environment. It is efficient for compatible application changes, but mixed-version behavior and state changes need explicit tests.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+Rolling back a Kubernetes Deployment restores the Pod template, not every schema migration, prompt alias, retrieval index, cache entry, policy version, or external side effect. Test state rollback or roll-forward separately.
+{% /callout %}
+
+{% code-block file="/api/content/genai/production-deployment/code/canary-release-gate.py" language="python" title="Reproducible quality, policy, latency, and efficiency gate" /%}
+{% /section-card %}
+
+{% section-card %}
+## Observe the user outcome and the causal path
+
+**Production observability** connects a user-visible outcome to the exact release path that produced it. Fleet averages without cohort and version identity can hide a severe regression.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Serving health" icon="activity" tone="blue" %}
+Track admitted and rejected requests, queue age and depth, concurrency, retries, timeouts, fallback use, and P50/P95/P99 latency by route.
+{% /concept-card %}
+{% concept-card title="Model demand" icon="gauge" tone="violet" %}
+Track input and output tokens, context truncation, cache behavior, provider-limit utilization, generation stops, and compute per successful task.
+{% /concept-card %}
+{% concept-card title="Behavior quality" icon="check" tone="green" %}
+Join task success, groundedness, policy failures, protected slices, user feedback, and delayed outcomes to candidate and baseline assignments.
+{% /concept-card %}
+{% concept-card title="Release state" icon="fingerprint" tone="amber" %}
+Record image digest, model and prompt route, retrieval and tool versions, policy, feature flags, gate result, owner, and rollback target.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Alert on decisions, not isolated charts
+
+- Page when the request path cannot meet its reliability contract or a hard policy boundary fails.
+- Pause expansion when evidence volume, latency, efficiency, or instrumentation is incomplete.
+- Diagnose by release, cohort, route, dependency, and time window before blaming the model.
+- Preserve sampled inputs and outputs only under explicit privacy, access, redaction, and retention controls.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Secure and rehearse the recovery path
+
+**Deployment security** limits what a compromised request, model output, tool, workload, or operator can reach. **Recovery readiness** proves the team can contain a bad release under pressure.
+
+### Enforce least privilege across boundaries
+
+- Keep provider credentials in a secret manager; never ship them to clients, images, examples, or logs.
+- Authenticate service-to-service calls and authorize retrieval documents and tools for the current tenant and user.
+- Treat model output as untrusted data before it enters HTML, SQL, shell commands, tool arguments, or downstream automation.
+- Pin artifacts, verify provenance, scan dependencies, run as non-root, drop capabilities, and keep the filesystem read-only when possible.
+- Redact or tokenize sensitive prompt, output, trace, and feedback fields before storage.
+
+### Rehearse these production failures
+
+1. Provider timeout or quota exhaustion under peak traffic
+2. Queue saturation while autoscaling capacity is still starting
+3. Candidate quality or policy regression with healthy infrastructure metrics
+4. Retrieval index, prompt alias, or policy change that must roll back independently
+5. Monitoring delay or data loss during a release decision
+6. Secret rotation, compromised credential containment, and audit reconstruction
+
+{% callout variant="tip" %}
+A deployment is ready when the team can explain which version served a request, why it was admitted, what evidence justified its traffic share, which boundary failed, and how users return to a known-good path.
+{% /callout %}
+{% /section-card %}
+
+{% quiz title="Production Deployment Decision Check" quizId="production-deployment" lessonSlug="production-deployment" questionsFile="/api/content/genai/production-deployment/quiz/production-deployment-decisions.json" /%}

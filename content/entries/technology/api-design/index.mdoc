@@ -1,0 +1,240 @@
+---
+registryId: api-design-tech
+---
+
+{% section-card tone="intro" %}
+## What is API design?
+
+**API design is the work of defining a stable, testable contract between a client and a service.** The contract names resources and operations, describes request and response schemas, identifies the caller, limits work, classifies errors, explains retry behavior, and states how the interface can evolve.
+
+In plain language, an API lets two programs cooperate without knowing each other's implementation. A client should be able to predict what one request means, which result proves success, how to recover from failure, and whether tomorrow's service release will preserve that behavior.
+
+The core invariant is **one documented client intent has one predictable meaning across success, rejection, timeout, retry, and version change**. A route that works in the happy path but can double-charge after a lost response is not a complete contract.
+
+Review [API Design Principles](/fundamentals/api-design) first if HTTP resources, methods, and status classes are unfamiliar.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Meaning" label="Name the intent" detail="Resources, methods, schemas, and preconditions define what the request means." tone="blue" /%}
+{% metric value="Bounds" label="Limit the work" detail="Page size, payload, deadline, rate, and concurrency limits protect both parties." tone="violet" /%}
+{% metric value="Recovery" label="Resolve uncertainty" detail="Errors, operation state, idempotency, and reconciliation tell clients what to do next." tone="amber" /%}
+{% metric value="Evidence" label="Prove the promise" detail="Specifications, contract tests, traces, and SLOs keep implementation aligned." tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Design from the client workflow inward
+
+Start with the business outcome the client needs, not the controller method or database table already in the server. A useful contract exposes domain meaning while leaving storage, queues, and service boundaries free to change.
+
+{% process-flow %}
+{% process-step number="1" title="Name the client intent" label="Outcome" %}
+State the result in client language: read one order, search orders, create one payment, or start one export.
+{% /process-step %}
+{% process-step number="2" title="Choose the resource boundary" label="Meaning" %}
+Give the durable noun a stable identity and use the method, path, and preconditions to express the allowed transition.
+{% /process-step %}
+{% process-step number="3" title="Bound request work" label="Capacity" %}
+Cap payloads, page size, fan-out, processing time, retries, and concurrency before the route reaches production scale.
+{% /process-step %}
+{% process-step number="4" title="Specify every outcome" label="Recovery" %}
+Define success, validation, authorization, conflict, limit, timeout, and dependency results with a safe next action.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep three boundaries separate
+
+{% concept-grid columns="3" %}
+{% concept-card title="Representation" eyebrow="What exists?" icon="box" tone="blue" %}
+A resource schema describes durable state that clients may read. Stable IDs, field meaning, formats, and optionality matter more than mirroring internal columns.
+{% /concept-card %}
+{% concept-card title="Transition" eyebrow="What may change?" icon="route" tone="violet" %}
+An operation changes or creates state under explicit preconditions. The method and result must reveal whether work completed now or only started.
+{% /concept-card %}
+{% concept-card title="Policy" eyebrow="Who may do it?" icon="shield" tone="amber" %}
+Authentication resolves identity; authorization checks this caller, resource, tenant, scope, and business state. A valid schema does not grant permission.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Lab: turn a workflow into a client contract
+
+Choose a workflow, interface shape, completion promise, and collection policy. Watch the generated endpoint, client follow-up, response bound, and design findings change together. The goal is not a universal score; it is a contract whose consequences match the workload.
+
+{% interactive-block id="technology/api-design-contract-shape-lab" dataFile="/api/content/technology/api-design/data/contract-shapes.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Route every request through explicit owners
+
+An API is a boundary, not the whole system. The gateway can authenticate and apply coarse abuse controls, but the owning service must still authorize the resource, enforce business invariants, create the durable effect, and classify the result.
+
+{% system-flow title="A bounded API request" caption="Each stage owns one decision and passes a deadline, identity, and correlation ID forward." %}
+{% system-node title="Client" eyebrow="Intent" icon="users" tone="blue" %}
+Sends a documented request, stable idempotency identity where required, and a deadline. It handles only errors and retries the contract declares recoverable.
+{% /system-node %}
+{% system-node title="Edge and gateway" eyebrow="Admission" icon="shield" tone="amber" %}
+Authenticate, validate content type and coarse size, apply rate policy, assign a request ID, and reject work that has no remaining deadline.
+{% /system-node %}
+{% system-node title="Owning service" eyebrow="Meaning" icon="route" tone="violet" %}
+Authorize the resource and operation, validate business state, bind idempotency, and coordinate the authoritative transition.
+{% /system-node %}
+{% system-node title="Data and dependencies" eyebrow="Durability" icon="database" tone="cyan" %}
+Commit state under bounded calls and explicit consistency rules. A dependency timeout becomes a known service outcome, not a leaked exception.
+{% /system-node %}
+{% system-node title="Response and telemetry" eyebrow="Evidence" icon="activity" tone="green" %}
+Return a stable representation or error envelope and record route, outcome, latency, version, and trace context without sensitive labels.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Give HTTP semantics one clear meaning
+
+Use lowercase plural resource nouns and stable identifiers. Let standard methods carry their usual semantics so clients, caches, gateways, SDKs, and operators can reason about the route without private knowledge.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Read" eyebrow="Safe operation" icon="search" tone="blue" %}
+`GET /v1/orders/{orderId}` returns a representation without changing business state. Validators such as ETags can make repeat reads efficient.
+{% /concept-card %}
+{% concept-card title="Create" eyebrow="New resource" icon="plus" tone="green" %}
+`POST /v1/orders` creates under a collection. Return `201 Created`, the resource location, and an idempotency policy when retries could repeat the effect.
+{% /concept-card %}
+{% concept-card title="Replace or patch" eyebrow="Existing resource" icon="file-check" tone="violet" %}
+Use `PUT` for documented replacement and `PATCH` for a declared patch format. Require a version precondition where concurrent updates could overwrite work.
+{% /concept-card %}
+{% concept-card title="Delete" eyebrow="Lifecycle transition" icon="trash" tone="rose" %}
+State whether repeated deletion returns the same terminal outcome, whether deletion is asynchronous, and how clients observe retention or restoration windows.
+{% /concept-card %}
+{% concept-card title="Command" eyebrow="Domain action" icon="zap" tone="amber" %}
+Use an action endpoint only when a meaningful transition does not fit resource creation or update. Name it in domain language and expose its resulting state.
+{% /concept-card %}
+{% concept-card title="Long-running work" eyebrow="Tracked operation" icon="clock" tone="cyan" %}
+Return `202 Accepted` only with a durable operation ID, status URL, terminal states, expiry policy, and cancellation behavior. Acceptance is not completion.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Make collection work finite
+
+- Cap page size and response bytes; reject requests that ask the server to scan or return an unbounded collection.
+- Prefer opaque cursors for large mutable collections. The cursor should bind ordering and continuation state without exposing storage internals.
+- Define a stable sort with a unique tie-breaker so concurrent inserts do not make rows disappear or repeat between pages.
+- Allowlist filters and operators. An arbitrary expression language can turn one valid request into an expensive full scan.
+- State freshness and consistency. A fast list from a replica may lag a write that the client just completed.
+
+{% callout variant="info" %}
+Capacity is part of the contract. At 2,000 requests per second, a 100-item page can serialize 200,000 items per second. A 64 KB response ceiling implies about 128 MB/s before protocol overhead and replication, so page, field, and compression choices need measurement.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Return errors that programs can act on
+
+Use one machine-readable envelope with a stable error code, safe human message, request or trace ID, and optional field details. Do not expose stack traces, SQL, tokens, or secrets. Clients should branch on the stable code and status, not parse prose.
+
+### Separate the failure classes
+
+- **Invalid request:** malformed syntax, unsupported content type, invalid field, or failed business validation. Point to the relevant field without echoing sensitive data.
+- **Unauthenticated or forbidden:** distinguish missing or invalid identity from a caller that lacks permission for this resource and action.
+- **Conflict or stale state:** identify version, uniqueness, or lifecycle conflicts and explain whether the client should refresh, choose again, or stop.
+- **Rate or capacity limit:** return the policy scope and safe retry guidance. Do not invite every caller to retry at the same instant.
+- **Server or dependency failure:** return a stable service code and correlation ID. Document whether a read may retry and how a write must reconcile.
+
+{% code-block file="/api/content/technology/api-design/code/error-response.json" language="json" title="A structured, field-aware error" /%}
+
+Status codes provide a shared class, while application error codes carry stable domain meaning. For example, `409 Conflict` may contain `order_version_stale` or `idempotency_key_reused` so the client knows which recovery path applies.
+{% /section-card %}
+
+{% section-card %}
+## Publish one executable source of contract truth
+
+An OpenAPI document can describe operations, parameters, schemas, security, examples, and reusable errors. Generate it from the implementation or validate both against the same schema in CI. A manually maintained document that drifts from runtime behavior creates a second, false API.
+
+{% code-block file="/api/content/technology/api-design/code/orders-openapi.yaml" language="yaml" title="A bounded orders API contract" /%}
+
+### Test the boundary at several depths
+
+1. Unit-test serializers, field validation, authorization decisions, idempotency fingerprints, and domain transitions.
+2. Integration-test handlers with real databases and faithful dependency behavior, including deadlines and transaction failures.
+3. Run provider and consumer contract tests against every supported client shape.
+4. Diff the OpenAPI contract for removed fields, newly required inputs, enum changes, status changes, and altered retry semantics.
+5. Inject lost responses, duplicate deliveries, stale preconditions, and dependency saturation before release.
+{% /section-card %}
+
+{% section-card %}
+## Make non-idempotent writes recoverable
+
+Network delivery is at-least-once unless the application proves otherwise. A client may send one request, receive no response, and still have the server commit the write. Retrying a payment, reservation, or message with a new identity can repeat the business effect.
+
+An idempotency record should bind these values atomically at the owning service:
+
+- Authenticated caller or tenant scope.
+- Operation name and client-supplied key.
+- Fingerprint of the normalized request body.
+- In-progress or terminal operation state.
+- Stored response or stable resource reference.
+- Expiry long enough to cover the documented retry window.
+
+{% code-block file="/api/content/technology/api-design/code/idempotent-payment.py" language="python" title="Deduplicate one logical payment intent" /%}
+
+The example rejects a reused key with a changed body and returns the first durable result for a valid replay. Production code must persist the key and side effect in one transactional boundary or reconcile them through an operation record.
+{% /section-card %}
+
+{% section-card %}
+## Lab: recover an uncertain write without charging twice
+
+Place a lost response before or after the durable write, choose a retry policy, and enable or remove the server's replay record. The trace updates write attempts, durable effects, duplicate charges, and the safe recovery decision.
+
+{% interactive-block id="technology/api-design-retry-boundary-lab" dataFile="/api/content/technology/api-design/data/retry-boundaries.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Evolve the contract without surprising clients
+
+Backward compatibility means a supported client can keep using documented behavior. JSON that still parses can nevertheless break when authorization, defaults, ordering, pagination, error codes, or retryability change.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Additive evolution" eyebrow="Preferred" icon="plus" tone="green" %}
+Add optional inputs, ignorable response fields, or new endpoints while preserving old semantics. Test generated clients that may treat unknown enum values strictly.
+{% /concept-card %}
+{% concept-card title="Versioned migration" eyebrow="Intentional break" icon="git-branch" tone="blue" %}
+Publish a new contract, migration examples, supported SDKs, usage telemetry, and a dated overlap window. Versioning buys migration time; it does not make a poor change safe.
+{% /concept-card %}
+{% concept-card title="Deprecation and sunset" eyebrow="Operational process" icon="calendar-clock" tone="amber" %}
+Warn in documentation and response metadata, contact active consumers, measure remaining usage, rehearse rollback, and gate removal on evidence rather than the date alone.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use URL major versions when routing and discoverability matter most. Header or media-type versions can keep URLs stable but are harder to inspect manually and easy to omit from tooling. Whichever strategy you choose, apply it consistently and publish the support policy.
+{% /section-card %}
+
+{% section-card %}
+## Protect and operate the API as a product boundary
+
+### Enforce trust at the resource owner
+
+- Keep credentials out of browser bundles, URLs, examples, and logs.
+- Validate token issuer, audience, expiry, and signature, then authorize tenant, scope, ownership, operation, and current resource state.
+- Use API keys for project identification only when that risk model is appropriate; a key alone is not user authorization.
+- Apply rate, quota, concurrency, and payload limits by trusted identity. Avoid raw user IDs or keys as unbounded metric labels.
+- Rotate signing keys and credentials with overlap, telemetry, and rollback rather than an instantaneous global cutover.
+
+### Measure the promise clients experience
+
+{% metric-strip %}
+{% metric value="R / E / D" label="Request health" detail="Rate, error ratio, and duration by stable route template, method, version, and outcome." tone="blue" /%}
+{% metric value="p50 / p95 / p99" label="Latency shape" detail="Tail latency reveals timeouts and retries that an average conceals." tone="violet" /%}
+{% metric value="One intent" label="Write safety" detail="Track replay hits, fingerprint conflicts, duplicate reconciliation, and operation age." tone="amber" /%}
+{% metric value="Remaining callers" label="Migration evidence" detail="Measure deprecated-version traffic and owner readiness before sunset." tone="green" /%}
+{% /metric-strip %}
+
+Alert on user-visible symptoms and sustained capacity risk. Trace one correlation ID through the gateway, service, database or queue, dependency, and response. Redact sensitive fields and keep route templates bounded; raw paths with IDs create high-cardinality telemetry.
+
+Continue with [GraphQL](/technology/graphql), [gRPC](/technology/grpc), and [API Paradigms](/technology/api-paradigms) to compare other interface styles after the contract fundamentals are clear.
+{% /section-card %}
+
+{% section-card %}
+## Check your API design decisions
+
+{% quiz questionsFile="/api/content/technology/api-design/quiz/api-design-production.json" lessonSlug="api-design" title="API Design Production Review" /%}
+{% /section-card %}

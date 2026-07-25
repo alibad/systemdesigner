@@ -1,0 +1,123 @@
+{
+  "title": "Trace integrity through a distributed CDN",
+  "description": "Switch scenarios to see whether asset bytes and the expected digest retain independent paths. Select any component to inspect its responsibility during delivery and recovery.",
+  "nodes": [
+    {
+      "id": "publisher",
+      "label": "Release publisher",
+      "eyebrow": "Build authority",
+      "detail": "Creates immutable bytes, computes their digest, and authorizes one release identity. Its signing authority must remain separate from CDN delivery credentials.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 10,
+      "y": 50
+    },
+    {
+      "id": "origin",
+      "label": "Immutable origin",
+      "eyebrow": "Asset store",
+      "detail": "Stores versioned objects without overwriting an existing key. Operators compare these bytes with the build artifact during an incident.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 33,
+      "y": 20
+    },
+    {
+      "id": "release-record",
+      "label": "Release record",
+      "eyebrow": "Trust anchor",
+      "detail": "Binds the asset URL, algorithm, digest, and release ID in authenticated HTML or a signed manifest.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 33,
+      "y": 80
+    },
+    {
+      "id": "edge-a",
+      "label": "CDN edge A",
+      "eyebrow": "Selected POP",
+      "detail": "Caches one immutable object near the user. A bad disk, stale fill, or compromised credential can make this edge disagree with the origin.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 56,
+      "y": 20
+    },
+    {
+      "id": "edge-b",
+      "label": "CDN edge B",
+      "eyebrow": "Alternate POP",
+      "detail": "Provides another delivery route only when its bytes are independently verified against the same trusted release record.",
+      "kind": "edge",
+      "tone": "green",
+      "x": 56,
+      "y": 55
+    },
+    {
+      "id": "browser",
+      "label": "Browser verifier",
+      "eyebrow": "Enforcement",
+      "detail": "Computes the digest, compares it with the authenticated SRI value, and prevents a mismatched script or stylesheet from loading.",
+      "kind": "client",
+      "tone": "green",
+      "x": 81,
+      "y": 36
+    },
+    {
+      "id": "telemetry",
+      "label": "Integrity telemetry",
+      "eyebrow": "Incident evidence",
+      "detail": "Groups failures by release, asset, edge, and time window so responders can distinguish one poisoned cache from a broad rollout fault.",
+      "kind": "analytics",
+      "tone": "rose",
+      "x": 81,
+      "y": 80
+    }
+  ],
+  "edges": [
+    { "id": "publisher-origin", "from": "publisher", "to": "origin", "label": "versioned asset" },
+    { "id": "publisher-record", "from": "publisher", "to": "release-record", "label": "digest + release" },
+    { "id": "origin-edge-a", "from": "origin", "to": "edge-a", "label": "cache fill" },
+    { "id": "origin-edge-b", "from": "origin", "to": "edge-b", "label": "clean fill" },
+    { "id": "edge-a-browser", "from": "edge-a", "to": "browser", "label": "edge response" },
+    { "id": "edge-b-browser", "from": "edge-b", "to": "browser", "label": "verified fallback" },
+    { "id": "record-browser", "from": "release-record", "to": "browser", "label": "trusted digest", "via": { "x": 65, "y": 92 } },
+    { "id": "browser-telemetry", "from": "browser", "to": "telemetry", "label": "result", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-release",
+      "label": "Healthy release",
+      "summary": "Edge A returns the immutable release bytes while authenticated HTML supplies the independently protected digest.",
+      "activeEdges": ["publisher-origin", "publisher-record", "origin-edge-a", "edge-a-browser", "record-browser", "browser-telemetry"],
+      "focusNode": "browser",
+      "result": "The computed digest matches the trusted release record, so the browser executes the asset and records a successful verification."
+    },
+    {
+      "id": "poisoned-edge",
+      "label": "Poisoned edge",
+      "summary": "Edge A returns changed bytes under the release URL, but it cannot rewrite the digest carried by authenticated HTML.",
+      "activeEdges": ["publisher-record", "edge-a-browser", "record-browser", "browser-telemetry"],
+      "degradedNodes": ["edge-a"],
+      "focusNode": "edge-a",
+      "result": "The browser detects the mismatch and blocks execution. Responders preserve the edge response, compare it with origin bytes, and quarantine or purge the affected object."
+    },
+    {
+      "id": "verified-failover",
+      "label": "Verified failover",
+      "summary": "Traffic moves away from the affected edge, but the alternate copy must still match the same independently trusted release digest.",
+      "activeEdges": ["publisher-record", "origin-edge-b", "edge-b-browser", "record-browser", "browser-telemetry"],
+      "failedNodes": ["edge-a"],
+      "focusNode": "edge-b",
+      "result": "Edge B is a safe fallback because its bytes verify before execution. Routing to another location without repeating verification would only move the trust assumption."
+    },
+    {
+      "id": "coupled-metadata",
+      "label": "Coupled metadata",
+      "summary": "A compromised edge returns malicious bytes and a matching digest sidecar through the same authority. No independent release path reaches the verifier.",
+      "activeEdges": ["edge-a-browser", "browser-telemetry"],
+      "degradedNodes": ["edge-a", "release-record", "browser"],
+      "focusNode": "release-record",
+      "result": "The hash comparison passes but publisher authenticity is lost. Move the expected value into authenticated HTML or a signed manifest controlled outside CDN write authority."
+    }
+  ]
+}

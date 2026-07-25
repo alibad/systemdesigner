@@ -1,0 +1,325 @@
+---
+registryId: observability-tech
+---
+
+{% section-card tone="intro" %}
+## What is observability?
+
+**Observability is the ability to explain a system's internal state from the evidence it
+produces.** That evidence includes metrics, logs, traces, profiles, deploy records, and
+business outcomes. Monitoring tells a team that a known condition is unhealthy;
+observability helps the team ask new questions when the failure was not predicted.
+
+It matters because one user action can cross services, queues, databases, and regions.
+The core invariant is simple: **an engineer must be able to connect a user-visible
+symptom to the responsible request path, change, and owner without guessing.**
+
+{% concept-grid columns="4" %}
+{% concept-card title="Measure outcomes" eyebrow="Metrics" icon="gauge" tone="blue" %}
+Track rates, distributions, errors, and saturation so a change in user experience is
+visible before individual events are inspected.
+{% /concept-card %}
+{% concept-card title="Explain events" eyebrow="Logs" icon="braces" tone="amber" %}
+Record structured facts about decisions and failures, with stable fields that support
+search and correlation.
+{% /concept-card %}
+{% concept-card title="Follow causality" eyebrow="Traces" icon="network" tone="violet" %}
+Carry context across synchronous and asynchronous boundaries so one operation can be
+reconstructed end to end.
+{% /concept-card %}
+{% concept-card title="Find hot code" eyebrow="Profiles" icon="activity" tone="green" %}
+Sample CPU, memory allocation, locks, and runtime activity to locate resource cost
+inside a process.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with questions, not telemetry volume
+
+Instrumentation should answer operational questions. Before adding a signal, name the
+decision it supports and the cost of being unable to answer it.
+
+- **Is the user journey healthy?** Measure successful outcomes, latency distributions,
+  traffic, and incomplete work at the system boundary.
+- **Which dependency changed the result?** Preserve service, operation, region,
+  version, and dependency context across the path.
+- **Is the problem isolated or systemic?** Keep bounded dimensions that separate
+  routes, status classes, tenants tiers, and failure domains.
+- **What changed just before the symptom?** Correlate deploys, configuration, feature
+  flags, schema versions, and ownership with the same timeline.
+
+### Preserve four evidence contracts
+
+1. **Identity:** service names, trace IDs, operation names, and resource attributes
+   mean the same thing at every boundary.
+2. **Completeness:** sampling, dropped events, delayed export, and missing
+   instrumentation remain visible instead of looking like healthy silence.
+3. **Boundedness:** label values, payload size, retention, and query work stay within an
+   explicit budget.
+4. **Safety:** secrets and personal data are removed at the source, before export or
+   storage.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Budget telemetry without losing the failures
+
+Observability has a data plane of its own. A design must budget event volume, network,
+storage, query load, and collector headroom while retaining enough evidence to diagnose
+rare failures.
+
+{% interactive-block id="technology/observability-impact" dataFile="/api/content/technology/observability/data/telemetry-budget-model.json" /%}
+
+The model exposes a common tension: random sampling controls trace volume but can
+discard rare failures, while outcome-aware tail sampling retains errors at the cost of
+buffering complete traces before deciding. Neither policy repairs unbounded metric
+labels or indiscriminate debug logging.
+
+### Estimate each signal separately
+
+- **Metric samples per second:** active time series divided by the scrape interval.
+- **Trace bytes per day:** retained traces multiplied by spans per trace and bytes per
+  span.
+- **Log bytes per day:** events per request multiplied by request rate and encoded
+  event size.
+- **Retained storage:** daily ingest multiplied by retention, replication, and index
+  overhead.
+- **Investigation coverage:** the fraction of errors, slow paths, and critical journeys
+  preserved by the sampling policy.
+
+State assumptions next to every estimate. Compression, vendor indexing, and query
+pricing vary, so a transparent planning model is more useful than a precise-looking
+number with hidden assumptions.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build one correlation path across all signals
+
+Signals are useful together when they share context. A metric should identify the
+symptom, a representative trace should expose the affected path, logs should explain
+the local decision, and change metadata should identify what moved.
+
+{% system-flow title="Symptom-to-cause investigation path" caption="The correlation contract shortens the search space at every handoff." %}
+{% system-node title="Outcome SLI" eyebrow="Detect" icon="activity" tone="rose" %}
+An error-budget or latency signal identifies the affected user journey, window, and
+severity.
+{% /system-node %}
+{% system-node title="Representative trace" eyebrow="Localize" icon="network" tone="violet" %}
+Exemplars or trace links reveal which service, queue, or dependency consumed the
+budget.
+{% /system-node %}
+{% system-node title="Structured event" eyebrow="Explain" icon="braces" tone="amber" %}
+Trace ID, operation, error class, and bounded business context explain the local
+decision without exposing sensitive payloads.
+{% /system-node %}
+{% system-node title="Change and owner" eyebrow="Act" icon="workflow" tone="green" %}
+Version, deploy, feature flag, and service ownership identify the rollback or
+mitigation path.
+{% /system-node %}
+{% /system-flow %}
+
+Use the W3C trace context or another explicit propagation contract across HTTP, RPC,
+messaging, scheduled work, and retries. A new trace for every queue consumer severs
+causality; copying baggage without limits creates privacy and cardinality risk.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose signal types for the question
+
+### Metrics preserve aggregates
+
+- Use **counters** for cumulative events such as requests, errors, and bytes.
+- Use **gauges** for values that move in both directions, such as queue depth or active
+  workers.
+- Use **histograms** for latency and size distributions that must aggregate across
+  processes.
+- Derive rates and percentiles in the backend instead of publishing a metric for every
+  dashboard view.
+
+The label set defines the number of active series. Route templates and status classes
+are usually bounded; request IDs, raw URLs, timestamps, and email addresses are not.
+
+### Logs preserve event detail
+
+- Emit structured fields with a stable event name, severity, service, environment,
+  trace ID, version, and error classification.
+- Log a failure once at the layer that owns the decision; attach context instead of
+  repeating the same exception at every layer.
+- Keep debug logging scoped, sampled, time-bounded, and easy to disable.
+- Redact credentials and personal data before the event leaves the process.
+
+### Traces preserve causal order
+
+- Name spans after stable operations, not raw URLs or customer values.
+- Record status, bounded attributes, and meaningful events at ownership boundaries.
+- Propagate context through retries and asynchronous work, while representing links
+  when strict parent-child structure is misleading.
+- Monitor sampling decisions, dropped spans, export lag, and incomplete traces.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Instrument a controlled telemetry pipeline
+
+OpenTelemetry separates signal creation from export. Applications use APIs and SDKs;
+collectors receive, enrich, batch, sample, redact, and route telemetry to one or more
+backends.
+
+{% process-flow %}
+{% process-step number="1" title="Create context" label="Application boundary" %}
+Start or continue a trace, attach stable resource attributes, and record the outcome
+that matters to the caller.
+{% /process-step %}
+{% process-step number="2" title="Buffer locally" label="SDK and agent" %}
+Batch exports under bounded memory, expose dropped-item counters, and never block the
+critical request path indefinitely.
+{% /process-step %}
+{% process-step number="3" title="Process centrally" label="Collector tier" %}
+Redact sensitive fields, enforce dimensions, perform sampling, and route signals with
+backpressure and failure isolation.
+{% /process-step %}
+{% process-step number="4" title="Store by query" label="Signal backends" %}
+Retain aggregates, searchable events, and traces according to different access,
+latency, and retention requirements.
+{% /process-step %}
+{% /process-flow %}
+
+### Protect the application from the observer
+
+- Use bounded queues and explicit drop policy in SDKs and collectors.
+- Export asynchronously with short timeouts and retry limits.
+- Isolate collector failure domains and preserve spare capacity for incident bursts.
+- Expose collector receive, refuse, drop, queue, retry, and export metrics.
+- Test what the application does when every telemetry backend is unavailable.
+
+The business operation must not fail because telemetry export failed. At the same
+time, silent loss is unacceptable: degradation must produce a local, low-cost signal.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Alert on error-budget consumption
+
+An **SLI** is a measured indicator, such as the fraction of successful requests. An
+**SLO** is the target for that indicator over a window. The **error budget** is the
+unreliability the target permits.
+
+For a `99.9%` availability SLO, the allowed failure fraction is `0.1%`. If a service is
+currently failing `1%` of requests, it is consuming budget at `10x` the sustainable
+rate. A short, high-burn window catches severe incidents; a longer window confirms the
+condition is persistent enough to page.
+
+{% code-block file="/api/content/technology/observability/code/evaluate-error-budget.py" language="python" title="Evaluate multi-window error-budget burn" /%}
+
+### Every page needs a response contract
+
+- A user-visible symptom or imminent objective breach.
+- One owning team and one urgency level.
+- A first diagnostic action linked to current evidence.
+- Deduplication and inhibition rules for dependent symptoms.
+- A tested notification path and a fallback when delivery fails.
+
+Route capacity forecasts and low-urgency causes to scheduled work. Paging on every CPU
+threshold teaches responders to ignore the system.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Practice an incident investigation
+
+Choose an incident, a starting signal, and the context your instrumentation preserves.
+The lab shows whether the evidence forms a causal path or forces the responder into a
+wide search.
+
+{% interactive-block id="technology/observability-incident-correlation-lab" dataFile="/api/content/technology/observability/data/incident-correlation-scenarios.json" /%}
+
+The fastest investigation does not begin with the largest data source. It begins with
+a user-visible symptom and narrows the search through shared identifiers, bounded
+dimensions, and recent-change metadata.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Design for known observability failures
+
+### Missing or misleading evidence
+
+- **Telemetry silence:** distinguish no traffic from broken instrumentation with
+  expected-heartbeat and scrape-health signals.
+- **Sampling bias:** retain errors, slow traces, and rare critical workflows; compare
+  sampled counts with unsampled aggregate metrics.
+- **Clock skew:** prefer causal relationships and backend timestamps over assuming all
+  host clocks are perfectly aligned.
+- **Metric resets:** derive counter rates with reset-aware functions.
+- **Partial traces:** mark missing spans and export loss instead of presenting an
+  incomplete path as complete.
+
+### The observability platform is also a distributed system
+
+- Collector overload can create a blind spot exactly when incident traffic spikes.
+- A high-cardinality release can exhaust ingestion, index, and query capacity.
+- Cross-region export can violate data residency or make incident access depend on the
+  failed region.
+- Long retention increases recovery, deletion, and breach impact as well as cost.
+- One shared tenant without quotas lets a noisy service degrade every team's queries.
+
+Use quotas, tenant isolation, regional buffering, tested restore, and an emergency
+low-volume signal path. Record telemetry schema changes like any other production
+interface.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Roll out observability in evidence-driven stages
+
+{% process-flow %}
+{% process-step number="1" title="Name the journey" label="Outcome first" %}
+Choose one critical user or business workflow, its owner, and its SLI before adding
+more infrastructure dashboards.
+{% /process-step %}
+{% process-step number="2" title="Standardize context" label="Correlation" %}
+Define service, environment, version, region, operation, and trace propagation
+contracts across the full path.
+{% /process-step %}
+{% process-step number="3" title="Close the response loop" label="Operations" %}
+Add SLO alerts, ownership, deploy markers, runbooks, and notification tests tied to the
+same journey.
+{% /process-step %}
+{% process-step number="4" title="Learn from incidents" label="Continuous review" %}
+After each exercise or incident, remove noise, add missing evidence, and compare the
+diagnostic value with telemetry cost.
+{% /process-step %}
+{% /process-flow %}
+
+### Review these operating metrics
+
+- Mean time to detect, form a correct hypothesis, mitigate, and verify recovery.
+- Page precision, repeated alerts, manual pivots, and investigations blocked by missing
+  context.
+- Active series, ingest bytes, trace retention by reason, log query volume, and cost by
+  service or team.
+- SDK and collector queue depth, dropped items, export errors, and backend query
+  latency.
+- Instrumentation coverage for critical journeys, asynchronous boundaries, and recent
+  deploys.
+
+Observability is successful when teams make faster, safer decisions, not when the
+organization collects the most telemetry.
+{% /section-card %}
+
+{% section-card %}
+## Production readiness review
+
+### Ship when
+
+- Critical journeys have owned SLIs, explicit SLOs, and tested alert routing.
+- Metrics, logs, traces, and deploy records share stable correlation attributes.
+- Cardinality, retention, sampling, access, and sensitive-data policies are enforced.
+- Telemetry loss and collector saturation are visible through an independent path.
+- Responders can move from a symptom to a responsible change in a failure exercise.
+
+### Stop and repair when
+
+- Request IDs or customer values appear in metric labels.
+- The same exception is logged at every layer without added ownership context.
+- Sampling policy cannot explain which traces it drops or retains.
+- A telemetry outage can block or crash the business request path.
+- Pages have no owner, urgency, first action, or connection to user impact.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/observability/quiz/observability-production-design.json" lessonSlug="observability" title="Observability Production Design Review" /%}

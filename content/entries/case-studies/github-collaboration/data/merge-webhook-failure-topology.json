@@ -1,0 +1,143 @@
+{
+  "title": "Trace merge authority and webhook failure isolation",
+  "description": "Select a scenario to see which path is allowed to change a protected reference, which work remains asynchronous, and what an operator or developer observes.",
+  "nodes": [
+    {
+      "id": "developer",
+      "label": "Developer or bot",
+      "eyebrow": "Requested change",
+      "detail": "Pushes commits or asks to merge a pull request. The request names a repository, a target branch, and an expected head commit.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 24
+    },
+    {
+      "id": "merge-coordinator",
+      "label": "Merge coordinator",
+      "eyebrow": "Policy and compare-and-swap",
+      "detail": "Revalidates authorization, reviews, required checks, mergeability, and the expected branch head before attempting one atomic reference update.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 29,
+      "y": 24
+    },
+    {
+      "id": "check-store",
+      "label": "Versioned check results",
+      "eyebrow": "Evidence",
+      "detail": "Stores status evidence against an exact commit SHA. A passing result for an older commit cannot authorize a newer head.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 29,
+      "y": 67
+    },
+    {
+      "id": "git-refs",
+      "label": "Git objects and refs",
+      "eyebrow": "Repository truth",
+      "detail": "Durably stores immutable objects, advances the protected branch reference only when the expected old head still matches, and records the committed ref transition.",
+      "kind": "database",
+      "tone": "green",
+      "x": 53,
+      "y": 24
+    },
+    {
+      "id": "event-log",
+      "label": "Durable event log",
+      "eyebrow": "After commit",
+      "detail": "Publishes the durable ref journal or outbox as a versioned repository event. Consumers can replay from this boundary without rewriting repository history.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 53,
+      "y": 67
+    },
+    {
+      "id": "fanout-workers",
+      "label": "Fan-out workers",
+      "eyebrow": "Independent consumers",
+      "detail": "Route the event to notifications, search, audit, Actions, and webhook delivery queues with per-consumer offsets and backpressure.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 75,
+      "y": 67
+    },
+    {
+      "id": "webhook-endpoint",
+      "label": "Customer webhook",
+      "eyebrow": "External dependency",
+      "detail": "Receives an at-least-once delivery with a stable delivery ID. It can be slow, unavailable, or accept a request before the sender records success.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 94,
+      "y": 67
+    },
+    {
+      "id": "dead-letter",
+      "label": "Dead-letter queue",
+      "eyebrow": "Bounded failure",
+      "detail": "Holds deliveries that exhausted the retry policy, including the reason, attempt count, next action, and replay identity.",
+      "kind": "stream",
+      "tone": "rose",
+      "x": 87,
+      "y": 24
+    }
+  ],
+  "edges": [
+    { "id": "developer-merge", "from": "developer", "to": "merge-coordinator", "label": "merge request" },
+    { "id": "checks-merge", "from": "check-store", "to": "merge-coordinator", "label": "SHA-bound evidence" },
+    { "id": "merge-refs", "from": "merge-coordinator", "to": "git-refs", "label": "atomic ref update" },
+    { "id": "refs-events", "from": "git-refs", "to": "event-log", "label": "committed event", "mode": "async" },
+    { "id": "events-fanout", "from": "event-log", "to": "fanout-workers", "label": "consume", "mode": "async" },
+    { "id": "fanout-webhook", "from": "fanout-workers", "to": "webhook-endpoint", "label": "delivery ID", "mode": "async" },
+    { "id": "fanout-dead-letter", "from": "fanout-workers", "to": "dead-letter", "label": "retries exhausted", "mode": "async", "via": { "x": 76, "y": 41 } },
+    { "id": "dead-letter-replay", "from": "dead-letter", "to": "fanout-workers", "label": "operator replay", "mode": "async", "via": { "x": 94, "y": 47 } }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-merge",
+      "label": "Healthy protected merge",
+      "summary": "The coordinator validates check evidence for the exact candidate commit and atomically advances the protected reference. Only then does an asynchronous event enter fan-out.",
+      "activeEdges": ["developer-merge", "checks-merge", "merge-refs", "refs-events", "events-fanout", "fanout-webhook"],
+      "focusNode": "git-refs",
+      "result": "The branch advances exactly once. Search, notifications, Actions, audit, and webhooks may converge later because none of them owns repository history."
+    },
+    {
+      "id": "stale-check",
+      "label": "Stale status evidence",
+      "summary": "Required checks passed for an older commit, but the pull-request head changed. The coordinator sees that the evidence SHA no longer matches the candidate SHA.",
+      "activeEdges": ["developer-merge", "checks-merge"],
+      "degradedNodes": ["check-store"],
+      "focusNode": "check-store",
+      "result": "The merge is rejected or checks rerun for the new commit. The protected reference does not move and no merge event is emitted."
+    },
+    {
+      "id": "head-moved",
+      "label": "Target head moved",
+      "summary": "Another merge advances the target branch after policy evaluation but before this update. The compare-and-swap no longer sees the expected old head.",
+      "activeEdges": ["developer-merge", "checks-merge", "merge-refs"],
+      "degradedNodes": ["merge-coordinator"],
+      "focusNode": "merge-coordinator",
+      "result": "The atomic update fails without losing the winning merge. Recompute mergeability and policy against the new target head instead of overwriting it."
+    },
+    {
+      "id": "webhook-timeout",
+      "label": "Webhook timeout",
+      "summary": "The repository merge and durable event succeed, but the customer endpoint times out during delivery. The external response is not part of the merge transaction.",
+      "activeEdges": ["developer-merge", "checks-merge", "merge-refs", "refs-events", "events-fanout", "fanout-webhook"],
+      "failedNodes": ["webhook-endpoint"],
+      "focusNode": "webhook-endpoint",
+      "result": "The branch remains merged. Retry with the same delivery ID and bounded backoff; the receiver must deduplicate because a timeout does not prove the first attempt was ignored."
+    },
+    {
+      "id": "dead-letter-recovery",
+      "label": "Dead-letter recovery",
+      "summary": "Repeated delivery attempts fail and the subscriber-specific job reaches its retry limit. Other consumers continue from their own queues and offsets.",
+      "activeEdges": ["refs-events", "events-fanout", "fanout-webhook", "fanout-dead-letter", "dead-letter-replay"],
+      "degradedNodes": ["fanout-workers"],
+      "failedNodes": ["webhook-endpoint"],
+      "focusNode": "dead-letter",
+      "result": "Operators can inspect and replay the stable delivery after the endpoint recovers. One subscriber cannot block search indexing, audit records, or other webhook destinations."
+    }
+  ]
+}

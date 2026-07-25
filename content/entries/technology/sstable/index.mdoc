@@ -1,0 +1,283 @@
+---
+registryId: sstable
+---
+
+{% section-card tone="intro" %}
+## What is an SSTable?
+
+**A Sorted String Table (SSTable) is an immutable file whose key-value records are
+stored in sorted key order.** A storage engine writes the file once, verifies it with
+checksums, and replaces it only by creating another file. The original is never edited
+in place.
+
+An LSM tree combines these files with a write-ahead log (WAL), an in-memory sorted
+table, and background compaction. This turns small random updates into sequential file
+writes while preserving fast point lookups and ordered scans.
+
+The core invariant is **accepted writes must remain recoverable, and the newest visible
+version of each key must win across every in-memory and on-disk run**. Bloom filters,
+indexes, caches, and compaction can reduce work, but none may change that answer.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## See what lives inside one immutable file
+
+An SSTable separates record bytes from the small structures needed to find and verify
+them. A reader normally opens the footer first, then narrows the request until only one
+or a few data blocks remain.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Data blocks" eyebrow="Sorted records" icon="database" tone="blue" %}
+Store adjacent key-value records, usually compressed and checksummed independently.
+Small blocks favor point reads; larger blocks make sequential scans more efficient.
+{% /concept-card %}
+{% concept-card title="Sparse index" eyebrow="Block offsets" icon="search" tone="violet" %}
+Maps representative boundary keys to block locations. One entry per block is enough
+because records inside the block remain sorted.
+{% /concept-card %}
+{% concept-card title="Bloom filter" eyebrow="Negative membership" icon="filter" tone="cyan" %}
+Proves that one exact key is absent from the file. A positive result means only
+"possibly present" and must continue through the index and data block.
+{% /concept-card %}
+{% concept-card title="Footer" eyebrow="File map" icon="storage" tone="amber" %}
+Stores format identity and offsets for the index and metadata regions. A fixed location
+lets a reader discover the file layout without scanning it.
+{% /concept-card %}
+{% /concept-grid %}
+
+### File-level rules worth preserving
+
+- Keys use one documented byte ordering everywhere: writes, index boundaries, scans,
+  compaction, and tests.
+- Every block has an integrity check, and the footer has a recognizable format version
+  and magic value.
+- Index entries and Bloom filters are derived from the exact records committed to the
+  file, not from an earlier in-memory snapshot.
+- Publication is atomic: readers see either the complete verified file or no file at
+  all.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow a write from memory to durable runs
+
+An LSM tree does not write every update into an existing data page. It first records
+the update durably, keeps a sorted working set in memory, and later flushes that state
+as a new SSTable.
+
+{% process-flow %}
+{% process-step number="1" title="Append the WAL" label="Durability" %}
+Record key, value or tombstone, operation identity, and checksum before acknowledging
+the write according to the configured durability contract.
+{% /process-step %}
+{% process-step number="2" title="Update the MemTable" label="Fast sorted state" %}
+Insert the newest key version into a sorted in-memory structure so current reads can
+observe it without waiting for a file flush.
+{% /process-step %}
+{% process-step number="3" title="Freeze and flush" label="Immutable file" %}
+Swap a full MemTable for a new writable one, stream the frozen keys in order, build
+blocks and metadata, then publish the completed SSTable atomically.
+{% /process-step %}
+{% process-step number="4" title="Compact runs" label="Background convergence" %}
+Merge selected files, keep the newest visible key version, retain tombstones until
+their safety boundary passes, and replace inputs with verified outputs.
+{% /process-step %}
+{% /process-flow %}
+
+### Acknowledgement and recovery are one contract
+
+- If an acknowledged record exists only in the MemTable, a crash loses data.
+- If WAL replay can apply a record twice, recovery needs a sequence or operation
+  identity that makes the repeat harmless.
+- If a flushed file is visible before its footer and checksums are durable, restart may
+  discover a partial SSTable.
+- If the WAL is discarded before every covered file is durable and referenced by the
+  manifest, recovery has a gap.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Resolve the newest visible version on reads
+
+A point lookup checks mutable memory first, then immutable memory, then on-disk runs
+from newest to oldest. The search stops when it finds the newest visible value or a
+tombstone that proves deletion.
+
+{% system-flow title="A point lookup narrows before touching record bytes" caption="Each stage may remove work, but only a value or tombstone at the newest visible sequence decides the answer." %}
+{% system-node title="MemTable" eyebrow="Newest state" icon="layers" tone="green" %}
+Search current and frozen memory first. A matching value or tombstone outranks every
+older SSTable.
+{% /system-node %}
+{% system-node title="File bounds + Bloom" eyebrow="Reject runs" icon="filter" tone="cyan" %}
+Skip files whose key interval cannot match. For exact keys, a negative Bloom result
+also proves that the file cannot contain the key.
+{% /system-node %}
+{% system-node title="Sparse index" eyebrow="Locate block" icon="search" tone="violet" %}
+Binary-search block boundary keys to find the data block that could contain the target.
+{% /system-node %}
+{% system-node title="Block cache or disk" eyebrow="Read bytes" icon="storage" tone="amber" %}
+Verify and decompress the candidate block, then search its ordered records for the
+newest visible version.
+{% /system-node %}
+{% /system-flow %}
+
+Range scans use the same sorted runs but merge several iterators in key order. A
+point-key Bloom filter cannot reject an interval, so compaction layout, key-range
+overlap, block size, and readahead matter more for scans.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Tune the point-read budget
+
+Change the number of immutable runs, Bloom-filter memory, and block-cache coverage.
+The workbench distinguishes a key miss, a key hit, and a range scan so the same tuning
+knob does not appear useful where it cannot help.
+
+{% interactive-block id="technology/sstable-read-path-lab" dataFile="/api/content/technology/sstable/data/read-path-model.json" /%}
+
+The numbers are transparent planning estimates. Replace device latency, cache behavior,
+and key distribution with measurements from the engine and hardware you actually run.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Encode read assumptions as a small model
+
+This executable example estimates candidate runs and disk work for a point lookup. It
+uses the standard optimal Bloom-filter false-positive approximation and keeps cache and
+device assumptions explicit.
+
+{% code-block file="/api/content/technology/sstable/code/read-path-planner.py" language="python" title="Estimate candidate runs and point-read I/O" /%}
+
+### Read-path metrics to observe in production
+
+- Bloom true negatives and false positives by level or file age.
+- Files consulted, blocks read, cache hits, and bytes decompressed per request.
+- p50, p95, and p99 latency separated by hit, miss, range, and consistency mode.
+- Tombstones scanned, versions merged, and range-scan bytes discarded.
+- Checksum failures and file-open errors tagged with the SSTable and host identity.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Estimate memory, I/O, and temporary space
+
+Storage-engine capacity is a coupled budget. Saving memory in a filter may add disk
+reads; reducing read amplification through leveled compaction may add rewrite work.
+
+{% metric-strip %}
+{% metric label="Bloom memory" value="N x bits / 8" detail="10 bits per key is about 1.19 MiB per million keys" tone="cyan" /%}
+{% metric label="Data blocks" value="ceil(bytes / block)" detail="Compression and record overhead change the real count" tone="blue" /%}
+{% metric label="Rewrite demand" value="ingest x (WA - 1)" detail="Background capacity must stay ahead over sustained windows" tone="violet" /%}
+{% metric label="Compaction disk" value="inputs + output" detail="Keep enough headroom to finish and atomically publish the merge" tone="amber" /%}
+{% /metric-strip %}
+
+### Review the full envelope
+
+1. Start with logical bytes written per second and the peak flush rate.
+2. Measure total bytes read and written by compaction to derive write amplification.
+3. Reserve bandwidth for foreground reads, WAL syncs, flushes, repair, and backups.
+4. Size free disk for the largest active merge, migration overlap, and failure recovery.
+5. Recheck the budget at p95 record size and during bursts, not only at daily average.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose compaction by the pressure you can afford
+
+Compaction merges immutable runs into new runs. It removes overwritten versions and,
+after a safe retention boundary, old tombstones. The merge improves future reads and
+reclaims space, but every rewritten byte consumes storage bandwidth and endurance.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Size-tiered compaction" eyebrow="Lower rewrite pressure" icon="boxes" tone="amber" %}
+Merge runs of similar size in batches. This often favors sustained ingest, but more
+overlapping files can raise point-read, range-read, and temporary-space amplification.
+{% /concept-card %}
+{% concept-card title="Leveled compaction" eyebrow="Predictable read shape" icon="layers" tone="violet" %}
+Maintain mostly non-overlapping key ranges within larger levels. Reads inspect fewer
+runs, while values may be rewritten repeatedly as they move through levels.
+{% /concept-card %}
+{% /concept-grid %}
+
+Neither strategy is universally better. Select from measured write rate, update rate,
+range-scan share, latency objective, disk endurance, and available free space.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Challenge the compaction envelope
+
+Choose a workload and compaction shape, then push ingest, worker capacity, and free disk
+across their limits. The control room separates throughput debt from temporary-space
+failure because they require different operational responses.
+
+{% interactive-block id="technology/sstable-compaction-envelope-lab" dataFile="/api/content/technology/sstable/data/compaction-envelope.json" /%}
+
+Compaction debt is a queue even when an engine does not expose it as one. When rewrite
+work arrives faster than workers drain it, run count, read amplification, flush stalls,
+and disk use all trend in the wrong direction.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Turn compaction capacity into a release gate
+
+The following dependency-free model checks two independent conditions: background
+rewrite capacity must cover demand, and free disk must stage the active merge. It fails
+closed when either boundary is missing.
+
+{% code-block file="/api/content/technology/sstable/code/compaction-envelope.py" language="python" title="Check rewrite throughput and disk headroom" /%}
+
+### Operate with explicit guardrails
+
+- Alert on compaction backlog age and bytes, not only worker utilization.
+- Track write, read, and space amplification by level and workload class.
+- Rate-limit ingest or flushes before level-zero run count causes emergency stalls.
+- Reserve separate observability for foreground latency and background I/O saturation.
+- Test strategy changes on representative key distributions and tombstone density.
+- Keep enough headroom for one failed compaction, repair stream, or blue-green format
+  migration without filling the device.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Recover without violating immutability
+
+Immutability simplifies recovery because completed files never need in-place repair.
+The manifest, WAL, and checksums define which files are trusted and which writes need
+replay.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Crash during flush" eyebrow="Partial output" icon="warning" tone="amber" %}
+Write to a temporary file, sync required bytes and metadata, then publish the final
+name and manifest reference. Restart deletes or ignores unreferenced partial files.
+{% /concept-card %}
+{% concept-card title="Checksum mismatch" eyebrow="Corrupt block" icon="shield" tone="rose" %}
+Stop serving the affected bytes, quarantine the file, and restore or rebuild from a
+verified replica, backup, or durable mutation source. Never rewrite the block in place.
+{% /concept-card %}
+{% concept-card title="Crash during compaction" eyebrow="Old inputs remain" icon="repeat" tone="blue" %}
+Do not retire input files until the complete output is durable and atomically present in
+the manifest. An interrupted merge can then restart without losing the prior state.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Tombstones need a proof boundary
+
+A tombstone can be discarded only after the system knows that no older value can
+reappear from an uncompacted file, delayed replica, restore, or repair stream. Removing
+it merely because it is old can resurrect deleted data.
+{% /section-card %}
+
+{% section-card %}
+## Review the production design
+
+Before shipping an SSTable-backed service, verify that these decisions are explicit:
+
+- The comparator, key encoding, sequence ordering, and tombstone visibility rules.
+- WAL durability, group-commit behavior, replay identity, and truncation checkpoints.
+- MemTable limits, flush concurrency, level-zero stall thresholds, and backpressure.
+- Data-block size, compression codec, checksum, cache admission, and filter memory.
+- Compaction selection, worker capacity, disk headroom, and tombstone retention.
+- Manifest atomicity, backup coverage, restore procedure, and corruption response.
+- Metrics for read, write, space, and recovery amplification under realistic load.
+
+The objective is not the smallest benchmark latency. It is a storage contract that
+still returns the newest valid value, survives interruption, and remains operable while
+background work catches up.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/sstable/quiz/sstable-production-design.json" lessonSlug="sstable" title="SSTable and LSM Tree Production Review" /%}

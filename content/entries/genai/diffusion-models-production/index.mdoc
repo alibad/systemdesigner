@@ -1,0 +1,210 @@
+---
+title: "Diffusion Models for Production"
+section: genai
+level: intermediate
+duration: 60 min
+description: "Design a bounded diffusion serving path: sampling budgets, latent architecture, batching, precision, safety, queues, retries, and controlled rollouts."
+registryId: diffusion-models-production
+---
+
+{% section-card tone="intro" %}
+## What is a diffusion model?
+
+A **diffusion model** is a generative model that learns to reverse a gradual noising process. At inference time, it starts with random noise and repeatedly predicts how to move that sample toward data that resembles its training distribution. Text-to-image systems add text conditioning so those updates also follow a prompt.
+
+In plain language: the service turns noise into an image through a sequence of model-guided corrections. Each correction consumes accelerator time, so production quality depends on both the learned model and the system that budgets, queues, checks, stores, and delivers those corrections.
+
+The core invariant is **bounded, attributable generation**: every accepted job has a fixed model and sampling contract, a deadline and compute budget, an externally enforced publication policy, and enough versioned metadata to explain or replay the result.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Model" label="Predict the update" detail="A UNet or diffusion transformer estimates noise, velocity, or another training-specific target" tone="violet" /%}
+{% metric value="Scheduler" label="Apply the update" detail="The sampler maps the prediction and current noise level to the next latent state" tone="blue" /%}
+{% metric value="Steps" label="Spend sequential work" detail="Each scheduled evaluation adds latency; useful step ranges are measured per model and workload" tone="amber" /%}
+{% metric value="Policy" label="Control publication" detail="Admission, safety, provenance, and delivery remain outside the generative model" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Follow one latent from noise to image
+
+Most production text-to-image systems use **latent diffusion**. An autoencoder compresses images into a lower-dimensional latent representation; the expensive denoising loop operates there; a decoder then converts the final latent back into pixels. This reduces computation compared with denoising every full-resolution pixel while preserving useful visual structure.
+
+{% system-flow title="One conditioned denoising path" caption="The model predicts an update; the scheduler applies it. Repeating this pair across selected noise levels creates the final latent." %}
+{% system-node title="Encode the prompt" eyebrow="Condition" icon="braces" tone="blue" %}
+Tokenize and encode prompt text, negative conditioning, and any image, mask, or control inputs under versioned preprocessing.
+{% /system-node %}
+{% system-node title="Sample initial noise" eyebrow="Seed" icon="activity" tone="violet" %}
+Create a latent tensor from a recorded random seed and the requested shape. The seed supports replay only when the rest of the execution contract is also fixed.
+{% /system-node %}
+{% system-node title="Predict an update" eyebrow="Model" icon="workflow" tone="amber" %}
+At the current noise level, the denoiser combines the latent with conditioning and predicts the target expected by its training objective.
+{% /system-node %}
+{% system-node title="Advance the sample" eyebrow="Scheduler" icon="route" tone="cyan" %}
+The scheduler uses that prediction to compute the next latent. Sampler family, timestep schedule, and model compatibility change the trajectory.
+{% /system-node %}
+{% system-node title="Decode to pixels" eyebrow="VAE" icon="layers" tone="green" %}
+After the final scheduled update, decode the latent, then evaluate and package the pixel output before publication.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the responsibilities separate
+
+- **The model checkpoint** defines what target is predicted and which conditioning and noise schedule it was trained to use.
+- **The scheduler or sampler** defines the numerical path between selected noise levels; it is not a drop-in quality upgrade for every model.
+- **The inference step count** selects how many model evaluations the request will buy from that path.
+- **Classifier-free guidance** combines conditional and unconditional predictions to change prompt adherence and diversity. Enabling the second path changes compute; increasing the scale does not linearly add more model calls.
+- **The random seed** initializes noise. Reproducibility also depends on model, scheduler, precision, software, hardware kernels, dimensions, and conditioning versions.
+{% /section-card %}
+
+{% section-card %}
+## Budget sampler, steps, and guidance together
+
+There is no universal best step count or guidance scale. A faster sampler may reach a useful result in fewer model evaluations, while a mismatched scheduler or an aggressive guidance value can create artifacts even when latency looks good. Establish a measured profile for each model, resolution, hardware class, and task slice.
+
+Use the lab to choose a workload and sampler, then change step count and guidance. The numbers are an explicit teaching model, not vendor benchmark results; the useful invariant is how one decision changes the whole request envelope.
+{% /section-card %}
+
+{% interactive-block id="genai/diffusion-models-production-denoising-budget-lab" dataFile="/api/content/genai/diffusion-models-production/data/denoising-budget-model.json" /%}
+
+{% section-card %}
+## Interpret the budget before tuning it
+
+### Step count is a marginal-value decision
+
+Early denoising evaluations usually establish broad composition; later evaluations refine local structure and texture. Quality gains commonly saturate, so extra steps should remain only when measured task quality improves enough to justify added GPU time and queue pressure.
+
+- Compare candidate samplers at the same model, seed set, prompt set, dimensions, and quality evaluator.
+- Plot quality against p50, p95, and p99 latency rather than reporting one preferred step count.
+- Include difficult slices such as text rendering, hands, unusual aspect ratios, low-resource languages, and policy-sensitive prompts.
+- Re-run the profile after model, scheduler, compiler, precision, kernel, or hardware changes.
+
+### Guidance is not a generic quality knob
+
+Classifier-free guidance trades conditional alignment against distribution coverage. Weak guidance may ignore important prompt details; excessive guidance may reduce diversity, oversaturate an image, or amplify artifacts. Some newer or distilled model families use different guidance conventions, so preserve the checkpoint's documented contract.
+
+{% callout variant="warn" %}
+Do not let arbitrary client parameters choose unbounded work. Publish named generation profiles with validated ranges, then reject or asynchronously route requests that exceed those envelopes.
+{% /callout %}
+
+{% code-block file="/api/content/genai/diffusion-models-production/code/denoising-budget.py" language="python" title="Runnable sampling-budget model" /%}
+{% /section-card %}
+
+{% section-card %}
+## Put generation inside a production request path
+
+The denoising loop is a GPU kernel workload; the product is a durable media job. Interactive requests may wait synchronously for a preview, but long or high-resolution jobs need asynchronous status, cancellation, and durable completion.
+
+{% process-flow %}
+{% process-step number="1" title="Validate and admit" label="Control plane" %}
+Authenticate the tenant, normalize dimensions and parameters, classify policy, estimate work, reserve quota, and assign an idempotent job ID.
+{% /process-step %}
+{% process-step number="2" title="Queue compatible work" label="Scheduler" %}
+Separate latency classes and batch only requests with compatible model, shape, conditioning, precision, and safety contracts.
+{% /process-step %}
+{% process-step number="3" title="Generate with a lease" label="Worker" %}
+Load the pinned model bundle, claim a bounded lease, propagate cancellation, emit progress, and checkpoint only when recovery value exceeds storage cost.
+{% /process-step %}
+{% process-step number="4" title="Evaluate before publish" label="Policy" %}
+Run output safety, quality, provenance, and product-specific checks outside the model. Fail closed when a mandatory decision is unavailable.
+{% /process-step %}
+{% process-step number="5" title="Commit one result" label="Delivery" %}
+Atomically record the terminal state and object reference, notify once, and retain the execution manifest needed for replay and incident review.
+{% /process-step %}
+{% /process-flow %}
+
+### Store an execution manifest, not just an image
+
+- job, tenant, request, parent, and idempotency identifiers;
+- original and normalized prompts under the applicable privacy and retention policy;
+- model, text encoder, autoencoder, scheduler, adapter, and safety-policy versions;
+- seed, dimensions, step count, guidance, precision, batch identity, and runtime image;
+- queue, load, denoising, decode, safety, storage, and end-to-end timings;
+- terminal state, retry lineage, safety decisions, output digest, and provenance reference.
+
+A seed by itself is not a replay contract. Even deterministic samplers can diverge across precision modes, library versions, kernels, and hardware.
+{% /section-card %}
+
+{% section-card %}
+## Choose capacity and failure boundaries deliberately
+
+Batching, precision, queueing, retry, safety, and rollout settings are coupled. Larger batches can improve throughput but consume more memory and wait longer to fill. Lower precision can reduce memory and accelerate supported operations, but the exact quality and speed change must be validated on the target stack. Blind retries can turn an ambiguous worker timeout into duplicate GPU work or duplicate publication.
+
+Use the control room to configure one modeled serving path. It exposes queue growth, memory fit, publication safety, retry amplification, and canary blast radius at the same time.
+{% /section-card %}
+
+{% interactive-block id="genai/diffusion-models-production-serving-control-lab" dataFile="/api/content/genai/diffusion-models-production/data/serving-control-model.json" /%}
+
+{% section-card %}
+## Make failure outcomes explicit
+
+### Queue overload
+
+- Admit work against reserved GPU-seconds, memory shape, tenant quota, and deadline before enqueueing.
+- Keep preview, standard, and offline queues separate so a campaign export cannot consume every interactive slot.
+- Shed, degrade, or defer before queue age exceeds the remaining user deadline.
+- Propagate cancellation to queued and running jobs; completed work after cancellation still consumes capacity.
+
+### Worker loss and retries
+
+- Lease jobs for a bounded period and heartbeat while useful work continues.
+- Commit outputs with a compare-and-set on job identity so two workers cannot publish two terminal results.
+- Retry only from a known state. An unknown completion state requires reconciliation before another expensive attempt.
+- Limit retry count and charge every attempt to the original quota and deadline.
+
+### Safety dependency failure
+
+- Keep prompt admission and output publication checks as separate controls.
+- Fail closed for mandatory checks; route to review or a bounded safe mode rather than silently bypassing policy.
+- Version safety models and thresholds with the release and measure both false negatives and false positives by slice.
+- Treat provenance as verifiable history, not proof that the depicted scene is true or harmless.
+
+### Model rollout regression
+
+- Shadow or offline-evaluate the complete model bundle before exposure.
+- Canary by stable traffic identity, cap concurrency and percentage, and compare quality, safety, latency, and retry metrics against the control.
+- Roll back model, scheduler, precision, compiler, and policy as one versioned bundle.
+- Preserve the old runtime until the new bundle has survived representative load and failure drills.
+
+{% code-block file="/api/content/genai/diffusion-models-production/code/diffusion-worker-policy.py" language="python" title="Idempotent worker and publication policy" /%}
+{% /section-card %}
+
+{% section-card %}
+## Test the system at matched quality
+
+An optimization is useful only if the complete path still meets its quality and safety contract. Measure each model bundle and request profile independently.
+
+### Offline release evidence
+
+- task quality and prompt adherence on fixed, versioned prompt and seed sets;
+- diversity and artifact measures alongside human review for slices where automatic metrics are weak;
+- safety false-negative and false-positive rates by content class, language, and product context;
+- output similarity and numerical drift across precision, compiler, scheduler, and hardware variants;
+- cold start, warm latency, peak memory, throughput, and cost at matched output quality.
+
+### Online operating evidence
+
+- queue age, admission, shedding, cancellation, lease expiry, retry, and duplicate-suppression rates;
+- p50, p95, and p99 latency split into queue, load, denoise, decode, safety, and storage stages;
+- accelerator utilization, memory headroom, batch fill, images per GPU-second, and failed GPU-seconds;
+- safety rejection, review, appeal, and policy-unavailable rates by exact bundle version;
+- user retry, download, edit, abandonment, and task-success signals by generation profile.
+
+{% callout variant="info" %}
+Optimize cost per accepted, useful output. Faster generation that causes more user retries, unsafe publications, or quality rejections can increase total GPU cost.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Primary papers and maintained documentation
+
+- [Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239) introduces the learned reverse noising process underlying DDPMs.
+- [Denoising Diffusion Implicit Models](https://openreview.net/forum?id=St1giarCHLP) presents a non-Markovian formulation with faster deterministic sampling paths for compatible trained models.
+- [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598) describes combining conditional and unconditional score estimates to trade sample fidelity against diversity.
+- [High-Resolution Image Synthesis with Latent Diffusion Models](https://openaccess.thecvf.com/content/CVPR2022/html/Rombach_High-Resolution_Image_Synthesis_With_Latent_Diffusion_Models_CVPR_2022_paper.html) explains denoising in a compressed latent space and cross-attention conditioning.
+- [Hugging Face Diffusers scheduler documentation](https://huggingface.co/docs/diffusers/using-diffusers/schedulers) documents scheduler, timestep, and guidance configuration and emphasizes model-specific evaluation.
+- [Hugging Face Diffusers batch inference](https://huggingface.co/docs/diffusers/using-diffusers/batched_inference) describes the throughput, memory, and waiting-time trade-offs of batching prompts.
+- [Hugging Face Diffusers inference optimization](https://huggingface.co/docs/diffusers/optimization/fp16) covers precision, compilation, and attention optimizations; benchmark them on the target model and device.
+- [NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) and the [C2PA specifications](https://spec.c2pa.org/specifications/) provide maintained risk-management and media-provenance references for generative systems.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/diffusion-models-production/quiz/diffusion-models-production.json" lessonSlug="diffusion-models-production" /%}

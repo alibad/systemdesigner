@@ -1,0 +1,343 @@
+---
+registryId: zookeeper
+---
+
+{% section-card tone="intro" %}
+## What is Apache ZooKeeper?
+
+Apache ZooKeeper is a **distributed coordination service**. Applications use it
+to agree on small but critical facts such as which process is leader, which
+instances are alive, and which configuration version is current.
+
+ZooKeeper matters when several processes must act on one shared decision while
+machines, networks, and clients can fail independently. Its core invariant is:
+
+> A coordination decision becomes authoritative only after a majority of the
+> voting ensemble agrees on one ordered history.
+
+ZooKeeper is not the application's main database. It stores a small hierarchy of
+versioned records called **znodes**, keeps client ownership tied to sessions, and
+notifies clients when watched state may have changed. Large payloads, event
+history, and business records remain in systems designed for those workloads.
+{% /section-card %}
+
+{% section-card %}
+## Build the coordination mental model
+
+Four ideas explain most ZooKeeper designs:
+
+{% concept-grid columns="2" %}
+{% concept-card title="Ensemble" eyebrow="Replicated authority" icon="network" tone="blue" %}
+An ensemble is a group of ZooKeeper servers. Voting members elect a leader and
+replicate every accepted mutation. A strict majority must be available for the
+ensemble to commit writes.
+{% /concept-card %}
+{% concept-card title="Znode" eyebrow="Small versioned record" icon="database" tone="violet" %}
+A znode has a path such as `/services/payments/instance-17`, a byte payload,
+metadata, and a version. The version supports compare-and-set updates instead of
+blind overwrites.
+{% /concept-card %}
+{% concept-card title="Session" eyebrow="Client identity and lifetime" icon="key" tone="green" %}
+A session survives brief reconnects. If it expires, its identity cannot be
+revived and ZooKeeper removes every ephemeral znode owned by that session.
+{% /concept-card %}
+{% concept-card title="Watch" eyebrow="State invalidation" icon="activity" tone="amber" %}
+A watch tells a client that state may have changed. It is not a durable event
+stream, so the handler rereads the authoritative znode and establishes the next
+watch.
+{% /concept-card %}
+{% /concept-grid %}
+
+The hierarchy is useful because names carry meaning:
+
+- `/services/payments/*` can represent live service members.
+- `/elections/invoice-writer/*` can order leadership candidates.
+- `/locks/month-end/*` can queue contenders for a critical section.
+- `/config/search/current` can point to the active configuration version.
+
+Keep the hierarchy shallow and bounded. A parent operation such as listing
+children must not accidentally become an unbounded scan.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one mutation through the ensemble
+
+ZooKeeper gives mutations one total order. A client can connect to any server,
+but the ensemble leader coordinates the write.
+
+{% system-flow title="A ZooKeeper write reaches one ordered history" caption="The client receives success only after the mutation is durably acknowledged by a quorum." %}
+{% system-node title="Client" eyebrow="Request" icon="client" tone="neutral" %}
+Sends a create, set, delete, or atomic multi-operation through its current
+session.
+{% /system-node %}
+{% system-node title="Connected server" eyebrow="Ingress" icon="server" tone="blue" %}
+Validates the request and forwards a mutation to the current leader when
+necessary.
+{% /system-node %}
+{% system-node title="Leader" eyebrow="Order" icon="route" tone="violet" %}
+Assigns the next transaction order and proposes the mutation to voting
+followers.
+{% /system-node %}
+{% system-node title="Quorum" eyebrow="Commit" icon="shield" tone="green" %}
+A majority acknowledges the proposal before the committed result is returned
+and watches are notified.
+{% /system-node %}
+{% /system-flow %}
+
+The distinction between reads and writes matters:
+
+- **Writes** are ordered through the leader and committed by a majority.
+- **Reads** are usually served by the connected server, so a lagging follower
+  can return an older value.
+- **Client order** is preserved for operations issued through one session.
+- **Versions** let a writer reject a stale update with compare-and-set.
+- **Multi-operations** atomically apply a bounded group of checks and mutations.
+
+When a decision requires the newest committed state, design the client protocol
+explicitly rather than assuming every local read is current.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size quorum and placement together
+
+For `N` voting members, ZooKeeper needs:
+
+`quorum = floor(N / 2) + 1`
+
+That means:
+
+{% metric-strip %}
+{% metric value="2 of 3" label="Three voters" detail="Tolerates one arbitrary voter failure." tone="blue" /%}
+{% metric value="3 of 5" label="Five voters" detail="Tolerates two arbitrary voter failures." tone="violet" /%}
+{% metric value="4 of 7" label="Seven voters" detail="Tolerates three arbitrary voter failures." tone="green" /%}
+{% metric value="No gain" label="Even voter count" detail="Four voters still tolerate only one failure." tone="amber" /%}
+{% /metric-strip %}
+
+An odd voter count avoids paying replication cost for a member that does not
+increase arbitrary-failure tolerance. Placement then decides whether those
+voters actually fail independently. Five voters split `3 + 2` across two zones
+still lose quorum when the three-voter zone disappears.
+
+### Lab 1: remove a voter, rack, or zone
+
+Change the ensemble size, spread its voters, and inject a failure. The result
+counts surviving voters instead of inventing an availability percentage.
+
+{% interactive-block id="technology/zookeeper-ensemble-failure-lab" dataFile="/api/content/technology/zookeeper/data/ensemble-failure-model.json" /%}
+
+Use **observers** when additional read-serving members are useful without
+increasing the voting quorum. Observers replicate committed state but do not
+vote, so they do not increase failure tolerance or write acknowledgement cost in
+the same way as another voter.
+{% /section-card %}
+
+{% section-card %}
+## Tie temporary ownership to sessions
+
+A ZooKeeper client negotiates a session timeout and receives a session identity.
+The client library sends heartbeats and reconnects to another ensemble member
+when its connection changes.
+
+{% process-flow %}
+{% process-step number="1" title="Create a session" label="Identity" %}
+The ensemble establishes the client identity and timeout. Authentication and
+ACLs determine which paths the session may use.
+{% /process-step %}
+{% process-step number="2" title="Claim temporary state" label="Ephemeral znode" %}
+The client creates membership or election state whose lifetime is bound to that
+session.
+{% /process-step %}
+{% process-step number="3" title="Reconnect or expire" label="Failure boundary" %}
+A brief disconnect can retain the session. Expiration permanently invalidates
+it and removes its ephemeral znodes.
+{% /process-step %}
+{% process-step number="4" title="Rebuild from truth" label="Recovery" %}
+The client rereads current state, reinstalls watches, recreates eligible
+ephemeral nodes, and reacquires ownership before serving.
+{% /process-step %}
+{% /process-flow %}
+
+Three client states require different behavior:
+
+- **Connected:** coordination operations can proceed under the current session.
+- **Suspended or disconnected:** stop external work that requires current
+  ownership until the client can verify ensemble state.
+- **Expired:** discard every ownership assumption from the old session and
+  establish a new one.
+
+The client should not hide these states behind a generic retry loop.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat watches as invalidation, not history
+
+Traditional ZooKeeper watches are one-shot triggers associated with a read. A
+notification says that the observed state may now differ; it does not contain a
+complete sequence of every mutation.
+
+A robust watch loop does the following:
+
+1. Read the value or children and install the watch.
+2. Build local behavior from the returned value and version.
+3. Keep the callback short; enqueue work instead of blocking the client event
+   thread.
+4. When notified, reread current state and establish the next watch.
+5. After reconnect or session loss, rebuild the view before resuming work.
+
+### Lab 2: recover a membership, leader, or configuration client
+
+Inject a brief disconnect, session expiration, or burst of changes. Then choose
+whether to trust local state, reread, or create a new fenced session.
+
+{% interactive-block id="technology/zookeeper-session-ownership-lab" dataFile="/api/content/technology/zookeeper/data/session-ownership-model.json" /%}
+
+{% callout variant="warn" %}
+An ephemeral election node proves ownership inside ZooKeeper. It cannot stop a
+paused former leader from writing to an external database after a replacement
+leader takes over. Protect the external resource with a monotonically increasing
+**fencing token** and reject older tokens.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Compose coordination recipes from primitives
+
+Recipes are protocols, not single API calls. Use a mature client library when it
+implements the protocol you need, and still understand the invariant it
+protects.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Leader election" eyebrow="One current owner" icon="shield" tone="blue" %}
+Candidates create ephemeral sequential nodes. The lowest sequence owns
+leadership; each follower watches only its predecessor and reevaluates after
+notification.
+{% /concept-card %}
+{% concept-card title="Distributed lock" eyebrow="Ordered contenders" icon="lock" tone="violet" %}
+Contenders queue with ephemeral sequential nodes. A client enters only when it
+owns the lowest sequence and uses fencing when the protected resource is outside
+ZooKeeper.
+{% /concept-card %}
+{% concept-card title="Service membership" eyebrow="Live participants" icon="users" tone="green" %}
+Each instance creates an ephemeral registration. Consumers watch the bounded
+parent and rebuild their endpoint set from current children.
+{% /concept-card %}
+{% concept-card title="Configuration pointer" eyebrow="Versioned state" icon="braces" tone="amber" %}
+Store a small version or location, not a large configuration bundle. Readers
+watch the pointer, fetch the referenced configuration, validate it, and switch
+atomically.
+{% /concept-card %}
+{% /concept-grid %}
+
+The predecessor-watch pattern avoids the **herd effect**. If every contender
+watches the current leader, one deletion wakes all of them. Watching only the
+immediately preceding sequence wakes the next eligible contender.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement ownership with fencing and recovery
+
+The first example runs leader work only after incrementing a persistent fencing
+token. The downstream resource must atomically remember the greatest accepted
+token.
+
+{% code-block file="/api/content/technology/zookeeper/code/lead-with-fencing-token.py" language="python" title="Run elected work with a monotonic fencing token" /%}
+
+The second example separates connection suspension from permanent session loss.
+It stops serving while ownership is uncertain, recreates ephemeral membership
+only after loss, and rebuilds a watched configuration from the current version.
+
+{% code-block file="/api/content/technology/zookeeper/code/recover-membership-and-watches.py" language="python" title="Recover ephemeral membership and watched configuration" /%}
+
+Production code should additionally define bounded retries, shutdown behavior,
+metrics, authentication, ACLs, and an explicit policy for callback failures.
+{% /section-card %}
+
+{% section-card %}
+## Operate the ensemble as critical infrastructure
+
+### Protect the write path
+
+- Run voting members on independent failure domains with predictable network
+  latency.
+- Give transaction logs dedicated, low-latency storage and keep snapshots from
+  exhausting the same disk.
+- Change one voter at a time and confirm quorum health before continuing a
+  restart or upgrade.
+- Keep client payloads small; use ZooKeeper to locate large state rather than
+  carrying that state inside znodes.
+
+### Monitor leading indicators
+
+- Request latency by operation and server, especially sustained write latency.
+- Outstanding requests, connection count, and watch count.
+- Leader and follower synchronization state.
+- Disk latency, free space, snapshot duration, and transaction-log growth.
+- Session expiration rate and reconnect storms by client version.
+- Znode count, largest payloads, and parent paths with unbounded child growth.
+
+### Secure and recover
+
+- Use authentication and least-privilege ACLs instead of open world-readable or
+  world-writable paths.
+- Encrypt client and quorum traffic where the deployment supports it.
+- Automate snapshot and transaction-log retention, then test restoration away
+  from the active ensemble.
+- Back up critical coordination metadata even though it is replicated; a bad
+  delete or application write can reach every replica.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Avoid the failure patterns that look convenient
+
+### Do not use ZooKeeper as a general database
+
+Large payloads, high-volume records, scans, and analytics create pressure on the
+replicated coordination path. Store the business data elsewhere and keep only a
+small identifier, version, lease, or ownership record in ZooKeeper.
+
+### Do not equate connection with ownership
+
+A client can pause, disconnect, or lose its session while external work remains
+in flight. Revalidate state after reconnect and use fencing at the protected
+resource.
+
+### Do not treat watches as a queue
+
+Notifications can be delayed or coalesced around reconnects. Use a durable
+stream when every event must be consumed; use a watch when the client can
+reconstruct current state.
+
+### Do not hide quorum loss behind retries
+
+Retries cannot create a majority. Surface the ensemble outage, stop unsafe
+automation, and restore voters or network reachability without allowing two
+independent authorities.
+{% /section-card %}
+
+{% section-card %}
+## Choose ZooKeeper only for the coordination boundary
+
+Use ZooKeeper when the system needs a small, ordered coordination state and the
+team can operate a quorum. Choose a different system when the primary need is:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Business data" eyebrow="Database or object store" icon="storage" tone="blue" %}
+Use a database for records, indexes, queries, transactions, and larger values.
+Keep ZooKeeper metadata as a pointer or owner, not the payload.
+{% /concept-card %}
+{% concept-card title="Every event" eyebrow="Durable stream" icon="repeat" tone="violet" %}
+Use Kafka, Pulsar, or another log when consumers must replay every mutation and
+track offsets independently.
+{% /concept-card %}
+{% concept-card title="Long-running work" eyebrow="Workflow engine" icon="workflow" tone="green" %}
+Use a workflow system such as Temporal when steps, retries, timers, and business
+state must survive for hours or days.
+{% /concept-card %}
+{% /concept-grid %}
+
+For another quorum-backed coordination model, compare
+[etcd](/technology/etcd). For event-stream ownership and partition leadership,
+continue with [Kafka](/technology/kafka).
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/zookeeper/quiz/zookeeper-production-decisions.json" lessonSlug="zookeeper" title="Apache ZooKeeper Production Decisions" /%}

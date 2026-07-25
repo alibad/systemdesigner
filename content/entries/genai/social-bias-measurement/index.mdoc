@@ -1,0 +1,229 @@
+---
+registryId: social-bias-measurement
+---
+
+{% section-card tone="intro" %}
+## What is social bias measurement?
+
+Social bias measurement checks whether a model or AI product creates systematically different language, assumptions, errors, or outcomes for social groups. It turns a broad concern such as "the assistant treats people unfairly" into declared harms, comparable test conditions, slice-level counts, uncertainty, and a release decision.
+
+The core invariant is **controlled comparison**: compare groups under the same task, prompt meaning, sampling policy, scorer, and product policy. Every reported rate must retain its numerator, denominator, and uncertainty. An average without those details can hide the people most affected.
+
+This lesson builds on [advanced safety evaluation](/genai/safety-evaluation-advanced), where you can review evaluator validity, release gates, and production monitoring.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="1,508" label="CrowS-Pairs pairs" detail="Minimal pairs probe stereotypical likelihood preferences" tone="blue" /%}
+{% metric value="58,492" label="BBQ examples" detail="Ambiguous and disambiguated contexts expose unsupported assumptions" tone="violet" /%}
+{% metric value="23,679" label="BOLD prompts" detail="Repeated open-ended generations reveal regard distributions" tone="amber" /%}
+{% metric value="n + CI" label="Required evidence" detail="Keep the denominator and uncertainty beside every slice rate" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Start with the harm, not the benchmark
+
+A fairness metric is useful only when it represents a plausible product harm. The same model can look acceptable on one metric and fail badly on another because each metric asks a different question.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Stereotype preference" eyebrow="Likelihood" icon="scale" tone="blue" %}
+Does a minimal demographic substitution make a stereotypical sentence more likely than a matched alternative? This is the shape tested by CrowS-Pairs.
+{% /concept-card %}
+{% concept-card title="Unsupported assumption" eyebrow="Question answering" icon="warning" tone="amber" %}
+When evidence is ambiguous, does the model infer an answer from a social stereotype instead of selecting `unknown`? BBQ separates this behavior from ordinary accuracy.
+{% /concept-card %}
+{% concept-card title="Negative regard" eyebrow="Open generation" icon="activity" tone="violet" %}
+Across repeated continuations, does one group receive more demeaning, hostile, or dismissive language? BOLD examines distributions rather than one completion.
+{% /concept-card %}
+{% concept-card title="Product outcome gap" eyebrow="Deployment" icon="users" tone="green" %}
+Do ranking, refusal, recommendation, or task-success rates differ after retrieval, prompting, moderation, and business rules are applied?
+{% /concept-card %}
+{% /concept-grid %}
+
+Before collecting data, write a measurement contract:
+
+1. Name the user-visible harm and the population that could experience it.
+2. Declare the metric direction, comparison groups, intersectional slices, and minimum denominator.
+3. Freeze prompt construction, decoding, scorer versions, and human-review guidance.
+4. Predeclare the fairness threshold and what `pass`, `hold`, and `block` mean for deployment.
+
+{% callout variant="warn" %}
+A score near a benchmark baseline is not proof that a system is unbiased. Opposing slice effects can cancel in the aggregate, a small denominator can create a wide interval, and the benchmark may not represent the deployed task.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Use CrowS-Pairs, BBQ, and BOLD as different lenses
+
+### CrowS-Pairs measures paired likelihood preference
+
+Each item contains a stereotypical sentence and a minimally changed anti-stereotypical sentence. A common score is the percentage of valid pairs for which the model assigns greater likelihood to the stereotypical sentence.
+
+- Keep the pair intact so lexical and grammatical changes do not become confounders.
+- Report the number of valid pairs, preference rate, paired effect size, and interval by bias type.
+- Inspect items manually because a minimal text edit can still alter fluency or meaning.
+- Do not read `50%` as a universal fairness target; it is a reference point for this paired task.
+
+### BBQ separates ambiguity from answerable context
+
+BBQ presents related question-answering cases with either ambiguous or disambiguated evidence. In an ambiguous case, choosing a person based on stereotype is the failure; in a disambiguated case, the model must still use the stated facts correctly.
+
+- **Ambiguous context:** measure unsupported stereotype-aligned answers and appropriate `unknown` selections.
+- **Disambiguated context:** measure task accuracy and whether errors differ by group.
+- **Joint interpretation:** a model that always refuses may reduce assumptions while destroying useful accuracy.
+
+### BOLD measures a generation distribution
+
+BOLD prompts models to continue text about professions and social groups. One completion is not enough because decoding is stochastic and rare harmful generations matter.
+
+- Generate multiple continuations with a frozen sampling policy.
+- Score regard, sentiment, toxicity, and representation, then audit scorer errors by group.
+- Compare full distributions and tail rates instead of only average sentiment.
+- Treat repeated generations from one prompt as a cluster, not as fully independent prompts.
+{% /section-card %}
+
+{% section-card %}
+## Turn a concern into comparable evidence
+
+{% process-flow %}
+{% process-step number="1" title="Declare the harm" label="Contract" %}
+Name the affected workflow, metric, direction of harm, and consequence of crossing the threshold.
+{% /process-step %}
+{% process-step number="2" title="Construct matched cases" label="Design" %}
+Hold task meaning constant, include counterfactual substitutions, and declare intersectional slices before seeing results.
+{% /process-step %}
+{% process-step number="3" title="Sample and score" label="Evidence" %}
+Version the model, prompt, decoding policy, automated scorers, and human-audit rubric.
+{% /process-step %}
+{% process-step number="4" title="Gate and monitor" label="Decision" %}
+Use slice intervals for release, then watch product outcomes during a bounded canary with rollback thresholds.
+{% /process-step %}
+{% /process-flow %}
+
+### Estimate evaluation volume before running it
+
+Suppose a team declares `12` product-relevant slices, selects `250` prompts per slice, and draws `5` continuations per prompt:
+
+- Generations: `12 x 250 x 5 = 15,000`.
+- At `180` output tokens per generation: about `2.7 million` output tokens.
+- With two automated scorers: `30,000` scoring jobs, plus a stratified human audit.
+- The slice denominator is still the evidence used by that metric: valid pairs for CrowS-Pairs, ambiguous cases for a BBQ assumption rate, or scored prompt-completion samples for BOLD.
+
+More samples narrow random uncertainty, but they do not repair biased prompts, a miscalibrated regard classifier, or missing populations. When several generations share one prompt, use a prompt-cluster bootstrap or hierarchical model rather than pretending every completion is independent.
+{% /section-card %}
+
+{% interactive-block id="genai/social-bias-measurement-slice-threshold-lab" dataFile="/api/content/genai/social-bias-measurement/data/intersectional-slice-metrics.json" /%}
+
+{% section-card %}
+## Build a versioned evaluation and release path
+
+{% system-flow title="Bias evidence from test case to release gate" caption="Every artifact is versioned so a score can be reproduced and a deployment decision can be audited." %}
+{% system-node title="Evaluation contract" eyebrow="Harm, slices, thresholds" icon="clipboard" tone="blue" %}
+Own the definitions of a harmful event, comparison group, intersectional slice, and minimum evidence.
+{% /system-node %}
+{% system-node title="Controlled sampler" eyebrow="Prompts and decoding" icon="shuffle" tone="cyan" %}
+Construct matched prompts, allocate slice coverage, and record seeds and decoding parameters.
+{% /system-node %}
+{% system-node title="Model plus policy" eyebrow="Complete product path" icon="layers" tone="violet" %}
+Evaluate the deployed prompt, retrieval, model, reranker, refusal, and moderation stack together.
+{% /system-node %}
+{% system-node title="Scoring and audit" eyebrow="Automated plus human" icon="search" tone="amber" %}
+Run task-specific scorers, estimate scorer error by group, and adjudicate sampled disagreements.
+{% /system-node %}
+{% system-node title="Slice store and gate" eyebrow="Counts, intervals, action" icon="shield" tone="green" %}
+Persist numerators and denominators, compare confidence bounds with thresholds, and emit pass, hold, or block.
+{% /system-node %}
+{% /system-flow %}
+
+Store raw evidence separately from derived summaries. A report row should be traceable to a suite version, model and policy version, scorer version, prompt ID, slice keys, event label, and review status. Recomputing a threshold must not require regenerating the model outputs.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Expect measurement failures before model failures
+
+- **The aggregate passes while an intersection fails.**
+  - Single-axis or global averages can dilute a small but high-harm slice.
+  - Keep declared intersections in the release table even when their denominator is small; mark them inconclusive and collect targeted evidence.
+- **The evaluator behaves differently by group.**
+  - A sentiment or toxicity classifier can create the disparity it claims to measure.
+  - Audit false positives and false negatives by slice, and use human adjudication for threshold-near cases.
+- **Matched prompts are not actually matched.**
+  - A demographic substitution can change grammar, cultural meaning, or factual plausibility.
+  - Validate semantic equivalence and report excluded pairs instead of silently shrinking the denominator.
+- **More samples create false confidence.**
+  - Repeated completions from one prompt share context and are correlated.
+  - Larger samples narrow random error but preserve prompt selection bias and systematic scorer error.
+- **Many slice tests create chance discoveries.**
+  - Predeclare primary slices, publish all tested slices, and use multiplicity-aware intervals or a hierarchical model.
+  - Confirm newly discovered failures on a held-out suite before changing policy.
+{% /section-card %}
+
+{% section-card %}
+## Mitigation changes more than the bias metric
+
+A mitigation is part of the product behavior, so evaluate its consequences on the same traffic contract. A targeted reranker may reduce harmful generations but add latency and false interventions. A broad refusal rule may close a measured gap while denying benign requests unevenly.
+
+Compare at least these outcomes:
+
+- Harm rate and fairness gap, with denominators and uncertainty.
+- Task success or quality retention for the same slices.
+- False interventions on benign requests.
+- Added generations, scoring work, latency, and serving cost.
+- Residual failures that require human review, escalation, or rollback.
+
+The next lab separates **evaluation sampling** from **deployment mitigation**. Increasing samples changes confidence and evaluation cost; selecting a mitigation changes user-visible behavior.
+{% /section-card %}
+
+{% interactive-block id="genai/social-bias-measurement-mitigation-consequence-lab" dataFile="/api/content/genai/social-bias-measurement/data/mitigation-consequences.json" /%}
+
+{% section-card %}
+## Implement a denominator-aware gate
+
+The example below groups binary harm observations, computes Wilson intervals for each group, estimates the gap interval, and returns one of three actions. It keeps the threshold policy separate from data collection so a reviewer can reproduce both the evidence and the decision.
+
+{% code-block file="/api/content/genai/social-bias-measurement/code/bias_evaluation.py" language="python" title="Intersectional slice evidence and fairness gate" /%}
+
+Use the example as a reporting boundary, not as a complete fairness definition:
+
+- Replace the simple gap interval with a prompt-cluster bootstrap when prompts have repeated generations.
+- Add scorer-audit uncertainty when labels come from an automated evaluator.
+- Keep reference-group choice and metric direction explicit in configuration.
+- Require a minimum denominator even when a wide interval happens to fall below the threshold.
+{% /section-card %}
+
+{% section-card %}
+## Operate fairness as a release and monitoring loop
+
+{% process-flow %}
+{% process-step number="1" title="Offline gate" label="Before traffic" %}
+Block clear threshold violations, hold inconclusive slices, and preserve every tested result.
+{% /process-step %}
+{% process-step number="2" title="Shadow and canary" label="Limited exposure" %}
+Run the candidate on representative traffic, then expose a bounded cohort only after task and fairness gates pass.
+{% /process-step %}
+{% process-step number="3" title="Slice monitoring" label="Production" %}
+Track product outcomes, abstentions, complaints, and scorer drift with privacy-safe slice keys and minimum-count suppression.
+{% /process-step %}
+{% process-step number="4" title="Rollback and learn" label="Incident response" %}
+Rollback on declared thresholds, preserve affected evidence, audit root cause, and add a regression slice before re-release.
+{% /process-step %}
+{% /process-flow %}
+
+### Deployment decisions are asymmetric
+
+{% concept-grid columns="2" %}
+{% concept-card title="Pass earns a canary" eyebrow="Not global release" icon="check" tone="green" %}
+Offline evidence supports limited exposure. It does not prove every production population or adversarial context is safe.
+{% /concept-card %}
+{% concept-card title="Hold means uncertainty" eyebrow="Collect evidence" icon="search" tone="amber" %}
+When the plausible gap crosses the threshold, increase independent slice coverage or improve the measurement design before deciding.
+{% /concept-card %}
+{% concept-card title="Block names a harm" eyebrow="Target remediation" icon="shield" tone="rose" %}
+Do not optimize a global score. Fix the failing path, rerun unaffected quality gates, and verify the targeted slice on held-out cases.
+{% /concept-card %}
+{% concept-card title="Monitoring protects the contract" eyebrow="After release" icon="activity" tone="blue" %}
+Population mix, prompts, model versions, and scorers drift. Alert on both outcome gaps and evidence quality, including denominator collapse.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/social-bias-measurement/quiz/social-bias-measurement.json" title="Social Bias Measurement Decision Check" lessonSlug="social-bias-measurement" /%}

@@ -1,0 +1,287 @@
+---
+registryId: practice-video-streaming
+---
+
+{% section-card tone="intro" %}
+## What is a video streaming system?
+
+A video streaming system turns uploaded or live media into short, immutable segments and delivers those segments from edge caches to a player. The control plane decides what a viewer may watch and returns a manifest. The media data plane moves the expensive bytes through object storage, origins, and CDNs.
+
+The central invariant is **a published manifest references only complete, authorized, immutable media segments**. A fast player cannot repair a manifest that points at missing bytes, mixed versions, or content the viewer is not allowed to receive.
+
+{% callout variant="info" %}
+This walkthrough designs global video-on-demand first. Live ingest, recommendations, comments, and creator monetization are extensions, not hidden requirements on the playback path.
+{% /callout %}
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Control plane" eyebrow="Small decisions" icon="sliders" tone="blue" %}
+Owns catalog metadata, authorization, playback sessions, manifest selection, and regional policy.
+{% /concept-card %}
+{% concept-card title="Media plane" eyebrow="Large byte flow" icon="route" tone="cyan" %}
+Moves uploads and immutable segments through durable storage, origins, and edge caches.
+{% /concept-card %}
+{% concept-card title="Player loop" eyebrow="Experience" icon="activity" tone="violet" %}
+Measures throughput and buffer health, then switches among compatible renditions without interrupting playback.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% design-challenge
+   challengeId="video-streaming"
+   title="Design the playback delivery path"
+   prompt="Show how an authorized viewer receives a manifest and how media segments reach the player without sending normal playback bytes through application servers. Include publication safety, edge misses, and degraded playback." /%}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+## Clarify the product before drawing the CDN
+
+Start with one concrete contract: global video-on-demand for user uploads, with adaptive playback on web, mobile, and television clients.
+
+### Functional requirements
+
+- Creators upload large files with pause, resume, integrity checks, and visible processing state.
+- The platform transcodes accepted uploads into several compatible renditions and packages short HLS or DASH segments.
+- Authorized viewers start playback, seek, and change quality automatically as network conditions change.
+- Creators can replace metadata or remove a video without mutating already published segment objects.
+- The player emits bounded quality-of-experience events such as startup time, rebuffering, selected rendition, and terminal errors.
+
+### Non-functional goals
+
+- P95 time to first frame below 2 seconds for warm popular content.
+- Rebuffering below 0.5% of watched time at the regional and device-slice level.
+- Playback availability of 99.95%, with a lower rendition preferred to a stalled high-resolution stream.
+- Newly uploaded standard-definition content ready within 15 minutes at the target load.
+- Normal segment delivery bypasses application servers and protects origins from viral fanout.
+
+### State the exclusions
+
+- Live streaming needs a separate low-latency ingest and packaging path.
+- Recommendations and search may choose a video, but they are not dependencies of an active playback session.
+- Comments, likes, billing, and creator payouts do not belong on the media request path.
+- Digital-rights management can be added through license services and encrypted renditions after the base flow is sound.
+
+{% callout variant="tip" %}
+Ask whether the interview prioritizes upload processing, playback delivery, or live events. Trying to deep-dive all three usually produces a wide but indefensible design.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate scale and constraints" %}
+## Translate watch time into edge and origin load
+
+Use transparent assumptions rather than memorized platform numbers. A defensible baseline is:
+
+- 20 million daily viewers and 2 million peak concurrent playbacks.
+- 3.5 Mbps average delivered bitrate after adaptive selection.
+- Six-second media segments.
+- 92% segment-byte cache hit rate across the CDN fleet.
+- 300 hours of source video uploaded per minute, with six output renditions.
+
+{% interactive-block id="practice/video-streaming-capacity-lab" dataFile="/api/content/practice/video-streaming/data/capacity-scenarios.json" /%}
+
+### Show the arithmetic
+
+1. **Viewer egress:** `concurrent viewers * average bitrate` gives aggregate edge bandwidth.
+2. **Segment requests:** `viewers / segment duration` approximates requests per second before retries and seeks.
+3. **Origin egress:** `edge bandwidth * (1 - byte cache hit rate)` gives the miss traffic origins must absorb.
+4. **Storage growth:** `uploaded source hours * rendition multiplier * average encoded size` gives a planning estimate, not a billing forecast.
+5. **Transcoding demand:** compare source minutes arriving per minute with aggregate worker real-time factor and preserve retry headroom.
+
+{% code-block file="/api/content/practice/video-streaming/code/estimate-delivery.py" language="python" title="Estimate playback and origin capacity" /%}
+
+### Interpret the result
+
+- A high request hit rate can still hide poor byte hit rate if large high-bitrate segments miss.
+- A global average does not size one region during a premiere or sporting event.
+- Origin capacity needs headroom for cache churn, new releases, failover, and invalidation mistakes.
+- Transcoding is asynchronous for video-on-demand, so queue age is more useful than raw queue depth.
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+## Separate ingest, publication, and playback
+
+{% system-flow title="Upload-to-playback path" caption="The media plane is immutable after publication. A manifest version is the commit record that makes a coherent rendition set visible." %}
+{% system-node title="Resumable upload" eyebrow="Ingest" icon="upload" tone="blue" %}
+Issues multipart URLs, verifies parts, scans the assembled source, and records an idempotent upload completion.
+{% /system-node %}
+{% system-node title="Transcode and package" eyebrow="Async workers" icon="layers" tone="violet" %}
+Creates renditions, audio tracks, thumbnails, checksums, and manifests under a versioned staging prefix.
+{% /system-node %}
+{% system-node title="Publication gate" eyebrow="Atomic visibility" icon="shield" tone="green" %}
+Validates every referenced object, writes the final immutable manifest, and changes catalog state from processing to ready.
+{% /system-node %}
+{% system-node title="Origin and CDN" eyebrow="Media delivery" icon="globe" tone="cyan" %}
+Serves cacheable manifests and segments while shielding object storage from viewer fanout.
+{% /system-node %}
+{% system-node title="Adaptive player" eyebrow="Client loop" icon="activity" tone="amber" %}
+Chooses a rendition from measured throughput, device capability, and buffer health, then reports bounded telemetry.
+{% /system-node %}
+{% /system-flow %}
+
+### Define service boundaries
+
+- **Catalog service:** authoritative video state, ownership, visibility, policy, and active publication version.
+- **Upload service:** resumable session state and direct-to-object-storage upload credentials.
+- **Media workflow:** queues, leases, idempotent jobs, retries, validation, and publication.
+- **Playback service:** authorizes the viewer and returns a short-lived manifest URL or playback token.
+- **Origin shield:** coalesces misses and keeps edge churn away from object storage.
+- **Telemetry pipeline:** accepts sampled player events without becoming a playback dependency.
+
+### Keep the request path narrow
+
+The player asks the playback service for authorization once, then fetches the manifest and segments from CDN hostnames. Search, recommendations, creator dashboards, and analytics remain off this path.
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Define data, storage, and contracts" %}
+## Model publication as a versioned state machine
+
+{% process-flow %}
+{% process-step number="1" title="Uploading" label="Source incomplete" %}
+The multipart session accepts parts and records checksums. No playback object is visible.
+{% /process-step %}
+{% process-step number="2" title="Processing" label="Jobs leased" %}
+Workers create outputs beneath a versioned staging prefix. Retries reuse deterministic object keys.
+{% /process-step %}
+{% process-step number="3" title="Validating" label="Evidence checked" %}
+The gate verifies codec metadata, durations, segment continuity, checksums, and required renditions.
+{% /process-step %}
+{% process-step number="4" title="Ready" label="Manifest committed" %}
+The catalog atomically points to the immutable publication version. CDN delivery can begin.
+{% /process-step %}
+{% /process-flow %}
+
+### Core records
+
+- **Video:** `video_id`, owner, visibility, processing state, active publication version, duration, created time.
+- **Upload session:** upload ID, source object key, expected bytes, accepted parts, checksum, expiry, idempotency key.
+- **Rendition:** publication version, codec, resolution, bitrate, segment duration, object prefix, validation result.
+- **Playback grant:** video ID, publication version, policy claims, region, expiry, and optional license binding.
+- **QoE event:** session ID, event time, startup time, buffer duration, rendition, edge region, and sampled error code.
+
+### Publication rules
+
+- Object keys include the publication version and never overwrite bytes referenced by an active manifest.
+- Upload completion and workflow dispatch share an idempotency key so a retry cannot create duplicate pipelines.
+- The active publication pointer changes only after all mandatory outputs pass validation.
+- Deletion first revokes playback and updates catalog policy; asynchronous storage cleanup follows retention rules.
+
+{% code-block file="/api/content/practice/video-streaming/code/publish-manifest.py" language="python" title="Validate an immutable publication before commit" /%}
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="5. Deep-dive on playback and delivery" %}
+## Make adaptive playback a bounded control loop
+
+The player does not simply choose the fastest rendition. It balances recent throughput, buffer health, display capability, decode support, and the cost of switching. Hysteresis prevents quality from oscillating around one threshold.
+
+### Segment and manifest choices
+
+- Short segments reduce retry cost and can improve startup, but increase request and manifest overhead.
+- Long segments compress and cache efficiently, but a miss or retry blocks more playback time.
+- Keep every rendition aligned on segment boundaries so the player can switch without timeline gaps.
+- Use codec capability negotiation; a smaller AV1 stream is not useful to a device that cannot decode it efficiently.
+
+### Cache behavior
+
+- Immutable segment URLs can use long cache lifetimes and content-addressed validation.
+- Manifests need shorter policy-aware lifetimes because authorization and active publication can change.
+- Origin shields collapse simultaneous misses for a newly popular segment.
+- Multi-CDN routing should use measured health and bounded failover, not per-request random switching.
+
+{% interactive-block id="practice/video-streaming-playback-failure-lab" dataFile="/api/content/practice/video-streaming/data/playback-failures.json" /%}
+
+### Reason from buffer time
+
+A player with 18 seconds buffered can survive a short CDN failover without visible interruption. The same outage at startup has no safety margin. Failure policy therefore depends on playback phase, available renditions, and the time needed to recover a healthy route.
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability, reliability, and operations" %}
+## Design degraded playback before the incident
+
+### Failure playbooks
+
+- **Edge miss storm:** coalesce requests at the shield, cap origin concurrency, and temporarily serve a lower rendition.
+- **Regional CDN failure:** stop new session assignment, preserve buffered playback, and move sessions to a healthy provider with backoff.
+- **Corrupt segment:** fail checksum validation before publication; if corruption appears later, revoke the publication version and restore the previous manifest.
+- **Transcoder retry storm:** use leases, attempt budgets, dead-letter queues, and deterministic output keys.
+- **Catalog outage:** allow already authorized sessions to continue fetching immutable segments while refusing unsafe new grants.
+- **Telemetry outage:** sample locally and drop bounded analytics before allowing event delivery to affect playback.
+
+### Observe user experience by slice
+
+{% metric-strip %}
+{% metric value="<2 s" label="P95 first frame" detail="Break down by region, device, codec, and cache state" tone="blue" /%}
+{% metric value="<0.5%" label="Rebuffer ratio" detail="Buffered seconds divided by watched seconds" tone="rose" /%}
+{% metric value=">92%" label="Byte hit rate" detail="Track by rendition and release cohort" tone="green" /%}
+{% metric value="<15 min" label="Ready latency" detail="Upload completion to safe publication" tone="amber" /%}
+{% /metric-strip %}
+
+### Alert on causes and impact
+
+- Page on sustained regional playback failure or a sharp increase in stalled sessions.
+- Scale media workers from oldest queue age and estimated remaining compute, not message count alone.
+- Watch origin bandwidth, shield coalescing, edge error rate, and cache-byte misses together.
+- Preserve publication version, player version, CDN route, and rendition in incident traces.
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+## Make each decision traceable to the contract
+
+{% tabs %}
+{% tab title="One CDN or several" %}
+A single CDN is simpler and can be sufficient early. Multiple providers improve regional resilience and negotiating leverage, but require consistent logs, cache keys, token validation, health scoring, and rehearsed failover.
+{% /tab %}
+{% tab title="Encode now or later" %}
+Encoding every rendition immediately improves readiness but spends compute and storage on cold content. A baseline ladder plus on-demand premium renditions reduces waste but adds first-view delay and operational states.
+{% /tab %}
+{% tab title="Uniform or per-title ladder" %}
+A uniform ladder is predictable. Per-title encoding can reduce bytes at comparable visual quality, but needs content analysis, more evaluation, and careful device compatibility.
+{% /tab %}
+{% tab title="Strong or eventual counters" %}
+Ownership, visibility, and active publication need authoritative transitions. View counts and analytics can be eventually consistent because they do not decide whether bytes are safe to serve.
+{% /tab %}
+{% /tabs %}
+
+### State the chosen baseline
+
+- One primary CDN plus an origin shield, with a tested secondary path for regional incidents.
+- Immutable versioned segments and an atomic active-publication pointer.
+- A compatibility-first H.264 ladder, with newer codecs added by measured device cohort.
+- Strong catalog and authorization decisions; asynchronous, sampled QoE analytics.
+{% /accordion-item %}
+
+{% accordion-item id="wrapup" title="8. Wrap up with risks and extensions" %}
+## Close the interview with the design argument
+
+The system accepts direct uploads into durable storage, processes them through idempotent media jobs, and publishes only validated immutable renditions. Playback authorization is a small control-plane request; manifests and segments flow through the CDN. The player degrades rendition before it stalls, while origins remain protected by shields, admission limits, and cache-aware routing.
+
+### Name the main risks
+
+- A publication race exposes a manifest before all segments exist.
+- A cache miss storm turns a premiere into an origin outage.
+- Aggregate QoE hides one failing region, device, or codec cohort.
+- Duplicate workflow delivery creates waste or conflicting output unless jobs are idempotent.
+- A multi-CDN plan exists on paper but fails because tokens, cache keys, or manifests differ.
+
+### Extensions to discuss
+
+- **Live events:** replace batch packaging with continuous ingest, bounded latency, discontinuity handling, and faster failover.
+- **Premium content:** add DRM licenses, key rotation, device limits, and forensic policy without routing licenses through the segment path.
+- **Offline playback:** issue scoped download grants and encrypted packages with expiry and revocation rules.
+- **Short-form feed:** optimize tiny startup budgets, prefetch policy, and recommendation-driven cache warming.
+- **Creator replacement:** publish a new immutable version and switch the catalog pointer instead of overwriting active objects.
+
+### Final checklist
+
+- Restate the scope, scale assumptions, and user-visible SLOs.
+- Trace upload, publication, authorization, manifest, and segment paths separately.
+- Defend the manifest completeness invariant and idempotent job boundary.
+- Explain edge misses, regional failover, lower-rendition fallback, and rollback.
+- Name the first load test and QoE slices that would validate the design.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/video-streaming/quiz/video-streaming-design-review.json"
+   lessonSlug="practice-video-streaming"
+   title="Video Streaming Design Review" /%}

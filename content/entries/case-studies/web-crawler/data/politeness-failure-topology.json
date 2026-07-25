@@ -1,0 +1,135 @@
+{
+  "title": "Politeness and failure-path lab",
+  "description": "Change the host condition to see how the scheduler preserves a remote site's budget while unrelated hosts remain available to the fleet.",
+  "nodes": [
+    {
+      "id": "frontier",
+      "label": "URL frontier",
+      "eyebrow": "Global value",
+      "detail": "Selects the best candidate from hosts that are allowed to run. It cannot override a host's budget.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 12,
+      "y": 50
+    },
+    {
+      "id": "robots",
+      "label": "Robots cache",
+      "eyebrow": "Policy",
+      "detail": "Evaluates the path against cached robots rules and records the policy version used for the decision.",
+      "kind": "cache",
+      "tone": "amber",
+      "x": 30,
+      "y": 24
+    },
+    {
+      "id": "host-scheduler",
+      "label": "Host scheduler",
+      "eyebrow": "Crawl budget",
+      "detail": "Maintains the next-allowed time, in-flight cap, backoff, and circuit state for one host.",
+      "kind": "allocator",
+      "tone": "green",
+      "x": 40,
+      "y": 54
+    },
+    {
+      "id": "worker",
+      "label": "Fetch worker",
+      "eyebrow": "Leased work",
+      "detail": "Executes a single request under the scheduler's lease and classifies the outcome without choosing its own retry rate.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 59,
+      "y": 54
+    },
+    {
+      "id": "remote-host",
+      "label": "Remote host",
+      "eyebrow": "External system",
+      "detail": "The website being crawled. Its responsiveness and policy are part of the crawler's operating contract.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 79,
+      "y": 28
+    },
+    {
+      "id": "retry-delay",
+      "label": "Retry delay",
+      "eyebrow": "Transient fault",
+      "detail": "Holds only retryable work until a jittered backoff expires; it does not occupy a worker while waiting.",
+      "kind": "stream",
+      "tone": "amber",
+      "x": 75,
+      "y": 77
+    },
+    {
+      "id": "dead-letter",
+      "label": "Review queue",
+      "eyebrow": "Exhausted work",
+      "detail": "Retains bounded evidence for repeated failures, parser faults, or operator review instead of retrying forever.",
+      "kind": "stream",
+      "tone": "rose",
+      "x": 91,
+      "y": 80
+    },
+    {
+      "id": "telemetry",
+      "label": "Host telemetry",
+      "eyebrow": "Evidence",
+      "detail": "Records policy decisions, delays, outcomes, bytes, and retries so operators can prove compliance and investigate complaints.",
+      "kind": "analytics",
+      "tone": "blue",
+      "x": 92,
+      "y": 50
+    }
+  ],
+  "edges": [
+    { "id": "frontier-robots", "from": "frontier", "to": "robots", "label": "path", "mode": "sync" },
+    { "id": "frontier-scheduler", "from": "frontier", "to": "host-scheduler", "label": "candidate", "mode": "async" },
+    { "id": "robots-scheduler", "from": "robots", "to": "host-scheduler", "label": "allowed", "mode": "sync" },
+    { "id": "scheduler-worker", "from": "host-scheduler", "to": "worker", "label": "lease", "mode": "sync" },
+    { "id": "worker-host", "from": "worker", "to": "remote-host", "label": "bounded fetch", "mode": "sync" },
+    { "id": "host-telemetry", "from": "remote-host", "to": "telemetry", "label": "outcome", "mode": "async" },
+    { "id": "worker-retry", "from": "worker", "to": "retry-delay", "label": "retryable", "mode": "async" },
+    { "id": "retry-scheduler", "from": "retry-delay", "to": "host-scheduler", "label": "backoff elapsed", "mode": "async" },
+    { "id": "retry-dead-letter", "from": "retry-delay", "to": "dead-letter", "label": "attempts exhausted", "mode": "async" },
+    { "id": "scheduler-telemetry", "from": "host-scheduler", "to": "telemetry", "label": "delay decision", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy host",
+      "summary": "The path is allowed, the host is past its next-allowed time, and a single leased fetch completes within the configured limits.",
+      "activeEdges": ["frontier-robots", "frontier-scheduler", "robots-scheduler", "scheduler-worker", "worker-host", "host-telemetry", "scheduler-telemetry"],
+      "focusNode": "host-scheduler",
+      "result": "One request is issued and the scheduler advances the next-allowed time before the next candidate can run."
+    },
+    {
+      "id": "crawl-delay",
+      "label": "Crawl-delay wait",
+      "summary": "A valuable URL is allowed by robots policy but the host's next-allowed time has not arrived. The worker remains free for another eligible host.",
+      "activeEdges": ["frontier-robots", "frontier-scheduler", "robots-scheduler", "scheduler-telemetry"],
+      "degradedNodes": ["host-scheduler"],
+      "focusNode": "host-scheduler",
+      "result": "The URL waits in the host queue. Global capacity is filled from other hosts rather than violating this host's budget."
+    },
+    {
+      "id": "robots-denial",
+      "label": "Robots denial",
+      "summary": "The robots policy disallows the URL path. The scheduler records the decision but does not create a lease or a retry.",
+      "activeEdges": ["frontier-robots"],
+      "focusNode": "robots",
+      "result": "No request leaves the crawler. A policy denial is a terminal scheduling outcome, not a transient failure."
+    },
+    {
+      "id": "timeout-backoff",
+      "label": "Timeout and backoff",
+      "summary": "A leased request times out. The scheduler lengthens the host delay, routes only the retryable item through backoff, and keeps other hosts independent.",
+      "activeEdges": ["frontier-robots", "frontier-scheduler", "robots-scheduler", "scheduler-worker", "worker-host", "worker-retry", "retry-scheduler", "scheduler-telemetry"],
+      "failedNodes": ["remote-host"],
+      "degradedNodes": ["host-scheduler", "retry-delay"],
+      "focusNode": "retry-delay",
+      "result": "The retry waits with jitter. After bounded attempts, it moves to review instead of creating an unbounded retry storm."
+    }
+  ]
+}

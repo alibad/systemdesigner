@@ -1,0 +1,392 @@
+---
+title: "Design Chat System"
+section: practice
+level: advanced
+duration: 60 min
+description: "Design a real-time chat system with durable messaging, per-conversation ordering, multi-device delivery, presence, group fanout, and failure recovery."
+registryId: practice-chat-system
+---
+
+{% section-card tone="intro" %}
+## What is a chat system?
+
+A **chat system** accepts a message once, stores it durably, orders it within one conversation, and makes it available to every intended recipient device. A live WebSocket makes delivery feel immediate, but the durable conversation log is what lets the system recover after a disconnect, retry, or server failure.
+
+The central invariant is: **after the sender receives an accepted acknowledgement, retrying the same client message ID cannot create another logical message, and every reader observes one stable conversation sequence.** Presence, typing indicators, and push notifications improve the experience, but none of them may decide whether a durable message exists.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Commit before accepted" eyebrow="Durability" icon="database" tone="blue" %}
+Authorize, deduplicate, assign the conversation sequence, and commit the message plus its outbox event before telling the sender it was accepted.
+{% /concept-card %}
+{% concept-card title="Order one conversation" eyebrow="Correctness" icon="shield" tone="violet" %}
+Give each conversation one logical sequencing owner. Global ordering across unrelated conversations is unnecessary and expensive.
+{% /concept-card %}
+{% concept-card title="Replay after failure" eyebrow="Recovery" icon="repeat" tone="green" %}
+Clients reconnect with a durable cursor, fetch missing sequence ranges, and apply messages idempotently before resuming the live stream.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="info" %}
+Attempt the design challenge before opening the walkthrough. Define what an acknowledgement means, draw the reconnect path, and state which features may degrade without blocking message acceptance.
+{% /callout %}
+
+{% design-challenge
+   challengeId="chat-system"
+   title="Design the durable message path"
+   prompt="Design 1:1 and group chat for 100 million daily users and 50 million peak connections. Show where a client message ID is deduplicated, where conversation order is assigned, when the sender is acknowledged, how online devices receive the event, and how offline devices catch up." /%}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+### What are chat-system requirements?
+
+Requirements define the user promise before infrastructure choices begin. For this interview, a **message** is a durable logical record; a WebSocket frame, push notification, and per-device delivery are separate events.
+
+### Functional requirements
+
+- Send and receive text messages in 1:1 conversations and groups of up to 256 members.
+- Show ordered conversation history with cursor-based pagination.
+- Support several devices per user and synchronize missed messages after reconnect.
+- Expose accepted, delivered, and read states without creating one mutable row per recipient-message pair.
+- Show approximate presence and typing indicators.
+- Upload media out of band, then send a message containing an authorized media reference.
+
+### Non-functional goals
+
+{% metric-strip %}
+{% metric label="Delivery latency" value="<100ms" detail="Target p95 for online users in one region" tone="blue" /%}
+{% metric label="Availability" value="99.99%" detail="Target for durable send and history APIs" tone="green" /%}
+{% metric label="Connections" value="50M" detail="Assumed peak concurrent sockets" tone="violet" /%}
+{% metric label="Ordering" value="Per conversation" detail="No global message order" tone="amber" /%}
+{% /metric-strip %}
+
+- Once `accepted` is returned, the message survives a process or gateway restart.
+- A retry with the same `(sender_id, client_message_id)` returns the original message ID and sequence.
+- Messages are totally ordered inside one conversation; presence, typing, and read indicators may converge eventually.
+- Authorization is checked when accepting a send and again when serving history.
+- Overload may delay fanout or disable optional signals, but it must not acknowledge an uncommitted message.
+
+### Questions to ask the interviewer
+
+1. Does "delivered" mean one user device received the event or every registered device did? Assume at least one active device.
+2. Must a user see the same order on every device? Assume yes, using the server sequence.
+3. Are edits, deletes, reactions, search, calls, and end-to-end encryption required now? Treat them as extensions represented by ordered events.
+4. Can a temporarily unavailable conversation owner reject or queue sends instead of accepting them out of order? Assume yes.
+5. How long is hot history retained? Assume 30 days hot and one year archived.
+
+### Scope boundary
+
+The core design includes durable text messaging, media references, groups, multi-device sync, receipts, presence, and push fallback. Full-text search, voice/video, public channels, bots, legal retention workflows, and end-to-end encryption key management are discussed as extensions rather than hidden inside the first design.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate scale and constraints" %}
+
+### What is a capacity estimate?
+
+A capacity estimate converts product assumptions into rates the architecture must absorb. The values below are modeling inputs, not claims about a specific commercial service.
+
+{% metric-strip %}
+{% metric label="Daily messages" value="1B" detail="Logical messages before recipient fanout" tone="blue" /%}
+{% metric label="Peak ingress" value="~58K/s" detail="Five times the daily average" tone="green" /%}
+{% metric label="Delivery work" value="~232K/s" detail="Four recipients per message on average" tone="violet" /%}
+{% metric label="Socket gateways" value="~2,858" detail="25K sockets each at 70% utilization" tone="amber" /%}
+{% /metric-strip %}
+
+### Back-of-the-envelope math
+
+- **Average ingress:** `1,000,000,000 / 86,400 = 11,574 messages/s`.
+- **Peak ingress:** `11,574 x 5 = 57,870 messages/s`.
+- **Logical delivery attempts:** `57,870 x 4 recipients = 231,480 attempts/s` before multi-device expansion.
+- **Raw message records:** `1B x 500 bytes = 500GB/day`; 30 hot days with replication factor 3 is about `45TB` before indexes and storage overhead.
+- **Connection fleet:** `50M / 25K = 2,000` gateways at full utilization; dividing by a 70% target yields about `2,858` gateways before regional and failure headroom.
+- **Media path:** if 5% of messages reference a 2MB object, object ingestion is about `100TB/day`. Media therefore bypasses the message log and uses object storage plus a CDN.
+
+Fanout is the variable that averages hide. A 1:1 message has one recipient, while a busy group creates many delivery attempts. Batching recipients by destination gateway reduces queue and network overhead, but it does not reduce the final number of socket writes.
+
+{% interactive-block id="practice/chat-system-capacity-lab" /%}
+
+{% callout variant="warn" %}
+Do not multiply every number into a precise fleet cost during an interview. State the assumed payload, peak factor, utilization target, and per-worker benchmark, then identify which estimate must be load-tested.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### What is the high-level chat architecture?
+
+The architecture separates connection ownership from message ownership. A nearby gateway owns a live socket; a conversation partition owns authorization, deduplication, and sequence assignment; asynchronous workers own delivery.
+
+{% system-flow title="Durable chat message path" caption="Only the conversation commit is on the accepted path. Online fanout, push, receipts, and analytics happen after the durable boundary." %}
+{% system-node title="Connection edge" eyebrow="Authenticate" icon="users" tone="blue" %}
+Terminate WebSockets, enforce frame and connection limits, attach user/device identity, and forward commands. Gateways keep no authoritative history.
+{% /system-node %}
+{% system-node title="Conversation owner" eyebrow="Order" icon="route" tone="cyan" %}
+Check membership, deduplicate the client message ID, and assign the next sequence under one fenced owner for the conversation.
+{% /system-node %}
+{% system-node title="Message log + outbox" eyebrow="Commit" icon="database" tone="violet" %}
+Atomically persist the ordered message and an event for fanout. Return `accepted` only after this boundary succeeds.
+{% /system-node %}
+{% system-node title="Delivery plane" eyebrow="Distribute" icon="activity" tone="green" %}
+Batch online recipients by gateway, update durable device cursors, retain offline history, and request best-effort mobile push.
+{% /system-node %}
+{% /system-flow %}
+
+### Send path
+
+1. The client creates a stable `client_message_id` before its first attempt.
+2. The edge authenticates the connection and applies user, device, and payload limits.
+3. The command routes by `conversation_id` to the conversation's home partition.
+4. The owner verifies current membership and checks the sender's deduplication key.
+5. The owner allocates the next sequence and commits the message plus outbox event.
+6. The sender receives the stable `message_id`, sequence, and `accepted` state.
+7. Fanout workers resolve recipient devices, batch live delivery by gateway, and leave offline devices to replay from history.
+
+### Receive and reconnect path
+
+1. A gateway pushes an envelope containing `conversation_id`, sequence, and message payload to a connected device.
+2. The device persists and deduplicates the event locally, then advances its contiguous cursor.
+3. After reconnect, the device requests `messages after sequence N` for each active conversation.
+4. History fills any gap before the client treats newer live events as contiguous.
+5. Delivery and read watermarks advance monotonically; duplicate acknowledgements are harmless.
+
+### Regional ownership
+
+Terminate sockets in the nearest healthy region, but route writes for one conversation to one home region at a time. A fenced lease prevents the old and new owners from assigning competing sequences during failover. Remote replicas serve disaster recovery and nearby history reads only when their freshness is acceptable.
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Design data, storage, and contracts" %}
+
+### What does the data model protect?
+
+The data model encodes the two correctness boundaries: one stable sequence per conversation and one logical message per sender-generated idempotency key. Ephemeral connection state belongs elsewhere.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Conversation log" eyebrow="Source of truth" icon="database" tone="blue" %}
+Store immutable message events by `(conversation_id, bucket, sequence)`. A time or sequence bucket prevents one long-lived conversation from creating an unbounded physical partition.
+{% /concept-card %}
+{% concept-card title="Membership" eyebrow="Authorization" icon="shield" tone="violet" %}
+Store member role, join sequence, leave sequence, and membership version. A fanout event carries the version used when the send was authorized.
+{% /concept-card %}
+{% concept-card title="Device cursor" eyebrow="Synchronization" icon="repeat" tone="green" %}
+Track the highest contiguous delivered sequence per `(conversation, user, device)` so reconnect fetches a range instead of scanning all history.
+{% /concept-card %}
+{% concept-card title="Presence lease" eyebrow="Soft state" icon="activity" tone="amber" %}
+Map a user-device to gateway and lease expiry. Rebuild it from live connections; never use it as proof that delivery succeeded.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Minimal records
+
+- **Message:** `conversation_id`, bucket, sequence, `message_id`, `sender_id`, `client_message_id`, kind, encrypted-or-plain payload reference, membership version, and server timestamp.
+- **Conversation:** type, home partition, current membership version, latest sequence, and retention policy.
+- **Membership event:** user, role, effective sequence, action, and actor.
+- **Device cursor:** device, highest contiguous delivered sequence, highest read sequence, and update time.
+- **Outbox event:** message ID, conversation sequence, recipient snapshot reference, and publication state.
+
+### Message contracts
+
+- `send_message` includes protocol version, conversation ID, client message ID, content type, payload or media reference, and the last sequence observed by the sender.
+- `message_accepted` returns the stable server message ID and assigned sequence. It does not claim recipient delivery.
+- `message_event` is replayable and safe for a device to apply more than once.
+- `sync_request` sends a conversation cursor and bounded page size; `sync_response` returns a contiguous range plus the next cursor.
+- `receipt_update` advances delivered or read watermarks monotonically and ignores regressions.
+
+The executable example demonstrates commit-before-ack and duplicate retry with a stable client message ID.
+
+{% code-block file="/api/content/practice/chat-system/code/idempotent-message-ingest.js" language="javascript" title="Idempotent message acceptance" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="5. Deep-dive on delivery, presence, and fanout" %}
+
+### What are delivery semantics?
+
+Delivery semantics define what may happen when a client or worker retries after an uncertain result. The practical contract is **at-least-once transport with idempotent processing**, producing one visible logical message.
+
+{% process-flow %}
+{% process-step number="1" title="Accepted" label="Server durability" %}
+The ordered message and outbox event are committed. The sender may stop retrying this client message ID.
+{% /process-step %}
+{% process-step number="2" title="Delivered" label="Device watermark" %}
+At least one intended device confirms a contiguous sequence at or beyond this message.
+{% /process-step %}
+{% process-step number="3" title="Read" label="User action" %}
+A client reports the highest sequence the user viewed. The server advances, never decreases, the watermark.
+{% /process-step %}
+{% process-step number="4" title="Synced" label="Recovery" %}
+Every active device eventually fetches missing ranges; long-retired devices expire under policy.
+{% /process-step %}
+{% /process-flow %}
+
+### Preserve order without global coordination
+
+- Route one conversation to one fenced sequencing owner at a time.
+- Assign a sequence only after authorization and deduplication checks.
+- Let unrelated conversations progress independently.
+- Allow sequence gaps if a reserved write aborts, but never reuse a committed sequence.
+- Buffer a short out-of-order window on the client and fetch a missing range when the gap persists.
+
+### Fan out by destination, not only by member
+
+- Snapshot the authorized membership version for the message event.
+- Expand recipients asynchronously so sender latency does not grow with group size.
+- Group online devices by gateway and send one internal batch per destination gateway.
+- Store one durable conversation message rather than one full payload copy per recipient.
+- Advance recipient/device cursors in batches; use push only as a wake-up hint for offline mobile devices.
+
+### Treat presence as a hint
+
+Presence is a short lease refreshed by the active connection. Lease expiry, gateway failure, or network delay can make it stale. A false "online" result may waste a live-delivery attempt, while a false "offline" result may trigger an unnecessary push; neither result may lose the durable message.
+
+Typing indicators are even weaker: throttle them, scope them to active conversation viewers, expire them quickly, and drop them first during overload.
+
+Use the failure lab to test whether a recovery action protects durability, ordering, and one visible copy.
+
+{% interactive-block id="practice/chat-system-delivery-failure-lab" /%}
+
+{% callout variant="info" %}
+[RFC 6455](https://www.rfc-editor.org/info/rfc6455/) defines WebSocket's two-way framed transport, not chat acknowledgements or offline recovery. [Firebase Cloud Messaging delivery guidance](https://firebase.google.com/docs/cloud-messaging/understand-delivery) likewise separates provider acceptance and reporting from the application's own end-to-end delivery state. Keep the chat contract above those transports.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability, reliability, and operations" %}
+
+### What makes the system reliable?
+
+Reliability means preserving the accepted-message invariant while dependencies fail and load becomes uneven. Recovery behavior must be designed before autoscaling rules.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Gateway failure" eyebrow="Reconnect" icon="repeat" tone="blue" %}
+Clients reconnect with jitter to a healthy gateway and replay after their durable cursors. The failed process owns sockets, not messages.
+{% /concept-card %}
+{% concept-card title="Conversation-owner failure" eyebrow="Fence" icon="shield" tone="rose" %}
+Pause or queue sends until a new owner holds a higher fencing token. Never let two regions assign the same sequence range.
+{% /concept-card %}
+{% concept-card title="Fanout backlog" eyebrow="Backpressure" icon="activity" tone="amber" %}
+Keep accepted messages durable, prioritize live text over optional signals, batch by gateway, and expose delivery delay instead of dropping work silently.
+{% /concept-card %}
+{% concept-card title="Presence or push outage" eyebrow="Degrade" icon="warning" tone="green" %}
+Continue accepting and storing messages. Rebuild presence from sockets and let clients recover history without depending on push.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Scale each plane independently
+
+- **Connection plane:** partition users across gateways, cap connections and outbound bytes per process, and drain nodes by asking clients to reconnect.
+- **Command plane:** partition by conversation ID so authorization, deduplication, and sequence assignment share one owner.
+- **Storage plane:** bucket large conversation logs, replicate durable records across failure domains, and archive old immutable segments.
+- **Delivery plane:** partition outbox consumption by conversation, batch destinations by gateway, and bound retries with dead-letter inspection rather than silent loss.
+- **Presence plane:** shard leases by user ID and rebuild them from gateway registrations.
+
+### Overload order
+
+1. Drop typing indicators and reduce presence refresh frequency.
+2. Disable nonessential analytics and read-receipt fanout.
+3. Batch gateway deliveries more aggressively and delay mobile push.
+4. Apply per-sender and per-conversation admission control.
+5. Reject new sends with a retryable error before the durable tier crosses its safety limit.
+
+### Operate user-visible SLOs
+
+- Accepted-message latency and error rate, split before and after durable commit.
+- Online delivery p50, p95, and p99 from message commit to device acknowledgement.
+- Reconnect success rate and missing-range replay duration.
+- Oldest outbox age by conversation tier and destination region.
+- Deduplication hits, duplicate client applies, and sequence-gap repairs.
+- Presence staleness and push request failures as separate, noncritical indicators.
+- Conversation-owner failovers, fencing rejections, and replica lag.
+
+Test the recovery contract with lost acknowledgements, worker crashes after send but before checkpoint, expired presence leases, regional isolation, and a reconnect surge. A load test that covers only the healthy send path is incomplete.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+### What trade-offs define this design?
+
+A strong answer names the rejected alternative and the consequence, not only the chosen technology.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Commit before ack vs early ack" eyebrow="Durability" icon="database" tone="blue" %}
+Commit-before-ack adds storage latency but makes `accepted` meaningful. Early acknowledgement is faster only by shifting message-loss risk to the user.
+{% /concept-card %}
+{% concept-card title="Home region vs multi-writer" eyebrow="Ordering" icon="route" tone="violet" %}
+A conversation home simplifies total order and deduplication. Multi-writer regions reduce local write latency but require conflict semantics users can understand.
+{% /concept-card %}
+{% concept-card title="Push fanout vs pull on sync" eyebrow="Delivery" icon="activity" tone="green" %}
+Push gives low online latency; pull makes offline recovery simple. The hybrid design pushes to live gateways and always retains cursor-based history.
+{% /concept-card %}
+{% concept-card title="Receipt rows vs watermarks" eyebrow="Storage" icon="repeat" tone="amber" %}
+Per-message receipt rows answer detailed audits but explode writes. Monotonic per-device watermarks compress the common "read through sequence N" case.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Additional decisions
+
+- **Sequence counter vs broker offset:** a conversation-local counter keeps the API contract independent of broker topology; using a broker offset can simplify one implementation but couples repartitioning to user-visible order.
+- **One payload vs recipient copies:** one immutable message plus cursors minimizes storage; recipient copies can simplify mailbox reads but amplify writes and deletion work.
+- **Server-readable content vs end-to-end encryption:** server-readable content enables central search and moderation; E2EE moves trust and key recovery to clients and changes how abuse reporting, multi-device sync, and backups work. [Signal's protocol documentation](https://signal.org/docs/) is a primary reference for those protocol building blocks.
+- **Exact presence vs scalable presence:** stronger consistency increases coordination but still cannot prove a remote device is reachable. Expiring soft state is the honest contract.
+
+The selected design favors one conversation writer, durable commit before acknowledgement, asynchronous destination-batched fanout, and cursor-based replay. It spends a regional hop and some ownership complexity to obtain a crisp ordering and retry contract.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrapup" title="8. Wrap up with risks and extensions" %}
+
+### Restate the design in one minute
+
+1. Clients connect to nearby stateless gateways and attach stable user and device identities.
+2. Sends route by conversation ID to one fenced owner that authorizes, deduplicates, sequences, and commits the message plus outbox event.
+3. The sender receives `accepted` only after that commit.
+4. Workers batch online recipients by gateway; offline devices later replay after their durable cursors.
+5. Presence, typing, push, and analytics can degrade without changing message correctness.
+6. Reconnect, deduplication, and range replay turn retries into one visible ordered conversation.
+
+### Main risks
+
+- **Hot conversations or abusive senders** can overload one ordering partition.
+  - Isolate them with per-conversation quotas and dedicated partitions.
+  - Measure queue age and owner CPU by conversation, not only fleet averages.
+- **Split ownership during regional failover** can create conflicting sequences.
+  - Require quorum-backed leases and monotonically increasing fencing tokens.
+  - Prefer temporary unavailability to accepting ambiguous order.
+- **Retry bugs** can create duplicate rows or duplicate visible messages.
+  - Preserve the client ID through every hop and test crashes at each commit boundary.
+  - Deduplicate both server acceptance and client application.
+- **Membership races** can expose a message to a removed user or omit a new member.
+  - Attach a membership version and define whether changes take effect at the assigned sequence.
+
+### Extensions to discuss
+
+- End-to-end encryption with device identity, prekeys, group key rotation, backup recovery, and explicit metadata leakage analysis.
+- Message edits, deletes, reactions, and threads as ordered events referencing an original message.
+- Very large public channels that replace per-member push fanout with partitioned subscription logs.
+- Search indexes built asynchronously with deletion propagation and tenant-specific retention.
+- Voice/video signaling over chat while media flows through a separate real-time communications plane.
+- Enterprise tenancy, legal holds, audit export, and data residency by conversation or organization.
+
+### Final interview checklist
+
+- State exactly when a sender may stop retrying.
+- Trace a lost acknowledgement without creating a duplicate logical message.
+- Explain why presence and push are not delivery guarantees.
+- Show how a reconnecting device detects and fills a sequence gap.
+- Identify the partition key and the hot-key mitigation.
+- Name the degraded mode for gateway, fanout, presence, storage, and regional failures.
+- End with the first production signal: **oldest durable outbox age**, segmented by region and conversation tier.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/chat-system/quiz/chat-system-design-review.json"
+   lessonSlug="practice-chat-system"
+   title="Chat System Design Review" /%}

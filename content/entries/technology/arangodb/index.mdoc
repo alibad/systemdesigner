@@ -1,0 +1,257 @@
+---
+registryId: arangodb
+---
+
+{% section-card tone="intro" %}
+## What is ArangoDB?
+
+**ArangoDB is a native multi-model database that stores key-addressed records,
+JSON documents, and graph relationships in one database engine.** Its query language,
+AQL, can filter document attributes, follow graph edges, aggregate results, and combine
+those operations in one query.
+
+In plain language, one customer record can be retrieved by its key, queried as a
+document, and connected to accounts or devices as a graph node. The application does
+not need to copy that same fact into three separate databases just to use three access
+patterns.
+
+The core invariant is **the stored model must make the application's dominant query
+and correctness boundary explicit**. A unified engine does not remove index design,
+edge lifecycle, transaction scope, shard placement, replication, or recovery work.
+
+{% callout variant="info" %}
+### Native multi-model is a query choice, not three storage engines
+
+ArangoDB's key-value model is a subset of its document model. Graph nodes and edges are
+also documents; edge documents add `_from` and `_to` references. The important design
+decision is which access path owns each request.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## See one engine through three access paths
+
+Each model makes a different application question direct.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Key-value access" eyebrow="Known identity" icon="key" tone="blue" %}
+Every document has an immutable string `_key` inside its collection. The built-in
+primary index supports exact `_key` and `_id` lookups without a user-created index.
+{% /concept-card %}
+{% concept-card title="Document query" eyebrow="Attributes and aggregates" icon="braces" tone="violet" %}
+A document is a JSON object whose attributes can be filtered, sorted, projected, and
+aggregated with AQL. Secondary indexes should follow real query predicates.
+{% /concept-card %}
+{% concept-card title="Graph traversal" eyebrow="Paths and neighborhoods" icon="network" tone="green" %}
+Vertices live in document collections and directed edges live in edge collections.
+AQL can traverse inbound, outbound, or either direction over bounded depths.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use the narrowest model that answers the question. A profile lookup does not need a
+graph traversal; a fraud neighborhood cannot be discovered from a known-key lookup
+alone.
+{% /section-card %}
+
+{% section-card %}
+## Choose the model from the query shape
+
+Select an application query, then try each access path. The lab changes the required
+index, execution steps, and maintenance cost. It is a decision model based on query
+semantics, not a latency or throughput benchmark.
+
+{% interactive-block id="technology/arangodb-performance" dataFile="/api/content/technology/arangodb/data/modeling-query-shapes.json" /%}
+
+Write the expected query before creating collections. Include the known identifiers,
+attribute predicates, relationship direction and depth, sort order, projection, result
+limit, and the facts that must be transactionally correct.
+{% /section-card %}
+
+{% section-card %}
+## Express each access path in AQL
+
+AQL is declarative: describe the documents and paths you need, then inspect the query
+plan to verify which indexes, traversals, remote operations, and gathers it uses.
+
+{% tabs %}
+{% tab title="Known key" %}
+Filter by `_key` equality when the collection is known. The built-in primary index is
+the intended access path.
+
+{% code-block file="/api/content/technology/arangodb/code/aql-key-value-lookup.txt" language="text" title="Fetch one document through the primary index" /%}
+{% /tab %}
+{% tab title="Document filter" %}
+Use explicit predicates, sorting, projection, and limits. Create a persistent index
+only after the full query shape and write cost are understood.
+
+{% code-block file="/api/content/technology/arangodb/code/aql-document-query.txt" language="text" title="Filter and project documents" /%}
+{% /tab %}
+{% tab title="Graph traversal" %}
+Bound the direction and depth. Return only the vertex, edge, or path fields the caller
+needs, and use `PRUNE` when a condition can stop expansion early.
+
+{% code-block file="/api/content/technology/arangodb/code/aql-graph-traversal.txt" language="text" title="Traverse exactly two outbound hops" /%}
+{% /tab %}
+{% tab title="Mixed model" %}
+One AQL query can filter starting documents, traverse edge documents, inspect connected
+vertices, and return the path as evidence.
+
+{% code-block file="/api/content/technology/arangodb/code/aql-multi-model-query.txt" language="text" title="Combine document filters and graph evidence" /%}
+{% /tab %}
+{% /tabs %}
+
+Run `EXPLAIN` before production and `PROFILE` with representative data. Concise AQL
+syntax does not prove that a distributed query is selective or local.
+{% /section-card %}
+
+{% section-card %}
+## Keep transaction claims inside the deployment boundary
+
+ArangoDB supports ACID transactions, but the exact guarantee depends on deployment and
+query scope.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Single server" eyebrow="Broad local boundary" icon="shield" tone="green" %}
+Multi-document and multi-collection transactions can be fully ACID when the work stays
+inside one server and avoids documented intermediate-commit limits.
+{% /concept-card %}
+{% concept-card title="Cluster, one document" eyebrow="Native atomic unit" icon="braces" tone="blue" %}
+A single-document operation in a cluster is fully ACID. A multi-document query can also
+be ACID when its collection has one shard.
+{% /concept-card %}
+{% concept-card title="Cluster, many shards" eyebrow="Distributed limit" icon="network" tone="amber" %}
+Do not claim one atomic transaction across arbitrary shards or collections. Use
+OneShard for eligible multi-collection ACID work, or design an application workflow
+with idempotency and reconciliation.
+{% /concept-card %}
+{% /concept-grid %}
+
+Also separate transaction atomicity from disk and replica acknowledgement. Options such
+as `waitForSync`, `replicationFactor`, and `writeConcern` describe different durability
+boundaries and should be reviewed explicitly.
+{% /section-card %}
+
+{% section-card %}
+## Design shard keys from placement and lookup behavior
+
+In a cluster, every collection is divided into a configured number of shards.
+Coordinators route work to DB-Servers, and the default shard key is `_key`.
+
+{% process-flow %}
+{% process-step number="1" title="List equality lookups" label="Routing" %}
+Record which requests know `_key`, tenant, account, region, or another stable ownership
+attribute. A Coordinator can target one shard only when it has the shard-key values.
+{% /process-step %}
+{% process-step number="2" title="Measure key distribution" label="Balance" %}
+Check cardinality, frequency, and the largest value. Every document with the same shard
+key value maps together, so a dominant tenant or region can create a hot shard.
+{% /process-step %}
+{% process-step number="3" title="Trace cross-collection work" label="Locality" %}
+Identify joins, transactions, and graph traversals that cross collection boundaries.
+Independent sharding can turn one logical query into network fan-out.
+{% /process-step %}
+{% process-step number="4" title="Lock the creation contract" label="Lifecycle" %}
+Choose shard keys and shard count before loading data, then test rebalancing, failure,
+backup, and restore. Shard-key attributes cannot be changed in place.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="warn" %}
+### A custom shard key changes point-lookup routing
+
+If a collection is sharded by something other than `_key`, a lookup that supplies only
+the document key may need to contact every shard. Include the custom shard-key values
+when the operation supports a lookup hint, and verify the AQL plan.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Trace replication and failure at one shard
+
+The topology below models one shard with `replicationFactor: 3` and
+`writeConcern: 2`. Switch scenarios to see how follower loss, leader promotion, write
+concern, and independent backup change the result. Select any node to inspect its
+responsibility.
+
+{% topology-lab dataFile="/api/content/technology/arangodb/data/shard-replication-failure-topology.json" /%}
+
+The model intentionally omits timing. Detection, promotion, resynchronization, and
+replacement duration depend on the deployed version, configuration, data size, and
+infrastructure. Measure those values in failure drills.
+{% /section-card %}
+
+{% section-card %}
+## Make collection assumptions executable
+
+This `arangosh` example creates an illustrative collection with six shards, a tenant
+shard key, three configured copies, and a two-copy write concern.
+
+{% code-block file="/api/content/technology/arangodb/code/arangodb-cluster-collection.js" language="javascript" title="Create a sharded, replicated collection" /%}
+
+These values are not defaults or universal recommendations. Before using them:
+
+1. replay the real tenant distribution and measure the hottest shard;
+2. confirm common lookups include `tenantId` when targeted routing matters;
+3. verify the cluster has enough DB-Servers for the replication factor;
+4. inject follower and leader failures while observing write acknowledgement;
+5. calculate physical storage from logical bytes, replicas, indexes, compaction, and
+   operational headroom.
+{% /section-card %}
+
+{% section-card %}
+## Operate query, shard, and recovery contracts together
+
+Monitor facts that identify which boundary is failing:
+
+- **queries:** execution plans, scanned documents, result rows, remote operations,
+  Coordinator memory, traversal depth, branching, and cancellation;
+- **indexes:** selectivity, write maintenance, cache behavior, build status, and indexes
+  that no observed query uses;
+- **shards:** document and byte distribution, request rate per shard, leader placement,
+  under-replication, resynchronization, and rebalance progress;
+- **writes:** accepted, rejected, timed out, retried, and reconciled operations, plus the
+  active `writeConcern` and `waitForSync` contract;
+- **recovery:** independent backup age, restore duration, recovered point in time,
+  document validation, graph-edge integrity, and application-level verification.
+
+Replication is not a backup. A valid delete or corrupt application write can be copied
+to every follower, so recovery needs an independent artifact and a tested restore path.
+{% /section-card %}
+
+{% section-card %}
+## Know when ArangoDB is a strong fit
+
+{% concept-grid columns="2" %}
+{% concept-card title="Strong fit" eyebrow="Several connected access patterns" icon="check" tone="green" %}
+Choose ArangoDB when the same owned facts need document filters, known-key access, and
+relationship traversal, and one team can operate their shared transaction, sharding,
+backup, and access-control boundary.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="One simpler dominant contract" icon="warning" tone="rose" %}
+Prefer a simpler store when the workload is only key-value lookup, requires unrestricted
+cross-shard ACID transactions, centers on large analytical scans, or needs a graph copy
+that is clearly derived from another authoritative database.
+{% /concept-card %}
+{% /concept-grid %}
+
+Multi-model capability is valuable when it removes a real synchronization boundary.
+It is not a reason to put unrelated workloads into one cluster.
+{% /section-card %}
+
+{% section-card %}
+## Verify decisions against official documentation
+
+These primary Arango references define the semantics used in this lesson:
+
+- [data models: key-value, document, and graph](https://docs.arango.ai/arangodb/3.12/concepts/data-models/);
+- [AQL data queries and document access](https://docs.arango.ai/arangodb/stable/aql/data-queries/);
+- [primary and edge index behavior](https://docs.arango.ai/arangodb/stable/indexes-and-search/indexing/basics/);
+- [cluster sharding and shard-key routing](https://docs.arango.ai/arangodb/3.12/deploy/architecture/data-sharding/);
+- [cluster roles, synchronous replication, and automatic failover](https://docs.arango.ai/arangodb/3.12/deploy/cluster/);
+- [transaction guarantees and cluster limitations](https://docs.arango.ai/arangodb/stable/develop/transactions/).
+
+Pin the deployed ArangoDB version in runbooks. Defaults, limitations, and operational
+procedures can change between releases.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/arangodb/quiz/arangodb-production-decisions.json" lessonSlug="arangodb" title="ArangoDB Design Decisions" /%}

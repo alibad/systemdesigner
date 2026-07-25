@@ -1,0 +1,282 @@
+---
+registryId: boilerplate-detection
+---
+
+{% section-card tone="intro" %}
+## What is boilerplate detection?
+
+**Boilerplate detection is the task of deciding which regions of a web page belong to
+the target document and which regions are reusable page furniture.** The target might
+be one news article, a product guide, a documentation page, or a discussion thread.
+Boilerplate often includes global navigation, account controls, advertisements,
+recommendation rails, cookie notices, and repeated footers.
+
+It matters because a parser can recover every HTML node and still produce a poor
+document. Search indexes, retrieval systems, accessibility views, corpora, summaries,
+and content archives need the meaningful text and structure without unrelated labels
+or links dominating the result.
+
+### Core invariant
+
+An extractor implements **a content policy for a defined page population**. It does not
+discover one universal meaning of "main content." Name the intended output, classify
+observable blocks, preserve required structure, and verify the result against labeled
+pages from the sources the system actually processes.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Input representation" eyebrow="What exists" icon="file" tone="blue" %}
+The detector can only classify nodes present in its input. Raw response HTML, a parsed
+tree, and a browser-rendered DOM may contain different content.
+{% /concept-card %}
+{% concept-card title="Block evidence" eyebrow="What is observed" icon="search" tone="cyan" %}
+Text length, sentence shape, link density, semantic roles, DOM context, and repetition
+across pages are signals. None is ground truth by itself.
+{% /concept-card %}
+{% concept-card title="Evaluation target" eyebrow="What is correct" icon="target" tone="green" %}
+Labeled blocks define what this product intends to keep. Precision, recall, and
+page-type slices expose different kinds of extraction error.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Turn a page tree into an explicit extraction decision
+
+A practical pipeline separates acquisition from classification. That keeps a fetch or
+render failure from being mistaken for an extraction failure and makes each output
+stage testable.
+
+{% system-flow title="A block-based extraction pipeline" caption="Each boundary narrows the page representation while preserving evidence needed by the next decision." %}
+{% system-node title="Acquire bounded input" eyebrow="Fetch or render" icon="download" tone="blue" %}
+Obtain approved HTML with time, byte, redirect, and concurrency limits. Render only
+when required content is absent from the response representation.
+{% /system-node %}
+{% system-node title="Normalize and segment" eyebrow="Build candidates" icon="layers" tone="cyan" %}
+Remove non-content execution elements, parse the tree, and group nearby text, links,
+media, lists, tables, and headings into candidate blocks.
+{% /system-node %}
+{% system-node title="Classify blocks" eyebrow="Apply policy" icon="filter" tone="violet" %}
+Use structural, textual, contextual, and cross-page evidence to keep or discard each
+candidate. Retain the evidence needed to explain uncertain decisions.
+{% /system-node %}
+{% system-node title="Reconstruct and validate" eyebrow="Publish output" icon="check" tone="green" %}
+Restore reading order and required structure, sanitize any HTML for its destination,
+and reject outputs that violate minimum quality or completeness checks.
+{% /system-node %}
+{% /system-flow %}
+
+### Define the target before selecting features
+
+- Article reader: keep the title, byline, body, figures, captions, and useful tables;
+  comments and recommendations may be intentionally out of scope.
+- Search or retrieval corpus: preserve headings, lists, code, tables, and section
+  boundaries because structure improves chunking and citation.
+- Discussion archive: keep the opening post and answers even though they live in
+  repeated generic containers.
+- Product guide: retain specifications and FAQs even when they contain few complete
+  sentences.
+
+A correct policy for one target can be wrong for another. Store the target definition
+beside labeled fixtures so a future maintainer can understand what the metrics mean.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Compare block evidence instead of trusting one HTML label
+
+Semantic elements such as `main`, `article`, `nav`, and `aside` are useful evidence,
+but real templates can omit or reuse them in surprising ways. Text shape helps when
+markup is weak, while long comments and recommendation copy show why density alone is
+also insufficient.
+
+### Common signals and their failure modes
+
+- Text amount and sentence count
+  - Long prose often indicates content.
+  - Specifications, code, headlines, and captions can be valuable without many
+    sentences.
+- Link density
+  - Navigation and recommendation rails often devote much of their text to links.
+  - A reference-heavy article can legitimately contain many links.
+- Structural role and DOM context
+  - `main` and `article` can identify an editorial boundary.
+  - Generic containers may hold the real document, especially on forums and older
+    templates.
+- Repetition across pages
+  - Blocks repeated with nearly identical structure or text are strong template
+    candidates.
+  - A repeated legal notice may still be required by the archive product.
+
+Choose a page shape and evidence policy below. The target labels stay fixed while the
+policy changes, making both false inclusions and missing content visible.
+
+{% interactive-block id="technology/boilerplate-detection-calculator" dataFile="/api/content/technology/boilerplate-detection/data/block-classification-scenarios.json" /%}
+
+The hybrid score is deliberately transparent teaching arithmetic, not a benchmark or
+universal production threshold. Its value is that every decision can be inspected and
+challenged before a more complex classifier is introduced.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement a small, explainable baseline first
+
+Start with features the team can calculate, log, and test. A baseline gives later
+heuristics or learned models something concrete to beat, and it produces recognizable
+failure classes instead of one opaque accuracy number.
+
+{% code-block file="/api/content/technology/boilerplate-detection/code/score-content-blocks.py" language="python" title="Score segmented blocks with inspectable evidence" /%}
+
+### Keep the boundary honest
+
+- Segment nested DOM nodes carefully. Scoring both a parent and all descendants can
+  duplicate text in the reconstructed document.
+- Calculate link density from linked text divided by total block text, and define how
+  images, buttons, hidden nodes, and empty blocks are handled.
+- Preserve headings, lists, tables, code, captions, and media references when the
+  output contract requires them; flattening everything to text loses useful meaning.
+- Record policy version, input representation, source template, block features,
+  verdict, and fallback path with evaluation fixtures.
+- Route low-confidence or structurally invalid results to a fallback, source-specific
+  rule, or review queue instead of silently publishing an empty document.
+
+When training a classifier, split evaluation by site or template family when possible.
+Randomly splitting near-identical pages from one template across training and test
+sets can overstate generalization to unseen layouts.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Tune precision and recall from labeled fixtures
+
+Block-level evaluation starts with four counts:
+
+{% metric-strip %}
+{% metric label="True positive" value="Content kept" detail="A target block was retained" tone="green" /%}
+{% metric label="False positive" value="Noise kept" detail="A boilerplate block entered the output" tone="rose" /%}
+{% metric label="False negative" value="Content missed" detail="A target block was discarded" tone="amber" /%}
+{% metric label="True negative" value="Noise removed" detail="A boilerplate block was discarded" tone="blue" /%}
+{% /metric-strip %}
+
+**Precision** asks what fraction of kept blocks are target content. **Recall** asks what
+fraction of target blocks were kept. Raising a score threshold usually keeps fewer
+blocks: precision may improve while recall falls. The right operating point depends on
+the product cost of extra noise versus missing content.
+
+Move the threshold and then switch from the aggregate fixture set to individual page
+types. Notice how an acceptable overall score can hide a weak template family.
+
+{% interactive-block id="technology/boilerplate-detection-evaluation-lab" dataFile="/api/content/technology/boilerplate-detection/data/evaluation-set.json" /%}
+
+{% code-block file="/api/content/technology/boilerplate-detection/code/evaluate-extractor.py" language="python" title="Calculate precision, recall, and F1 from labeled blocks" /%}
+
+### Evaluate document behavior, not only isolated blocks
+
+- Exact or near-exact document recovery when that is realistic for the target.
+- Empty-output, title-only, duplicated-text, reading-order, and oversized-output rates.
+- Field coverage for title, byline, timestamp, headings, tables, captions, and links.
+- Metrics sliced by source, template version, language, page type, render path, and
+  extractor version.
+- Human review of high-impact false positives and false negatives, with repaired cases
+  added to a durable regression fixture set.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose an extractor that matches the content contract
+
+Maintained libraries package useful policies, but their intended outputs differ. Test
+representative pages before standardizing on one result shape.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Mozilla Readability" eyebrow="Reader-oriented article" icon="book" tone="blue" %}
+`Readability.parse()` returns processed article HTML and text plus fields such as title,
+excerpt, byline, site name, language, and published time. It targets a reader-style
+article result rather than arbitrary page preservation.
+{% /concept-card %}
+{% concept-card title="jusText" eyebrow="Sentence-rich text" icon="file-text" tone="green" %}
+jusText is a heuristic boilerplate remover designed to preserve mainly text containing
+full sentences. That makes it useful for web corpora, while tables or terse structured
+content need explicit evaluation.
+{% /concept-card %}
+{% concept-card title="Trafilatura" eyebrow="Configurable extraction" icon="sliders" tone="violet" %}
+Trafilatura exposes main-text extraction and explicit `favor_precision` and
+`favor_recall` modes, along with controls for comments, tables, links, metadata, and
+other output choices.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use the current primary documentation as the contract:
+
+- [Mozilla Readability](https://github.com/mozilla/readability) documents `parse()`,
+  `isProbablyReaderable()`, DOM cloning, output fields, and its security boundary.
+- [jusText](https://github.com/miso-belica/justext) documents its paragraph-oriented
+  boilerplate API and full-sentence goal.
+- [Trafilatura extraction functions](https://trafilatura.readthedocs.io/en/latest/usage-python.html)
+  document the precision and recall presets and returned representations.
+
+`isProbablyReaderable()` is only a fast pre-check; Mozilla explicitly notes that it can
+produce false positives and false negatives. Do not treat that boolean as the final
+extraction or quality verdict.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Put rendering, safety, and fallback behavior around extraction
+
+Content extraction is not a complete web-ingestion boundary. The surrounding system
+still owns network policy, browser execution, output safety, storage, and replay.
+
+### Release a bounded extraction pipeline
+
+{% process-flow %}
+{% process-step number="1" title="Acquire safely" label="Input" %}
+Allow approved schemes and destinations, constrain redirects, block unintended private
+network access, and enforce response, time, and concurrency limits.
+{% /process-step %}
+{% process-step number="2" title="Render selectively" label="Representation" %}
+Use an isolated browser only for sources whose required content is absent from raw
+HTML. Disable unnecessary capabilities and bound scripts, navigation, and resources.
+{% /process-step %}
+{% process-step number="3" title="Extract and validate" label="Policy" %}
+Run a versioned detector, verify required fields and output bounds, and capture a
+diagnosable result when the page no longer matches the expected shape.
+{% /process-step %}
+{% process-step number="4" title="Sanitize and publish" label="Output" %}
+Treat extracted HTML as untrusted. Apply destination-appropriate sanitization and
+escaping before rendering, then store provenance and policy version with the result.
+{% /process-step %}
+{% /process-flow %}
+
+Mozilla's Readability documentation explicitly recommends sanitizing untrusted output
+before rendering it and using Content Security Policy as defense in depth. Main-content
+selection does not remove the need for an HTML safety boundary.
+
+### Monitor decisions that reveal drift
+
+- Fetch, parse, render, extraction, validation, and sanitization failures as separate
+  categories.
+- Empty result rate, output-to-input text ratio, duplicate text, missing required
+  fields, and unusually large outputs.
+- Precision and recall on a recurring labeled sample, split by source and page type.
+- Fallback and manual-review rates, plus the templates responsible for each change.
+- Latency and resource percentiles for raw-HTML and rendered paths independently.
+{% /section-card %}
+
+{% section-card %}
+## Review the extraction contract before release
+
+- Target
+  - Which page regions and fields belong in the output?
+  - Are comments, tables, code, captions, related links, and legal notices content or
+    boilerplate for this product?
+- Input
+  - Does required content exist in raw HTML, or is a bounded rendered DOM necessary?
+  - Which sources, sizes, redirects, scripts, and network destinations are allowed?
+- Decision policy
+  - Which block evidence drives the verdict, and how are nested or uncertain blocks
+    handled?
+  - Which fallback catches empty, duplicated, structurally invalid, or low-confidence
+    output?
+- Evaluation and operations
+  - Which labeled fixtures represent every important source and page shape?
+  - Which precision, recall, field coverage, drift, latency, and safety thresholds block
+    a release?
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/boilerplate-detection/quiz/boilerplate-detection-production-design.json" lessonSlug="boilerplate-detection" title="Boilerplate Detection Production Design Review" /%}

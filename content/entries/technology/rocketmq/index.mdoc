@@ -1,0 +1,251 @@
+---
+registryId: rocketmq
+---
+
+{% section-card tone="intro" %}
+## What is Apache RocketMQ?
+
+**Apache RocketMQ is a distributed message broker for asynchronous communication.** A
+producer publishes a message, a broker stores it in a topic, and one or more consumer
+groups process it later. The producer and consumer do not need to be available at the
+same moment, which separates their scaling and failure behavior.
+
+RocketMQ matters when a business workflow needs more than a basic queue. Its 5.x model
+has explicit normal, FIFO, delay, and transaction message types, broker-side filtering,
+consumer retries, and dead-letter queues. These features help with ordered entity
+updates, deferred work, and reliable handoff, but they do not make an application
+side effect exactly once.
+
+{% callout variant="info" %}
+The core invariant is simple: **the broker owns message availability; the consumer
+owns business correctness.** Expect a delivery to be repeated when acknowledgements,
+timeouts, or rebalancing leave the result uncertain. Make the handler idempotent.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one message from producer to business effect
+
+RocketMQ separates routing, storage, and processing. In a 5.x deployment, clients can
+use the gRPC SDK through a Proxy; the Proxy can run with a Broker or as a stateless
+cluster. NameServers hold routing metadata, Brokers persist topic queues, and consumer
+groups own independent processing progress.
+
+{% system-flow title="Simplified RocketMQ 5.x message path" caption="The Proxy is shown because current gRPC clients connect through it. Remoting clients use a different access path, but the topic, broker, and consumer responsibilities remain." %}
+{% system-node title="Producer" eyebrow="Create" icon="code" tone="blue" %}
+Builds a message with a topic, body, stable business key, and optional tag or
+attributes.
+{% /system-node %}
+{% system-node title="Proxy + NameServer" eyebrow="Access and route" icon="network" tone="cyan" %}
+The Proxy exposes the 5.x gRPC endpoint. NameServer metadata tells the client where the
+topic is available.
+{% /system-node %}
+{% system-node title="Broker topic" eyebrow="Persist" icon="storage" tone="violet" %}
+Appends the message to a MessageQueue and keeps it for the configured storage duration,
+independent of whether a consumer has processed it.
+{% /system-node %}
+{% system-node title="Consumer group" eyebrow="Deliver" icon="users" tone="green" %}
+Receives matching messages, runs the handler, and reports success or failure according
+to the selected consumer API.
+{% /system-node %}
+{% system-node title="Business store" eyebrow="Apply" icon="database" tone="amber" %}
+Commits the domain effect and a durable receipt for the event ID in one transaction
+when possible.
+{% /system-node %}
+{% /system-flow %}
+
+Three names are easy to confuse:
+
+- A **topic** groups messages for one business domain and one message type.
+- A **MessageQueue** is RocketMQ's smallest storage and transfer unit inside a topic.
+- A **consumer group** records one logical subscriber's behavior and progress; other
+  groups can process the same topic independently.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the message type before creating the topic
+
+RocketMQ 5.x treats the message type as topic metadata. Keep one type per topic so
+producers, consumers, operations, and safety policies share the same delivery contract.
+Do not use tags to mix normal, FIFO, delay, and transaction behavior in one topic.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Normal" eyebrow="Independent events" icon="activity" tone="blue" %}
+Use when messages can be processed independently and immediate availability is fine.
+This is the simplest contract and usually offers the most scheduling freedom.
+{% /concept-card %}
+{% concept-card title="FIFO" eyebrow="Per message group" icon="repeat" tone="green" %}
+Use when events for the same entity must be delivered in send order. Give every related
+message the same message group; unrelated groups can still progress concurrently.
+{% /concept-card %}
+{% concept-card title="Delay" eyebrow="Available later" icon="timer" tone="amber" %}
+Use when the broker should withhold a message until a delivery timestamp, such as an
+order-expiry check. This schedules a message, not an entire stateful workflow.
+{% /concept-card %}
+{% concept-card title="Transaction" eyebrow="Local commit + publish" icon="shield" tone="violet" %}
+Use when publishing must follow a local transaction result. The broker can check an
+unknown local outcome; downstream consumers still need idempotent processing.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+FIFO is scoped to a message group, not an entire distributed application. A slow or
+failing message can delay later messages in that group, so choose a stable key such as
+`orderId` and keep groups independent enough to provide concurrency.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Turn workload assumptions into a recovery envelope
+
+Broker benchmark numbers are not portable across message sizes, disks, replication,
+flush policies, versions, and failure conditions. Start with arithmetic you control:
+arrival rate, payload size, consumer service rate, outage backlog, and retention.
+
+Choose a workload and change its rate, consumer count, retention window, and simulated
+outage. The lab reserves 25% of measured consumer capacity for variance and recovery;
+it does not claim a RocketMQ broker limit.
+
+{% interactive-block id="technology/rocketmq-performance" dataFile="/api/content/technology/rocketmq/data/capacity-envelope.json" /%}
+
+The raw retained-payload estimate excludes indexes, metadata, replicas, filesystem
+overhead, and compression. Measure those factors on the exact deployment before
+provisioning storage.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Trace success, retry ambiguity, and dead-letter isolation
+
+A successful consumer callback lets RocketMQ advance processing. A failure or timeout
+can make the message available again. After the configured retry limit, the broker
+moves the message to the consumer group's dead-letter queue (DLQ). The DLQ isolates a
+poison message; it does not repair or replay it automatically.
+
+Select a scenario, then inspect the active nodes. Notice that a timeout after the
+database commits is ambiguous: retry is correct for delivery, but only an idempotency
+record prevents a second business mutation.
+
+{% topology-lab dataFile="/api/content/technology/rocketmq/data/delivery-topology.json" /%}
+
+{% callout variant="warn" %}
+Do not use retries as flow control for a continuously overloaded consumer. Bound
+concurrency, reduce incoming work, or add sustainable processing capacity. Repeatedly
+failing hot traffic only increases queue age and retry pressure.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make repeated delivery produce one business result
+
+At-least-once delivery means the same event may reach application code more than once.
+Use a stable business event ID and store its receipt with the business mutation. If the
+event is replayed, return the recorded result without applying the mutation again.
+
+{% code-block file="/api/content/technology/rocketmq/code/idempotent-order-consumer.js" language="javascript" title="Dependency-free idempotent consumer model" /%}
+
+The example uses memory so it can run with Node.js. In production, put the receipt and
+the domain write in the same durable transaction, or use an inbox table with a unique
+constraint. A process-local set is lost on restart and cannot coordinate multiple
+consumer instances.
+
+Choose the consumer API from the processing contract:
+
+- **PushConsumer** manages fetching, concurrency, result submission, and retries
+  through a synchronous message listener. Use it for bounded, predictable handlers.
+- **SimpleConsumer** gives the application explicit receive and acknowledgement
+  operations plus an invisibility duration. Use it when processing needs custom pacing
+  or a duration that the application must extend.
+- **PullConsumer** is intended mainly for stream-processing integrations. Do not mix
+  PullConsumer with another consumer type in the same consumer group.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Model topics, tags, and filters as separate boundaries
+
+Topic design is an ownership decision, not just a naming decision. Split topics when
+business domain, message type, retention, traffic importance, or access policy differs.
+Within one domain, tags or attributes can reduce delivery to each consumer.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Topic" eyebrow="Operational boundary" icon="layers" tone="blue" %}
+Use a separate topic for a distinct domain or message contract, such as
+`order-events` and `payment-commands`. Topic-level policy should be understandable
+without inspecting every consumer.
+{% /concept-card %}
+{% concept-card title="Tag filter" eyebrow="Simple category" icon="key" tone="green" %}
+Use a tag for a small, stable category such as `CREATED` or `CANCELLED`. The broker can
+match it before returning messages to a subscriber.
+{% /concept-card %}
+{% concept-card title="SQL attribute filter" eyebrow="Compound predicate" icon="search" tone="violet" %}
+Use typed attributes and a SQL92 expression for a condition such as region plus price.
+Missing or mismatched attributes can filter a message out, so test the exact predicate.
+{% /concept-card %}
+{% /concept-grid %}
+
+Broker-side filtering reduces unnecessary network and consumer work. It is not an
+authorization boundary: apply access control to producers, consumers, topics, and
+administrative operations separately.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate for age, ambiguity, and recovery
+
+Queue depth alone does not say whether users are waiting too long. Monitor the oldest
+unprocessed message age and end-to-end business latency alongside throughput and error
+rates. Then rehearse recovery before an incident.
+
+{% process-flow %}
+{% process-step number="1" title="Declare the contract" label="Design" %}
+Record the topic owner, message type, key or message group, payload schema, retention,
+filtering rules, retry limit, and consumer group behavior.
+{% /process-step %}
+{% process-step number="2" title="Measure the envelope" label="Capacity" %}
+Load test producer acknowledgements and consumer service time with realistic payloads,
+replication, disk policy, skew, and downstream limits.
+{% /process-step %}
+{% process-step number="3" title="Protect the handler" label="Correctness" %}
+Validate schema, enforce idempotency, bound processing time, and distinguish retryable
+dependency faults from permanent data or policy errors.
+{% /process-step %}
+{% process-step number="4" title="Watch progress" label="Observe" %}
+Alert on oldest-message age, retry rate, DLQ growth, send failures, broker disk headroom,
+and the latency of the final business effect.
+{% /process-step %}
+{% process-step number="5" title="Rehearse recovery" label="Operate" %}
+Test a failed consumer, unavailable route lookup, broker loss under the chosen HA mode,
+DLQ diagnosis, bounded replay, and reconciliation of ambiguous outcomes.
+{% /process-step %}
+{% /process-flow %}
+
+Before production, also verify:
+
+- authentication, authorization, and encrypted transport for the deployment mode;
+- schema compatibility and payload-size limits at both producer and consumer;
+- retention and disk cleanup behavior under a stopped consumer;
+- dashboards that separate broker health from downstream business completion;
+- a replay runbook that preserves event identity and rate-limits repaired traffic.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Know where RocketMQ fits
+
+RocketMQ is a strong fit when one platform should combine asynchronous pub/sub with
+per-group FIFO, delayed delivery, transactional publication, filtering, and managed
+retry behavior. That combination is useful for order lifecycles, payment commands,
+device operations, and other event-driven workflows with explicit business keys.
+
+Choose a different tool when the dominant requirement is a mutable source of truth,
+ad hoc querying, long analytical scans, or large object storage. Compare RocketMQ with
+Kafka, Pulsar, cloud queues, and workflow engines using the actual need for replay,
+ordering, delay, transactions, ecosystem integrations, and operational ownership.
+
+Current primary references:
+
+- [RocketMQ 5.x concepts](https://rocketmq.apache.org/docs/introduction/02concepts/)
+- [Deployment modes and the Proxy](https://rocketmq.apache.org/docs/deploymentOperations/01deploy/)
+- [Consumer types](https://rocketmq.apache.org/docs/featureBehavior/06consumertype/)
+- [Consumption retry policy](https://rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy/)
+- [Message filtering](https://rocketmq.apache.org/docs/featureBehavior/07messagefilter/)
+{% /section-card %}
+
+{% quiz quizId="rocketmq" lessonSlug="rocketmq" title="RocketMQ Production Design Review" questionsFile="/api/content/technology/rocketmq/quiz/rocketmq-production-design.json" /%}

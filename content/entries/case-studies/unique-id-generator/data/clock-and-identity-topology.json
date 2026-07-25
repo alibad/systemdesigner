@@ -1,0 +1,33 @@
+{
+  "title": "Clock and identity decision lab",
+  "description": "Choose a generator condition to trace the allowed path. A safe response may reduce local availability, but it never issues an ID from an overlapping tuple.",
+  "nodes": [
+    { "id": "caller", "label": "Create caller", "eyebrow": "Request", "detail": "Asks for an identifier. It can be routed to another healthy generator when this one fails closed.", "kind": "client", "tone": "blue", "x": 8, "y": 50 },
+    { "id": "router", "label": "Generator router", "eyebrow": "Availability", "detail": "Routes only to generators with a valid lease and healthy time status. It removes a quarantined process from the pool.", "kind": "edge", "tone": "cyan", "x": 25, "y": 50 },
+    { "id": "lease", "label": "Identity lease", "eyebrow": "Control plane", "detail": "Grants one generator identity to one live process and fences stale owners before a replacement can accept traffic.", "kind": "allocator", "tone": "violet", "x": 43, "y": 22 },
+    { "id": "clock", "label": "Clock guard", "eyebrow": "Safety check", "detail": "Compares wall time to the last emitted timestamp. It blocks generation when time regresses or the clock is untrusted.", "kind": "security", "tone": "amber", "x": 45, "y": 75 },
+    { "id": "generator", "label": "Local generator", "eyebrow": "Hot path", "detail": "Combines safe time, leased identity, and sequence in memory. It never calls a database to issue a normal ID.", "kind": "service", "tone": "green", "x": 64, "y": 50 },
+    { "id": "sequence", "label": "Next-millisecond wait", "eyebrow": "Finite capacity", "detail": "Holds only the overloaded generator after its sequence field is exhausted; the counter must not wrap in the same millisecond.", "kind": "stream", "tone": "amber", "x": 66, "y": 86 },
+    { "id": "quarantine", "label": "Quarantine and alert", "eyebrow": "Fail closed", "detail": "Removes an unsafe process from routing, preserves evidence, and requires an operator or automated recovery policy to make it safe again.", "kind": "stream", "tone": "rose", "x": 83, "y": 20 },
+    { "id": "id", "label": "64-bit ID", "eyebrow": "Response", "detail": "Returns a positive integer whose timestamp, generator identity, and sequence form a unique tuple under the operating contract.", "kind": "database", "tone": "blue", "x": 88, "y": 58 }
+  ],
+  "edges": [
+    { "id": "caller-router", "from": "caller", "to": "router", "label": "create" },
+    { "id": "router-lease", "from": "router", "to": "lease", "label": "eligible owner", "mode": "sync" },
+    { "id": "router-generator", "from": "router", "to": "generator", "label": "routed request" },
+    { "id": "lease-generator", "from": "lease", "to": "generator", "label": "fenced identity", "mode": "sync" },
+    { "id": "clock-generator", "from": "clock", "to": "generator", "label": "safe millisecond", "mode": "sync" },
+    { "id": "generator-id", "from": "generator", "to": "id", "label": "packed ID" },
+    { "id": "generator-sequence", "from": "generator", "to": "sequence", "label": "sequence exhausted", "mode": "async" },
+    { "id": "sequence-clock", "from": "sequence", "to": "clock", "label": "next tick", "mode": "async" },
+    { "id": "clock-quarantine", "from": "clock", "to": "quarantine", "label": "rollback", "mode": "async" },
+    { "id": "lease-quarantine", "from": "lease", "to": "quarantine", "label": "lease conflict", "mode": "async" },
+    { "id": "quarantine-router", "from": "quarantine", "to": "router", "label": "remove target", "mode": "async", "via": { "x": 57, "y": 5 } }
+  ],
+  "scenarios": [
+    { "id": "healthy", "label": "Healthy issue", "summary": "The process holds a valid identity lease, its clock is not behind its prior emission, and sequence capacity remains in the current millisecond.", "activeEdges": ["caller-router", "router-lease", "router-generator", "lease-generator", "clock-generator", "generator-id"], "focusNode": "generator", "result": "The generator packs the tuple and returns a local 64-bit ID without a request-time coordination call." },
+    { "id": "sequence-full", "label": "Sequence exhausted", "summary": "One generator has issued every sequence value for the current millisecond. Other healthy generators can still serve their own ranges.", "activeEdges": ["caller-router", "router-generator", "lease-generator", "clock-generator", "generator-sequence", "sequence-clock"], "degradedNodes": ["generator", "sequence"], "focusNode": "sequence", "result": "This generator waits for a later millisecond before emitting again. It must not wrap the sequence while timestamp and identity are unchanged." },
+    { "id": "clock-rollback", "label": "Clock rollback", "summary": "The wall clock is earlier than the last timestamp this process emitted, perhaps after a VM resume or time correction.", "activeEdges": ["caller-router", "router-lease", "router-generator", "lease-generator", "clock-quarantine", "quarantine-router"], "failedNodes": ["clock"], "focusNode": "clock", "result": "Generation stops and routing removes this process. A retry can reach another healthy generator; this one remains unavailable until its time is safe." },
+    { "id": "lease-conflict", "label": "Duplicate identity attempt", "summary": "A replacement is starting while a stale process still appears to hold the same generator identity. The lease service detects incompatible ownership.", "activeEdges": ["caller-router", "router-lease", "lease-quarantine", "quarantine-router"], "failedNodes": ["lease"], "focusNode": "lease", "result": "The system fences and drains the stale owner before the replacement becomes routable. Allowing both processes to issue IDs would violate uniqueness." }
+  ]
+}

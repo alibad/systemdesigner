@@ -1,0 +1,242 @@
+---
+registryId: immersive-experience-platforms
+---
+
+{% section-card tone="intro" %}
+## What is an immersive experience platform?
+
+**An immersive experience platform is the complete runtime and service system that keeps a digital world spatially aligned, responsive, and consistent while a person moves and interacts.** It combines device tracking, a simulation loop, real-time rendering, input and haptics, spatial coordinate systems, content delivery, and sometimes shared-session services.
+
+In plain language: a headset or spatial display must sense where the person is, predict what they will see at the next display time, render the right view before its deadline, and make interactions feel immediate. A shared experience adds a second problem: every participant must eventually agree on the important parts of the world without delaying every local movement.
+
+{% callout variant="info" %}
+### Core invariant
+
+Preserve **spatial continuity and user control**. Tracking, input, safety boundaries, and frame timing must remain coherent as load or network quality changes. Reduce optional visual detail, remote update frequency, or background work before breaking alignment or blocking local control.
+{% /callout %}
+
+This lesson builds on [spatial computing architecture](/fundamentals/spatial-computing-architecture). Review [real-time collaborative systems](/fundamentals/real-time-collaborative-systems) if ownership, prediction, and reconciliation are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat presence as one deadline-driven loop
+
+Presence is not a feature owned by the renderer alone. It is an end-to-end loop in which each stage uses compatible time and coordinate assumptions.
+
+{% system-flow title="The local presence loop" caption="The XR runtime predicts a display time, the application produces a view for that time, and the compositor presents the final layers. Work that misses the interval cannot be recovered by a faster backend." %}
+{% system-node title="Tracking and input" eyebrow="1. Observe" icon="activity" tone="cyan" %}
+Sample head, hands, controllers, gaze, and environment data with timestamps and confidence. Keep raw device details behind an action or capability layer where possible.
+{% /system-node %}
+{% system-node title="Simulation" eyebrow="2. Update" icon="workflow" tone="violet" %}
+Advance interactions, animation, physics, and application state for one predicted display time. Avoid different subsystems advancing the same frame from different clocks.
+{% /system-node %}
+{% system-node title="Rendering" eyebrow="3. Draw" icon="layers" tone="blue" %}
+Cull the scene, choose detail, shade the views, and submit composition layers before the application deadline.
+{% /system-node %}
+{% system-node title="Runtime compositor" eyebrow="4. Present" icon="speed" tone="green" %}
+Compose application layers, apply the runtime's latest device information where supported, and drive the display at its active cadence.
+{% /system-node %}
+{% /system-flow %}
+
+OpenXR formalizes this relationship with `xrWaitFrame`, `xrBeginFrame`, and `xrEndFrame`. `xrWaitFrame` supplies a predicted display time; the application should use one consistent target time when locating views and advancing that frame. WebXR similarly gives an immersive session a runtime-managed animation-frame loop and reference-space model.
+
+Three latency classes should remain separate:
+
+- **Local presentation latency:** motion or input to the display. This is governed by device sampling, the application frame, and the runtime compositor.
+- **Interaction acknowledgement latency:** time until the application confirms that an action was accepted locally.
+- **Shared-state latency:** time until remote participants receive or agree on an update. This can be much longer without forcing the local pose loop to wait.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Convert refresh rate into a frame deadline
+
+A display cadence creates a hard interval: `1000 / refresh rate`. A `90 Hz` target provides about `11.1 ms` per display interval; `120 Hz` provides about `8.3 ms`. The application does not own all of that time because the runtime, compositor, operating system, and safety features also need capacity.
+
+{% metric-strip %}
+{% metric value="13.9 ms" label="72 Hz interval" detail="1000 / 72 before runtime reserve" tone="cyan" /%}
+{% metric value="11.1 ms" label="90 Hz interval" detail="1000 / 90 before runtime reserve" tone="blue" /%}
+{% metric value="8.3 ms" label="120 Hz interval" detail="1000 / 120 before runtime reserve" tone="violet" /%}
+{% metric value="p95 / p99" label="Operate the tail" detail="Averages hide the frames people notice" tone="amber" /%}
+{% /metric-strip %}
+
+CPU simulation and GPU rendering are commonly pipelined, so adding their durations is usually the wrong planning model. Start with the slower side as the application critical path, subtract a measured runtime reserve from the display interval, then validate the result with device traces.
+
+{% code-block file="/api/content/fundamentals/immersive-experience-platforms/code/plan-frame-budget.ts" language="typescript" title="Evaluate a simple CPU/GPU frame envelope" /%}
+
+Do not turn a target cadence into a universal product claim. The active rate and exact application budget depend on the device, runtime, content, thermal state, and presentation mode.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: protect the frame deadline under load
+
+Choose a scene and refresh rate, then increase participants or render scale. Change foveation to see which quality lever restores headroom. The lab exposes the display interval, application budget, CPU/GPU critical path, and the first optimization target.
+
+{% interactive-block id="fundamentals/immersive-experience-platforms-calculator" dataFile="/api/content/fundamentals/immersive-experience-platforms/data/frame-budget-model.json" /%}
+
+Read the result as a capacity envelope:
+
+- **Positive headroom** is necessary but not sufficient. Test representative scenes on each supported device and watch tail frame time over long sessions.
+- **A CPU-bound miss** calls for less per-frame simulation, fewer main-thread stalls, lower avatar or physics update frequency, and work moved out of the critical loop.
+- **A GPU-bound miss** calls for lower render scale, cheaper materials and lighting, visibility and level-of-detail work, or supported foveation.
+- **A fragile pass** needs reserve for spikes, background activity, thermal throttling, and runtime work. Do not budget every frame to the measured average.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Build an explicit coordinate and capability stack
+
+An immersive application should not scatter device-specific poses through business logic. Keep spaces, actions, capabilities, and persistent anchors as separate contracts.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Reference spaces" eyebrow="Where poses are expressed" icon="route" tone="cyan" %}
+Choose local, floor-relative, bounded, or unbounded spaces according to the experience. Handle reference-space resets instead of assuming one global coordinate system never changes.
+{% /concept-card %}
+
+{% concept-card title="Actions and capabilities" eyebrow="What the user can do" icon="activity" tone="blue" %}
+Bind semantic actions such as select, grab, menu, or haptic output to supported devices. Treat hand tracking, eye tracking, passthrough, and haptics as negotiated capabilities.
+{% /concept-card %}
+
+{% concept-card title="Spatial anchors" eyebrow="What should stay placed" icon="database" tone="violet" %}
+Anchor important content near a tracked real-world location and store application metadata separately. An anchor provides spatial alignment, not object ownership or shared business state.
+{% /concept-card %}
+
+{% concept-card title="Safety boundaries" eyebrow="Where movement is allowed" icon="shield" tone="amber" %}
+Respect runtime-provided boundaries and visibility state. Never hide or override a safety signal to preserve immersion.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use capability negotiation rather than a device-name allowlist:
+
+1. Request only features required for the core experience; optional capabilities should not block session creation.
+2. Define a usable fallback for every optional input or output path, such as controller input when hand tracking is unavailable.
+3. Keep application objects in an appropriate reference space and respond to loss, reset, or relocalization explicitly.
+4. Store anchor identity, object identity, authorization, and durable object state as distinct records with separate lifecycles.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate local responsiveness from shared truth
+
+Networking every transform through one authoritative database creates latency and cost without making every state safer. Classify state by its invariant before choosing authority.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Local transient state" eyebrow="Pose and comfort" icon="speed" tone="cyan" %}
+Head pose, hand pose, cursor rays, and local visual feedback belong on the device's immediate path. Send disposable snapshots to peers; stale samples can be dropped.
+{% /concept-card %}
+
+{% concept-card title="Shared interactive state" eyebrow="Ownership and motion" icon="users" tone="violet" %}
+A held tool, shared part, or movable prop needs a declared owner or authority. Use lease epochs or versions so stale owners cannot keep writing after handoff.
+{% /concept-card %}
+
+{% concept-card title="Durable consequential state" eyebrow="Validated commit" icon="shield" tone="green" %}
+Approvals, configuration changes, purchases, and irreversible workflow steps need ordered validation, authorization, idempotency, and recovery after reconnect.
+{% /concept-card %}
+{% /concept-grid %}
+
+Client anticipation can make a server-authoritative action feel immediate by displaying an expected result before the accepted update returns. That visual value is not truth. The client must reconcile when the authoritative result differs, and the product should avoid hiding corrections that change a consequential outcome.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 2: choose authority for each kind of shared state
+
+Choose a tracked pose, exclusively held tool, or durable configuration. Then change the authority path, network round trip, competing claim, and anticipation policy. The lab separates visible response from the state every participant eventually accepts.
+
+{% interactive-block id="fundamentals/immersive-experience-platforms-authority-lab" dataFile="/api/content/fundamentals/immersive-experience-platforms/data/shared-authority-model.json" /%}
+
+{% code-block file="/api/content/fundamentals/immersive-experience-platforms/code/route-shared-action.ts" language="typescript" title="Route shared actions by their invariant" /%}
+
+The shared-session contract should name:
+
+- Who may create, update, transfer, and delete each entity class.
+- Whether the update is a disposable sample, an owner-controlled stream, or a durable command.
+- Which sequence, version, lease epoch, or operation ID rejects stale and duplicate work.
+- How a joining participant receives an authoritative snapshot and the updates after it.
+- What the user sees when an anticipated action is rejected or corrected.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Stream content without destabilizing interaction
+
+Large scenes should arrive progressively. The presence loop must not wait for every mesh, texture, animation, audio file, or remote avatar asset.
+
+{% process-flow %}
+{% process-step number="1" title="Publish immutable scene artifacts" label="Identify" %}
+Version assets by digest and bind them to coordinate conventions, units, material capabilities, collision metadata, and compatibility requirements.
+{% /process-step %}
+{% process-step number="2" title="Load the interaction shell first" label="Prioritize" %}
+Deliver safety geometry, anchors, interaction proxies, low-detail representations, and essential audio before decorative detail.
+{% /process-step %}
+{% process-step number="3" title="Refine by visibility and importance" label="Stream" %}
+Prioritize nearby, visible, interactive, or soon-needed content. Bound decode, upload, and shader-compilation work so streaming cannot monopolize a frame.
+{% /process-step %}
+{% process-step number="4" title="Evict with a recovery path" label="Control" %}
+Keep explicit CPU, GPU, and disk budgets. Preserve lightweight proxies and stable identities so an evicted object does not disappear from interaction or shared state.
+{% /process-step %}
+{% /process-flow %}
+
+Progressive fidelity should preserve meaning. A low-detail object still needs the same identity, scale, anchor relationship, interaction bounds, and ownership rules as its refined representation.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design degradation and failure as product states
+
+Define which experience property degrades first instead of letting overload choose randomly.
+
+### When local frame time grows
+
+1. Reduce peripheral shading, post-processing, shadows, reflections, particles, and distant geometry.
+2. Lower update frequency for remote avatars, background animation, and non-critical simulation while interpolating presentation.
+3. Pause optional capture, analytics enrichment, and background content work.
+4. Preserve current tracking, input, safety boundaries, essential audio, and a clear way to exit or recover.
+
+### When the network degrades
+
+- Keep local pose, input, safety, and current scene interaction responsive when their authority permits it.
+- Interpolate remote transient state for a bounded interval, then show explicit stale, paused, or disconnected status.
+- Queue only commands that are safe to replay with stable operation IDs; expire authority and leases predictably.
+- Prevent reconnect floods by jittering retries, resuming from checkpoints, and prioritizing current session state over old telemetry.
+- Reconcile anticipated state visibly when the accepted result differs; never preserve two conflicting owners to avoid a correction.
+
+### When tracking or relocalization fails
+
+- Stop placement-sensitive actions that could affect the physical world or another participant.
+- Keep a stable head-locked recovery surface when the platform guidance allows it.
+- Mark anchors and content as unresolved rather than guessing a world transform.
+- Record the transition and recovery time without collecting unnecessary spatial data.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the experience by distributions and user-visible outcomes
+
+Instrument the local frame path, spatial quality, shared session, and content pipeline as separate systems. Correlate every sample with device class, runtime version, application version, scene version, thermal state, and session conditions.
+
+### Frame and interaction health
+
+- CPU and GPU frame time at p50, p95, and p99, plus missed or discarded application frames.
+- Active refresh rate, render scale, foveation mode, compositor/runtime signals available to the application, and thermal events.
+- Input-to-feedback and action-to-accepted-state latency by interaction type.
+- Long tasks, shader compilation, asset decode/upload spikes, memory pressure, and scene-change stalls.
+
+### Spatial and session health
+
+- Tracking confidence or platform-provided quality state, reference-space resets, relocalization time, and unresolved anchors.
+- Snapshot age, packet loss, interpolation gap, lease conflict, stale update rejection, and reconciliation correction rate.
+- Join time split into authentication, scene manifest, authoritative snapshot, essential assets, and first interactive frame.
+- User-visible disconnected, stale, corrected, or degraded-state duration rather than only transport uptime.
+
+Before release, test a busy scene, long session, thermal pressure, poor network, reconnect, simultaneous ownership claims, reference-space reset, anchor loss, and a cold cache. A platform is production-ready when each failure has a bounded consequence and an observable recovery path.
+{% /section-card %}
+
+{% section-card %}
+## Use the platform specifications as contracts
+
+The implementation surface changes by device and engine. Ground architecture in the platform's current specification and profiling tools:
+
+- [OpenXR 1.1 specification](https://registry.khronos.org/OpenXR/specs/1.1-khr/html/xrspec.html) for runtime sessions, frame timing, reference spaces, actions, composition, and extensions.
+- [WebXR Device API](https://www.w3.org/TR/webxr/) for browser-managed XR sessions, animation frames, views, and reference spaces.
+- [Apple visionOS performance analysis](https://developer.apple.com/documentation/visionos/analyzing-the-performance-of-your-visionos-app) for frame tracing, rendering deadlines, power, and thermal effects.
+- [Unity client anticipation](https://docs-multiplayer.unity3d.com/netcode/current/advanced-topics/client-anticipation/) and [ownership and authority](https://docs-multiplayer.unity3d.com/netcode/current/basics/ownership/) for concrete client-server state patterns.
+- [Microsoft mixed-reality coordinate systems](https://learn.microsoft.com/en-us/windows/mixed-reality/design/coordinate-systems) for experience scales, spatial anchors, and the limits of large rigid coordinate spaces.
+
+Use these sources to validate API behavior. The calculators in this lesson are planning envelopes, not device benchmarks or substitutes for traces.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/immersive-experience-platforms/quiz/immersive-experience-platforms.json" lessonSlug="immersive-experience-platforms" title="Immersive Platform Design Decisions" /%}

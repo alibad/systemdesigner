@@ -1,0 +1,265 @@
+---
+registryId: rag
+---
+
+{% section-card tone="intro" %}
+## What is Retrieval-Augmented Generation?
+
+**Retrieval-Augmented Generation (RAG)** is a system pattern that finds external evidence at request time and gives that evidence to a language model before it writes an answer. The model supplies language and reasoning; the retrieval system supplies current, private, or domain-specific facts.
+
+In plain language: RAG is an open-book workflow. It searches first, reads a small set of relevant passages, and answers from those passages. This can make knowledge easier to update and answers easier to inspect without retraining the model.
+
+The core invariant is **an answer is only as trustworthy as its authorized evidence**. A fluent response is not grounded when the system retrieved the wrong document, crossed an access boundary, omitted a necessary fact, or cited text that does not support the claim.
+{% /section-card %}
+
+{% section-card %}
+## Separate the online answer path from the offline knowledge path
+
+RAG has two connected systems. The offline path prepares searchable evidence; the online path turns one user question into a supported response.
+
+{% system-flow title="The RAG evidence loop" caption="Document identity and authorization metadata must survive every stage so the final citation can point back to an approved source." %}
+{% system-node title="Sources" eyebrow="Offline" icon="database" tone="blue" %}
+Collect approved documents, ownership, timestamps, access labels, and stable source IDs.
+{% /system-node %}
+{% system-node title="Index" eyebrow="Prepare" icon="layers" tone="cyan" %}
+Parse, chunk, enrich, embed, and publish a versioned searchable snapshot.
+{% /system-node %}
+{% system-node title="Retrieve" eyebrow="Online" icon="search" tone="violet" %}
+Apply identity filters, find candidates, merge signals, and rerank a bounded set.
+{% /system-node %}
+{% system-node title="Compose" eyebrow="Evidence" icon="braces" tone="amber" %}
+Fit diverse, attributable passages into a deliberate context budget.
+{% /system-node %}
+{% system-node title="Answer or abstain" eyebrow="Trust" icon="check" tone="green" %}
+Generate supported claims, attach citations, and refuse when evidence is insufficient.
+{% /system-node %}
+{% /system-flow %}
+
+The two paths deploy independently. A new model version should not silently change the index, and a new index snapshot should be traceable in every answer log.
+{% /section-card %}
+
+{% section-card %}
+## Build a reproducible ingestion contract
+
+Ingestion is not merely “split text and embed it.” It produces the evidence units that retrieval, authorization, citation, deletion, and incident response depend on.
+
+{% process-flow %}
+{% process-step number="1" title="Accept an approved source" label="Provenance" %}
+Record source owner, URI, tenant, permissions, content hash, effective date, and ingestion policy before parsing.
+{% /process-step %}
+{% process-step number="2" title="Parse structure" label="Meaning" %}
+Preserve headings, lists, tables, page numbers, and attachment relationships instead of flattening everything into one string.
+{% /process-step %}
+{% process-step number="3" title="Create evidence units" label="Chunk" %}
+Split on semantic boundaries, add measured overlap where facts cross boundaries, and retain parent-document and offset metadata.
+{% /process-step %}
+{% process-step number="4" title="Enrich and index" label="Search" %}
+Create lexical fields and embeddings, then write them to a versioned index with the same access-control attributes.
+{% /process-step %}
+{% process-step number="5" title="Validate and publish" label="Release" %}
+Run parse, retrieval, authorization, freshness, and deletion tests before atomically promoting the snapshot.
+{% /process-step %}
+{% /process-flow %}
+
+### Treat chunking as an experiment
+
+- Start from the document's natural structure: section, paragraph, list, table, code block, or transcript turn.
+- Keep each chunk self-identifying by carrying its heading path and source title.
+- Add overlap only when a measured query set shows boundary loss; duplicate text can crowd out diverse evidence.
+- Keep stable document and chunk IDs across no-op reingestion so caches, evaluations, and deletion audits remain interpretable.
+- Re-embed when the embedding contract changes, and publish to a new index version rather than mutating the serving index in place.
+
+{% code-block file="/api/content/genai/rag/code/hybrid-retrieval.py" language="python" title="Hybrid Retrieval with Authorization and Reciprocal Rank Fusion" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose retrieval signals by the query's failure mode
+
+No single signal dominates every query. Exact identifiers reward lexical matching; paraphrases reward dense retrieval; ambiguous or high-value questions often need both plus reranking.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Lexical retrieval" eyebrow="Exact language" icon="search" tone="blue" %}
+Matches terms and phrases directly. It is strong for product codes, error messages, names, and policy clauses, but can miss paraphrases.
+{% /concept-card %}
+{% concept-card title="Dense retrieval" eyebrow="Semantic similarity" icon="layers" tone="violet" %}
+Matches encoded meaning. It can recover paraphrases, but similar language is not proof that a passage answers the question.
+{% /concept-card %}
+{% concept-card title="Reranking" eyebrow="Pairwise relevance" icon="workflow" tone="amber" %}
+Scores a smaller candidate set with richer query-passage interaction. It can improve ordering at the cost of latency and compute.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use metadata filters as a security boundary, not as a relevance hint. Apply tenant, user, geography, lifecycle, and source-status policy before evidence can enter the candidate set.
+{% /section-card %}
+
+{% section-card %}
+## Tune retrieval against evidence recall, not attractive scores
+
+Select a query, retrieval strategy, candidate count, and reranking policy. The workbench exposes which relevant facts survive into the candidate set and which distractors consume the budget.
+
+{% interactive-block id="genai/rag-retrieval-workbench" dataFile="/api/content/genai/rag/data/retrieval-workbench.json" /%}
+
+The useful `top_k` is a system parameter, not a universal constant. Increasing it can improve recall while reducing precision, increasing reranker cost, and sending redundant passages into context.
+
+### Read the ranking as a contract
+
+- **Candidate recall:** Did at least one authorized chunk for each required fact enter the pool?
+- **Ranking precision:** How many selected chunks are actually useful for this question?
+- **Diversity:** Did near-duplicate passages displace a different source or second required fact?
+- **Latency:** Can candidate search and reranking stay inside the online budget at peak load?
+- **Traceability:** Can an operator reproduce the ranking from query, identity, index version, and model versions?
+{% /section-card %}
+
+{% section-card %}
+## Assemble context as a bounded evidence packet
+
+The model should receive a small, explicit evidence packet rather than a raw dump of the nearest chunks. Context assembly decides what is included, how conflicts are represented, and whether the request has enough support to answer.
+
+{% metric-strip %}
+{% metric value="100%" label="Claims traced" detail="Every factual claim maps to one or more source spans" tone="blue" /%}
+{% metric value="0" label="Unauthorized chunks" detail="Access policy runs before retrieval and again before prompt assembly" tone="green" /%}
+{% metric value="1" label="Index version" detail="One reproducible snapshot is recorded for the request" tone="violet" /%}
+{% /metric-strip %}
+
+### Budget evidence deliberately
+
+1. Reserve tokens for system instructions, the user's question, answer structure, and output.
+2. Deduplicate overlapping chunks and prefer source diversity when independent corroboration matters.
+3. Keep source IDs and exact spans adjacent to the text they identify.
+4. Surface conflicts instead of silently choosing the highest-scoring passage.
+5. Put retrieved text inside an explicit untrusted-data boundary; never let document instructions redefine system policy.
+{% /section-card %}
+
+{% section-card %}
+## Decide whether the evidence permits an answer
+
+Change the evidence scenario, token budget, and answer policy. The gate shows how support coverage, contradictory sources, and poisoned passages alter the safe response.
+
+{% interactive-block id="genai/rag-evidence-gate-lab" dataFile="/api/content/genai/rag/data/evidence-gate.json" /%}
+
+Abstention is a valid product outcome. The system should ask a clarifying question, return the evidence it found, or route to a human when required claims remain unsupported.
+
+{% code-block file="/api/content/genai/rag/code/evidence-gate.py" language="python" title="Claim-Level Evidence Gate" /%}
+{% /section-card %}
+
+{% section-card %}
+## Give generation a narrow contract
+
+The generator's job is to transform approved evidence into a useful response, not to repair retrieval invisibly.
+
+### Require these outputs
+
+- A direct answer scoped to the user's question.
+- Claim-level citations that point to stable source IDs and spans.
+- Explicit uncertainty when evidence is incomplete, stale, or conflicting.
+- A refusal or escalation when policy forbids the request or support is below the product threshold.
+
+### Do not delegate these controls to prompting
+
+- Tenant and document authorization.
+- Source allowlisting, malware scanning, and integrity checks.
+- Token and cost budgets.
+- Citation validation against returned spans.
+- Tool execution or side-effect approval.
+
+Prompt instructions can guide model behavior, but deterministic application code must enforce identity, access, budgets, and post-generation checks.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the pipeline one boundary at a time
+
+An end-to-end answer score cannot explain whether a regression came from parsing, retrieval, evidence assembly, or generation. Keep a labeled evaluation set with expected sources, answerable and unanswerable questions, authorization cases, and known adversarial documents.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Retrieval evaluation" eyebrow="Did evidence arrive?" icon="search" tone="cyan" %}
+Measure recall at `k`, precision at `k`, reciprocal rank, ranking quality, source diversity, filter correctness, and latency by query slice.
+{% /concept-card %}
+{% concept-card title="Answer evaluation" eyebrow="Was evidence used?" icon="check" tone="green" %}
+Measure claim support, citation correctness, completeness, relevance, abstention quality, safety, latency, and cost using the exact retrieved packet.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Slice the results before averaging
+
+- Exact-match identifiers versus conceptual questions.
+- Single-hop versus multi-source questions.
+- Fresh versus stale knowledge.
+- Answerable, ambiguous, conflicting, and unanswerable prompts.
+- Common-language versus low-resource or domain-specific phrasing.
+- Public, tenant-private, and user-private authorization scopes.
+
+Track both offline quality and online behavior. Production traces should include query class, redacted query fingerprint, identity scope, index version, candidate IDs and scores, reranker version, selected evidence, model version, citations, decision, latency, and cost.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Treat retrieved documents as untrusted input
+
+RAG adds a data supply chain and a prompt-injection path. A malicious or compromised document can rank highly, attempt to override instructions, or expose data from another tenant.
+
+### Protect the knowledge path
+
+- Approve sources and record provenance, uploader, content hash, parser version, and index version.
+- Scan active content, hidden text, markup, attachments, and suspicious encodings before indexing.
+- Quarantine failed documents and make deletion propagate through chunks, embeddings, caches, and replicas.
+- Keep credentials and raw secrets out of source documents and observability payloads.
+
+### Protect the answer path
+
+- Apply row- or document-level authorization before vector search and recheck selected chunks before prompt assembly.
+- Delimit retrieved text as data, not instructions, and isolate untrusted content from privileged tools.
+- Detect cross-tenant citations, unsupported claims, suspicious output links, and policy violations before response.
+- Red-team poisoning, indirect prompt injection, context flooding, Unicode obfuscation, and source-replacement scenarios.
+
+Retrieval reduces neither prompt-injection risk nor the need for output validation. It changes where untrusted text enters the system.
+{% /section-card %}
+
+{% section-card %}
+## Operate the index like a production database
+
+### Release and freshness
+
+- Build immutable index snapshots and promote them atomically after evaluation.
+- Support incremental ingestion, but periodically reconcile source inventory against indexed inventory.
+- Define freshness service levels per source and alert on ingestion lag, parser failures, embedding backlogs, and stale snapshots.
+- Keep rollback compatibility across parser, chunker, embedding, index, and reranker versions.
+
+### Reliability and capacity
+
+- Budget latency separately for query rewriting, retrieval, reranking, prompt assembly, generation, and verification.
+- Bound candidate counts, context tokens, retries, and concurrent generation.
+- Cache only when the key includes authorization scope, index version, query transformation, and retrieval configuration.
+- Degrade explicitly: skip an optional reranker, use a known-good snapshot, or return search results without generation.
+
+### Incident evidence
+
+- Preserve enough metadata to reproduce one answer without logging sensitive source text unnecessarily.
+- Provide kill switches for a source, index snapshot, embedding model, reranker, generator, or tenant.
+- Revoke poisoned content from every derived store and invalidate affected caches.
+- Replay a fixed evaluation set before restoring traffic.
+{% /section-card %}
+
+{% section-card %}
+## Review the design through failure questions
+
+- What happens when the relevant document was never ingested?
+- What happens when the right chunk ranks below `top_k`?
+- What happens when two authorized sources disagree?
+- What happens when a retrieved document contains instructions for the model?
+- What happens when the user can name a document but cannot read it?
+- What happens when an index promotion partially fails?
+- What happens when retrieval is healthy but generation stops citing the packet?
+- What evidence lets an operator reproduce and revoke one bad answer?
+{% /section-card %}
+
+{% section-card %}
+## Sources and further reading
+
+- [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401)
+- [Dense Passage Retrieval for Open-Domain Question Answering](https://arxiv.org/abs/2004.04906)
+- [ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction](https://arxiv.org/abs/2004.12832)
+- [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172)
+- [OWASP RAG Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/RAG_Security_Cheat_Sheet.html)
+- [NIST AI 600-1: Generative AI Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/rag/quiz/rag-production-review.json" lessonSlug="rag" /%}

@@ -1,0 +1,307 @@
+---
+registryId: case-study-edge-ai-deployment
+---
+
+{% section-card tone="intro" %}
+## What is edge AI deployment?
+
+Edge AI deployment runs machine-learning inference where data is created: on a
+phone, camera, sensor, vehicle, or nearby gateway. The critical request does not need
+to cross the internet before the product can make a decision.
+
+In plain language: a cloud model is only a starting point. The production system must
+compile an appropriate model for each hardware tier, keep a trusted copy available
+offline, and update millions of devices without turning one bad release into a
+fleet-wide failure.
+
+This case study uses a mobile-camera feature as the concrete scenario. It designs a
+privacy-first inference path for **10M active devices** while accounting for IoT-class
+hardware, battery limits, unreliable connectivity, and staged model delivery.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Start with the on-device promise
+
+The product contract determines the architecture. A camera feature should remain
+responsive and useful during an outage, and raw frames should not leave the device
+merely because inference is easier in the cloud.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Respond while the moment is current" eyebrow="Latency" icon="gauge" tone="blue" %}
+Keep critical mobile inference below **50ms**. Network variance cannot consume a budget
+that belongs to capture, preprocessing, model execution, and post-processing.
+{% /concept-card %}
+
+{% concept-card title="Keep sensitive input local" eyebrow="Privacy" icon="lock" tone="green" %}
+Process raw pixels and sensor data on device. Export only explicitly approved,
+privacy-reduced telemetry rather than defaulting to raw-data collection.
+{% /concept-card %}
+
+{% concept-card title="Continue through an outage" eyebrow="Availability" icon="shield" tone="violet" %}
+The last-known-good model, preprocessing code, and product fallback must remain usable
+without the control plane or an update connection.
+{% /concept-card %}
+
+{% concept-card title="Fit the actual hardware" eyebrow="Efficiency" icon="cpu" tone="amber" %}
+Target less than **50MB** for a primary mobile model, less than **200MB** peak runtime
+memory, and less than **5% battery drain per hour** for continuous workloads.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% metric-strip %}
+{% metric value="10M" label="Active devices" detail="A release is a distributed-systems event" tone="blue" /%}
+{% metric value="1B" label="Daily inferences" detail="About 100 decisions per active device" tone="violet" /%}
+{% metric value="1,000+" label="Hardware profiles" detail="Operators and accelerators vary by tier" tone="amber" /%}
+{% metric value="99.9%" label="Offline availability" detail="The local path owns the product promise" tone="green" /%}
+{% /metric-strip %}
+
+{% callout variant="info" %}
+### Core invariant
+
+The currently active local model must remain complete, compatible, and callable until
+a replacement has been downloaded, authenticated, verified, and proven healthy.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Place the model against real constraints
+
+Model choice and execution location are one decision. A larger model can improve task
+quality, but it also changes runtime memory, accelerator time, battery use, privacy,
+and offline behavior. Use the lab to find configurations that satisfy the whole
+contract rather than one benchmark.
+
+{% interactive-block id="case-studies/edge-ai-deployment-placement-lab" /%}
+{% /section-card %}
+
+{% accordion defaultOpen="architecture" %}
+
+{% accordion-item id="architecture" title="1. Separate the inference path from the control plane" %}
+
+## The local path serves users; the control plane manages change
+
+The synchronous path should contain only the work needed to transform sensor input
+into a product decision. Model optimization, rollout coordination, telemetry analysis,
+and federated aggregation belong outside that latency budget.
+
+{% system-flow title="On-device camera decision path" caption="Every stage needed for the immediate result remains on the device. Cloud connectivity can improve and update the system, but it is not required for one inference." %}
+{% system-node title="Capture and buffer" eyebrow="Input" icon="camera" tone="cyan" %}
+Bound the frame buffer, select the useful region, and discard data that the feature
+does not need.
+{% /system-node %}
+{% system-node title="Preprocess locally" eyebrow="Features" icon="settings" tone="blue" %}
+Resize, normalize, and transform the input exactly as expected by the compiled model.
+{% /system-node %}
+{% system-node title="Run the device model" eyebrow="Inference" icon="cpu" tone="violet" %}
+Use the compatible CPU, GPU, NPU, or DSP execution provider chosen for this hardware
+tier.
+{% /system-node %}
+{% system-node title="Apply the product decision" eyebrow="Output" icon="sparkles" tone="green" %}
+Check confidence, apply business rules, render the feature, and queue optional
+privacy-safe signals for later synchronization.
+{% /system-node %}
+{% /system-flow %}
+
+The asynchronous control plane has different responsibilities:
+
+- **Model build plane**
+  - Quantizes, prunes, distills, converts, and signs hardware-specific artifacts.
+  - Benchmarks latency, memory, power, supported operators, and task quality per tier.
+- **Fleet control plane**
+  - Maps device capability to compatible artifacts and rollout cohorts.
+  - Delivers deltas, records activation health, pauses promotion, and coordinates rollback.
+- **Learning and observability plane**
+  - Aggregates privacy-reduced crash, latency, thermal, and quality signals.
+  - Detects drift by model version and hardware profile without placing telemetry in the critical path.
+
+{% callout variant="tip" %}
+Cloud inference may still be useful for an optional high-quality enhancement. It must
+not silently become the fallback for a feature whose contract promises offline use or
+local privacy.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="scale" title="2. Turn fleet size into delivery and telemetry budgets" %}
+
+## A small per-device cost becomes a large fleet event
+
+The useful calculation is not only model size. Multiply every artifact, retry, and
+telemetry record by the eligible cohort, then budget for devices that reconnect in
+bursts after hours or days offline.
+
+{% metric-strip %}
+{% metric value="8TB" label="One 0.8MB delta" detail="Across 10M eligible devices before retries" tone="green" /%}
+{% metric value="340TB" label="One 34MB full model" detail="A full-fleet replacement before CDN overhead" tone="rose" /%}
+{% metric value="10GB/day" label="Minimal telemetry" detail="At 1KB per active device per day" tone="blue" /%}
+{% metric value="500K" label="Retries at 5%" detail="Why jitter and cohort pacing matter" tone="amber" /%}
+{% /metric-strip %}
+
+Plan capacity around these behaviors:
+
+- **Reconnect bursts:** devices should add jitter and use resumable downloads rather than synchronizing immediately.
+- **Regional concentration:** CDN and object-storage egress must tolerate cohorts that are not geographically uniform.
+- **Compatibility fan-out:** one logical model version may compile into many artifacts for different operators and chipsets.
+- **Telemetry sampling:** aggregate counters and sketches usually answer fleet-health questions more cheaply than raw event streams.
+
+{% callout variant="warn" %}
+A 1% canary limits product blast radius, but it does not automatically limit delivery
+load. Targeting errors, retry loops, or a missing compatibility filter can still send
+an artifact to the wrong devices repeatedly.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="optimization" title="3. Optimize a model without hiding quality loss" %}
+
+## Compression is a release decision, not a file-conversion step
+
+Optimization succeeds only when the compiled artifact retains the product behavior
+that matters. Validate the full preprocessing and post-processing pipeline, not just a
+standalone model benchmark.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Quantize precision" eyebrow="Memory and compute" icon="gauge" tone="blue" %}
+INT8 commonly reduces weight storage about fourfold compared with FP32 and can unlock
+specialized accelerator kernels. INT4 can reduce further, but operator support and
+task-specific quality require direct measurement.
+{% /concept-card %}
+
+{% concept-card title="Remove unnecessary work" eyebrow="Architecture" icon="scissors" tone="violet" %}
+Structured pruning, smaller inputs, efficient operators, and hardware-aware neural
+architecture search reduce work that the runtime can actually skip.
+{% /concept-card %}
+
+{% concept-card title="Distill product behavior" eyebrow="Quality" icon="sparkles" tone="green" %}
+Train a smaller student from a stronger teacher, then compare the student on slices
+that represent low light, motion, device sensors, and other real edge conditions.
+{% /concept-card %}
+{% /concept-grid %}
+
+For every hardware tier, make the release report answer:
+
+1. Does the artifact load with the available execution provider and supported operators?
+2. What are cold-start and warm p50/p95 latency under realistic thermal conditions?
+3. What are peak memory and sustained battery costs, not only average CPU use?
+4. Which quality slices regress relative to the cloud teacher and current production model?
+5. What simpler model or non-ML behavior takes over when the primary model cannot run?
+{% /accordion-item %}
+
+{% accordion-item id="offline" title="4. Design offline behavior as a complete state machine" %}
+
+## Offline-first means more than caching a model file
+
+The local runtime needs enough state and policy to continue making safe decisions
+when it cannot authenticate with, report to, or download from the control plane.
+
+- **Input state:** bound camera and sensor buffers so an outage cannot create unbounded local storage.
+- **Inference state:** keep the active artifact, tokenizer or feature transforms, labels, and confidence policy versioned together.
+- **Output state:** distinguish immediate product output from optional records waiting to synchronize.
+- **Update state:** download into an inactive slot, resume partial transfers, verify the complete artifact, and switch atomically.
+- **Recovery state:** retain a last-known-good artifact and a non-ML fallback when storage or hardware health is degraded.
+
+When connectivity returns, synchronization should be opportunistic and bounded:
+
+1. Refresh security and rollout policy before requesting a model.
+2. Resume the smallest eligible delta with randomized backoff.
+3. Upload only approved aggregate signals from a priority queue.
+4. Resolve conflicts with product-specific rules rather than assuming last-write-wins is always correct.
+5. Delete expired local data according to a documented retention policy.
+{% /accordion-item %}
+
+{% accordion-item id="privacy" title="5. Learn from the fleet without collecting raw input by default" %}
+
+## Privacy controls shape both observability and model improvement
+
+On-device inference reduces data movement, but it does not make the system private by
+itself. Logs, cached inputs, model updates, identifiers, and diagnostic uploads can
+still reveal sensitive behavior.
+
+- **Minimize collection:** emit versioned counters for latency, crashes, thermal throttling, confidence bands, and update state.
+- **Protect transport and artifacts:** sign model manifests, verify hashes, encrypt delivery, and attest supported devices where the threat model requires it.
+- **Bound retention:** encrypt sensitive local state and delete it when the feature no longer needs it.
+- **Aggregate before analysis:** use sampling, thresholded reporting, or differential privacy when individual device signals are unnecessary.
+- **Treat federated learning as a system:** select eligible devices, cap local work, tolerate dropouts, use secure aggregation, and evaluate the resulting global model independently.
+
+Federated learning can avoid centralizing raw training examples, but gradients and
+updates are not automatically anonymous. Privacy budgets, secure aggregation, device
+selection, poisoning defenses, and user controls remain explicit design decisions.
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="6. Record the decisions and their escape hatches" %}
+
+## Choose from the product contract, then name when the choice breaks
+
+- **Tiered models instead of one universal artifact**
+  - Gains broader hardware coverage and better use of accelerators.
+  - Costs more build, validation, storage, and rollout complexity.
+  - Revisit when most active devices converge on a compatible hardware baseline.
+- **On-device primary inference with optional cloud enhancement**
+  - Protects latency, privacy, and offline behavior for the critical feature.
+  - Limits primary-model size and makes hardware-specific optimization mandatory.
+  - Route to cloud only when the user benefit is optional and the data policy allows it.
+- **Delta delivery with a retained rollback slot**
+  - Reduces bandwidth and keeps a complete current artifact available during failure.
+  - Uses extra storage and requires atomic activation logic.
+  - Fall back to a full signed artifact when the delta base does not match exactly.
+- **Staged rollout instead of fleet-wide activation**
+  - Bounds compatibility, crash, latency, and quality regressions to a cohort.
+  - Slows promotion and requires representative canaries plus trustworthy health gates.
+  - Pause automatically when any guardrail crosses its predefined threshold.
+- **Privacy-reduced telemetry instead of raw event collection**
+  - Lowers data exposure and fleet bandwidth.
+  - Makes debugging rare device-specific failures harder.
+  - Add consented, time-bounded diagnostics rather than weakening the default for everyone.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% section-card accent="green" %}
+## Pressure-test offline updates and rollback
+
+The update mechanism is part of availability. A device that worked before an update
+should not lose its only complete model because a download stopped, a signature failed,
+or the candidate passed technical checks but regressed product quality.
+
+{% interactive-block id="case-studies/edge-ai-deployment-resilience-lab" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Close the edge deployment loop
+
+Optimization, local validation, fleet control, and privacy-safe learning form one
+release loop. Each stage produces evidence required by the next stage.
+
+{% process-flow %}
+{% process-step number="1" title="Build per hardware tier" label="Compile" %}
+
+Quantize, prune, convert, sign, and package compatible model-plus-runtime bundles.
+
+{% /process-step %}
+{% process-step number="2" title="Prove the local contract" label="Validate" %}
+
+Test cold and warm latency, memory, battery, task quality, offline state, and fallback behavior on representative devices.
+
+{% /process-step %}
+{% process-step number="3" title="Promote through cohorts" label="Control" %}
+
+Start with employees or labs, then 1%, 10%, and broader cohorts while automatic health gates protect promotion.
+
+{% /process-step %}
+{% process-step number="4" title="Learn and recover" label="Operate" %}
+
+Aggregate approved telemetry by version and hardware tier, detect drift, roll back quickly, and feed evidence into the next release.
+
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="tip" %}
+### Minimum release evidence
+
+- Compatibility manifest for every targeted device profile
+- Signed artifact and reproducible model version
+- Slice-level quality comparison against the current production model
+- Offline, interrupted-download, storage-pressure, and rollback tests
+- Cohort health gates for crashes, latency, thermal cost, and product quality
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/case-studies/edge-ai-deployment/quiz/edge-ai-deployment.json" lessonSlug="edge-ai-deployment" title="Review the Edge Deployment" /%}

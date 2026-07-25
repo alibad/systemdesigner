@@ -1,0 +1,36 @@
+{
+  "title": "Follow evidence through a Prometheus deployment",
+  "description": "Switch paths to separate discovery and scraping, local storage, rule evaluation, alert delivery, and asynchronous remote write. Inspect a node for its exact responsibility.",
+  "nodes": [
+    {"id":"discovery","label":"Service discovery","eyebrow":"Target inventory","detail":"Produces target labels and addresses. Relabeling decides which discovered targets become scrape targets and which labels are retained.","kind":"allocator","tone":"blue","x":8,"y":18},
+    {"id":"target","label":"Target or exporter","eyebrow":"Metrics endpoint","detail":"Exposes current metric families over HTTP. It owns instrumentation quality, label bounds, and scrape response time.","kind":"service","tone":"cyan","x":8,"y":78},
+    {"id":"scrape","label":"Scrape engine","eyebrow":"Prometheus server","detail":"Selects targets, performs timed scrapes, applies metric relabeling, records scrape health, and appends accepted samples.","kind":"analytics","tone":"violet","x":30,"y":48},
+    {"id":"tsdb","label":"Local TSDB + WAL","eyebrow":"Single-node storage","detail":"Stores the mutable head and persisted blocks used by local queries and rules. The WAL protects recent local writes across restart but is not clustered replication.","kind":"database","tone":"green","x":52,"y":22},
+    {"id":"rules","label":"Rule engine","eyebrow":"PromQL evaluation","detail":"Evaluates recording and alerting rules on intervals. Recording results return to the TSDB; active alerts are sent to configured Alertmanagers.","kind":"analytics","tone":"amber","x":52,"y":76},
+    {"id":"remote-queue","label":"Remote-write queue","eyebrow":"WAL-backed sender","detail":"Reads WAL samples into sharded queues, batches requests, retries failures, and adds memory, CPU, and network pressure.","kind":"stream","tone":"violet","x":75,"y":22},
+    {"id":"alertmanager","label":"Alertmanager","eyebrow":"Notification policy","detail":"Groups, deduplicates, routes, silences, and inhibits alerts. It does not evaluate the alert's PromQL expression.","kind":"security","tone":"rose","x":75,"y":76},
+    {"id":"remote-store","label":"Remote storage","eyebrow":"External retention","detail":"Accepts remote-write batches under its own durability, query, tenancy, and availability contract.","kind":"database","tone":"blue","x":94,"y":22},
+    {"id":"receiver","label":"On-call receiver","eyebrow":"Human or automation","detail":"Receives a routed notification and needs enough context, ownership, and runbook evidence to act.","kind":"client","tone":"green","x":94,"y":76}
+  ],
+  "edges": [
+    {"id":"discover","from":"discovery","to":"scrape","label":"target set"},
+    {"id":"scrape-request","from":"scrape","to":"target","label":"GET /metrics"},
+    {"id":"scrape-response","from":"target","to":"scrape","label":"samples"},
+    {"id":"append-local","from":"scrape","to":"tsdb","label":"accepted samples"},
+    {"id":"rule-query","from":"tsdb","to":"rules","label":"PromQL input"},
+    {"id":"record-result","from":"rules","to":"tsdb","label":"recording series","via":{"x":62,"y":48}},
+    {"id":"send-alert","from":"rules","to":"alertmanager","label":"active alert","mode":"async"},
+    {"id":"notify","from":"alertmanager","to":"receiver","label":"grouped notification","mode":"async"},
+    {"id":"queue-remote","from":"tsdb","to":"remote-queue","label":"WAL samples","mode":"async"},
+    {"id":"send-remote","from":"remote-queue","to":"remote-store","label":"batched write","mode":"async"}
+  ],
+  "scenarios": [
+    {"id":"healthy-scrape","label":"Healthy scrape","summary":"Discovery supplies an eligible target, the HTTP scrape succeeds, and accepted samples enter the local TSDB.","activeEdges":["discover","scrape-request","scrape-response","append-local"],"focusNode":"scrape","result":"Prometheus records the target's samples and an up value of 1 for the successful scrape. Local queries and later rule evaluations can use the new samples."},
+    {"id":"target-down","label":"Target down","summary":"The target is discovered but the scrape request times out or returns an invalid response.","activeEdges":["discover","scrape-request"],"failedNodes":["target"],"degradedNodes":["scrape"],"focusNode":"target","result":"Prometheus records up as 0 for the failed scrape and does not receive the target's application samples. Existing stored history remains queryable."},
+    {"id":"rule-to-page","label":"Rule to page","summary":"A rule reads local series, remains active for its configured duration, and sends a firing alert for Alertmanager to route.","activeEdges":["rule-query","send-alert","notify"],"focusNode":"alertmanager","result":"Prometheus owns detection state; Alertmanager owns grouping and notification policy. Both paths need independent health checks."},
+    {"id":"slow-rule","label":"Slow rule group","summary":"A rule group has not finished before its next scheduled evaluation.","activeEdges":["rule-query"],"degradedNodes":["rules"],"focusNode":"rules","result":"Prometheus skips the next evaluation of that group until the current evaluation completes or times out, creating a gap in recorded or alert evidence."},
+    {"id":"alertmanager-down","label":"Alertmanager down","summary":"PromQL alert state is firing, but the configured Alertmanager cannot accept the alert update.","activeEdges":["rule-query","send-alert"],"failedNodes":["alertmanager"],"focusNode":"alertmanager","result":"Detection remains visible in Prometheus, but grouping and receiver delivery are unavailable. Prometheus periodically resends alert state, so recovery must be tested end to end."},
+    {"id":"remote-write-down","label":"Remote write down","summary":"Local ingestion continues while the remote endpoint rejects or cannot receive batches.","activeEdges":["append-local","queue-remote","send-remote"],"failedNodes":["remote-store"],"degradedNodes":["remote-queue"],"focusNode":"remote-queue","result":"The remote-write queue retries and consumes resources. If the endpoint remains unavailable beyond the retained WAL window, unsent remote samples can be lost even though local data was ingested."},
+    {"id":"local-disk-loss","label":"Local disk loss","summary":"The Prometheus node loses its unsupported or failed local storage volume.","activeEdges":["append-local"],"failedNodes":["tsdb"],"degradedNodes":["rules"],"focusNode":"tsdb","result":"Local query history and rule inputs are unavailable because the built-in TSDB is not clustered or replicated. Recovery depends on tested snapshots, another autonomous replica, or the separately designed remote-storage contract."}
+  ]
+}

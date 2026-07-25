@@ -1,0 +1,572 @@
+---
+registryId: practice-ride-sharing
+---
+
+{% section-card tone="intro" %}
+## What is a ride-sharing system?
+
+**A ride-sharing system coordinates a time-sensitive marketplace between riders and drivers.**
+It receives fresh driver locations, finds eligible nearby supply, commits one
+driver to one trip, guides both parties through a shared trip lifecycle, and settles the
+fare after the ride.
+
+The hard part is not drawing cars on a map. Location data is fast, approximate, and
+short-lived; trip, payment, and safety decisions are durable business facts. The design
+must use each kind of consistency deliberately.
+
+The core invariant is: **one active accepted trip per rider and driver, with one durable owner for every accepted transition.** A stale map
+can recover. Conflicting trip ownership cannot be exposed to users.
+
+{% callout variant="info" %}
+This walkthrough uses explicit interview assumptions rather than production claims. If
+you need a foundation first, review [ACID transactions](/fundamentals/acid-properties),
+[message queues](/fundamentals/message-queues), and the
+[system design interview framework](/fundamentals/system-design-framework).
+{% /callout %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+### Start with the marketplace contract
+
+A useful first version supports one rider, one driver, and one direct trip inside a
+single operating region. Ask which user-visible promises matter before choosing a geo
+index, stream, or database.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Core rider and driver actions" eyebrow="Functional" icon="route" tone="blue" %}
+- A rider requests an immediate trip, sees an estimate, and cancels when policy allows.
+- An available driver publishes location, receives offers, and accepts or declines.
+- Both parties see assignment, arrival, pickup, in-trip progress, and completion.
+- The system calculates the final fare, starts payment, and issues a receipt.
+{% /concept-card %}
+
+{% concept-card title="Service promises" eyebrow="Non-functional" icon="gauge" tone="green" %}
+- Return an initial match outcome within 5 seconds at P95 in a healthy region.
+- Keep active-trip state available during failures even if new matching is paused.
+- Bound location age; never present an indefinitely stale driver as available.
+- Make trip commands and payment attempts safe to retry.
+{% /concept-card %}
+
+{% concept-card title="Safety and privacy boundaries" eyebrow="Guardrails" icon="shield" tone="rose" %}
+- Isolate urgent safety reports from ordinary notification and payment capacity.
+- Restrict precise-location access by role, purpose, region, and retention policy.
+- Preserve auditable trip and safety events without retaining every raw coordinate forever.
+- Minimize exposed contact and payment data through tokenization and scoped access.
+{% /concept-card %}
+
+{% concept-card title="First-version boundary" eyebrow="Out of scope" icon="boxes" tone="neutral" %}
+- No scheduled rides, shared rides, or multi-stop route optimization.
+- No driver repositioning model or long-term demand forecasting.
+- No globally roaming trip that changes its authoritative region mid-ride.
+- No in-house card network, maps engine, or emergency-response organization.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Resolve the questions that change the architecture
+
+1. **How many drivers are concurrently online?** Daily active drivers do not all send
+   location at once, so concurrency determines stream load.
+2. **How fresh must an offer be?** A four-second update interval does not imply every
+   indexed point is four seconds old; ingestion delay, disconnects, and retries add age.
+3. **Who owns a trip?** Choose one authoritative operating region from the pickup area
+   and keep ownership stable through completion.
+4. **How are offers sent?** Sequential offers reduce contention but can increase match
+   time; small bounded batches improve latency but create acceptance races.
+5. **What may degrade?** New estimates and matches may pause. Active-trip recovery and
+   the safety path require stricter continuity.
+
+{% callout variant="tip" %}
+State the distinction explicitly: location is a hint used to choose candidates; an
+atomic trip claim is the decision that creates ownership.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate geospatial and dispatch scale" %}
+
+### Use concurrency and peaks, not only daily totals
+
+Assume **10 million trips per day**, **2 million concurrently online drivers** at peak,
+a **four-second location interval**, and a **10x peak-to-average trip multiplier**. The
+numbers are a model to stress, not a claim about a specific company.
+
+{% metric-strip %}
+{% metric value="500K/s" label="Peak location updates" detail="2M online drivers / 4 seconds" tone="cyan" /%}
+{% metric value="60 MB/s" label="Raw location ingress" detail="500K updates/s x 120 modeled bytes" tone="blue" /%}
+{% metric value="116/s" label="Average trip creation" detail="10M trips / 86,400 seconds" tone="green" /%}
+{% metric value="~1.2K/s" label="Planned peak matches" detail="Average rounded up with a 10x peak factor" tone="violet" /%}
+{% /metric-strip %}
+
+### Expose the coupled capacity decisions
+
+Location cadence controls write pressure. Search expansion and local supply density
+control candidate pressure. Change both sides of the model and identify which stage
+crosses its headroom target first.
+
+{% interactive-block
+   id="practice/ride-sharing-dispatch-capacity-lab"
+   dataFile="/api/content/practice/ride-sharing/data/dispatch-capacity-model.json" /%}
+
+### Translate arithmetic into architecture
+
+- **Location stream:** `online drivers / update interval` gives ingress events per
+  second. At the modeled peak, one sustained hour is about 216 GB of raw payload before
+  replication, indexes, and protocol overhead.
+- **Geo-index memory:** size the concurrently available set and object overhead, not all
+  historical driver accounts. Benchmark the actual representation and account for skew.
+- **Candidate work:** one hexagonal `k`-ring contains `1 + 3k(k + 1)` cells before edge
+  cases. Stop expanding once enough fresh, eligible candidates exist.
+- **History retention:** a 24-hour worst-case upper bound at sustained peak is about
+  5.18 TB raw. Real sizing needs the traffic duty cycle, compression, sampling, legal
+  requirements, and replica count.
+- **Network fan-out:** rider and driver live updates are much smaller than broadcasting
+  every driver to every client. Publish only trip-scoped or viewport-scoped changes.
+
+{% callout variant="warn" %}
+Do not divide total registered or daily active drivers by the update interval. Only
+concurrently online sessions produce the peak location stream.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### Sketch the two critical paths first
+
+The location path continuously refreshes an expendable regional view. The dispatch path
+reads that view, computes candidates, and then commits one durable assignment. Keeping
+these paths separate prevents telemetry volume from turning every trip transition into a
+high-write transaction.
+
+{% callout variant="info" %}
+Use the whiteboard before reading the reference. Show regional ownership, the hot
+location index, the durable trip store, an event outbox, and a safety path that does not
+depend on payment or ordinary notifications.
+{% /callout %}
+
+{% design-challenge
+   challengeId="ride-sharing"
+   title="Design the regional dispatch and trip path"
+   prompt="Two million drivers may be online while riders need a match outcome within five seconds. Show sequenced location ingestion, bounded geo search, ETA scoring, one atomic driver claim, durable trip events, payment recovery, and an isolated safety workflow." /%}
+
+{% system-flow title="Hot location path" caption="The index is a regional, replaceable projection. Sequence and freshness prevent old packets and disconnected drivers from becoming candidates." %}
+{% system-node title="Driver app" eyebrow="Publish" icon="map-pin" tone="cyan" %}
+Send driver ID, coordinates, event time, monotonic sequence, accuracy, heading, and
+availability lease renewal.
+{% /system-node %}
+{% system-node title="Regional ingest" eyebrow="Validate" icon="radio" tone="blue" %}
+Authenticate, rate-limit, reject impossible or old updates, and partition the stream by
+driver ID.
+{% /system-node %}
+{% system-node title="Location projector" eyebrow="Order" icon="activity" tone="violet" %}
+Consume one driver's updates in order, reject lower sequences, and move the driver
+between geo cells.
+{% /system-node %}
+{% system-node title="Hot geo index" eyebrow="Serve" icon="search" tone="green" %}
+Return nearby available drivers with update age and vehicle attributes; expire abandoned
+leases automatically.
+{% /system-node %}
+{% /system-flow %}
+
+{% system-flow title="Ride request and durable assignment" caption="Candidate discovery may be eventually consistent. Driver ownership changes only through one authoritative conditional write." %}
+{% system-node title="Rider API" eyebrow="Request" icon="smartphone" tone="blue" %}
+Validate pickup, destination, product, rider eligibility, idempotency key, and regional
+ownership.
+{% /system-node %}
+{% system-node title="Dispatch service" eyebrow="Choose" icon="route" tone="amber" %}
+Expand nearby cells, filter stale or ineligible drivers, estimate pickup time, rank, and
+send a bounded offer batch.
+{% /system-node %}
+{% system-node title="Trip service" eyebrow="Commit" icon="shield-check" tone="violet" %}
+Atomically claim rider and driver, advance the trip version, and persist an outbox event.
+{% /system-node %}
+{% system-node title="Async workflows" eyebrow="React" icon="git-branch" tone="green" %}
+Notify clients, update analytics, start payment work, and feed support systems without
+holding the assignment transaction open.
+{% /system-node %}
+{% /system-flow %}
+
+### Define ownership boundaries
+
+- **Regional edge and session gateways** own authentication, admission control, and
+  client connections.
+- **Location service** owns recent position, sequence, freshness, and geo-cell membership.
+- **Dispatch service** owns candidate policy and offer orchestration, but not final trip
+  ownership.
+- **Trip service** owns the authoritative lifecycle, active rider/driver claims, fare
+  inputs, and outbox.
+- **Payment service** owns provider attempts, internal ledger references, reconciliation,
+  and receipts.
+- **Safety service** owns durable urgent reports, escalation state, access audit, and
+  responder handoff.
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Model trip state, storage, and contracts" %}
+
+### Separate authoritative facts from projections
+
+One datastore does not need to serve every access pattern. Choose storage around
+ownership, update rate, query shape, retention, and recovery.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Authoritative relational state" eyebrow="Trips and money" icon="database" tone="blue" %}
+Store trips, active-party claims, state versions, fare inputs, payment references,
+idempotency records, and an outbox. Transactions protect cross-row invariants.
+{% /concept-card %}
+{% concept-card title="Regional hot projections" eyebrow="Location and sessions" icon="map-pin" tone="cyan" %}
+Store current driver position, cell, availability lease, connection route, and update
+sequence. Rebuild these projections from sessions or a retained stream after failure.
+{% /concept-card %}
+{% concept-card title="Append-oriented history" eyebrow="Events and analytics" icon="activity" tone="violet" %}
+Retain trip events, selected location samples, pricing decisions, and audit records in
+streams and analytical storage with purpose-specific retention.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Make the trip state machine monotonic
+
+{% process-flow %}
+{% process-step number="1" title="Request and search" label="REQUESTED -> SEARCHING" %}
+Reserve the rider's active-trip slot, store pickup and product constraints, and start a
+bounded matching deadline.
+{% /process-step %}
+{% process-step number="2" title="Assign and approach" label="DRIVER_ASSIGNED -> ARRIVING" %}
+Commit one driver claim, record the accepted offer, and publish assignment after the
+transaction commits.
+{% /process-step %}
+{% process-step number="3" title="Start and travel" label="IN_PROGRESS" %}
+Require an authorized actor and expected state version. Begin fare inputs and trip-scoped
+tracking without allowing a late cancellation to rewrite history.
+{% /process-step %}
+{% process-step number="4" title="Complete and settle" label="COMPLETED" %}
+Commit immutable completion inputs, then let payment advance through its own pending,
+captured, failed, or reconciled states.
+{% /process-step %}
+{% /process-flow %}
+
+Cancellation is a terminal transition with a reason, actor, timestamp, and policy
+version. It does not delete the prior lifecycle. Payment state must never force a
+completed trip back to `IN_PROGRESS`.
+
+### Enforce one active assignment
+
+The following executable model demonstrates three ideas: condition the claim on an
+expected driver version, store a command result for retry, and emit one outbox event with
+the committed state. A production implementation would perform the state changes and
+idempotency write in one database transaction.
+
+{% code-block
+   file="/api/content/practice/ride-sharing/code/atomic-driver-claim.js"
+   language="javascript"
+   title="Retry-safe atomic driver claim model" /%}
+
+### Design records around access patterns
+
+- `trip`: immutable ID, owner region, rider, driver, product, state, state version,
+  pickup, destination, fare inputs, and lifecycle timestamps.
+- `active_party_claim`: party type plus party ID as a unique key, trip ID, lease/state,
+  and version. Release only through a valid terminal transition.
+- `trip_command`: idempotency key, actor, expected version, request hash, result, and
+  expiry policy.
+- `trip_event_outbox`: event ID, trip ID as ordering key, event type, state version,
+  payload version, and publish status.
+- `driver_location_hot`: driver ID, cell ID, coordinates, accuracy, event time, sequence,
+  and lease expiry.
+- `payment_attempt`: trip-scoped idempotency key, provider reference, amount, currency,
+  status, and reconciliation timestamps.
+
+Partition streams by the entity whose order matters. Driver ID preserves one driver's
+location sequence; trip ID preserves one trip's lifecycle sequence. Apache Kafka's
+[official documentation](https://kafka.apache.org/documentation/) describes ordering as
+a per-partition guarantee, not a global topic order.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep-dive matching, location, payments, and safety" %}
+
+### Match in stages so expensive work stays bounded
+
+{% process-flow %}
+{% process-step number="1" title="Find cells" label="Geo filter" %}
+Map pickup coordinates to a cell and search the pickup cell first. Expand neighboring
+rings only until the candidate budget or deadline is met.
+{% /process-step %}
+{% process-step number="2" title="Reject impossible candidates" label="Eligibility" %}
+Remove stale leases, wrong products, accessibility mismatches, active trips, policy
+blocks, and drivers already holding an offer that cannot overlap.
+{% /process-step %}
+{% process-step number="3" title="Estimate pickup time" label="ETA" %}
+Use road-network travel time for a small candidate set. Straight-line distance is a cheap
+prefilter, not the final pickup estimate.
+{% /process-step %}
+{% process-step number="4" title="Offer and claim" label="Commit" %}
+Send one or a small bounded batch of expiring offers. The first valid conditional claim
+wins; all later accepts receive the committed result.
+{% /process-step %}
+{% /process-flow %}
+
+The score can combine pickup ETA, destination compatibility, driver idle time, product
+rules, and marketplace objectives. Log feature values, policy version, candidate set,
+and rejection reasons so teams can diagnose unfair or unstable outcomes. Do not treat a
+complex optimizer as a substitute for the atomic claim.
+
+### Treat the location stream as a lossy sensor feed
+
+- **Order per driver:** attach a monotonic session sequence; reject lower sequences even
+  when network retries arrive later.
+- **Freshness:** store event time, receive time, and lease expiry. Candidate filtering
+  should use a measured age bound rather than assuming the nominal update interval.
+- **Backpressure:** coalesce queued updates for the same driver because the newest valid
+  position supersedes intermediate points for matching.
+- **Hot-cell skew:** partition with a stable region/cell strategy, isolate event venues,
+  and cap query work before a dense cell dominates one shard.
+- **Recovery:** rebuild hot indexes from active sessions or a short retained stream; do
+  not make raw long-term location history the only recovery source.
+
+Hierarchical cells are an indexing tool, not an exact distance answer. The
+[H3 indexing guide](https://h3geo.org/docs/highlights/indexing/) explains its hierarchy
+and approximate geometric containment, while the
+[Redis GEOSEARCH reference](https://redis.io/docs/latest/commands/geosearch/) documents
+radius and box queries plus their candidate-sensitive complexity. Benchmark the chosen
+implementation with city density and boundary cases.
+
+### Keep pricing, payment, and safety off the assignment transaction
+
+{% tabs %}
+{% tab title="Pricing" %}
+Compute a quote from product, estimated distance/time, fees, and a versioned regional
+marketplace policy. Store the quote inputs and policy version. Smooth zone-level supply
+and demand signals, cap changes by policy, and avoid oscillating the rider price on every
+location event.
+{% /tab %}
+{% tab title="Payment" %}
+Tokenize payment credentials with a provider. Optionally authorize before pickup, then
+commit final fare inputs at completion and capture asynchronously with a stable
+trip-scoped idempotency key. A timeout creates an uncertain payment state to reconcile;
+it does not reverse trip completion. Stripe's official documentation covers
+[idempotent requests](https://docs.stripe.com/api/idempotent_requests) and
+[separate authorization and capture](https://docs.stripe.com/payments/place-a-hold-on-a-payment-method).
+{% /tab %}
+{% tab title="Safety" %}
+Give urgent reports a dedicated authenticated endpoint, durable acknowledgement,
+high-priority workflow, restricted access, immutable audit trail, and accountable human
+handoff. Keep this path independent of matching, ordinary notifications, pricing, and
+payment availability.
+{% /tab %}
+{% /tabs %}
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Scale regions and design recovery" %}
+
+### Make a region the unit of dispatch ownership
+
+Route a pickup to one operating region and keep its trip authority there. Within the
+region, partition hot location and dispatch work by cells or stable cell groups, then
+replicate durable trip state across failure domains. Global services can distribute
+configuration and identity, but a normal match should not require global consensus.
+
+### Explore failures as state transitions
+
+Choose a failure and then select a recovery contract. The result shows whether the
+system preserves one trip owner, bounded location freshness, one intended charge, or an
+independent safety response.
+
+{% interactive-block
+   id="practice/ride-sharing-trip-recovery-lab"
+   dataFile="/api/content/practice/ride-sharing/data/trip-recovery-scenarios.json" /%}
+
+### Define degraded modes before the incident
+
+- **Hot geo index unavailable**
+  - Stop new offers in affected cells or use a strictly bounded last-known projection.
+  - Preserve active-trip state and client reconnect; do not assign from an unbounded
+    stale snapshot.
+- **Matcher overload**
+  - Admit by region and product, reduce candidate caps, stop ring expansion sooner, and
+    return an honest delayed/no-supply result.
+  - Do not let retries multiply work without a request deadline and idempotency key.
+- **Trip database failover**
+  - Fence the old writer before promoting another authority.
+  - Pause new assignments when ownership is uncertain; continue reads and safety intake
+    from known durable state.
+- **Event stream lag**
+  - Keep trip commits available through a transactional outbox.
+  - Let notifications and analytics catch up from durable state; alert on oldest event
+    age and state-version gaps.
+- **Payment provider outage**
+  - Complete trips, mark payment pending, retry with one identity, and reconcile later.
+  - Keep limits and risk policy for riders with unresolved balances.
+- **Safety dependency outage**
+  - Fall back to an independently operated escalation route with durable local evidence.
+  - Page on acknowledgement and responder deadlines, not only HTTP availability.
+
+### Measure user promises and invariants
+
+{% concept-grid columns="3" %}
+{% concept-card title="Dispatch health" icon="gauge" tone="blue" %}
+Track request-to-offer and request-to-assignment latency, no-candidate rate, offer
+acceptance, candidate count, search rings, stale-candidate rejection, and claim conflicts.
+{% /concept-card %}
+{% concept-card title="Trip correctness" icon="shield-check" tone="green" %}
+Track invalid transition attempts, duplicate command suppression, active-party claim
+conflicts, outbox lag, client state-version gaps, and reconciliation repairs.
+{% /concept-card %}
+{% concept-card title="Operational safety" icon="activity" tone="rose" %}
+Track location age, hot-cell skew, regional saturation, payment-pending age, safety-event
+acknowledgement, responder pickup, and recovery drill outcomes.
+{% /concept-card %}
+{% /concept-grid %}
+
+Run drills for duplicate accepts, stale driver leases, a fenced regional failover,
+notification lag, an uncertain payment capture, and an unavailable ordinary queue during
+a safety report. A dashboard cannot prove recovery; a drill can.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+### Defend decisions against the stated workload
+
+{% concept-grid columns="2" %}
+{% concept-card title="Cell index vs spatial tree" eyebrow="Candidate discovery" icon="map" tone="cyan" %}
+Hierarchical cells make bucketing, neighbors, and regional partitioning explicit, but
+need boundary expansion and exact distance/ETA checks. Spatial trees adapt to density but
+add rebalancing and ownership complexity. Choose from measured query and update patterns.
+{% /concept-card %}
+{% concept-card title="Sequential vs batch offers" eyebrow="Matching" icon="users" tone="violet" %}
+Sequential offers reduce races and rejected accepts but add round-trip delay. Small
+parallel batches improve response time but require expiring offers and one atomic winner.
+{% /concept-card %}
+{% concept-card title="Ephemeral index vs durable location log" eyebrow="Telemetry" icon="database" tone="blue" %}
+An ephemeral hot index is cheap to overwrite and rebuild. A retained stream supports
+replay and audit. Keeping every raw point forever increases privacy, storage, and access
+risk without improving current matching.
+{% /concept-card %}
+{% concept-card title="Regional authority vs global writer" eyebrow="Ownership" icon="globe" tone="amber" %}
+Regional authority lowers matching latency and limits failures, but needs explicit trip
+handoff policy. A global writer simplifies uniqueness conceptually while adding a broad
+latency and availability dependency.
+{% /concept-card %}
+{% concept-card title="Strong trip state vs eventual projections" eyebrow="Consistency" icon="shield" tone="green" %}
+Use conditional, durable writes for assignment and lifecycle. Let maps, ETAs,
+notifications, and analytics converge from versioned events because brief display lag is
+repairable.
+{% /concept-card %}
+{% concept-card title="Availability vs bounded refusal" eyebrow="Failure" icon="circle-alert" tone="rose" %}
+Rejecting a new ride during uncertain ownership protects users from conflicting drivers.
+Active trips and safety events deserve higher continuity than new matching or fresh
+pricing.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Alternatives rejected for this target
+
+- **One transactional write for every GPS packet:** ties telemetry throughput to the
+  authoritative trip database and pays strong-consistency cost for replaceable hints.
+- **Broadcast every nearby driver to the rider:** leaks precise supply data, increases
+  client fan-out, and creates a moving consistency problem. Send only the matched driver
+  and product-level estimates.
+- **Run global optimal matching on every request:** may improve a theoretical objective,
+  but exceeds a five-second interaction budget under large, changing candidate sets.
+  Use bounded regional optimization and measure marketplace outcomes.
+- **Let last-write-wins resolve assignment:** hides races by overwriting a promise. Use a
+  conditional claim that returns one winner and a visible conflict.
+- **Make payment success the terminal trip state:** couples mobility truth to a separate
+  financial workflow and makes provider outages corrupt the lifecycle.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Wrap up, risks, and extensions" %}
+
+### Recommended design in one minute
+
+{% process-flow %}
+{% process-step number="1" title="Own by pickup region" label="Route" %}
+Choose one low-latency authority for the trip and avoid global coordination on the normal
+dispatch path.
+{% /process-step %}
+{% process-step number="2" title="Project fresh supply" label="Locate" %}
+Partition sequenced driver updates, reject old packets, and maintain a lease-bound hot
+geo index.
+{% /process-step %}
+{% process-step number="3" title="Bound candidate work" label="Match" %}
+Expand cells progressively, filter cheaply, calculate ETA for a capped set, and send
+expiring offers.
+{% /process-step %}
+{% process-step number="4" title="Commit one owner" label="Claim" %}
+Use a versioned conditional transaction for rider, driver, trip, idempotency result, and
+outbox event.
+{% /process-step %}
+{% process-step number="5" title="Separate side effects" label="Complete" %}
+Advance trip state monotonically while notifications, payment, analytics, and support
+consume versioned events.
+{% /process-step %}
+{% process-step number="6" title="Degrade by priority" label="Recover" %}
+Pause uncertain new matches, preserve active trips, reconcile payments, and isolate the
+safety workflow.
+{% /process-step %}
+{% /process-flow %}
+
+### Highest risks
+
+1. **A hot event cell overloads one geo shard.** Track per-cell update/query skew, split
+   ownership before saturation, and cap candidate scans.
+2. **Two accepts create conflicting assignments.** Prove the conditional claim under
+   concurrency and make conflict rate observable.
+3. **Stale or reordered GPS creates bad offers.** Use sequence, event age, lease expiry,
+   and stale-candidate rejection metrics.
+4. **A regional failover creates two writers.** Fence the former authority before
+   accepting new trip transitions.
+5. **Payment retries create duplicate charges.** Reuse one operation identity and
+   reconcile uncertain provider results against the internal ledger.
+6. **A safety report shares a failed dependency.** Test independent admission, durable
+   acknowledgement, escalation, and restricted audit access.
+
+### Extensions worth rehearsing
+
+- **Scheduled rides**
+  - Add reservation windows, driver commitment policy, and a transition from planned to
+    active regional ownership.
+  - Recalculate supply promises because scheduled demand competes with immediate rides.
+- **Shared rides and multiple stops**
+  - Replace one rider-one trip assumptions with seat capacity, route insertion, changing
+    ETAs, split fares, and per-passenger cancellation policy.
+- **Airport and event queues**
+  - Model geofenced pickup zones, first-in-first-out eligibility, venue-specific staging,
+    and burst admission independent of ordinary nearest-driver matching.
+- **Cross-region trips**
+  - Keep one trip authority or execute an explicit fenced handoff; never let both regions
+    advance the lifecycle concurrently.
+- **Marketplace optimization**
+  - Add measured objectives for pickup time, cancellations, driver idle time, earnings,
+    accessibility, and pricing stability.
+  - Version policies and evaluate outcomes by city, time, product, and protected slices.
+
+### Primary implementation references
+
+- [H3 indexing and hierarchy](https://h3geo.org/docs/highlights/indexing/)
+- [Redis GEOSEARCH command](https://redis.io/docs/latest/commands/geosearch/)
+- [Apache Kafka event ordering and partitions](https://kafka.apache.org/documentation/)
+- [PostgreSQL row-level locking](https://www.postgresql.org/docs/current/explicit-locking.html)
+- [Stripe idempotent requests](https://docs.stripe.com/api/idempotent_requests)
+- [Stripe authorization and capture](https://docs.stripe.com/payments/place-a-hold-on-a-payment-method)
+
+{% callout variant="tip" %}
+End the interview by tracing one driver update, one successful assignment, one duplicate
+accept, and one payment timeout. Name the owner, invariant, and recovery metric at every
+step.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/ride-sharing/quiz/ride-sharing-design-review.json"
+   lessonSlug="practice-ride-sharing"
+   title="Ride Sharing Design Review" /%}

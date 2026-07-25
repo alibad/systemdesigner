@@ -1,0 +1,295 @@
+---
+registryId: practice-google-translate
+---
+
+{% section-card tone="intro" %}
+## What is a machine translation system?
+
+A machine translation system converts meaning from a source language into a target language. Modern systems usually encode the source text, generate target-language tokens, and then verify formatting, terminology, safety, and confidence before returning the result.
+
+The hard part is not replacing words. The system must preserve **meaning, names, numbers, tone, and structure** across language pairs with very different data coverage. For this interview, design a service for **108 languages**, **1 billion requests per day**, a **35,000 request/s peak**, and an interactive target below **200 ms at p95**.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Preserve meaning, not word order" eyebrow="Correctness invariant" icon="shield" tone="blue" %}
+A fluent sentence is wrong when it changes an entity, quantity, negation, instruction, or relationship from the source.
+{% /concept-card %}
+{% concept-card title="Route by language and consequence" eyebrow="Serving decision" icon="route" tone="violet" %}
+Language-pair evidence, domain, latency, and harm determine the model tier and release policy.
+{% /concept-card %}
+{% concept-card title="Abstention is a valid translation result" eyebrow="Degraded mode" icon="activity" tone="green" %}
+When confidence or policy fails, ask for context, queue review, or return no translation instead of hiding uncertainty.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Separate the translation products
+
+The word "translation" hides workloads with different deadlines and failure costs:
+
+- **Interactive text snippets**
+    - Translate short messages and web text in under 200 ms at p95.
+    - Preserve markup, names, numbers, and user-provided terminology.
+- **Live conversation**
+    - Translate partial phrases quickly enough to preserve turn-taking.
+    - Handle interruptions, code-switching, and corrected speech transcripts.
+- **Document jobs**
+    - Preserve sections, tables, lists, links, and reading order.
+    - Use an asynchronous path for long files and richer decoding.
+- **High-consequence domains**
+    - Medical, legal, emergency, and safety instructions need domain policy and specialist review.
+    - A general quality score must not authorize automatic release.
+
+### Ask questions that change the architecture
+
+1. **Which language directions launch first?** Supporting 108 languages creates `108 x 107 = 11,556` directed pairs, but traffic and data are highly concentrated.
+2. **What is the user-visible deadline?** Conversation, web, and document translation should not share one queue or model deadline.
+3. **What context is available?** A sentence alone may not reveal pronouns, formality, domain terms, or the intended meaning of an ambiguous word.
+4. **May content be retained?** Default to ephemeral request processing. Training or feedback reuse requires consent, provenance, minimization, and deletion behavior.
+5. **What happens when quality is uncertain?** Expose confidence and choose a bounded fallback; never silently claim that a pivot or low-resource route is equivalent.
+
+### State the scope explicitly
+
+- Translate text and parsed document segments; speech recognition and voice synthesis are adjacent systems.
+- Support glossary terms and document structure, but do not promise perfect layout reconstruction in the synchronous path.
+- Do not cache private text without a scoped, versioned, policy-aware key and an approved retention policy.
+- Do not automatically release consequential translations solely because the model is fluent.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Traffic, Tokens, and Serving Capacity" %}
+
+
+### Turn the product assumptions into load
+
+Assume 1 billion requests each day and a 3x peak factor:
+
+1. Average traffic = `1,000,000,000 / 86,400` = **about 11,600 requests/s**.
+2. Peak traffic = `11,600 x 3` = **about 34,800 requests/s**.
+3. At 60 source tokens per typical request, the peak input rate is **about 2.1 million tokens/s** before cache hits.
+4. If 30% of eligible public, repeated requests hit a safe cache, inference still receives **about 24,400 requests/s**.
+
+{% metric-strip %}
+{% metric value="35K/s" label="Peak requests" detail="Partition by region, workload, pair, and model tier." tone="blue" /%}
+{% metric value="200 ms" label="Web p95" detail="Detection, routing, inference, verification, and network share one deadline." tone="cyan" /%}
+{% metric value="11,556" label="Directed pairs" detail="Coverage cannot mean one dedicated model for every pair." tone="violet" /%}
+{% metric value="70%" label="Target utilization" detail="Leave room for skew, deployment, and zone loss." tone="green" /%}
+{% /metric-strip %}
+
+### Size the route, not an imaginary average server
+
+Benchmark each model tier with representative sequence lengths and batching deadlines. Capacity depends on the selected workload, pair, model, hardware, and failure headroom; parameter count alone does not produce a defensible fleet estimate.
+
+{% interactive-block id="practice/google-translate-capacity-routing-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the Online Architecture and Model Tiers" %}
+
+
+### Keep the interactive path narrow
+
+{% system-flow title="Machine translation request path" caption="Only work needed for this response stays synchronous. Training, broad evaluation, analytics, and feedback processing remain asynchronous." %}
+{% system-node title="Regional gateway" eyebrow="Protect" icon="shield" tone="blue" %}
+Authenticate, enforce residency and retention policy, rate-limit, and choose the nearest healthy region.
+{% /system-node %}
+{% system-node title="Language and content parser" eyebrow="Understand" icon="languages" tone="cyan" %}
+Detect language, segment text, preserve markup, normalize Unicode, and identify the requested target language.
+{% /system-node %}
+{% system-node title="Policy-aware router" eyebrow="Decide" icon="route" tone="amber" %}
+Select cache, compact multilingual, adapter, quality, pivot, or review paths from workload and pair evidence.
+{% /system-node %}
+{% system-node title="Translation workers" eyebrow="Generate" icon="sparkles" tone="violet" %}
+Batch compatible lengths and deadlines, decode with bounded search, and attach model and vocabulary versions.
+{% /system-node %}
+{% system-node title="Verification gate" eyebrow="Release" icon="check-circle" tone="green" %}
+Restore structure, verify terminology and entities, score confidence, and release, review, or abstain.
+{% /system-node %}
+{% /system-flow %}
+
+### Give each tier a specific job
+
+- **Scoped cache** serves approved repeated phrases only when the source, pair, model, glossary, policy, and normalization versions match.
+- **Compact multilingual model** handles common short requests with quantized weights and aggressive latency bounds.
+- **Language or domain adapter** improves a bounded pair, dialect, or terminology domain without duplicating the entire backbone.
+- **Quality tier** uses richer decoding or reranking for patient document jobs.
+- **Pivot route** expands coverage through an intermediate language, but adds latency and compounds semantic loss.
+- **Specialist review** owns consequential output and uncertain terminology; it is a governed workflow, not a silent retry.
+
+### Make request identity explicit
+
+Every request carries source and target languages, content type, region, tenant or user scope, glossary version, policy version, model version, and idempotency key. The response records the route, confidence, and review state so operators can explain why two requests behaved differently.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive on Data, Terminology, and Fallbacks" %}
+
+
+### Train one shared backbone without flattening every language
+
+Use a multilingual encoder-decoder or decoder model with language identifiers and a shared subword vocabulary. Shared parameters transfer useful structure across related languages, while sampling and adapters prevent high-volume languages from consuming the full training signal.
+
+The training corpus needs more than volume:
+
+- **Parallel text:** licensed sentence or document pairs with alignment confidence and source provenance.
+- **Monolingual text:** supports denoising and back-translation when direct pairs are sparse.
+- **Low-resource sampling:** raises visibility without repeating weak examples until the model memorizes them.
+- **Human corrections:** enter only through consented, deduplicated, privacy-reviewed pipelines.
+- **Evaluation holdouts:** remain isolated by language, direction, dialect, domain, script, and content risk.
+
+### Preserve the units users notice immediately
+
+Tokenization and decoding need explicit checks for:
+
+- names, organizations, product names, and places;
+- numbers, units, currencies, dates, and negation;
+- glossary terms, formality, gender, and dialect;
+- markup boundaries, placeholders, links, and document structure;
+- copied spans that should not be translated at all.
+
+### Use retrieval only when external terminology is required
+
+General translation does not need RAG. A glossary or translation-memory lookup is justified when a customer supplies approved terminology or prior segments. Retrieved text remains scoped data; it does not become an instruction that can override policy.
+
+### Make the fallback decision visible
+
+{% interactive-block id="practice/google-translate-quality-fallback-lab" /%}
+
+{% callout variant="warn" %}
+**A pivot is a fallback, not free quality.**
+
+Translating source -> English -> target may improve coverage, but it doubles generation work and can lose meaning at both boundaries. Mark the route and evaluate it independently.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Quality, Safety, and Launch Gates" %}
+
+
+### Measure meaning from more than one angle
+
+**Offline evaluation**
+
+- COMET or another learned metric estimates semantic quality; BLEU helps compare controlled experiments but is not a complete product metric.
+- Entity, number, negation, glossary, markup, and round-trip tests isolate specific correctness failures.
+- Human reviewers score adequacy, fluency, terminology, and cultural appropriateness using native speakers for the target locale.
+- Adversarial suites cover code-switching, Unicode confusables, abusive content, prompt-shaped text, and malformed documents.
+
+**Online evaluation**
+
+- User correction, copy, retry, abandonment, and explicit rating signals expose usefulness.
+- p50, p95, timeout, queue age, cache hit, and abstention rates expose serving health.
+- Cost per accepted translation measures unit economics without rewarding low-quality volume.
+- Slice every metric by source and target language, direction, dialect, domain, route, region, and model version.
+
+### Launch with hard gates
+
+A candidate advances from offline evaluation to shadow traffic, then canary traffic, only when:
+
+- no critical regression appears in names, numbers, negation, toxicity, privacy, or high-consequence domains;
+- quality floors pass for each launched language direction rather than only in aggregate;
+- p95 latency and timeout budgets pass under peak and zone-loss tests;
+- the fallback, abstention, and rollback paths behave as designed.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Control Cost and Govern Language Data" %}
+
+
+### Spend compute where it changes the result
+
+- Route short, common requests to compact models and reserve rich decoding for difficult or patient workloads.
+- Batch by token length, target language, model version, and deadline so padding and queue delay stay bounded.
+- Cache only eligible repeated content; never treat an 85% global cache target as permission to retain private text.
+- Track cost per million source tokens, per language tier, and per accepted translation.
+
+### Assign owners to the boundaries
+
+{% concept-grid columns="3" %}
+{% concept-card title="Data owner" eyebrow="Eligibility" icon="database" tone="blue" %}
+Owns licenses, consent, residency, retention, deletion, provenance, and contamination controls.
+{% /concept-card %}
+{% concept-card title="Model owner" eyebrow="Behavior" icon="brain" tone="violet" %}
+Owns training lineage, slice evaluation, calibration, artifact signatures, and rollback readiness.
+{% /concept-card %}
+{% concept-card title="Language policy owner" eyebrow="Release" icon="shield" tone="rose" %}
+Owns pair launch gates, domain exceptions, specialist review, incidents, and user-visible confidence policy.
+{% /concept-card %}
+{% /concept-grid %}
+
+Raw requests and model inputs should not enter logs by default. Operational events can record identifiers, sizes, versions, routes, timing, and policy outcomes without storing the text itself.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Plan Scaling, Reliability, and Continuous Improvement" %}
+
+
+### Partition capacity by deadline and model
+
+- Reserve interactive capacity so large document jobs cannot starve conversation and web traffic.
+- Autoscale from queue age, deadline risk, token volume, and model-specific throughput, not accelerator utilization alone.
+- Keep regional pair demand and model warm-up time in the forecast; a globally healthy fleet can still have one overloaded route.
+- Replicate signed model artifacts and policy versions, but keep residency-restricted request content inside its allowed region.
+
+### Degrade in a controlled order
+
+{% process-flow %}
+{% process-step number="1" title="Protect the request boundary" label="Gateway" %}
+Keep authentication, residency, content limits, and rate controls active during every incident.
+{% /process-step %}
+{% process-step number="2" title="Reduce optional work" label="Router" %}
+Disable expensive reranking, lower beam width, or move document work to a queue before touching correctness gates.
+{% /process-step %}
+{% process-step number="3" title="Route an explicit fallback" label="Inference" %}
+Use a compact, adapter, or pivot route only when that route has its own quality and latency policy.
+{% /process-step %}
+{% process-step number="4" title="Abstain and recover" label="Release" %}
+Return a clear unavailable or low-confidence state, rollback model and policy independently, and avoid unbounded retries.
+{% /process-step %}
+{% /process-flow %}
+
+### Close the feedback loop carefully
+
+Corrections become governed events, not immediate online training examples. Deduplicate and review them, preserve language and domain provenance, retrain asynchronously, and repeat the full slice evaluation before promotion.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Compare Trade-offs and Extend the Design" %}
+
+
+### Make the main trade-offs explicit
+
+- **One multilingual model vs dedicated pair models:** sharing improves coverage and operations; specialization can improve important pairs at additional data and serving cost.
+- **Direct translation vs pivoting:** direct routes avoid compounded loss; pivots cover sparse pairs but add latency and another error boundary.
+- **Latency vs decoding quality:** wider search and reranking can improve difficult text while violating an interactive deadline.
+- **Caching vs privacy and freshness:** repeated public phrases can avoid inference; private text, changing glossaries, and model versions make reuse risky.
+- **Coverage vs calibrated honesty:** supporting more languages is valuable only when quality tiers and uncertainty are visible.
+
+### State the recommended design
+
+Use a shared multilingual backbone with compact, adapter, and quality serving tiers. Route by workload, language direction, domain, and consequence. Keep terminology and release verification independent from generation, and make review or abstention a first-class response.
+
+### Discuss extensions after the core path works
+
+- Streaming speech translation with incremental hypotheses and correction handling.
+- On-device compact models for private or disconnected use cases.
+- Document layout reconstruction with structure-aware segmentation.
+- Customer-scoped terminology memory with explicit provenance and deletion.
+- Dialect and code-switching models evaluated by locale-specific reviewers.
+
+### Close the interview with the next experiment
+
+Benchmark the three serving tiers on real sequence-length distributions, then run a canary across high-, medium-, and low-resource directions. The largest unresolved risk is not aggregate quality; it is a confident semantic error in a slice with little data or high consequence.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/google-translate/quiz/google-translate-design-review.json"
+   lessonSlug="practice-google-translate"
+   title="Google Translate Design Review" /%}

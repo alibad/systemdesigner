@@ -1,0 +1,188 @@
+---
+registryId: event-driven-architecture
+---
+
+{% section-card tone="intro" %}
+## What is event-driven architecture?
+
+**Event-driven architecture (EDA)** organizes a system around events: durable descriptions of facts that have already happened. A producer publishes a fact such as `OrderCreated`; one or more consumers react later without the producer calling each consumer directly.
+
+In plain language, the order service says, "order 42 was accepted," then continues. Inventory, payment, notifications, and analytics can each respond on their own schedule. This removes those reactions from the checkout call path, but it also introduces eventual consistency, duplicate delivery, ordering boundaries, and asynchronous recovery.
+
+{% callout variant="info" %}
+### Core invariant
+
+An accepted business fact has one stable event identity and a durable path from its source of truth to every required consumer. Delivery may repeat, so each consumer must make the same event converge on one business effect.
+{% /callout %}
+
+Review [communication patterns](/fundamentals/communication-patterns) if commands, queues, and publish-subscribe are new. [Scalability basics](/fundamentals/scalability-basics) provides the throughput and storage vocabulary used in the capacity lab.
+{% /section-card %}
+
+{% section-card %}
+## Read an event as a contract, not a callback
+
+A **command** asks an owner to decide: `CreateOrder`. It can be accepted or rejected. An **event** reports the result after the owner commits it: `OrderCreated`. Consumers must not reinterpret that event as a request that might never have happened.
+
+The CloudEvents specification offers a vendor-neutral envelope. Its required context includes `id`, `source`, `specversion`, and `type`; application data remains separate from delivery metadata.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Identity" eyebrow="Deduplication" icon="fingerprint" tone="blue" %}
+The producer assigns one `id` for one distinct fact. A retry republishes the same identity, allowing consumers to recognize duplicate delivery.
+{% /concept-card %}
+{% concept-card title="Meaning" eyebrow="Domain contract" icon="file-text" tone="violet" %}
+The event `type` names a fact in past tense. A versioned name or schema gives independently deployed consumers a compatibility boundary.
+{% /concept-card %}
+{% concept-card title="Subject and order" eyebrow="Entity scope" icon="route" tone="green" %}
+An aggregate key such as `order-42` identifies the entity whose events require local ordering. Global order is rarely necessary or affordable.
+{% /concept-card %}
+{% concept-card title="Causation context" eyebrow="Traceability" icon="network" tone="amber" %}
+Correlation and causation identifiers connect an asynchronous chain to the user action or prior event that started it.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Trace the smallest reliable publish path
+
+The producer owns the business decision. The broker owns transport and retention. Each consumer owns its local effect. A transactional outbox connects the first two without requiring one distributed transaction across the database and broker.
+
+{% process-flow %}
+{% process-step number="1" title="Decide the command" label="Synchronous boundary" %}
+Validate `CreateOrder`, enforce the order invariant, and choose one authoritative order ID while the caller waits.
+{% /process-step %}
+{% process-step number="2" title="Commit state and intent" label="One transaction" %}
+Write the order and its `OrderCreated` outbox record together. Either both commit or neither does.
+{% /process-step %}
+{% process-step number="3" title="Publish from the outbox" label="Retryable handoff" %}
+A relay sends committed outbox records to the broker. A crash can cause another send, so the event keeps the same ID.
+{% /process-step %}
+{% process-step number="4" title="Apply local effects" label="Independent consumers" %}
+Each consumer records the event ID with its own state change, then acknowledges delivery. One slow consumer does not enter checkout latency.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Size fan-out and retention as different costs
+
+Published event rate, payload size, subscriber groups, retention, and partitions answer different capacity questions. Adding a subscriber usually does not create another retained copy of the event in a log, but it does create another read and processing path. Increasing retention consumes storage without increasing current event rate.
+
+Change the inputs below. First create an overloaded partition plan, then recover headroom without changing the event rate. Next add subscriber groups and observe which totals change.
+
+{% interactive-block id="fundamentals/event-driven-system-calculator" dataFile="/api/content/fundamentals/event-driven-architecture/data/event-capacity-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose the event shape before choosing a product
+
+EDA is an architectural style, while pub/sub, retained streams, event sourcing, and CQRS solve different problems inside or alongside it.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Publish-subscribe" eyebrow="Who receives it?" icon="network" tone="blue" %}
+Each subscription receives a copy of a published event. Use it when independent capabilities react to the same fact and do not require one shared worker queue.
+{% /concept-card %}
+{% concept-card title="Retained event stream" eyebrow="Can it replay?" icon="radio" tone="violet" %}
+Events remain in an ordered log for a retention window. Consumer groups track positions, enabling catch-up and replay within the ordering scope of a partition.
+{% /concept-card %}
+{% concept-card title="Event sourcing" eyebrow="What is authoritative?" icon="database" tone="amber" %}
+The event sequence is the source of truth for an aggregate, and current state is rebuilt by replay. This is a persistence model, not a requirement for every event-driven system.
+{% /concept-card %}
+{% concept-card title="CQRS" eyebrow="Which model serves reads?" icon="workflow" tone="green" %}
+Commands update a write model while queries use a separate read model. Events often build projections, but CQRS can exist without event sourcing and adds consistency lag to manage.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Inject failures where state crosses boundaries
+
+Asynchronous systems fail between durable steps. Switch among the scenarios, trace the active path, and select components to inspect ownership. Notice that an outbox closes the database-to-broker gap, while idempotency closes the broker-to-effect gap; neither pattern replaces the other.
+
+{% topology-lab dataFile="/api/content/fundamentals/event-driven-architecture/data/order-event-failure-topology.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Make delivery, ordering, and evolution explicit
+
+### Treat delivery and business effect separately
+
+- A broker can redeliver after a timeout, lost acknowledgement, consumer restart, or replay.
+- A consumer should record the event ID and its business mutation in one local transaction.
+- Acknowledge only after that transaction commits. Bound transient retries, then preserve persistent failures for controlled recovery.
+- Read "exactly once" claims at the full boundary. A broker transaction does not automatically make an external payment API or database mutation happen exactly once.
+
+### Order only where the domain requires it
+
+- Partition by the entity whose transitions must stay ordered, such as `orderId`.
+- Include an aggregate version when a consumer must reject stale or skipped transitions.
+- Avoid global order unless the domain truly requires one serial stream; it limits parallelism and enlarges the failure domain.
+- Design replay as an operation with a start position, rate limit, destination, and proof that repeated effects remain safe.
+
+### Evolve schemas for independently deployed consumers
+
+- Prefer additive changes: add optional fields and preserve the meaning of existing fields.
+- Introduce a new event type or explicit version for an incompatible semantic change.
+- Test old consumers against new producer events and new consumers against retained historical events.
+- Keep secrets and unnecessary personal data out of broadly visible events; retention and replay extend exposure.
+{% /section-card %}
+
+{% section-card %}
+## Implement the two local transactions
+
+This dependency-free Python example uses SQLite to make both correctness boundaries visible. `create_order` commits domain state with an outbox record. `apply_payment` commits a processed-event marker with the payment effect. The relay and broker may deliver twice, but the charge remains singular.
+
+{% code-block file="/api/content/fundamentals/event-driven-architecture/code/transactional-outbox.py" language="python" title="transactional-outbox.py" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate lag and recovery as product behavior
+
+Monitor the path from the business commit to each required effect, not only broker health.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Publication age" eyebrow="Producer boundary" icon="clock" tone="blue" %}
+Track the oldest unpublished outbox record and publish failures. A healthy broker does not reveal an event stranded before it.
+{% /concept-card %}
+{% concept-card title="Consumer lag" eyebrow="Freshness" icon="gauge" tone="violet" %}
+Measure both position lag and age of the oldest unprocessed event. A small count can still violate a time-sensitive business deadline.
+{% /concept-card %}
+{% concept-card title="Failure inventory" eyebrow="Recovery ownership" icon="alert-triangle" tone="amber" %}
+Alert on retry exhaustion and recovery-queue age. Preserve event ID, schema, error, attempts, and correlation context.
+{% /concept-card %}
+{% concept-card title="Effect reconciliation" eyebrow="Business correctness" icon="check-circle" tone="green" %}
+Compare accepted orders with required downstream effects. Transport metrics alone cannot prove that inventory, payment, or notification is correct.
+{% /concept-card %}
+{% /concept-grid %}
+
+Create a replay runbook before an incident: define who authorizes it, which event range is eligible, how throughput is capped, how duplicate effects are prevented, and how completion is reconciled.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Know when not to use event-driven architecture
+
+EDA is useful when several capabilities react independently, work can finish after the initiating request, bursts need buffering, or retained facts must be replayed. It is a poor default when a direct request-response call already meets the need, the caller requires an immediate strongly consistent answer across every participant, or the team cannot yet operate lag, retries, schema compatibility, and replay safely.
+
+Use synchronous and asynchronous paths together. Keep the smallest user-facing decision synchronous; publish committed facts for work that can proceed independently.
+{% /section-card %}
+
+{% section-card %}
+## Review the production contract
+
+Before shipping one event flow, write down:
+
+1. The fact owner, event type, stable identity, subject key, and schema compatibility policy.
+2. The atomic path from business commit to publish intent, including relay retry behavior.
+3. Every subscriber group, its local idempotency boundary, acknowledgement point, and ordering scope.
+4. The event-rate, payload, fan-out, retention, partition, and operating-headroom assumptions.
+5. The retry budget, recovery destination, replay authorization, and reconciliation proof.
+6. Publication age, consumer age, failure inventory, correlation fields, and business-effect alerts.
+
+Use these official references for the underlying contracts:
+
+- [CloudEvents 1.0.2 specification](https://github.com/cloudevents/spec/blob/ce%40v1.0.2/cloudevents/spec.md) for the portable event envelope.
+- [Apache Kafka delivery-semantics design](https://kafka.apache.org/41/design/design/#message-delivery-semantics) for producer, consumer, and transaction boundaries.
+- [AWS transactional outbox guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html) for the dual-write failure and outbox pattern.
+- [Microsoft event-driven architecture guidance](https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven) for architecture variants, suitability, and operational challenges.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/event-driven-architecture/quiz/event-driven-architecture.json" lessonSlug="event-driven-architecture" title="Event-Driven Architecture Review" /%}

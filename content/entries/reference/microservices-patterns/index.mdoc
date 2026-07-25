@@ -1,0 +1,140 @@
+---
+registryId: reference-microservices-patterns
+---
+
+{% section-card tone="intro" %}
+## What are Microservices Patterns?
+
+Microservices patterns are repeatable ways to divide a system into independently operated services and coordinate the work that crosses those boundaries. They matter when different parts of a product need different release schedules, scaling profiles, or ownership, but the product must still behave as one experience.
+
+The core invariant is simple: **one service owns each business fact, and every cross-service dependency has an explicit contract, timeout, and recovery behavior.** A pattern is useful only when it protects that invariant under the constraints of the product. Splitting code into network calls without ownership or recovery plans creates a distributed monolith, not useful autonomy.
+{% /section-card %}
+
+{% section-card %}
+## Start with a boundary, not a pattern name
+
+Microservices are not the default answer to a growing codebase. A modular monolith is usually the lower-risk choice when one team deploys together, one database transaction is essential, and independent scaling or availability is not yet a real requirement. Extract a service when its capability has a clear owner and a change, load, or reliability boundary that justifies the network and operational cost.
+
+Good boundaries usually align four things:
+
+- **Business capability:** for example, orders decide order state, payments decide authorization state, and inventory decides stock reservations.
+- **Data authority:** only the owning service writes its tables or storage. Other services learn through an API or an event, never by joining or mutating private data.
+- **Team ownership:** one team can change, test, deploy, and respond for the capability without coordinating a release across unrelated teams.
+- **Failure policy:** callers know whether they need an immediate answer, can accept a pending state, or must stop the user action when the dependency is unavailable.
+
+{% callout variant="warn" %}
+**A shared database is not a service boundary.** Separate processes that depend on the same tables, stored procedures, and cross-service foreign keys still need coordinated schema and release changes. Put the contract at the service boundary instead.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 1: choose the smallest pattern that fits the constraint
+
+Select the constraint you cannot relax. The active path shows the minimum coordination pattern it requires; click a component to inspect its responsibility. The answer can be a modular boundary rather than another microservice.
+
+{% topology-lab dataFile="/api/content/reference/microservices-patterns/data/constraint-pattern-selector.json" /%}
+
+Treat the selected result as a starting design, not a recipe. A synchronous API call does not make data shared, and an event does not remove the need to decide what the customer sees while work is pending.
+{% /section-card %}
+
+{% section-card %}
+## Make coordination explicit
+
+After choosing a boundary, choose one of two coordination modes for each dependency:
+
+{% concept-grid columns="2" %}
+{% concept-card title="Request and response" eyebrow="Synchronous contract" icon="route" tone="blue" %}
+Use a direct call when the caller cannot continue without the answer, such as validating a payment authorization before confirming an order. Bound the deadline, avoid deep fan-out, and define what the user sees when the call fails.
+{% /concept-card %}
+{% concept-card title="Durable event" eyebrow="Asynchronous contract" icon="radio-tower" tone="violet" %}
+Use an event when a committed fact lets another service progress independently, such as starting fulfillment after an order is paid. Persist the event with the state change, tolerate delayed delivery, and make consumers idempotent.
+{% /concept-card %}
+{% /concept-grid %}
+
+For a cross-service workflow, a **saga** is the sequence of local transactions and compensating actions that keeps the business process understandable without a distributed database transaction. An orchestrated saga centralizes the sequence in one workflow owner; choreography lets services react to events. Prefer orchestration when the steps, timeouts, and compensation rules are hard to see from the event graph alone.
+
+{% system-flow title="A durable order handoff" caption="The customer-critical decision stays short; downstream work begins only after the order state and its event are durable." %}
+{% system-node title="Checkout API" eyebrow="Accept command" icon="globe" tone="blue" %}
+Validate the request and use an idempotency key so a client retry does not create a second order.
+{% /system-node %}
+{% system-node title="Order service" eyebrow="Own state" icon="database" tone="green" %}
+Commit the order and an outbox record in one local transaction.
+{% /system-node %}
+{% system-node title="Event relay" eyebrow="Publish later" icon="radio-tower" tone="violet" %}
+Publish the committed event with retry; it must not lose or invent an order transition.
+{% /system-node %}
+{% system-node title="Inventory service" eyebrow="React locally" icon="boxes" tone="amber" %}
+Reserve stock idempotently and report a pending or failed reservation through the workflow contract.
+{% /system-node %}
+{% /system-flow %}
+
+{% code-block file="/api/content/reference/microservices-patterns/code/order-paid-event.json" language="json" title="An event contract that supports idempotent consumers" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Estimate the coordination budget before adding hops
+
+A network boundary adds a deadline, retry policy, telemetry, deployment surface, and failure mode. Put those costs into the design estimate before treating a split as free.
+
+{% metric-strip %}
+{% metric value="180 ms" label="Three sequential calls" detail="3 x 60 ms p95 before app work and network overhead" tone="blue" /%}
+{% metric value="200/s" label="Order events" detail="At 1 KiB each, seven days needs about 115 GiB before replication" tone="violet" /%}
+{% metric value="2 copies" label="Storage reality" detail="A replicated outbox retention target is about 231 GiB" tone="amber" /%}
+{% metric value="1 key" label="Retry safety" detail="The same idempotency key must converge on one business result" tone="green" /%}
+{% /metric-strip %}
+
+These are planning estimates, not universal targets. For a checkout flow, decide the user-facing deadline first, reserve time for a fallback or clear error, then allocate the remainder to only the calls that must be synchronous. If inventory confirmation can arrive later, making it asynchronous may reduce tail latency and blast radius, but it requires a visible `pending` state and a compensation path.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: trace failure and coordination through an order workflow
+
+Choose a workflow state, then inspect the active routes and failed or degraded components. The important question is not whether an error occurred; it is whether the order is durable, what the customer is told, and which action is safe to retry.
+
+{% topology-lab dataFile="/api/content/reference/microservices-patterns/data/order-coordination-failure-lab.json" /%}
+
+The outbox pattern closes one common gap: it stores the state change and the intention to publish in the same local transaction. It does not make delivery exactly once. Brokers and consumers can redeliver, so every consumer still needs a deduplication key or naturally idempotent write.
+{% /section-card %}
+
+{% section-card %}
+## Contain failure instead of amplifying it
+
+Reliability patterns protect a deliberate dependency, not an unclear one. Apply them at every synchronous edge and every asynchronous consumer boundary:
+
+- **Deadline and cancellation:** set a downstream timeout shorter than the caller deadline. Stop work when the caller can no longer use the result.
+- **Bounded retry:** retry only transient, idempotent operations with jitter and a cap. Retrying a saturated payment provider can turn a partial outage into a full one.
+- **Bulkhead:** reserve concurrency, connection pools, and queues so a slow optional dependency cannot consume the resources needed by checkout.
+- **Circuit breaker and fallback:** stop sending requests to a known-unhealthy dependency for a short interval. Return a truthful pending state or explicit failure; never claim an order is complete when it is not.
+- **Dead-letter and replay policy:** isolate malformed or repeatedly failing events with their correlation IDs. Replay only after the handler and the underlying business state are safe for it.
+
+{% callout variant="info" %}
+**Consistency is a product decision.** It is acceptable for an order confirmation to say `reservation pending` when fulfillment is asynchronous. It is not acceptable to show `paid` unless the payment owner has recorded a successful authorization. Write the visible states before choosing a saga or fallback.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate ownership and contracts
+
+Microservices move coordination from source code into runtime behavior. The operating model must make that behavior observable and changeable:
+
+- **Trace the workflow:** propagate a correlation ID from the command through every request, outbox record, event, retry, and compensation. A trace should answer which step owns the current state.
+- **Measure both paths:** monitor synchronous latency, timeout rate, dependency saturation, event publication lag, consumer lag, duplicate rate, and age of the oldest pending workflow.
+- **Version contracts additively:** consumers should ignore unknown event fields. Deploy producers and consumers with a compatibility window; do not rename or remove a field while delayed events can still arrive.
+- **Name recovery ownership:** document who can replay an event, cancel a pending workflow, issue a refund, or repair a stuck record. Automation needs an escalation path for ambiguity.
+- **Test the unhappy path:** rehearse broker delay, payment timeout, duplicate delivery, and inventory rejection with production-like data volumes. Record the expected customer message and reconciliation action.
+
+{% callout variant="tip" %}
+The useful pattern catalog is small: clear ownership, an explicit synchronous or event contract, a durable handoff, idempotent handlers, bounded failure behavior, and observable recovery. Add specialized patterns only when a concrete constraint remains unsolved.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [Monolith to Microservices](/fundamentals/monolith-to-microservices): find boundaries that match business capabilities and team ownership.
+- [API Design](/fundamentals/api-design): design versioned request and response contracts at a service edge.
+- [Message Queues](/fundamentals/message-queues): understand delivery, ordering, backpressure, and consumer lag.
+- [Circuit Breakers](/technology/circuit-breakers): contain a failing synchronous dependency without hiding an incorrect result.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/microservices-patterns/quiz/microservices-pattern-decisions.json" lessonSlug="microservices-patterns" title="Microservices Pattern Decisions" /%}

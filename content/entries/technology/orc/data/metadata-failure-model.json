@@ -1,0 +1,193 @@
+{
+  "modelNote": "This lab models correctness decisions for the Apache ORC Java reader. Exact exception and recovery behavior can vary by library and version.",
+  "defaultScenarioId": "healthy",
+  "defaultPolicyId": "strict",
+  "parts": [
+    {
+      "id": "header",
+      "label": "Header",
+      "detail": "The ORC magic bytes identify the file."
+    },
+    {
+      "id": "row-index",
+      "label": "Row indexes",
+      "detail": "Optional positions and per-row-group statistics support seeking and pruning."
+    },
+    {
+      "id": "bloom-filter",
+      "label": "Bloom filters",
+      "detail": "Optional per-row-group membership tests can reject more equality candidates."
+    },
+    {
+      "id": "data-stream",
+      "label": "Column streams",
+      "detail": "Encoded and compressed values make up the stripe data."
+    },
+    {
+      "id": "stripe-footer",
+      "label": "Stripe footer",
+      "detail": "The stream directory records each stream's kind, column, encoding, and length."
+    },
+    {
+      "id": "file-tail",
+      "label": "File tail",
+      "detail": "Metadata, footer, and postscript locate stripes and define schema and compression."
+    }
+  ],
+  "policies": [
+    {
+      "id": "strict",
+      "label": "Strict reader",
+      "detail": "Keep the Java reader default: throw when corrupt data is encountered."
+    },
+    {
+      "id": "skip-corrupt",
+      "label": "Skip corrupt data",
+      "detail": "Model orc.skip.corrupt.data=true; partial output is possible and must be labeled."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy file",
+      "detail": "All required metadata and data streams are readable.",
+      "affectedPartIds": [],
+      "results": {
+        "strict": {
+          "action": "Read file",
+          "coverage": "Complete",
+          "pruning": "Stripe + row group + Bloom",
+          "aggregateSafe": true,
+          "explanation": "The reader can locate every stream and use all available pruning metadata."
+        },
+        "skip-corrupt": {
+          "action": "Read file",
+          "coverage": "Complete",
+          "pruning": "Stripe + row group + Bloom",
+          "aggregateSafe": true,
+          "explanation": "The permissive setting changes nothing because no corruption is present."
+        }
+      }
+    },
+    {
+      "id": "no-bloom-filter",
+      "label": "Bloom filter not written",
+      "detail": "The writer did not configure a Bloom filter for the predicate column.",
+      "affectedPartIds": [
+        "bloom-filter"
+      ],
+      "results": {
+        "strict": {
+          "action": "Read with fallback",
+          "coverage": "Complete",
+          "pruning": "Stripe + row-group min/max",
+          "aggregateSafe": true,
+          "explanation": "Bloom filters are optional. The reader can still use min/max statistics, then apply the predicate to decoded rows."
+        },
+        "skip-corrupt": {
+          "action": "Read with fallback",
+          "coverage": "Complete",
+          "pruning": "Stripe + row-group min/max",
+          "aggregateSafe": true,
+          "explanation": "No corrupt data is being skipped. Equality pruning may be less selective, but result completeness is unchanged."
+        }
+      }
+    },
+    {
+      "id": "row-index-disabled",
+      "label": "Row indexes disabled",
+      "detail": "The writer intentionally omitted row-group index streams.",
+      "affectedPartIds": [
+        "row-index"
+      ],
+      "results": {
+        "strict": {
+          "action": "Read candidate stripes",
+          "coverage": "Complete",
+          "pruning": "Stripe statistics only",
+          "aggregateSafe": true,
+          "explanation": "An ORC file can be read without row indexes. The reader loses row-group seeking and pruning inside a candidate stripe."
+        },
+        "skip-corrupt": {
+          "action": "Read candidate stripes",
+          "coverage": "Complete",
+          "pruning": "Stripe statistics only",
+          "aggregateSafe": true,
+          "explanation": "The indexes are absent by design, not corrupt. The permissive setting provides no additional benefit."
+        }
+      }
+    },
+    {
+      "id": "corrupt-data-stream",
+      "label": "Corrupt column stream",
+      "detail": "One encoded data stream cannot be decoded.",
+      "affectedPartIds": [
+        "data-stream"
+      ],
+      "results": {
+        "strict": {
+          "action": "Reject read",
+          "coverage": "No result",
+          "pruning": "Not applicable",
+          "aggregateSafe": true,
+          "explanation": "The default Java setting throws instead of silently returning an incomplete result."
+        },
+        "skip-corrupt": {
+          "action": "Return partial output",
+          "coverage": "Incomplete",
+          "pruning": "Available metadata only",
+          "aggregateSafe": false,
+          "explanation": "Skipping corrupt data can preserve some rows, but counts and aggregates are not complete unless another source repairs the gap."
+        }
+      }
+    },
+    {
+      "id": "damaged-stripe-footer",
+      "label": "Damaged stripe footer",
+      "detail": "The reader cannot trust the stream directory for one stripe.",
+      "affectedPartIds": [
+        "stripe-footer"
+      ],
+      "results": {
+        "strict": {
+          "action": "Reject read",
+          "coverage": "No result",
+          "pruning": "Unavailable for stripe",
+          "aggregateSafe": true,
+          "explanation": "Without the stripe footer, the reader cannot safely map stream bytes to columns and encodings."
+        },
+        "skip-corrupt": {
+          "action": "Reject or recover offline",
+          "coverage": "No trustworthy live result",
+          "pruning": "Unavailable for stripe",
+          "aggregateSafe": true,
+          "explanation": "A permissive data policy does not reconstruct a missing stream directory. Quarantine the file and use validation or recovery tooling."
+        }
+      }
+    },
+    {
+      "id": "truncated-file-tail",
+      "label": "Truncated file tail",
+      "detail": "The postscript or file footer is incomplete.",
+      "affectedPartIds": [
+        "file-tail"
+      ],
+      "results": {
+        "strict": {
+          "action": "Reject file",
+          "coverage": "No result",
+          "pruning": "Unavailable",
+          "aggregateSafe": true,
+          "explanation": "The reader cannot reliably locate stripes, recover the schema, or determine the compression settings."
+        },
+        "skip-corrupt": {
+          "action": "Reject or recover offline",
+          "coverage": "No trustworthy live result",
+          "pruning": "Unavailable",
+          "aggregateSafe": true,
+          "explanation": "Skipping corrupt row data cannot replace the top-level metadata needed to interpret the file."
+        }
+      }
+    }
+  ]
+}

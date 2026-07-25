@@ -1,0 +1,247 @@
+---
+registryId: rate-limiting-tech
+---
+
+{% section-card tone="intro" %}
+## What is rate limiting?
+
+**Rate limiting is an admission policy that bounds how much work an identity may ask a
+resource to perform.** For each operation, a limiter identifies the caller, selects the
+applicable policy, observes prior usage, and returns a decision: admit now, reject,
+delay, or queue.
+
+Rate limiting matters because capacity and fairness are finite. One client, tenant, hot
+resource, retry loop, or automation error should not consume all of a shared dependency.
+It is a control on accepted work, not proof that the service has enough capacity and not
+a complete denial-of-service defense.
+
+### Core invariant
+
+Every decision needs an explicit **identity, resource, cost, time model, and overflow
+behavior**. A limit such as "100 requests" is incomplete until the design answers who
+shares it, which operations consume it, when credit returns, and what the caller sees
+when no credit remains.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Name the caller" eyebrow="Identity" icon="users" tone="blue" %}
+Use a trusted user, API key, tenant, workload, or network signal. An IP address can
+represent many users behind NAT and one user can rotate addresses.
+{% /concept-card %}
+{% concept-card title="Scope the work" eyebrow="Resource" icon="route" tone="violet" %}
+Protect an endpoint, operation class, tenant partition, downstream dependency, or
+service-wide budget. Expensive writes may need a different policy from cheap reads.
+{% /concept-card %}
+{% concept-card title="Charge a cost" eyebrow="Quota unit" icon="scale" tone="amber" %}
+One request can cost one unit, while batch size, tokens, rows, bytes, or compute time can
+consume weighted units when request counts hide the real load.
+{% /concept-card %}
+{% concept-card title="Define overflow" eyebrow="Outcome" icon="shield" tone="green" %}
+Reject immediately when waiting is unsafe, or use a bounded queue when delayed work is
+part of the product contract. Never create an unbounded hidden backlog.
+{% /concept-card %}
+{% /concept-grid %}
+
+This lesson builds on [API Design](/fundamentals/api-design), especially authentication,
+idempotency, status codes, and client-visible error contracts.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate sustained rate from burst allowance
+
+A **token bucket** stores a bounded number of credits. Tokens accumulate at refill rate
+`r` up to capacity `b`; an operation with cost `c` is admitted only when at least `c`
+tokens are available. Capacity permits a short burst, while refill controls how quickly
+credit returns.
+
+RFC 2216 describes the traffic envelope as `rT + b`: over an interval of length `T`, a
+conforming flow cannot exceed the sustainable rate multiplied by time plus stored burst
+credit. Application limiters commonly apply the same model to requests or weighted
+operations instead of bytes.
+
+{% metric-strip %}
+{% metric label="Refill rate" value="r units / second" detail="Long-term credit returned to the bucket" tone="blue" /%}
+{% metric label="Capacity" value="b units" detail="Maximum credit that can be stored for a burst" tone="cyan" /%}
+{% metric label="Operation cost" value="c units" detail="Credit consumed by one admitted action" tone="amber" /%}
+{% metric label="Decision" value="tokens >= c" detail="Admit and subtract, otherwise use overflow policy" tone="green" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/rate-limiting-impact" dataFile="/api/content/technology/rate-limiting/data/token-bucket-bursts.json" /%}
+
+The lab uses one-second ticks and starts with a full bucket so every number can be
+inspected. A production implementation can use continuous elapsed time, fractional
+credit, weighted costs, and a monotonic or authoritative clock; those choices must be
+defined and tested rather than hidden behind a generic "requests per second" label.
+
+{% code-block file="/api/content/technology/rate-limiting/code/token-bucket.py" language="python" title="Implement a deterministic token bucket" /%}
+
+The example receives time from its caller. That makes the refill rule testable and
+avoids tying correctness tests to wall-clock sleeps.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose an algorithm from the traffic contract
+
+A **rate-limiting algorithm** defines how prior usage becomes the next admission
+decision. The familiar names describe families, not one universal implementation, so
+document the exact window boundary, clock, storage, precision, and concurrency behavior.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Token bucket" eyebrow="Burst plus average" icon="gauge" tone="cyan" %}
+Refill credit at rate `r` up to capacity `b`. Use it when controlled bursts are valid but
+the long-term admitted rate must remain bounded. Weighted operations consume more than
+one token.
+{% /concept-card %}
+{% concept-card title="Leaky-bucket shaper" eyebrow="Smooth departure" icon="workflow" tone="blue" %}
+Place work in a bounded queue and release it at a configured rate. RFC 3290 distinguishes
+this shaping behavior from a token-bucket meter. Queue length and maximum waiting time
+must be explicit.
+{% /concept-card %}
+{% concept-card title="Fixed-window counter" eyebrow="Simple quota" icon="timer" tone="amber" %}
+Count operations in named intervals and reset at the boundary. It is easy to reason
+about, but one allowance just before reset and another just after can create a
+concentrated boundary burst.
+{% /concept-card %}
+{% concept-card title="Sliding window" eyebrow="Recent-history bound" icon="activity" tone="violet" %}
+Keep exact timestamps or estimate the moving interval from bounded counters. Exact logs
+make membership visible but grow with admitted activity; estimates trade precision for
+bounded state.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Ask these questions before choosing
+
+- **Must a valid burst pass immediately?** Prefer stored credit such as a token bucket.
+- **Must output be smoothed?** Use a bounded shaper only when callers can tolerate queue
+  delay and cancellation.
+- **Is a coarse calendar quota enough?** A fixed window may be sufficient when the
+  boundary burst is safe.
+- **Must every recent operation count exactly?** Budget the state and cleanup required
+  by an exact sliding log.
+- **Do operations have different cost?** Charge weighted units instead of pretending
+  every request consumes equal downstream work.
+
+See the primary definitions in [RFC 2216](https://www.rfc-editor.org/rfc/rfc2216.html)
+and the token-bucket and leaky-bucket discussion in
+[RFC 3290](https://www.rfc-editor.org/rfc/rfc3290.html#appendix-A).
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Make one distributed decision, not three racing operations
+
+A **distributed limiter** coordinates admission across multiple request handlers that
+share a policy. The correctness problem is not merely storing a counter: concurrent
+handlers must not read the same remaining credit and all spend it independently.
+
+{% process-flow %}
+{% process-step number="1" title="Derive a trusted key" label="Request edge" %}
+Combine the authenticated identity, protected resource, policy version, and any
+intentional tenant boundary. Normalize proxy and network signals before using them.
+{% /process-step %}
+{% process-step number="2" title="Evaluate atomically" label="Limiter state" %}
+Refill or expire prior usage, compare the operation cost with available credit, and
+record the decision as one atomic state transition.
+{% /process-step %}
+{% process-step number="3" title="Apply overflow behavior" label="Gateway or service" %}
+Admit the request, reject it, or enter a bounded queue. Keep the limiter timeout smaller
+than the protected operation's budget.
+{% /process-step %}
+{% process-step number="4" title="Return a usable contract" label="Client response" %}
+Explain the policy scope and recovery behavior without exposing sensitive identity or
+internal topology details.
+{% /process-step %}
+{% /process-flow %}
+
+Redis documents `INCR` plus expiration for fixed windows and server-side Lua for an
+atomic read-decide-update transition. That is one implementation choice, not a reason
+to make the shared store an unbounded synchronous dependency.
+
+### Choose failure behavior deliberately
+
+- **Fail closed:** reject when limiter state is unavailable. This protects a fragile or
+  costly dependency but can turn limiter failure into service unavailability.
+- **Fail open:** admit under a bounded emergency policy. This protects availability but
+  can expose the dependency the limiter was meant to defend.
+- **Reserve local credit:** allocate bounded quotas to instances or regions. This keeps
+  decisions local but can underuse capacity and requires a rule for lease expiry and
+  rebalancing.
+- **Partition ownership:** route one identity key to one owner. This reduces races but
+  creates hot-key and failover work that must be tested.
+
+Monitor limiter-store errors, decision latency, admitted and rejected units, hot keys,
+quota saturation by policy, queue age, and the protected dependency's real saturation.
+An accept/reject ratio without downstream health cannot prove the policy is useful.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Return 429 with a recoverable client contract
+
+**HTTP `429 Too Many Requests` means the client sent too many requests in a period.**
+[RFC 6585](https://www.rfc-editor.org/rfc/rfc6585.html#section-4) says the response
+representation should explain the condition and may include `Retry-After`. The standard
+does not prescribe how the server identifies the client or counts requests.
+
+[RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-retry-after) defines
+`Retry-After` as either an HTTP date or a non-negative integer number of seconds. It is
+not a remaining-quota counter. Use `503 Service Unavailable` when the condition is
+service unavailability rather than one client's quota, and avoid automatic retries for
+non-idempotent work unless the operation has an idempotency contract.
+
+{% interactive-block id="technology/rate-limiting-http-response" dataFile="/api/content/technology/rate-limiting/data/http-retry-scenarios.json" /%}
+
+The IETF HTTPAPI working group is developing `RateLimit` and `RateLimit-Policy` fields,
+but the current document is still an
+[Internet-Draft](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/).
+Treat vendor-specific limit, remaining, and reset headers as documented API contracts;
+do not describe them as universally standardized HTTP fields.
+
+{% code-block file="/api/content/technology/rate-limiting/code/retry-after-client.py" language="python" title="Parse Retry-After and build a bounded fallback schedule" /%}
+
+### Prevent rejection from becoming a retry storm
+
+- Honor a valid `Retry-After` value when present and cap all locally generated waits.
+- Add jitter when many independent clients could wake at the same instant.
+- Bound attempts and total elapsed time; surface a terminal failure instead of retrying
+  forever.
+- Retry an idempotent operation, or reuse an idempotency key that lets the server
+  recognize the same logical write.
+- Do not evade a policy by rotating credentials, addresses, or regions.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the policy as part of the product
+
+A **production quota** is versioned behavior shared by clients, gateways, services, and
+operators. It needs review, rollout, observability, and an escape path just like an API
+schema or capacity limit.
+
+### Before rollout
+
+- Inventory identities and proxies so the enforcement key cannot be forged accidentally.
+- Measure request cost and downstream saturation by operation instead of copying one
+  global limit to every endpoint.
+- Replay steady traffic, synchronized bursts, retries, clock shifts, instance loss,
+  store timeouts, and one extremely hot identity.
+- Define fail-open, fail-closed, local-reserve, and queue behavior per protected resource.
+
+### During operation
+
+- Alert on policy-specific rejection changes alongside downstream load and client success.
+- Separate legitimate quota pressure from attacks, broken automation, and retry loops.
+- Expose dashboards and documented limits to clients without leaking other tenants'
+  usage or sensitive partition keys.
+- Roll out policy changes gradually and preserve enough telemetry to explain a rejection.
+
+### During review
+
+- Confirm that high-value or accessibility-critical workflows are not unfairly grouped
+  behind shared network addresses.
+- Remove stale policy versions and expiring exceptions.
+- Recalculate weighted costs after endpoint behavior or dependency fan-out changes.
+- Verify that rejection responses remain consistent across regions and deployment paths.
+
+Rate limiting reduces accepted work. Network filtering, authentication, authorization,
+input validation, concurrency limits, circuit breakers, load shedding, and autoscaling
+protect different boundaries and remain necessary.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/rate-limiting/quiz/rate-limiting-production-design.json" lessonSlug="rate-limiting" title="Rate Limiting Production Design Review" /%}

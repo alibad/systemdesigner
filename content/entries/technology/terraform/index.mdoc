@@ -1,0 +1,264 @@
+---
+registryId: terraform
+---
+
+{% section-card tone="intro" %}
+## What is Terraform?
+
+Terraform is an infrastructure-as-code tool. You write the desired configuration of
+infrastructure objects, and Terraform asks provider plugins to read and change the
+corresponding cloud, platform, or SaaS APIs.
+
+Three models make that workflow possible:
+
+- **Configuration** describes the desired objects and the values that connect them.
+- **State** binds each Terraform resource address to one remote object identity.
+- **The dependency graph** determines which operations must wait and which may run in
+  parallel.
+
+The core invariant is one-to-one ownership: one managed remote object should be bound to
+one resource instance in one Terraform state. A plan is trustworthy only when the
+configuration, state bindings, refreshed remote values, provider behavior, and input
+values all refer to the intended environment.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Move one change through the full workflow
+
+Terraform is declarative, but operating it is a controlled sequence. Each stage protects
+a different boundary.
+
+{% process-flow %}
+{% process-step number="1" label="Initialize" title="Install and select dependencies" %}
+`terraform init` configures the backend and installs the provider and module versions
+selected by the dependency lock file and configuration constraints.
+{% /process-step %}
+{% process-step number="2" label="Validate" title="Reject invalid configuration" %}
+Format and validate the root module. Add policy, static analysis, and provider-specific
+checks before any production plan is approved.
+{% /process-step %}
+{% process-step number="3" label="Plan" title="Refresh, compare, and review" %}
+A normal plan reads managed remote objects, compares their refreshed values with prior
+state and configuration, then proposes create, update, replace, or destroy actions.
+{% /process-step %}
+{% process-step number="4" label="Apply" title="Execute the approved graph" %}
+Apply the reviewed saved plan, record successful object identities and values in state,
+and inspect the result before promoting the same change elsewhere.
+{% /process-step %}
+{% /process-flow %}
+
+Running `terraform apply` without a saved plan creates a new plan and asks for approval.
+In automation, `terraform plan -out=tfplan` followed by `terraform apply tfplan` creates
+a stronger review-to-apply boundary because apply executes the saved artifact. Protect
+that file: [HashiCorp documents that saved plans can contain sensitive
+data](https://developer.hashicorp.com/terraform/cli/commands/plan).
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Predict actions from configuration, state, and dependencies
+
+The same HCL edit can produce very different plans when state addresses or dependency
+edges differ. A resource rename is especially important: Terraform tracks the address,
+not the author's intention.
+
+### Lab 1: construct the plan before apply
+
+Choose a configuration change, preserve or lose the state binding, and change the
+dependency encoding. Watch the action symbols and graph waves update independently.
+
+{% interactive-block id="technology/terraform-project" dataFile="/api/content/technology/terraform/data/plan-state-dependency-model.json" /%}
+
+Use an expression reference when a downstream argument consumes an upstream value. The
+reference communicates both data flow and ordering. Reserve `depends_on` for a hidden
+behavioral dependency that Terraform cannot infer from values; broad explicit
+dependencies can make plans more conservative and produce more values that are known
+only after apply.
+
+For a resource or module refactor, commit a `moved` block with the configuration change.
+Terraform checks the old address in state and rebinds the object before it creates the
+plan. Without that mapping, the old address appears removed and the new address appears
+new.
+
+{% code-block file="/api/content/technology/terraform/code/dependency-and-refactor.tf" language="hcl" title="Dependencies and a Configuration-Driven Move" /%}
+
+This example uses Terraform's built-in `terraform_data` resource so the language and
+graph behavior can be studied without a cloud account. Real provider resource types
+decide which attributes update in place, require replacement, or remain unknown until
+their API operation finishes.
+{% /section-card %}
+
+{% section-card %}
+## Treat state as a protected ownership database
+
+State is not merely a cache of the last output. It stores remote-object bindings,
+provider metadata, dependency information, and resource values Terraform needs to plan
+future changes.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Address binding" eyebrow="Identity" icon="network" tone="violet" %}
+`module.network.aws_vpc.main` is a configuration address. State connects that address
+to the provider's remote object ID. Rename or move the address deliberately.
+{% /concept-card %}
+{% concept-card title="Refreshed values" eyebrow="Current view" icon="repeat" tone="cyan" %}
+Normal plan and apply operations ask providers for current managed-object values before
+comparing them with configuration and prior state. `-refresh=false` skips that read and
+can make a plan incomplete.
+{% /concept-card %}
+{% concept-card title="Sensitive material" eyebrow="Security boundary" icon="lock" tone="rose" %}
+State and saved plans can contain sensitive values even when terminal output masks
+them. Encrypt them, restrict access, retain recoverable versions, and never commit them.
+{% /concept-card %}
+{% /concept-grid %}
+
+Prefer Terraform's configuration-driven `moved`, `removed`, and `import` blocks for
+reviewable lifecycle changes. Direct `terraform state` commands are recovery and
+migration tools, not a substitute for an auditable configuration change. Never edit
+the state JSON by hand.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Split state along ownership and failure boundaries
+
+One state creates one dependency graph, one locking boundary, and one review surface.
+Putting an entire organization in that graph increases coordination and blast radius;
+splitting every tiny resource creates excessive interfaces and promotion work.
+
+Choose a boundary that has:
+
+- one accountable owner and approval policy;
+- a coherent lifecycle and release cadence;
+- a bounded failure and rollback domain;
+- narrow, versioned outputs for consumers;
+- independent credentials and least-privilege provider access;
+- a tested state backup, restore, and migration procedure.
+
+Modules and state boundaries solve different problems. A **module** packages a reusable
+configuration interface. A **state boundary** isolates ownership and operations. A
+single root module may call several child modules while still writing one state, and a
+shared module may be instantiated by many independent states.
+
+Avoid using `-target` as a routine substitute for proper boundaries. HashiCorp documents
+resource targeting for exceptional situations because routine targeting can leave
+relationships and drift outside the selected subgraph.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Contain drift, concurrent writers, and failed applies
+
+Terraform is not a distributed transaction across every provider API. A safe operating
+model detects stale assumptions before apply, serializes writers for each state, and
+limits how much infrastructure one failed run can involve.
+
+### Lab 2: inject an operational failure
+
+Select an incident, state boundary, locking policy, and plan workflow. Trace the run to
+see what Terraform detects, what it serializes, and what still requires operator
+recovery.
+
+{% interactive-block id="technology/terraform-drift-rollout-lab" dataFile="/api/content/technology/terraform/data/drift-lock-rollout-model.json" /%}
+
+The important failure rules are:
+
+1. **Drift is a decision, not just a difference.** A normal plan usually proposes to
+   restore configuration. A refresh-only plan instead proposes updating state to match
+   remote objects without changing those objects. Decide which source should win.
+2. **Locks serialize state writers, not all infrastructure changes.** The selected
+   backend must support locking, and every writer must use it. Investigate a stale lock
+   before using `terraform force-unlock` with the reported lock ID.
+3. **A failed apply does not roll itself back.** Terraform records completed changes it
+   knows about, releases the lock, and exits. Resolve the error, inspect reality, and
+   create a fresh plan.
+4. **Smaller state limits coordination scope, not provider failure semantics.** A
+   provider can still partially complete an API operation. Rehearse recovery for each
+   critical resource type.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Configure remote state for the backend you actually run
+
+Remote storage gives a team one shared state location. Locking behavior is
+backend-specific: check the selected backend's documentation instead of assuming that
+remote storage automatically includes a lock.
+
+{% code-block file="/api/content/technology/terraform/code/remote-state-backend.hcl" language="hcl" title="Amazon S3 Backend with S3 Lockfile Locking" /%}
+
+This example is specific to Terraform's **Amazon S3 backend**. Current HashiCorp
+documentation enables S3 lockfile locking with `use_lockfile = true` and marks the
+older DynamoDB-based locking mechanism as deprecated. Enable S3 bucket versioning for
+recovery, grant the runner access to the state and `.tflock` objects, and keep
+credentials out of the backend block.
+
+Other backends expose different storage, locking, authentication, and recovery
+contracts. Verify all four before migrating state:
+
+- where state and historical versions are stored;
+- whether and how the backend acquires a lock;
+- which identity may read, write, delete, or force-unlock;
+- how a failed state write or regional outage is recovered.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Build a production release boundary around the plan
+
+A production pipeline should make the approved artifact, target state, credentials, and
+policy results unambiguous.
+
+{% code-block file="/api/content/technology/terraform/code/reviewed-plan-workflow.sh" language="bash" title="Reviewed Saved-Plan Workflow" /%}
+
+Before applying, require:
+
+- a clean format and validation result;
+- pinned Terraform, provider, and module constraints plus a reviewed lock file;
+- an initialized backend that points to the intended state;
+- a normal refreshed plan unless a documented exceptional workflow says otherwise;
+- explicit review of creates, replacements, deletions, unknown values, and output
+  changes;
+- policy and security checks against the machine-readable saved plan;
+- short-lived, least-privilege credentials for the target environment;
+- serialized promotion, monitoring, and a rehearsed recovery owner.
+
+The JSON form from `terraform show -json tfplan` is designed for automation, but both
+the binary and JSON forms may expose sensitive data. Store them as protected,
+short-lived pipeline artifacts rather than source files.
+{% /section-card %}
+
+{% section-card %}
+## Know where Terraform stops
+
+Terraform is strongest when a provider can manage a durable remote object through a
+declarative lifecycle. It is weaker as a general-purpose procedural orchestrator for
+imperative application steps, long-running data migrations, or in-host configuration.
+
+Use [Ansible](/technology/ansible) or another configuration-management tool when the
+primary problem is converging operating-system or application settings. Use a deployment
+controller when the primary problem is gradually releasing application versions. Use a
+database migration system when schema and data transitions need domain-specific
+transactions and compatibility rules.
+
+These tools can cooperate, but keep ownership one-way. For example, Terraform may create
+a virtual machine and publish a narrow output; Ansible may configure that machine.
+Avoid having both systems independently mutate the same security rule, identity policy,
+or service setting.
+{% /section-card %}
+
+{% section-card %}
+## Verify each assumption against primary documentation
+
+Terraform language and backend behavior evolve. Review the current HashiCorp references
+for the exact version and backend you deploy:
+
+- [Terraform plan command](https://developer.hashicorp.com/terraform/cli/commands/plan)
+  for refresh, saved plans, targeting, and planning modes;
+- [purpose of Terraform state](https://developer.hashicorp.com/terraform/language/state/purpose)
+  for bindings, metadata, syncing, and remote state;
+- [`depends_on` reference](https://developer.hashicorp.com/terraform/language/meta-arguments/depends_on)
+  for hidden dependencies and conservative planning;
+- [`moved` block reference](https://developer.hashicorp.com/terraform/language/block/moved)
+  for configuration-driven address changes;
+- [state locking](https://developer.hashicorp.com/terraform/language/state/locking)
+  and the documentation for the selected backend;
+- [errors during apply](https://developer.hashicorp.com/terraform/tutorials/cli/apply#errors-during-apply)
+  for partial completion and recovery.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/terraform/quiz/terraform-production-decisions.json" lessonSlug="terraform" title="Terraform Plan, State, and Failure Decisions" /%}

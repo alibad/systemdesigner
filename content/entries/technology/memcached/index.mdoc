@@ -1,0 +1,328 @@
+---
+registryId: memcached
+---
+
+{% section-card tone="intro" %}
+## What is Memcached?
+
+Memcached is a networked, in-memory key-value cache. An application gives it an opaque
+key, a value, and usually an expiration time; a later request for that key can avoid a
+slower database query, API call, or rendering step.
+
+Its most important invariant is simple: **every cached value must be disposable**.
+Memcached can evict an item, expire it, lose it with a server, or return a miss after the
+client remaps a key. The application must still be correct by reading an authoritative
+source and rebuilding the value.
+
+Memcached is deliberately narrower than a database. It does not provide durable
+transactions, query indexes, a replication log, or application-level cache coherence.
+That small contract makes it fast, but it leaves routing, refill, invalidation, and
+failure containment with the application.
+{% /section-card %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Opaque key and value" eyebrow="Data model" icon="key" tone="blue" %}
+The server does not understand rows, JSON fields, relationships, or business versions.
+The client serializes a bounded value and chooses a stable key.
+{% /concept-card %}
+{% concept-card title="Memory is a budget" eyebrow="Capacity" icon="memory" tone="cyan" %}
+Values occupy slab-class chunks. Expiration and eviction keep use bounded, while item
+shape and access frequency determine what remains resident.
+{% /concept-card %}
+{% concept-card title="Clients own placement" eyebrow="Distribution" icon="route" tone="violet" %}
+A client library commonly hashes each key to one server. Consistent hashing limits how
+many keys move when the pool changes.
+{% /concept-card %}
+{% concept-card title="Misses are normal" eyebrow="Correctness" icon="repeat" tone="green" %}
+Every read path needs a bounded source fallback. Hit rate changes latency and source
+load, but it must never decide whether the answer is correct.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="blue" %}
+## Put Memcached on a cache-aside request path
+
+In the common **cache-aside** pattern, the application reads Memcached first. A hit is
+returned immediately. A miss causes the application to read the source, serialize the
+result, store a temporary copy, and return the source result. The source remains the
+authority throughout the flow.
+
+{% system-flow title="One cache-aside read" caption="A cache hit ends at Memcached. A miss temporarily joins the source path, then repopulates the disposable copy." %}
+{% system-node title="Application" eyebrow="Name the object" icon="workflow" tone="blue" %}
+Build a namespaced, versioned key from the request and choose a bounded timeout for the
+cache lookup.
+{% /system-node %}
+{% system-node title="Client routing" eyebrow="Choose one node" icon="route" tone="violet" %}
+Hash the key against the current server pool. Connection pooling and failure detection
+belong to the client or an explicitly deployed proxy.
+{% /system-node %}
+{% system-node title="Memcached" eyebrow="Fast optional copy" icon="memory" tone="cyan" %}
+Return the opaque bytes on a hit. On a miss, report absence rather than discovering or
+loading the source value itself.
+{% /system-node %}
+{% system-node title="Authoritative source" eyebrow="Correct fallback" icon="database" tone="amber" %}
+Read the database or service, enforce its consistency rules, and rebuild the cached
+representation under a refill-ownership contract.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the miss path bounded
+
+- Set a short cache timeout and treat timeout, connection failure, and miss as distinct
+  telemetry even when all three fall back to the source.
+- Limit concurrent source reads so an unavailable cache cannot turn into an unlimited
+  database fan-out.
+- Decide whether callers wait, serve a stale local value, degrade a feature, or fail
+  when the source is already saturated.
+- Add TTL jitter so many related keys do not expire on the same second.
+- Coordinate rebuilds for hot keys with single-flight work or the meta protocol's
+  recache ownership features.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size memory and miss capacity together
+
+A cache is useful only when the resident values match the access distribution and the
+source can survive the remaining misses. Begin with explicit quantities instead of a
+target hit-rate slogan.
+
+{% metric-strip %}
+{% metric label="Working set" value="items x item bytes" detail="Include keys, item metadata, serialization, and slab fit" tone="violet" /%}
+{% metric label="Usable memory" value="nodes x RAM x efficiency" detail="Reserve room for allocation behavior and non-item overhead" tone="cyan" /%}
+{% metric label="Miss load" value="traffic x (1 - hit rate)" detail="Budget source concurrency, latency, and retry amplification" tone="rose" /%}
+{% metric label="Node pressure" value="operations / live nodes" detail="Measure skew and hot keys, not only an even average" tone="amber" /%}
+{% /metric-strip %}
+
+The lab uses transparent planning assumptions. Change the object shape and target hit
+rate separately: memory coverage does not predict popularity, while a high measured hit
+rate does not prove that the source can survive a cold restart.
+
+{% interactive-block id="technology/memcached-performance" dataFile="/api/content/technology/memcached/data/capacity-envelope.json" /%}
+
+{% code-block file="/api/content/technology/memcached/code/plan-cache-envelope.py" language="python" title="Estimate memory coverage and miss load" /%}
+
+### Benchmark what the formula cannot know
+
+- Measure p50, p95, and maximum serialized value sizes; an average hides expensive slab
+  classes and network outliers.
+- Record key popularity. A small number of hot keys can produce a high hit rate while
+  overloading one node or one network path.
+- Benchmark the exact client, protocol, connection reuse, value codec, TLS mode, and
+  target hardware.
+- Remove one node during peak traffic and observe source request rate, tail latency,
+  timeouts, and refill duration.
+- Repeat after a full cold start; planned steady-state hit rate is unavailable during
+  warm-up.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Understand slabs, expiration, and eviction
+
+Memcached assigns items to size classes. Each class receives pages and divides them
+into fixed-size chunks. An item consumes one chunk from the nearest fitting class, so
+the difference between item bytes and chunk bytes becomes internal waste. Each class
+behaves like a smaller cache with its own pressure and LRU activity.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Expiration" eyebrow="Freshness boundary" icon="clock" tone="blue" %}
+A TTL says when the cached copy becomes invalid. In the basic text protocol, values up
+to 30 days are relative seconds; larger values are interpreted as Unix timestamps.
+Expiration is not a durable deletion guarantee.
+{% /concept-card %}
+{% concept-card title="Reclaim" eyebrow="Expired space" icon="repeat" tone="green" %}
+Expired items can be reclaimed by background maintenance, lookup, or allocation. The
+server does not need to synchronously clear every expired byte at the TTL boundary.
+{% /concept-card %}
+{% concept-card title="Eviction" eyebrow="Live item removed" icon="warning" tone="rose" %}
+When a class needs a chunk and cannot reclaim expired space or another page, it can
+remove a non-expired item. An eviction is a capacity signal, not source-data loss.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Diagnose pressure by class, not only total RAM
+
+- Track `evictions`, `reclaimed`, current items, bytes, and hit/miss counters over the
+  same time window.
+- Inspect slab-class statistics to find a pressured object-size band beside unused
+  capacity in another class.
+- Review key and value size distributions before changing the slab growth factor or
+  maximum item size.
+- Avoid storing very large payloads that increase serialization time, transfer cost,
+  allocator waste, and blast radius per miss.
+- Prefer compact, independently refreshable objects over one giant value when readers
+  do not always need the whole payload.
+
+The [official performance guide](https://docs.memcached.org/serverguide/performance/)
+explains current slab allocation, reclaim, and LRU behavior in more detail.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design keys, TTLs, and invalidation as one contract
+
+A cache key is a compatibility boundary. It should identify the representation, owner,
+and schema version without exposing secrets or becoming so long that key memory
+dominates small values.
+
+{% process-flow %}
+{% process-step number="1" title="Namespace the owner" label="Collision control" %}
+Begin with the service and entity, such as `catalog:product`, so unrelated teams cannot
+accidentally reuse the same key space.
+{% /process-step %}
+{% process-step number="2" title="Include representation version" label="Schema change" %}
+Add a version such as `v3` when serialization or derived fields change. Old keys can
+expire naturally instead of requiring a dangerous global flush.
+{% /process-step %}
+{% process-step number="3" title="Choose freshness" label="TTL and invalidation" %}
+Derive TTL from acceptable staleness and source recovery cost. Invalidate or move the
+version after authoritative writes when waiting for TTL would violate the contract.
+{% /process-step %}
+{% process-step number="4" title="Bound refill ownership" label="Concurrency" %}
+Choose single-flight, a short lease, early recache, or stale serving so a popular key
+does not multiply source work at expiration.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/memcached/code/cache-aside-with-guard.py" language="python" title="Use a versioned key and single-flight refill" /%}
+
+### Match invalidation to the data contract
+
+- **TTL only:** suitable when bounded staleness is acceptable and writes do not require
+  immediate visibility.
+- **Delete after source commit:** simple for cache-aside, but a failed delete leaves the
+  old value until TTL and a racing refill can repopulate stale data.
+- **Versioned keys:** useful for schema releases and immutable source versions; old
+  copies become unreachable and expire later.
+- **CAS-guarded updates:** reject a write if another caller changed the cached item
+  after it was read.
+- **Event-driven invalidation:** reduce stale windows across writers, but make delivery,
+  replay, deduplication, and ordering observable.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make node loss and refill races visible
+
+Memcached servers are independent. A lost node removes its resident values, and a pool
+change can send keys to new nodes. The cache itself does not coordinate a database-safe
+refill or reject a stale value that finishes last.
+
+Use the lab to compare routing, per-key refill ownership, and guarded writes. Each
+control protects a different boundary: consistent hashing limits key movement,
+single-flight limits duplicate source work, and CAS or versioned keys prevent an old
+refill from replacing a newer value.
+
+{% interactive-block id="technology/memcached-failure-lab" dataFile="/api/content/technology/memcached/data/failure-scenarios.json" /%}
+
+### Test the failure as a source-capacity event
+
+- Remove one cache node and measure the share of keys that move under the real client
+  continuum or proxy policy.
+- Restart the entire pool and confirm source admission control holds while hit rate is
+  near zero.
+- Expire a hot key under peak concurrency and verify that only the intended refill
+  owners reach the source.
+- Delay an older source read until after a newer read completes; confirm the cache does
+  not end with the older version.
+- Fail cache connections slowly as well as immediately. A long cache timeout can make
+  fallback slower than bypassing the cache.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Use commands and protocols deliberately
+
+The basic text protocol exposes a small command set. New clients should also evaluate
+the **meta text protocol**, which the current Memcached documentation recommends over
+the deprecated binary protocol.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Read and write values" eyebrow="get / set / delete" icon="database" tone="blue" %}
+`get` returns one or more present values. `set` writes regardless of prior existence;
+`add` writes only when absent. `delete` invalidates a key but cannot coordinate an
+external database transaction.
+{% /concept-card %}
+{% concept-card title="Guard concurrent updates" eyebrow="gets / cas" icon="shield" tone="violet" %}
+`gets` returns a CAS token. `cas` stores only if that token still matches, allowing a
+client to detect an intervening cache update instead of blindly overwriting it.
+{% /concept-card %}
+{% concept-card title="Coordinate modern refill" eyebrow="Meta protocol" icon="bolt" tone="green" %}
+Meta commands can expose TTL and item metadata, elect a recache winner, support early
+recache, and intentionally serve stale data while revalidation runs.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Avoid protocol surprises
+
+- Basic text keys are limited to 250 bytes and cannot contain spaces or newlines.
+- A basic expiration value of `0` means no expiry, but the item can still be evicted or
+  disappear with its node.
+- `incr` and `decr` operate on an existing unsigned integer representation; they do not
+  create a missing counter.
+- `flush_all` invalidates items and is not an ordinary deployment or schema-migration
+  tool.
+- Avoid ASCII `noreply` for general use because a client cannot reliably align mutation
+  errors with individual requests.
+
+See the official [protocol overview](https://docs.memcached.org/protocols/),
+[basic text reference](https://docs.memcached.org/protocols/basic/), and
+[meta protocol guide](https://docs.memcached.org/protocols/meta/) for the exact wire
+contract supported by the deployed version and client.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the cache as a dependency, not a black box
+
+Hit rate alone can improve while the system becomes less safe. A smaller hot set may
+raise hit rate while one node saturates, or a source slowdown may make the remaining
+misses unaffordable.
+
+{% metric-strip %}
+{% metric label="Outcome" value="hits / misses" detail="Split by operation, tenant, key family, and node" tone="blue" /%}
+{% metric label="Memory" value="bytes / evictions" detail="Inspect slab classes and object-size distributions" tone="violet" /%}
+{% metric label="Latency" value="p50 / p95 / p99" detail="Separate cache, source fallback, and end-to-end time" tone="amber" /%}
+{% metric label="Failure" value="timeouts / reconnects" detail="Track removals, remaps, cold starts, and source amplification" tone="rose" /%}
+{% /metric-strip %}
+
+### Build an operational review around consequences
+
+- Alert on source load and user latency alongside hit rate; misses become dangerous
+  only through their downstream cost.
+- Track evictions and out-of-memory write failures by slab class and value-size family.
+- Inventory client versions, hash-ring configuration, timeouts, retry behavior, and
+  server lists across every application fleet.
+- Roll node changes gradually and cap refill concurrency before expanding or shrinking
+  a pool.
+- Run cold-cache, one-node-loss, hot-key-expiry, slow-network, and stale-refill drills.
+- Keep dashboards and logs free of full keys or values when they can reveal customer
+  identifiers or sensitive payloads.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Secure the network and choose the right cache
+
+Memcached should not be exposed to the public internet. Put it on a restricted network,
+limit which workloads can connect, minimize sensitive values, and use encryption and
+mutual authentication when the threat model requires them. Memcached supports stable
+TLS in current releases when built and configured for it; verify client compatibility,
+certificate validation, and performance with the
+[official TLS guidance](https://docs.memcached.org/features/tls/).
+
+{% concept-grid columns="3" %}
+{% concept-card title="Choose Memcached" eyebrow="Disposable object cache" icon="check" tone="green" %}
+Use it for simple, high-volume cache-aside reads where values are opaque, misses are
+safe, and client-side placement plus application-owned coherence are acceptable.
+{% /concept-card %}
+{% concept-card title="Choose Redis or another data service" eyebrow="Richer server behavior" icon="layers" tone="amber" %}
+Use a different system when the design depends on durable state, replication semantics,
+server-side data structures, streams, transactions, or richer atomic workflows.
+{% /concept-card %}
+{% concept-card title="Choose a CDN or HTTP cache" eyebrow="Protocol-aware delivery" icon="network" tone="blue" %}
+Use an HTTP-aware cache when validators, request headers, status codes, shared-cache
+directives, geographic delivery, and purge behavior are the core contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+The final design question is not "How much RAM should Memcached have?" It is "Which
+source work becomes optional on a hit, and can the application remain correct and
+recoverable when every cached copy disappears?"
+{% /section-card %}
+
+{% quiz quizId="memcached" lessonSlug="memcached" title="Memcached Production Design Review" questionsFile="/api/content/technology/memcached/quiz/memcached-production-design.json" /%}

@@ -1,0 +1,488 @@
+---
+title: "Design Notification System"
+section: practice
+level: intermediate
+duration: 45 min
+description: "Design a multi-channel notification platform with durable queues, user preferences, templates, provider routing, and delivery observability."
+registryId: practice-notification-system
+---
+
+{% section-card tone="intro" %}
+## What is a notification system?
+
+A notification system turns a product event, such as an order update or security alert, into one or more messages delivered through email, SMS, push, or in-app channels. It accepts work quickly, stores a durable notification intent, applies the user's latest communication policy, and sends through external providers asynchronously.
+
+The core invariant is: **an accepted intent is durable, no external send bypasses current policy, and retries create at most one logical channel delivery**. "Accepted" therefore means the platform owns the work; it does not mean a provider or device has delivered it.
+
+This walkthrough assumes familiarity with [message queues](/fundamentals/message-queues), then builds from requirements and volume estimates to provider failures and production operations.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Separate acceptance from delivery" eyebrow="Durability" icon="database" tone="blue" %}
+Commit the intent and outbox event before acknowledging it. Template rendering, scheduling, fanout, and provider calls continue asynchronously.
+{% /concept-card %}
+{% concept-card title="Recheck policy before send" eyebrow="Safety" icon="shield" tone="green" %}
+An enqueue-time decision can become stale. Consent, quiet hours, frequency caps, and channel eligibility are authoritative immediately before an external call.
+{% /concept-card %}
+{% concept-card title="Make retries harmless" eyebrow="Correctness" icon="repeat" tone="violet" %}
+Use stable delivery and attempt identities across queues, workers, provider requests, and callbacks. At-least-once transport should still produce one logical send.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+### What is the notification contract?
+
+The contract states what callers may request, what users may control, and which result the system can honestly promise. These decisions shape the data model and failure behavior before any vendor or database is chosen.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Functional requirements" eyebrow="User actions" icon="route" tone="blue" %}
+- Accept transactional, security, product, and marketing events.
+- Target one recipient, a saved audience, or a large campaign.
+- Deliver through push, email, SMS, and in-app channels.
+- Support templates, personalization, scheduling, and approved fallback channels.
+- Expose accepted, scheduled, suppressed, dispatched, delivered, and failed states.
+{% /concept-card %}
+{% concept-card title="User policy" eyebrow="Permission" icon="shield" tone="green" %}
+- Enable or disable categories and channels.
+- Enforce immediate opt-outs and verified destination changes.
+- Respect recipient-local quiet hours and frequency caps.
+- Keep security and legally required messages in explicit policy classes.
+- Record the policy version and reason used for every suppression.
+{% /concept-card %}
+{% concept-card title="Service objectives" eyebrow="Observable" icon="gauge" tone="amber" %}
+- Sustain 100 million accepted intents per day and about 50K intents/s during a campaign burst.
+- Keep acceptance P95 below 150 ms when the durable tier is healthy.
+- Start eligible critical sends within one second at P99.
+- Start normal sends within one minute and marketing sends within ten minutes at P99.
+- Preserve accepted work through a worker, queue partition, or single-region failure.
+{% /concept-card %}
+{% concept-card title="First-version boundary" eyebrow="Out of scope" icon="boxes" tone="neutral" %}
+- No guarantee that a provider can deliver to an offline or invalid destination.
+- No universal exactly-once claim across independent providers and devices.
+- No recommendation model for choosing content or optimal send time.
+- No full campaign authoring suite, billing system, or engagement attribution model.
+- No emergency broadcast guarantee without a separately validated product contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Questions to ask the interviewer
+
+1. Does one request target one user or an audience that may contain millions? Assume both, but expand large audiences asynchronously.
+2. Which channels and message classes are required? Assume push, email, SMS, and in-app across security, transactional, product, and marketing classes.
+3. Does critical mean "ignore all limits"? Assume it may bypass marketing frequency caps, but never consent rules, legal restrictions, destination validation, or provider quotas.
+4. What does delivery mean? Treat provider acceptance, provider delivery, device receipt, and user engagement as distinct states.
+5. How quickly must opt-outs take effect? Assume a user change must stop queued marketing work before the next provider call.
+6. Are channel fallbacks automatic? Assume only an explicit policy may authorize fallback because cost, consent, and user experience differ by channel.
+
+### Correctness boundaries
+
+- A successful ingestion response refers to one durable `notification_id` for the caller's idempotency key.
+- A recipient-channel pair has one stable `channel_delivery_id`, even when workers replay the event.
+- A provider retry reuses the same attempt key after an ambiguous result; a deliberate failover creates a sequenced new attempt under the same logical delivery.
+- Policy is evaluated once to plan work and again immediately before an external send.
+- Callback events advance delivery state monotonically; a late "accepted" event cannot overwrite "delivered" or "permanently failed."
+
+{% callout variant="warn" %}
+Do not promise 99.9% end-user delivery without defining eligible destinations and provider behavior. The platform can own durable acceptance, time-to-first-attempt, policy compliance, and status accuracy; a disconnected device or invalid phone number remains outside its control.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate scale and constraints" %}
+
+### What is a capacity estimate?
+
+A capacity estimate converts product assumptions into intent rate, delivery-attempt rate, state-write volume, and queue recovery time. Notification systems amplify work because one intent can target many recipients and each recipient may use more than one channel.
+
+{% metric-strip %}
+{% metric value="1,157/s" label="Average intents" detail="100M / 86,400 seconds" tone="blue" /%}
+{% metric value="46.3K/s" label="Peak intents" detail="40x campaign burst, rounded toward 50K/s" tone="amber" /%}
+{% metric value="64.8K/s" label="Provider attempts" detail="1.4 eligible channels per intent at peak" tone="violet" /%}
+{% metric value="100GB/day" label="Intent records" detail="100M records at 1KB before indexes and replication" tone="green" /%}
+{% /metric-strip %}
+
+### Back-of-the-envelope math
+
+- **Average intent rate:** `100,000,000 / 86,400 = 1,157 intents/s`.
+- **Peak intent rate:** `1,157 x 40 = 46,280 intents/s`; round capacity planning toward the stated 50K/s target.
+- **Channel expansion:** `46,280 x 1.4 = 64,792 provider attempts/s` before retries.
+- **Worker estimate:** at a measured 250 adapter calls/s per worker and 70% target utilization, `64,792 / (250 x 0.70) = 371 workers` before failure-domain headroom.
+- **State-event stream:** at three 250-byte status events per attempt, peak status traffic is about `194K events/s` or `48.6 MB/s` before replication.
+- **Raw intent storage:** `100M x 1KB = 100GB/day`; 30 hot days with three copies is about `9TB` before indexes, status history, and storage overhead.
+
+Provider quotas, not CPU, often become the binding limit. A fleet that can issue 100K calls/s still cannot exceed an email account's contract, an SMS sender's throughput, a push service's feedback, or a per-recipient frequency cap. Model each provider and tenant as a separate constrained lane.
+
+{% interactive-block id="practice/notification-system-capacity-lab" /%}
+
+### Backlog and recovery
+
+If delivery demand is 80K attempts/s, dispatch capacity is 60K/s, and the burst lasts ten minutes, the queue gains `20K x 600 = 12M` attempts. After the burst, a 58K/s headroom drains that backlog in about 207 seconds. The exact queue depth matters less than **oldest eligible message age**, because age maps directly to the user-visible delivery SLO.
+
+{% callout variant="info" %}
+Estimate intent rate, audience expansion, eligible channels, retries, and callbacks separately. A single "messages per second" number hides the amplification that actually sizes queues, workers, provider quotas, and status storage.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### What is the high-level architecture?
+
+The architecture separates the **control plane**, which owns templates, preferences, policies, and provider configuration, from the **delivery plane**, which turns durable intents into bounded external calls. The synchronous path ends after durable acceptance; slow personalization and providers remain off that path.
+
+### Sketch the design first
+
+{% callout variant="info" %}
+Use the design challenge before reading the reference flow. Show the durable acceptance boundary, asynchronous audience expansion, send-time policy check, channel queues, provider adapters, and status path.
+{% /callout %}
+
+{% design-challenge
+   challengeId="notification-system"
+   title="Design a burst-safe notification path"
+   prompt="A campaign can create millions of push, email, and SMS sends while providers are slow or unavailable. Draw how callers receive fast durable acceptance, how user policy is rechecked, how channel work is isolated, and how retries avoid duplicate user-visible sends." /%}
+
+### Reference flow
+
+{% system-flow title="Durable multi-channel delivery path" caption="Only intent commit is synchronous. Audience expansion, policy evaluation, scheduling, rendering, provider calls, callbacks, and analytics proceed asynchronously." %}
+{% system-node title="Producers and campaign API" eyebrow="Request" icon="users" tone="blue" %}
+Authenticate callers, validate bounded payloads, enforce tenant admission limits, and require a stable idempotency key.
+{% /system-node %}
+{% system-node title="Intent service and outbox" eyebrow="Accept" icon="database" tone="violet" %}
+Commit the immutable request, initial state, and publication event atomically. Return the stable notification ID after this boundary.
+{% /system-node %}
+{% system-node title="Audience and policy planner" eyebrow="Plan" icon="shield" tone="green" %}
+Expand recipients in pages, resolve eligible channels, apply preliminary policy, and create stable channel-delivery records.
+{% /system-node %}
+{% system-node title="Scheduler and channel queues" eyebrow="Buffer" icon="activity" tone="amber" %}
+Hold future work by `send_after`, then isolate critical, normal, email, SMS, push, and provider-specific pressure.
+{% /system-node %}
+{% system-node title="Provider adapters" eyebrow="Dispatch" icon="route" tone="cyan" %}
+Revalidate policy, render a versioned template, enforce quotas, normalize provider responses, and reuse stable attempt keys.
+{% /system-node %}
+{% system-node title="Status and analytics pipeline" eyebrow="Observe" icon="gauge" tone="rose" %}
+Merge worker outcomes and signed callbacks into monotonic delivery state, user-facing status, SLO metrics, and delayed analytics.
+{% /system-node %}
+{% /system-flow %}
+
+### Event ingestion path
+
+1. The caller sends an idempotency key, event type, template reference, audience reference, priority, schedule, and bounded personalization data.
+2. The edge authenticates the tenant, validates schema and size, checks admission limits, and rejects obviously invalid destinations or schedules.
+3. The intent service looks up `(tenant_id, idempotency_key)`. A duplicate returns the original notification ID and state.
+4. One database transaction writes the notification intent and an outbox record.
+5. The API returns `accepted` only after the transaction commits.
+6. An outbox relay publishes the durable intent for asynchronous audience expansion; replay is safe because consumers deduplicate the notification ID.
+
+For a million-recipient campaign, store one campaign intent and expand the audience in checkpointed pages. Do not hold one request open or attempt one transaction containing a million recipient rows. Expansion checkpoints make pause, resume, cancellation, and replay explicit.
+
+### Channel fanout path
+
+1. Resolve a stable recipient set or audience snapshot according to the product's freshness contract.
+2. Evaluate category, channel, destination verification, quiet hours, caps, and fallback eligibility.
+3. Create one `channel_delivery_id` for every eligible recipient-channel pair.
+4. Schedule future work or publish immediately to the correct priority and channel lane.
+5. A worker rechecks current policy, renders the pinned template version, and asks the channel adapter to send.
+6. Worker outcomes and provider callbacks update state without blocking the original producer.
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Design data, storage, and contracts" %}
+
+### What does the data model protect?
+
+The model separates the caller's immutable intent, a recipient's logical channel delivery, and the provider calls used to achieve it. This separation makes idempotency, policy decisions, retries, and auditing explainable.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Notification intent" eyebrow="Caller contract" icon="database" tone="blue" %}
+Store tenant, idempotency key, event type, audience reference, template version, priority, schedule, payload reference, creation time, and cancellation state. The unique tenant-key pair returns one stable notification ID.
+{% /concept-card %}
+{% concept-card title="Channel delivery" eyebrow="Logical send" icon="route" tone="violet" %}
+Store notification, recipient, channel, normalized destination reference, delivery state, policy version, `send_after`, suppression reason, and latest attempt sequence. Uniqueness prevents replayed fanout from creating a second logical send.
+{% /concept-card %}
+{% concept-card title="Provider attempt" eyebrow="External side effect" icon="repeat" tone="amber" %}
+Store channel delivery, sequence, provider, stable idempotency key, request hash, start time, normalized outcome, provider message ID, retry time, and error class.
+{% /concept-card %}
+{% concept-card title="Policy and template versions" eyebrow="Reproducibility" icon="shield" tone="green" %}
+Keep immutable template versions and auditable policy revisions. Record which versions produced a suppression or send without copying sensitive preference data into every event.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Stable identity hierarchy
+
+- `notification_id` identifies one accepted caller intent.
+- `channel_delivery_id` identifies one intended `(notification, recipient, channel)` result.
+- `attempt_sequence` increases only for an intentional provider attempt or approved failover.
+- `provider_attempt_key` is derived from the channel delivery and sequence, then reused across ambiguous retries.
+- `provider_message_id` correlates callbacks after the provider accepts ownership.
+
+{% code-block file="/api/content/practice/notification-system/code/notification-intent.schema.json" language="json" title="Notification intent API schema" /%}
+
+### Storage by access pattern
+
+- **Transactional store:** intents, idempotency keys, channel deliveries, attempts, templates, preferences, and audit state requiring uniqueness or conditional updates.
+- **Durable log:** outbox events, audience-expansion work, channel jobs, attempt outcomes, and callback events that must be replayable.
+- **Scheduler index:** due work ordered by coarse time bucket and partition, with durable ownership and bounded scans.
+- **Cache:** immutable template versions, destination routing hints, and short-lived preference reads. The source of truth still decides send eligibility.
+- **Analytical store:** provider performance, delivery latency, suppression counts, cost, and engagement aggregates off the correctness path.
+- **Object storage:** large campaign inputs and payload assets referenced by immutable IDs rather than copied through every queue event.
+
+### API and event semantics
+
+- `POST /v1/notification-intents` returns the stable ID and `accepted` state; it does not wait for audience expansion or provider delivery.
+- `GET /v1/notification-intents/{id}` returns aggregate progress plus sampled or paginated recipient failures, not an unbounded response.
+- `notification.delivery.changed` includes event ID, delivery ID, monotonic state version, occurred time, provider identity, and normalized reason.
+- Provider webhooks are authenticated, deduplicated by provider event ID, and applied only if the transition is valid for the current attempt.
+
+The executable worker below demonstrates a stable channel delivery, repeated queue consumption, and one logical provider side effect.
+
+{% code-block file="/api/content/practice/notification-system/code/idempotent-delivery-worker.mjs" language="javascript" title="Idempotent delivery worker" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="5. Deep-dive on policy, scheduling, and delivery" %}
+
+### What is the delivery decision?
+
+The delivery decision chooses **whether**, **when**, **through which channel and provider**, and **under which attempt identity** an external side effect may occur. It is recomputed at the last responsible moment because preferences, schedules, quotas, and provider health can change after ingestion.
+
+{% process-flow %}
+{% process-step number="1" title="Load current policy" label="Authorize" %}
+Read the latest consent, category, channel, destination verification, quiet hours, frequency caps, and tenant policy. Fail closed for optional communication when policy cannot be established.
+{% /process-step %}
+{% process-step number="2" title="Schedule or suppress" label="Decide" %}
+Persist a terminal suppression reason or a durable `send_after` time. Scheduled work is revalidated when due rather than trusting the old decision.
+{% /process-step %}
+{% process-step number="3" title="Render a pinned version" label="Prepare" %}
+Use the accepted template version, validate required variables, escape channel-specific content, and keep secrets or sensitive attributes out of queue payloads.
+{% /process-step %}
+{% process-step number="4" title="Acquire quota" label="Limit" %}
+Apply hierarchical token buckets for tenant, category, channel, provider account, sender identity, and destination. Reserve critical capacity without ignoring hard provider limits.
+{% /process-step %}
+{% process-step number="5" title="Call through an adapter" label="Send" %}
+Translate the canonical request to a provider API and normalize accepted, permanent, retryable, rate-limited, and unknown outcomes.
+{% /process-step %}
+{% process-step number="6" title="Reconcile state" label="Observe" %}
+Merge synchronous outcomes and signed callbacks by attempt identity. Emit monotonic delivery changes and schedule only bounded, policy-valid retries.
+{% /process-step %}
+{% /process-flow %}
+
+### Preference and policy evaluation
+
+- Evaluate policy during planning to avoid unnecessary fanout and storage work.
+- Evaluate again immediately before send so a recent opt-out or destination change wins.
+- Cache immutable policy versions or short-lived reads, but use invalidation and a source-of-truth fallback for strict opt-out requirements.
+- Separate **suppressed** from **failed**. Suppression means the platform intentionally obeyed policy; retrying it is a correctness bug.
+- Store reason codes such as `channel_disabled`, `quiet_hours`, `frequency_cap`, `invalid_destination`, and `campaign_cancelled` for support and audit.
+- Define precedence explicitly: legal prohibition and opt-out, destination validity, cancellation, quiet hours, frequency caps, fallback policy, then optimization.
+
+### Scheduling without queue churn
+
+Store `send_after` in UTC together with the timezone and rule version that produced it. Put distant work into time buckets or a scheduler store, then move only near-due work into delivery queues. On daylight-saving changes or a user timezone update, choose a documented policy and re-evaluate before send.
+
+{% code-block file="/api/content/practice/notification-system/code/evaluate-delivery-policy.mjs" language="javascript" title="Executable policy and scheduling rules" /%}
+
+### Provider adapter contract
+
+Every email, SMS, and push adapter implements the same application-facing result classes:
+
+- **Accepted:** the provider owns the request and returns a provider message ID; final delivery may still arrive later by callback.
+- **Permanent failure:** invalid address, unregistered device token, prohibited content, or another result that retries cannot repair.
+- **Retryable failure:** transient transport error or provider overload with a bounded retry budget.
+- **Rate limited:** quota feedback with `Retry-After` or a reset time; pause the affected provider partition rather than busy-looping.
+- **Unknown:** timeout or connection loss after the request may have reached the provider; reconcile with the same attempt key.
+
+The adapter also owns provider-specific authentication, sender identity, request size, response mapping, circuit breaking, callback verification, and health signals. It must not own product consent rules; those remain consistent across providers.
+
+### Idempotency and retries
+
+- Use at-least-once queues and make every consumer idempotent.
+- Insert or claim a provider attempt with a conditional write before the external call.
+- Reuse the same provider idempotency key when an outcome is unknown.
+- Create a new attempt sequence only for a deliberate retry or failover recorded under the same channel delivery.
+- Apply exponential backoff with full jitter, a maximum elapsed time, and per-class attempt limits.
+- Route exhausted work to an inspectable terminal state or dead-letter queue. Never replay an entire dead-letter queue without fixing the cause and preserving original identities.
+- Deduplicate callbacks and reject state regressions; callback arrival order is not a delivery order guarantee.
+
+{% interactive-block id="practice/notification-system-policy-retry-lab" /%}
+
+### Rate limits and fairness
+
+Rate limiting protects several boundaries at once. Use independent buckets for API admission, recipient frequency, tenant budget, channel capacity, provider account, and sender identity. Partition queues so one tenant or provider cannot monopolize workers, and use weighted fair scheduling when critical and normal traffic share a fleet.
+
+{% callout variant="warn" %}
+Do not treat retries as new sends. A timeout is an ambiguous result, not proof of failure. Minting a new provider attempt key on every retry is how at-least-once infrastructure becomes duplicate email, SMS, or push notifications.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability, reliability, and operations" %}
+
+### What makes notification delivery reliable?
+
+Reliability means accepted intents remain recoverable while the platform preserves policy and bounds duplicate side effects. Autoscaling helps only after queue ownership, retry behavior, rate limits, and degraded modes are explicit.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Queue partition or worker loss" eyebrow="Replay" icon="repeat" tone="blue" %}
+Reassign the partition and replay from the durable checkpoint. Stable notification, delivery, and attempt IDs make duplicate consumption harmless.
+{% /concept-card %}
+{% concept-card title="Preference store unavailable" eyebrow="Fail closed" icon="shield" tone="amber" %}
+Pause optional sends whose current eligibility cannot be proven. Use a narrowly defined, audited policy for critical transactional classes rather than a blanket bypass.
+{% /concept-card %}
+{% concept-card title="Provider outage" eyebrow="Contain" icon="warning" tone="rose" %}
+Open the provider circuit, stop consuming quota, isolate its queue, and fail over only when sender identity, region, policy, and cost permit it.
+{% /concept-card %}
+{% concept-card title="Scheduler delay" eyebrow="Recover" icon="activity" tone="violet" %}
+Scan overdue time buckets, reclaim expired leases, and prioritize by due time and class. A late schedule still requires a fresh policy check.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Scale and overload in a deliberate order
+
+1. Shed nonessential analytics enrichment and expensive engagement joins.
+2. Pause new bulk marketing campaigns and reduce their audience-expansion rate.
+3. Preserve reserved critical capacity and apply fair tenant admission control.
+4. Honor provider backpressure by pausing only affected provider-channel partitions.
+5. Delay eligible normal work within its SLO and expose the growing oldest-message age.
+6. Reject new work before acknowledging it when the durable tier has no safe storage or recovery headroom.
+
+### Observe the state machine, not only server health
+
+- **Ingestion:** accepted requests, duplicate-key hits, validation rejects, durable-commit latency, outbox lag, and tenant admission rejects.
+- **Planning:** audience expansion rate and lag, eligible channels per intent, preference read latency, suppression reason, and template validation failure.
+- **Scheduling:** due messages, oldest overdue age, wakeup lag, lease recovery, and re-evaluation outcome.
+- **Queues:** arrival and completion rate, oldest eligible age by priority/channel/provider/tenant, retry volume, and dead-letter reason.
+- **Providers:** call latency, accepted rate, permanent failure, `429` rate, timeout ambiguity, circuit state, quota remaining, and backup usage.
+- **Outcomes:** time from accepted to first attempt, provider acceptance, final delivery, policy compliance, duplicate logical sends, and callback lag.
+- **Cost:** sends and retries by provider, channel, tenant, and message class; unexpected failover cost should be visible before billing closes.
+
+Queue depth alone is misleading: ten million scheduled messages due tomorrow are healthy, while ten thousand critical messages already two minutes old are not. Alert on SLO burn and oldest eligible age, split by the dimensions operators can act on.
+
+### Trace and test the production path
+
+- Carry `notification_id`, `channel_delivery_id`, `attempt_sequence`, tenant, channel, provider, and policy version through structured events and traces.
+- Redact message bodies, email addresses, phone numbers, device tokens, and personalization values from routine logs.
+- Run synthetic sends through test destinations for every provider and validate callback authentication and state transitions.
+- Load-test burst admission, audience expansion, template rendering, scheduler wakeups, and provider stubs independently.
+- Inject lost acknowledgements, worker crashes after send, stale preference caches, callback reordering, provider `429` storms, open circuits, and campaign cancellation mid-fanout.
+- Rehearse queue replay and dead-letter repair with stable identities before production incidents require them.
+
+{% callout variant="tip" %}
+Define separate SLOs for accepted-to-first-attempt and provider-accepted-to-final-delivery. The first is mostly your platform; the second includes provider and destination behavior. Combining them hides ownership and slows incident response.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+### What trade-offs define this design?
+
+A defensible design names the rejected alternative and its consequence. The selected architecture favors durable asynchronous acceptance, send-time policy revalidation, channel isolation, and provider-neutral delivery state.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Async acceptance vs inline send" eyebrow="Latency" icon="activity" tone="blue" %}
+Asynchronous delivery absorbs bursts and provider slowness but requires honest status APIs and eventual results. Inline send looks simple but couples caller latency and availability to every provider.
+{% /concept-card %}
+{% concept-card title="Revalidate vs freeze policy" eyebrow="Compliance" icon="shield" tone="green" %}
+Send-time revalidation adds a preference read and race handling, but honors recent opt-outs. Freezing the enqueue-time plan is cheaper and unsafe when work waits in queues.
+{% /concept-card %}
+{% concept-card title="Channel lanes vs one queue" eyebrow="Isolation" icon="route" tone="violet" %}
+Channel and priority lanes scale and fail independently but require routing and fair scheduling. One FIFO queue is easier until slow email or provider throttling delays critical push and SMS.
+{% /concept-card %}
+{% concept-card title="Adapters vs direct integration" eyebrow="Portability" icon="boxes" tone="amber" %}
+A canonical adapter contract adds translation code but standardizes outcomes, retries, metrics, and failover. Direct provider calls expose vendor details throughout the product and make safe migration harder.
+{% /concept-card %}
+{% concept-card title="Render late vs render early" eyebrow="Freshness" icon="code" tone="cyan" %}
+Late rendering uses current recipient data and avoids storing message bodies, but increases send-path work. Early rendering makes dispatch cheaper but can expose stale or sensitive content while queued.
+{% /concept-card %}
+{% concept-card title="Recipient rows vs lazy fanout" eyebrow="Campaigns" icon="users" tone="rose" %}
+Materialized rows simplify per-recipient audit and cancellation but amplify writes. Checkpointed lazy expansion controls write bursts but makes aggregate progress and audience freshness more complex.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Additional decisions
+
+- **Exactly-once claim vs idempotent at-least-once:** independent providers and callbacks prevent a useful universal exactly-once guarantee. Stable identities and reconciliation provide the user-visible property that matters.
+- **Primary-only vs provider failover:** one provider simplifies sender identity and callback state. Failover improves availability only when policy, reputation, regional rules, and cost are validated for the backup.
+- **Central scheduler vs partitioned time buckets:** one scheduler is easy to reason about but becomes a throughput and availability bottleneck. Partitioned buckets scale, while requiring lease recovery and overdue scans.
+- **Strong preference reads vs bounded cache:** source-of-truth reads simplify immediate enforcement but increase latency and dependency load. A bounded cache can work with invalidation, explicit staleness budgets, and fail-closed behavior for optional sends.
+
+The reference design does not optimize for the fewest services. It spends operational complexity where the product has independent scaling, policy, or failure boundaries: ingestion, planning, scheduling, channels, providers, and outcomes.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrapup" title="8. Wrap up with risks and extensions" %}
+
+### What is the recommended design?
+
+The recommended system accepts a durable intent with a stable idempotency key, expands audiences asynchronously, creates one logical delivery per recipient-channel, rechecks policy before every provider call, isolates channel and provider pressure, and reconciles attempts and callbacks into monotonic status.
+
+{% process-flow %}
+{% process-step number="1" title="Accept durably" label="Ingest" %}
+Validate the tenant request and atomically commit the immutable intent plus outbox event before returning the stable notification ID.
+{% /process-step %}
+{% process-step number="2" title="Plan recipients" label="Expand" %}
+Page through large audiences, apply preliminary policy, and create stable recipient-channel delivery records without one giant transaction.
+{% /process-step %}
+{% process-step number="3" title="Schedule and isolate" label="Buffer" %}
+Store future `send_after` times durably, then route due work by priority, channel, provider, and tenant fairness boundaries.
+{% /process-step %}
+{% process-step number="4" title="Revalidate and render" label="Decide" %}
+Load current policy, suppress or reschedule when required, pin a template version, and acquire all applicable quotas.
+{% /process-step %}
+{% process-step number="5" title="Dispatch idempotently" label="Send" %}
+Call a normalized provider adapter with a stable attempt key, bounded retries, circuit breaking, and policy-controlled failover.
+{% /process-step %}
+{% process-step number="6" title="Reconcile and operate" label="Observe" %}
+Merge worker results and signed callbacks into monotonic state, alert on oldest eligible age, and audit policy, cost, and duplicate risk.
+{% /process-step %}
+{% /process-flow %}
+
+### Highest risks
+
+1. **A preference update races queued work.**
+   - Revalidate immediately before the provider call.
+   - Invalidate caches and record the policy version used for the decision.
+2. **A timeout hides provider acceptance.**
+   - Reuse the stable attempt key and query status when available.
+   - Merge callbacks by provider message ID without regressing state.
+3. **A campaign burst starves critical traffic.**
+   - Reserve capacity and isolate priority, channel, provider, and tenant queues.
+   - Operate on oldest eligible age and pause new bulk admission early.
+4. **Scheduling rules drift across timezones and daylight-saving changes.**
+   - Store UTC due time with timezone and rule version.
+   - Re-evaluate policy when work becomes due.
+5. **A bad template or poison payload retries forever.**
+   - Validate variables before dispatch and classify permanent failures.
+   - Quarantine by reason with bounded, identity-preserving repair tools.
+6. **Provider callbacks are spoofed, duplicated, or reordered.**
+   - Verify signatures, deduplicate event IDs, and enforce valid monotonic transitions.
+
+### Extensions to rehearse
+
+- **Digesting and batching**
+  - Define which events may be combined and the maximum wait window.
+  - Give the digest its own stable identity, policy decision, and cancellation behavior.
+- **Escalation workflows**
+  - Advance from push to SMS or voice only after a defined acknowledgement timeout.
+  - Treat each channel as a sequenced attempt under one escalation policy, not an accidental duplicate.
+- **Multi-region delivery**
+  - Give every intent and channel delivery one home ownership partition.
+  - Keep provider credentials, sender identities, preference data, and failover rules within residency constraints.
+- **Enterprise webhooks and chat integrations**
+  - Reuse the adapter contract while adding tenant-scoped secrets, endpoint health, replay protection, and delivery audit.
+
+{% callout variant="tip" %}
+End an interview by tracing one accepted intent through an opt-out race and an ambiguous provider timeout. Then name the oldest-eligible-age alert and the capacity assumption you would load-test first.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/notification-system/quiz/notification-system-design-review.json"
+   lessonSlug="practice-notification-system"
+   title="Notification System Design Review" /%}

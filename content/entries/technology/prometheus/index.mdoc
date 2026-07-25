@@ -1,0 +1,259 @@
+---
+registryId: prometheus
+---
+
+{% section-card tone="intro" %}
+## What is Prometheus?
+
+**Prometheus is a monitoring system that collects timestamped measurements and stores
+them as labeled time series.** The Prometheus server discovers targets, periodically
+scrapes their HTTP metrics endpoints, writes samples to its local time-series database
+(TSDB), answers PromQL queries, and evaluates recording and alerting rules.
+
+Prometheus matters because the same labels that make a metric useful for diagnosis also
+determine how many distinct series the system must ingest and retain. A label such as a
+bounded HTTP method may add a few valuable series; a request ID can create a new series
+for nearly every request.
+
+{% callout variant="info" %}
+### Core invariant
+
+Every unique metric-name and label-set combination is a separate time series, and every
+active series produces another sample on each successful scrape.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Target" eyebrow="Measured system" icon="server" tone="blue" %}
+An endpoint discovered from static configuration, Kubernetes, cloud APIs, files, DNS,
+or another supported service-discovery source.
+{% /concept-card %}
+{% concept-card title="Series" eyebrow="Metric identity" icon="key" tone="cyan" %}
+A metric name plus one exact set of labels. Changing any label value creates a different
+series identity.
+{% /concept-card %}
+{% concept-card title="Sample" eyebrow="Value at a time" icon="activity" tone="violet" %}
+A float or native-histogram value associated with a timestamp inside one series.
+{% /concept-card %}
+{% concept-card title="Rule" eyebrow="Derived evidence" icon="gauge" tone="amber" %}
+A PromQL expression evaluated on an interval to create a recording series or an alert
+state.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Budget series before choosing a server size
+
+Start with quantities that can be measured from a representative target:
+
+- **Active series** = scrape targets x post-relabel series per target.
+- **Samples per second** = active series / scrape interval in seconds.
+- **Raw local-block estimate** = samples per second x retention seconds x bytes per
+  sample.
+- **Provisioned disk** = raw estimate / (1 - reserved headroom).
+
+Prometheus documents an average of roughly **1-2 bytes per sample** for local storage.
+That formula is a planning baseline, not a complete disk or memory model. Use the lab
+to expose every input and reserve space outside retained blocks.
+
+{% interactive-block id="technology/prometheus-sizing" dataFile="/api/content/technology/prometheus/data/series-budget-model.json" /%}
+
+The estimate does not predict label-index size, the write-ahead log (WAL), the mutable
+head block, native histograms, exemplars, churn, compaction peaks, deleted-series
+tombstones, snapshots, remote-write queues, or operating-system overhead. Confirm the
+result with `promtool tsdb analyze`, production self-metrics, and a load test that uses
+the real metric shape.
+
+The official [storage documentation](https://prometheus.io/docs/prometheus/latest/storage/)
+defines the 1-2 byte estimate and recommends keeping time-based retained blocks below
+the full allocated disk so cleanup can occur before the filesystem fills.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace collection, rules, alerts, and remote write separately
+
+Prometheus keeps several paths deliberately distinct. Scrape discovery does not deliver
+notifications. Alertmanager does not evaluate PromQL. Remote write does not replace the
+local TSDB used by the Prometheus server for normal ingestion and rule evaluation.
+
+Select each scenario and follow only the components that participate.
+
+{% topology-lab dataFile="/api/content/technology/prometheus/data/prometheus-runtime-topology.json" /%}
+
+The failure boundary determines the user-visible symptom:
+
+- a **target failure** makes its scrape fail and records `up` as `0` for that target;
+- a **slow or failing rule group** can miss evaluations even while scraping remains
+  healthy;
+- an **Alertmanager outage** interrupts grouping and notification delivery, not the
+  underlying PromQL alert state inside Prometheus;
+- a **remote-write outage** grows an in-memory/WAL-backed queue and can eventually lose
+  unsent data after the WAL window is compacted;
+- a **local disk or node loss** affects local query and rule history because the local
+  TSDB is not clustered or replicated.
+
+Prometheus's [alerting overview](https://prometheus.io/docs/alerting/latest/overview/)
+and [remote-write tuning guide](https://prometheus.io/docs/practices/remote_write/)
+document the current ownership of these paths.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design the metric identity before instrumenting code
+
+{% concept-grid columns="4" %}
+{% concept-card title="Counter" eyebrow="Cumulative total" icon="activity" tone="blue" %}
+Tracks events that only increase until process restart, such as requests or failures.
+Use `rate()` or `increase()` over a range instead of alerting on the raw total.
+{% /concept-card %}
+{% concept-card title="Gauge" eyebrow="Current value" icon="gauge" tone="green" %}
+Moves up and down, such as queue depth, in-flight work, or available capacity. Do not
+apply counter-reset logic to a gauge.
+{% /concept-card %}
+{% concept-card title="Histogram" eyebrow="Aggregatable distribution" icon="scale" tone="violet" %}
+Records count, sum, and bucket observations. Bucket boundaries determine both the
+series cost and which latency or size questions can be answered.
+{% /concept-card %}
+{% concept-card title="Summary" eyebrow="Client-side quantiles" icon="gauge" tone="amber" %}
+Can expose count, sum, and configured quantiles. Precomputed quantiles generally cannot
+be aggregated across instances the way histogram buckets can.
+{% /concept-card %}
+{% /concept-grid %}
+
+Choose labels from questions operators will actually ask:
+
+- keep bounded dimensions such as method, route template, status class, region, and
+  stable service or deployment identity;
+- aggregate raw URL paths into route templates before exporting them;
+- avoid user IDs, request IDs, email addresses, timestamps, random values, and other
+  unbounded dimensions;
+- measure the post-relabel series count because metric relabeling can drop unwanted
+  series before ingestion;
+- budget classic histogram buckets as separate series and test the actual cost of
+  native histograms before enabling them broadly.
+
+Prometheus's [data-model documentation](https://prometheus.io/docs/concepts/data_model/)
+defines series identity and label behavior.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make each PromQL query preserve its intended meaning
+
+PromQL selects series by label matchers, applies functions to instant or range vectors,
+and aggregates labels. The syntax can be valid while the question is wrong.
+
+Use these rules when building service queries:
+
+- apply `rate()` to counters over a range that contains enough samples for the scrape
+  interval and expected reset behavior;
+- aggregate the numerator and denominator over compatible labels before dividing an
+  error ratio;
+- preserve only the dimensions needed for the dashboard, alert route, or drill-down;
+- use `histogram_quantile()` on aggregated bucket rates and retain the `le` label for
+  classic histograms;
+- decide whether missing data means healthy silence, discovery failure, scrape failure,
+  or an absent workload before turning it into a page.
+
+{% code-block file="/api/content/technology/prometheus/code/query-examples.promql" language="promql" title="Service-level PromQL queries" /%}
+
+The official [PromQL basics](https://prometheus.io/docs/prometheus/latest/querying/basics/)
+define selectors, value types, and range behavior. Test expressions against normal,
+low-traffic, deploy, outage, and missing-target windows.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Separate alert detection from notification delivery
+
+Prometheus evaluates an alert expression. A returned label set becomes pending when a
+`for` duration is configured and becomes firing only after the condition persists.
+Prometheus sends firing alerts to every configured Alertmanager. Alertmanager then
+groups, deduplicates, routes, silences, and inhibits notifications.
+
+An actionable alert should name:
+
+- the user-visible symptom or exhausted operating boundary;
+- the owner and severity used by the Alertmanager routing tree;
+- a `for` interval justified by the signal's cadence and urgency;
+- a summary and runbook that remain useful with the alert's actual labels;
+- a separate watchdog for the alert-delivery path itself.
+
+The rule file precomputes request and error rates, pages only when both traffic and
+error-ratio conditions hold, and includes an owned runbook. Validate rule syntax and
+tests with `promtool` before reload.
+
+{% code-block file="/api/content/technology/prometheus/code/alerting-rules.yaml" language="yaml" title="Recording and alerting rules for an API" /%}
+
+Prometheus documents current rule state and timing in the
+[alerting-rules reference](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/).
+Alertmanager's [behavior guide](https://prometheus.io/docs/alerting/latest/alertmanager/)
+describes grouping, routing, silences, and inhibition.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose durability and availability per path
+
+The local TSDB is a single-node database. Its WAL protects recent local writes across
+a process restart, but local storage is not clustered or replicated. Remote write
+streams ingested samples to another system; its queue reads from the WAL and has its
+own backlog, retry, memory, CPU, and network behavior.
+
+{% process-flow %}
+{% process-step number="1" title="Keep scrapes autonomous" label="Collect" %}
+Run Prometheus close to its targets so a central-network failure does not erase all
+local visibility. Give each replica independent discovery and storage.
+{% /process-step %}
+{% process-step number="2" title="Protect local continuity" label="Store" %}
+Use supported local filesystems, disk alerts, tested snapshots where needed, and a
+retention-size limit that leaves filesystem headroom.
+{% /process-step %}
+{% process-step number="3" title="Duplicate critical alerts" label="Notify" %}
+Send each Prometheus replica directly to every Alertmanager instance. Do not hide the
+Alertmanager set behind a load balancer.
+{% /process-step %}
+{% process-step number="4" title="Define the remote contract" label="Retain" %}
+Decide whether remote storage provides longer retention, global query, disaster
+recovery, or all three, then test backlog and replay behavior explicitly.
+{% /process-step %}
+{% /process-flow %}
+
+Two Prometheus replicas can scrape the same targets and improve collection and rule
+availability, but they produce duplicate series distinguished by external labels.
+Deduplicated global queries require a query layer or backend that understands the
+replica model; two servers alone do not create one replicated TSDB.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate Prometheus from its own evidence
+
+Watch each internal path independently:
+
+- **Discovery and scrape:** target count, `up`, scrape duration versus timeout, sample
+  count before and after metric relabeling, and targets dropped unexpectedly.
+- **Series and ingestion:** active head series, series churn, samples appended, label
+  pairs driving cardinality, and WAL or head growth.
+- **Rules and queries:** rule-group evaluation duration versus interval, missed and
+  failed evaluations, query concurrency, expensive expressions, and recording-rule
+  output cardinality.
+- **Local storage:** filesystem free space, retention-size pressure, WAL growth,
+  compaction failures and duration, block health, and restart replay time.
+- **Remote write:** pending samples, failed and retried sends, shard count, queue
+  capacity, throughput, lag, destination health, and WAL-window risk.
+- **Alert delivery:** pending and firing alert count, Alertmanager reachability,
+  notification failures, routing-tree tests, expired silences, and an end-to-end
+  watchdog reaching a real receiver.
+
+Before changing a scrape interval, ask whether the product can tolerate the resulting
+detection delay and whether a lower series count would solve more of the cost. Before
+adding a recording rule, budget the output series it creates. Before expanding local
+retention, prove the restart, compaction, and disk-failure behavior at the new scale.
+
+{% callout variant="warn" %}
+### Failure drill
+
+Stop one target, slow one rule group beyond its evaluation interval, reject remote-write
+requests, disconnect one Alertmanager, and restart Prometheus with a large WAL. Verify
+that each symptom appears in the expected self-metrics and that the collection,
+notification, and retention paths fail independently as designed.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/prometheus/quiz/prometheus-production.json" lessonSlug="prometheus" title="Prometheus Production Review" /%}

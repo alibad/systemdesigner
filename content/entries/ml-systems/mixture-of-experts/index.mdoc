@@ -1,0 +1,232 @@
+---
+registryId: mixture-of-experts
+---
+
+{% section-card tone="intro" %}
+## What is a Mixture of Experts?
+
+A **Mixture of Experts (MoE)** layer replaces one dense neural-network block with many expert blocks and a learned router. For each token, the router selects only a small number of experts, those experts process the token, and their outputs are combined before the model continues.
+
+MoE lets a model store much more expert capacity without running every expert for every token. That makes sparse scaling attractive, but it does not make the system cheap by default: all expert weights must be stored, tokens may cross devices, popular experts can overflow, and a failed expert can interrupt the token path.
+
+### The invariant to remember
+
+**Every admitted token must reach the intended number of available experts within capacity, then return one correctly weighted result.** Sparse compute is useful only while routing quality, load balance, communication, and degraded behavior preserve that invariant.
+
+Review [model serving](/ml-systems/model-serving) first if batching, tail latency, and distributed inference are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Follow one token through the sparse layer
+
+The router is a small learned network, not an external load balancer. It makes a model decision for every token and produces both expert choices and combination weights.
+
+{% process-flow %}
+{% process-step number="1" title="Score experts" label="Router" %}
+Project the token representation into one score per expert, then normalize or otherwise rank those scores.
+{% /process-step %}
+{% process-step number="2" title="Select top-K" label="Admission" %}
+Choose the allowed expert destinations and check each destination against its per-batch capacity.
+{% /process-step %}
+{% process-step number="3" title="Dispatch tokens" label="Communication" %}
+Group token representations by expert and move them to the devices that own the selected weights.
+{% /process-step %}
+{% process-step number="4" title="Run experts" label="Sparse compute" %}
+Execute only the selected feed-forward networks while recording overflow, queueing, and device failures.
+{% /process-step %}
+{% process-step number="5" title="Combine outputs" label="Return path" %}
+Move expert results back to token order and apply the router weights before the residual connection continues.
+{% /process-step %}
+{% /process-flow %}
+
+Top-1 routing executes one expert per token. Top-2 can increase expert diversity and model quality, but it roughly doubles expert assignments and dispatch volume for the same token batch.
+{% /section-card %}
+
+{% section-card %}
+## Size expert capacity before choosing hardware
+
+For `T` tokens, `K` selected experts per token, `E` total experts, and capacity factor `C`, a useful first estimate is:
+
+- Total assignments: `T x K`
+- Balanced assignments per expert: `(T x K) / E`
+- Capacity per expert: `ceil(C x T x K / E)`
+- Overflow: assignments above an expert's capacity must drop, reroute, wait, or use a fallback
+
+The average is not enough. Production planning needs a measured hot-expert multiplier from real token slices because domain shifts, languages, modalities, and prompt templates can change routing concentration.
+
+{% interactive-block id="ml-systems/mixture-of-experts-calculator" /%}
+
+{% callout variant="warn" %}
+Increasing the capacity factor treats overflow by reserving more expert slots. It does not correct a collapsed router, add network bandwidth, or make failed expert weights available.
+{% /callout %}
+
+{% code-block file="/api/content/ml-systems/mixture-of-experts/code/plan-expert-capacity.py" language="python" title="Turn the capacity equation into an executable assertion" /%}
+{% /section-card %}
+
+{% section-card %}
+## Separate active compute from resident memory
+
+Sparse activation changes which expert parameters execute for a token. It does not remove the other experts from the checkpoint or accelerator fleet.
+
+{% metric-strip %}
+{% metric value="K / E" label="Active expert fraction" detail="Top-K selects K of E expert blocks for each token; shared attention and other dense blocks still execute." tone="violet" /%}
+{% metric value="E copies" label="Resident expert weights" detail="Every unique expert must be stored somewhere that the serving topology can reach." tone="blue" /%}
+{% metric value="T x K x H" label="Dispatch payload" detail="Token assignments move hidden vectors of width H across the expert-parallel group and back." tone="amber" /%}
+{% metric value="p99" label="Operational target" detail="The slowest selected expert or path can hold up the token, so tails matter more than averages." tone="green" /%}
+{% /metric-strip %}
+
+### Include the costs sparse FLOPs hide
+
+- Expert checkpoints, optimizer states during training, replicas, and rollout overlap
+- Dispatch and combine buffers, collective-operation workspace, and activation memory
+- Shared attention, embeddings, normalization, router compute, and key-value cache
+- Token padding, capacity reserve, dropped-token handling, retries, and fallback execution
+- Cross-host serialization, queueing, synchronization, and straggler amplification
+{% /section-card %}
+
+{% section-card %}
+## Choose a routing contract deliberately
+
+{% concept-grid columns="2" %}
+{% concept-card title="Token choice" eyebrow="Top-K routing" icon="route" tone="violet" %}
+Each token selects its highest-scoring experts. The model has flexible specialization, while capacity and balancing controls must contain hot experts.
+{% /concept-card %}
+{% concept-card title="Switch routing" eyebrow="Top-1" icon="repeat" tone="green" %}
+Each token selects one expert. Dispatch is smaller and simpler, but one bad choice or unavailable expert has no second selected path.
+{% /concept-card %}
+{% concept-card title="Expert choice" eyebrow="Bounded intake" icon="scale" tone="blue" %}
+Each expert selects tokens up to a fixed capacity. Expert load is bounded by construction, while token coverage and combination semantics need explicit validation.
+{% /concept-card %}
+{% concept-card title="Deterministic routing" eyebrow="Hash or rules" icon="network" tone="amber" %}
+Assignments are reproducible and operationally simple, but the router cannot learn semantic specialization from the model objective.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Define overflow semantics as part of correctness
+
+- **Drop:** fast and bounded, but the residual path receives no expert contribution for that assignment.
+- **Reroute:** preserves work when a compatible expert has room, but changes model semantics and adds latency.
+- **Queue:** preserves the selected expert, but lets one hot expert determine batch tail latency.
+- **Fallback:** uses a dense or shared expert, but must be trained and evaluated as a real degraded mode.
+{% /section-card %}
+
+{% section-card %}
+## Build the distributed path around expert ownership
+
+{% system-flow title="An MoE layer is a distributed join" caption="The dispatcher must restore every admitted token to its original position with the correct expert weights and failure evidence." %}
+{% system-node title="Router" eyebrow="Score and admit" icon="route" tone="violet" %}
+Produces expert IDs, combination weights, capacity decisions, and routing telemetry for every token.
+{% /system-node %}
+{% system-node title="All-to-all dispatch" eyebrow="Regroup vectors" icon="network" tone="amber" %}
+Packs token representations by destination and moves them across the expert-parallel topology.
+{% /system-node %}
+{% system-node title="Expert owners" eyebrow="Execute sparse FFNs" icon="server" tone="blue" %}
+Run local experts under bounded capacity while exposing queue, overflow, device, and version state.
+{% /system-node %}
+{% system-node title="Combine" eyebrow="Restore token order" icon="workflow" tone="green" %}
+Returns expert outputs, applies router weights, validates coverage, and reconnects the residual path.
+{% /system-node %}
+{% /system-flow %}
+
+### Compose parallelism instead of treating it as one setting
+
+- **Data parallelism** replicates a model partition for independent batches.
+- **Tensor parallelism** splits dense matrix operations across devices.
+- **Pipeline parallelism** assigns layer ranges to stages and schedules microbatches.
+- **Expert parallelism** distributes expert weights and creates the token all-to-all path.
+- **Sequence or context parallelism** partitions long-sequence work and changes activation movement.
+
+The placement plan must name device groups, fault domains, collective topology, checkpoint ownership, and which dimension can scale independently.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Diagnose the failed stage before changing capacity
+
+The same user-visible symptom can come from different stages. A slow MoE layer may have a collapsed router, a congested all-to-all path, a straggling expert, a failed device, or expensive output synchronization. One universal tuning change usually moves the bottleneck instead of removing it.
+
+{% interactive-block id="ml-systems/mixture-of-experts-routing-diagnostics-lab" dataFile="/api/content/ml-systems/mixture-of-experts/data/routing-failure-scenarios.json" /%}
+
+{% code-block file="/api/content/ml-systems/mixture-of-experts/code/diagnose-routing-failure.py" language="python" title="Select mitigations from versioned incident evidence" /%}
+{% /section-card %}
+
+{% section-card %}
+## Train the router without erasing specialization
+
+The primary model loss teaches task quality. Router-specific objectives shape how that quality is distributed across experts.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Load-balancing loss" eyebrow="Distribute assignments" icon="scale" tone="blue" %}
+Penalizes traffic concentration using router probabilities, realized assignments, or both. Too little permits collapse; too much can force unrelated tokens into unsuitable experts.
+{% /concept-card %}
+{% concept-card title="Router z-loss" eyebrow="Stabilize logits" icon="activity" tone="violet" %}
+Discourages router logits from growing to extreme magnitudes, which can improve numerical stability and preserve useful gradients.
+{% /concept-card %}
+{% concept-card title="Capacity and admission" eyebrow="Bound work" icon="shield" tone="amber" %}
+Caps per-expert assignments for a batch. This is a systems constraint whose drop or reroute behavior must also be part of model evaluation.
+{% /concept-card %}
+{% concept-card title="Routing noise" eyebrow="Explore carefully" icon="repeat" tone="green" %}
+Can prevent early collapse and expose experts to more tokens during training. Inference behavior must remain deterministic enough to operate and reproduce.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Evaluate the router as a model component
+
+- Task quality by expert, token slice, language, domain, sequence position, and routing pattern
+- Assignment entropy, expert load distribution, overflow, reroute, and drop rates
+- Stability across seeds, checkpoints, precision modes, batch shapes, and distribution shifts
+- Expert similarity, specialization, dead experts, and sensitivity to disabling one expert
+- Calibration of router probabilities when they are used as combination weights
+{% /section-card %}
+
+{% section-card %}
+## Operate MoE with layer-level evidence
+
+End-to-end latency alone cannot identify whether routing, communication, expert compute, or combination failed.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Routing health" eyebrow="Decision" icon="activity" tone="violet" %}
+Track entropy, top-K margins, assignment counts, imbalance, overflow, drops, reroutes, and auxiliary losses by layer and token slice.
+{% /concept-card %}
+{% concept-card title="Fabric health" eyebrow="Movement" icon="network" tone="amber" %}
+Track bytes, queue time, collective duration, source-destination skew, link saturation, and timeout rate for dispatch and combine.
+{% /concept-card %}
+{% concept-card title="Expert health" eyebrow="Execution" icon="server" tone="blue" %}
+Track queue depth, batch size, compute time, memory, errors, weight version, replica state, and stragglers per expert owner.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Gate releases on failure behavior
+
+1. Replay representative routing traces against the candidate router and placement plan.
+2. Compare quality, overflow, all-to-all volume, and tails across production token slices.
+3. Remove one expert owner and verify rerouting, replica, or fallback semantics under load.
+4. Canary router and expert-weight versions together; reject mixed versions unless compatibility is explicit.
+5. Roll back on quality slices, dropped-token rate, expert imbalance, dispatch p99, or degraded-mode failure.
+{% /section-card %}
+
+{% section-card %}
+## Know when dense is the better architecture
+
+MoE earns its complexity when extra resident parameters improve quality enough to justify distributed routing and operational controls.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Prefer MoE" eyebrow="Sparse scale pays" icon="boxes" tone="green" %}
+The workload benefits from additional expert capacity, large batches amortize collectives, the fleet has fast topology-aware interconnects, and the team can operate routing evidence.
+{% /concept-card %}
+{% concept-card title="Prefer dense" eyebrow="Simplicity pays" icon="cpu" tone="blue" %}
+Small batches, strict tails, limited memory, weak interconnects, edge deployment, or modest quality gains make predictable dense execution more valuable.
+{% /concept-card %}
+{% concept-card title="Pilot a hybrid" eyebrow="Reduce blast radius" icon="layers" tone="violet" %}
+Use MoE in selected feed-forward layers, keep shared experts or dense fallback paths, and validate one topology before scaling expert count.
+{% /concept-card %}
+{% concept-card title="Reject parameter theater" eyebrow="Measure the frontier" icon="check" tone="amber" %}
+Compare quality, active FLOPs, resident memory, p99 latency, energy, availability, and operating burden against a tuned dense baseline.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="tip" %}
+The production question is not how many parameters the checkpoint contains. It is whether sparse capacity improves the measured quality-cost frontier while every token still completes a bounded, observable path.
+{% /callout %}
+{% /section-card %}
+
+{% quiz title="Mixture of Experts Production Review" questionsFile="/api/content/ml-systems/mixture-of-experts/quiz/mixture-of-experts.json" lessonSlug="mixture-of-experts" /%}

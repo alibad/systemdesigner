@@ -1,0 +1,223 @@
+---
+registryId: function-calling
+---
+
+{% section-card tone="intro" %}
+## What is function calling?
+
+**Function calling** is a pattern in which a language model proposes a named tool and structured arguments, then application code decides whether and how to execute that proposal. The tool might read an order, calculate a price, reserve inventory, or send a message.
+
+The model does not call your database or API by itself. It produces data shaped like `{"name":"lookup_order","arguments":{"orderId":"ord_1842"}}`. Your application validates that data, checks the caller's authority, executes trusted code, and returns a structured result for the model to explain.
+
+Function calling matters because generated text can now influence real systems. A fluent answer can be merely wrong; a poorly controlled tool call can expose another tenant's data, repeat a charge, or delete a record.
+
+**Core invariant: the model may propose an action, but deterministic application code owns validation, authorization, execution, and side effects.**
+
+Review [Conversational AI](/genai/conversational-ai) first if conversation history and model turns are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## One model turn becomes a controlled execution loop
+
+A tool-enabled response is an intermediate protocol message, not the final answer and not permission to act.
+
+{% system-flow title="The application stays in control" caption="Each boundary turns probabilistic model output into a typed, authorized, observable operation." %}
+{% system-node title="User request" eyebrow="Intent" icon="users" tone="blue" %}
+The application attaches identity, tenant, conversation state, and only the tools allowed for this task.
+{% /system-node %}
+{% system-node title="Tool proposal" eyebrow="Model output" icon="braces" tone="violet" %}
+The model chooses a tool and emits arguments that claim to match its input schema.
+{% /system-node %}
+{% system-node title="Deterministic gate" eyebrow="Trust boundary" icon="shield" tone="amber" %}
+Code validates the schema, permission, resource scope, risk class, confirmation, and budget.
+{% /system-node %}
+{% system-node title="Tool execution" eyebrow="Capability" icon="workflow" tone="rose" %}
+Trusted code runs with scoped credentials, a deadline, idempotency controls, and an audit identifier.
+{% /system-node %}
+{% system-node title="Typed observation" eyebrow="Result" icon="search" tone="green" %}
+The application returns bounded data or a structured error. The model can explain, ask a question, or propose another call.
+{% /system-node %}
+{% /system-flow %}
+
+### Three values must remain separate
+
+- **Proposal:** what the model requested, preserved exactly for inspection.
+- **Decision:** why deterministic policy allowed, denied, or paused the request.
+- **Observation:** what the tool actually returned or changed in the authoritative system.
+
+Never replace the observation with the model's assumption that a call probably succeeded.
+{% /section-card %}
+
+{% section-card %}
+## A tool contract has two boundaries
+
+The **model-facing contract** helps the model choose and populate a tool. The **execution policy** decides whether the proposed capability is available to this caller in this context. JSON Schema can constrain shape; it cannot prove business authority.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Name and description" eyebrow="Selection" icon="route" tone="blue" %}
+State what the tool does, when to use it, when not to use it, and what its result means. Ambiguous tools create routing errors before validation starts.
+{% /concept-card %}
+{% concept-card title="Input schema" eyebrow="Shape" icon="braces" tone="violet" %}
+Declare types, required fields, enums, ranges, formats, and whether unknown properties are rejected. Keep arguments smaller than the underlying API.
+{% /concept-card %}
+{% concept-card title="Execution policy" eyebrow="Authority" icon="lock" tone="amber" %}
+Bind the call to identity, tenant, task, permission, risk, budget, and confirmation. These checks use trusted application context, not model-supplied claims.
+{% /concept-card %}
+{% concept-card title="Result contract" eyebrow="Observation" icon="check" tone="green" %}
+Return bounded fields, stable status codes, provenance, and side-effect identifiers. Do not dump raw internal records back into the context window.
+{% /concept-card %}
+{% /concept-grid %}
+
+According to the [JSON Schema object reference](https://json-schema.org/understanding-json-schema/reference/object), properties are not required unless named in `required`, and extra properties are allowed unless constrained. Provider APIs use different envelopes, but both [OpenAI function tools](https://platform.openai.com/docs/guides/function-calling) and [Anthropic client tools](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use) describe tool inputs with JSON Schema.
+{% /section-card %}
+
+{% interactive-block id="genai/function-calling-contract-boundary-lab" dataFile="/api/content/genai/function-calling/data/contract-boundary-scenarios.json" /%}
+
+{% section-card %}
+## Design the narrowest useful schema
+
+A good schema reduces ambiguity without pretending to replace runtime policy. Prefer one operation per tool and make invalid states difficult to express.
+
+### Put these constraints in the schema
+
+- Require identifiers and values that execution cannot infer safely.
+- Use enums for small closed choices such as `summary` versus `shipping_status`.
+- Bound string length, collection size, numeric range, and nesting depth.
+- Reject unknown fields when the provider's supported JSON Schema subset allows it.
+- Describe units, identifier formats, and omitted-value behavior in plain language.
+
+### Keep these checks in trusted policy code
+
+- Whether the caller may use the tool at all.
+- Whether an order, account, or file belongs to the active tenant.
+- Whether a write requires approval, separation of duties, or a fresh login.
+- Which credential, region, network path, rate limit, and cost budget apply.
+- Whether the operation may be retried and how duplicate effects are prevented.
+
+{% callout variant="info" %}
+Schema conformance makes an argument structurally acceptable. It does not make the request true, authorized, safe, or current.
+{% /callout %}
+
+The runnable example rejects unknown arguments at the schema boundary, then applies tenant and permission checks separately.
+
+{% code-block file="/api/content/genai/function-calling/code/tool-contract.mjs" language="javascript" title="Schema validation followed by policy authorization" /%}
+{% /section-card %}
+
+{% section-card %}
+## Execute proposals as a state machine
+
+Tool orchestration becomes reliable when every call moves through explicit states and produces durable evidence.
+
+{% process-flow %}
+{% process-step number="1" title="Parse and correlate" label="Proposed" %}
+Capture the provider's call ID, tool name, raw arguments, conversation turn, and task identity. Reject malformed or unknown calls.
+{% /process-step %}
+{% process-step number="2" title="Validate and authorize" label="Decided" %}
+Apply schema, identity, tenant, permission, approval, budget, and risk checks before obtaining an execution credential.
+{% /process-step %}
+{% process-step number="3" title="Execute with a deadline" label="Attempted" %}
+Pass only validated arguments, use least-privilege credentials, and attach an idempotency key to supported writes.
+{% /process-step %}
+{% process-step number="4" title="Observe and continue" label="Recorded" %}
+Store status, latency, side-effect ID, and bounded result. Then return the matching tool result or structured error to the model.
+{% /process-step %}
+{% /process-flow %}
+
+### The call identifier is a correlation key
+
+When a model emits several tool calls, each result must be matched to the correct proposal. Preserve call IDs across queues, workers, logs, and the next model turn. Do not rely on array position after parallel execution.
+{% /section-card %}
+
+{% interactive-block id="genai/function-calling-retry-semantics-lab" dataFile="/api/content/genai/function-calling/data/retry-semantics-scenarios.json" /%}
+
+{% section-card %}
+## Treat timeouts as unknown outcomes
+
+A timeout tells the caller that no response arrived before its deadline. It does **not** prove that the downstream operation failed. The service may have committed a write and lost the response.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Read-only call" eyebrow="Safe to repeat" icon="search" tone="blue" %}
+A repeated lookup creates no external mutation, though it still consumes capacity and may observe a newer state.
+{% /concept-card %}
+{% concept-card title="Idempotent write" eyebrow="Repeat one intent" icon="key" tone="green" %}
+The caller sends a stable idempotency key. The service stores the first outcome and returns it for duplicate attempts instead of applying the effect again.
+{% /concept-card %}
+{% concept-card title="Non-idempotent write" eyebrow="Reconcile first" icon="warning" tone="rose" %}
+After an ambiguous timeout, query authoritative state or route to review. Blind retry can create a second message, booking, or payment.
+{% /concept-card %}
+{% /concept-grid %}
+
+The next example simulates a response lost after commit. Run it with Node to see two delivery attempts resolve to one stored side effect.
+
+{% code-block file="/api/content/genai/function-calling/code/idempotent-executor.mjs" language="javascript" title="Recover a timed-out write without duplicating it" /%}
+{% /section-card %}
+
+{% section-card %}
+## Parallel and sequential calls express different dependencies
+
+Use parallel calls only when their inputs and side effects are independent. If one result determines another call's arguments or permission, keep the calls sequential.
+
+{% system-flow title="Choose execution order from data dependencies" caption="Parallelism reduces latency only when calls do not depend on one another and partial failure has a defined policy." %}
+{% system-node title="Independent reads" eyebrow="Parallel" icon="network" tone="blue" %}
+Fetch weather and exchange rates together, correlate both results, and tolerate one bounded partial failure if the product can explain it.
+{% /system-node %}
+{% system-node title="Dependent lookup" eyebrow="Sequential" icon="route" tone="violet" %}
+Resolve an account before requesting its invoices because the first observation supplies the authorized account ID.
+{% /system-node %}
+{% system-node title="Consequential writes" eyebrow="Ordered" icon="shield" tone="amber" %}
+Confirm intent, reserve resources, commit the write, and verify the final state. Do not fan out writes without compensation or idempotency.
+{% /system-node %}
+{% /system-flow %}
+
+### Define partial-failure behavior before enabling concurrency
+
+- Decide whether one failed read cancels, degrades, or leaves the other results usable.
+- Bound concurrency so one model turn cannot exhaust a dependency or cost budget.
+- Preserve one result record per call ID, including denied and timed-out calls.
+- Return concise errors the model can act on without exposing secrets or internal stack traces.
+{% /section-card %}
+
+{% section-card %}
+## Test decisions, not just happy-path handlers
+
+Unit tests for the underlying API wrapper are necessary but insufficient. The model and control plane must be evaluated together.
+
+### Contract and routing tests
+
+- Valid, missing, mistyped, oversized, enum-invalid, and unknown arguments.
+- Similar tool names, ambiguous requests, missing user information, and requests that need no tool.
+- Provider model or schema-version changes against a frozen routing evaluation set.
+
+### Authority and side-effect tests
+
+- Cross-tenant identifiers, revoked permissions, expired approvals, and model-supplied privilege fields.
+- Timeout before commit, timeout after commit, duplicate delivery, worker restart, and result replay.
+- Parallel partial failure, cancellation, out-of-order completion, and call-ID correlation.
+
+### Production signals
+
+{% metric-strip %}
+{% metric value="Selection rate" label="Tool chosen by task slice" tone="blue" /%}
+{% metric value="Denial rate" label="Schema and policy separately" tone="amber" /%}
+{% metric value="p95 latency" label="Model, queue, and tool stages" tone="violet" /%}
+{% metric value="Duplicate effects" label="Target exactly zero" tone="rose" /%}
+{% /metric-strip %}
+
+Record tool name and schema version, call and task IDs, policy decision, attempt count, latency, status code, idempotency key hash, side-effect ID, and bounded result metadata. Redact secrets and minimize sensitive arguments.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production readiness checklist
+
+- Expose only the smallest tool set needed for the current task and caller.
+- Version tool descriptions, input schemas, result schemas, and policy together.
+- Keep authorization context and credentials outside model-controlled arguments.
+- Require confirmation for consequential, irreversible, exceptional, or high-value actions.
+- Set per-call deadlines, per-task budgets, concurrency limits, and explicit stop conditions.
+- Make write retries idempotent or reconcile authoritative state before another attempt.
+- Treat tool results as untrusted input: validate, bound, redact, and preserve provenance.
+- Audit every proposal, denial, attempt, result, and side effect with stable correlation IDs.
+- Provide a kill switch and a deterministic fallback for unavailable or degraded tools.
+{% /section-card %}
+
+{% quiz title="Function Calling Engineering Check" questionsFile="/api/content/genai/function-calling/quiz/function-calling-review.json" lessonSlug="function-calling" /%}

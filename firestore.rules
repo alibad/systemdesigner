@@ -1,0 +1,225 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if user is admin
+    function isAdmin() {
+      return request.auth != null &&
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    // ==================================
+    // User Data
+    // ==================================
+
+    // Users collection - Profile + stats + preferences + annotations (highlights + notes)
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null &&
+        request.auth.uid == userId &&
+        request.resource.data.uid == userId &&
+        request.resource.data.isAdmin == false;
+      allow update: if request.auth != null &&
+        request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['uid', 'isAdmin']);
+      allow read, delete: if isAdmin();
+    }
+
+    // Progress collection - All learning activity tracking
+    match /progress/{progressId} {
+      allow read: if request.auth != null &&
+        (resource == null || resource.data.userId == request.auth.uid);
+      allow read, delete: if isAdmin();
+      allow create: if request.auth != null &&
+        request.resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null &&
+        resource != null && resource.data.userId == request.auth.uid;
+    }
+
+    // Learning Plans collection - Custom learning paths
+    match /learningPlans/{planId} {
+      allow read: if request.auth != null &&
+        (resource == null || resource.data.userId == request.auth.uid);
+      allow read: if isAdmin();
+      allow create: if request.auth != null &&
+        request.resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null &&
+        resource != null && resource.data.userId == request.auth.uid;
+    }
+
+    // Diagrams collection - User-created diagrams/whiteboards
+    match /diagrams/{diagramId} {
+      // Allow read if the diagram is public, the owner is reading it, or an admin is reading it.
+      allow get: if resource.data.visibility == 'public' ||
+         (request.auth != null && resource.data.createdBy == request.auth.uid) ||
+         (request.auth != null && isAdmin());
+
+      allow list: if request.auth != null &&
+        (
+          resource.data.visibility == 'public' ||
+          resource.data.createdBy == request.auth.uid ||
+          isAdmin()
+        );
+
+      // Allow update if user owns it, or if a public viewer increments only view metadata.
+      allow update: if 
+        (request.auth != null && resource != null && resource.data.createdBy == request.auth.uid) ||
+        (resource.data.visibility == 'public' && 
+         request.resource.data.diff(resource.data).changedKeys().hasOnly(['views','updatedAt']));
+
+      // Allow create if user is authenticated and sets themselves as creator
+      allow create: if request.auth != null &&
+        request.resource.data.createdBy == request.auth.uid;
+
+      // Allow delete if user owns it or is admin
+      allow delete: if request.auth != null &&
+        (resource.data.createdBy == request.auth.uid || isAdmin());
+
+      // Per-page sharing via subcollection
+      match /pages/{pageId} {
+        // If page is public, anyone can read it. If not, owner/admin only.
+        allow get: if resource.data.visibility == 'public' ||
+          (request.auth != null && get(/databases/$(database)/documents/diagrams/$(diagramId)).data.createdBy == request.auth.uid) ||
+          (request.auth != null && isAdmin());
+        
+        // Listing page subcollections is restricted to the owner/admin.
+        allow list: if request.auth != null &&
+          (
+            get(/databases/$(database)/documents/diagrams/$(diagramId)).data.createdBy == request.auth.uid ||
+            isAdmin()
+          );
+        
+        // Owner (diagram owner) can create/update/delete pages
+        allow create, delete: if request.auth != null &&
+          get(/databases/$(database)/documents/diagrams/$(diagramId)).data.createdBy == request.auth.uid;
+
+        // Allow safe public view counter increments on shared pages.
+        function onlyViewsChanged() {
+          return request.resource.data.diff(resource.data).changedKeys().hasOnly(['views','updatedAt']);
+        }
+        allow update: if 
+          (request.auth != null && get(/databases/$(database)/documents/diagrams/$(diagramId)).data.createdBy == request.auth.uid) ||
+          (resource.data.visibility == 'public' && onlyViewsChanged());
+      }
+    }
+
+    // Annotations collection - User text highlights and notes (per-user document)
+    match /annotations/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read, delete: if isAdmin();
+    }
+
+    // Conversations collection - Active AI chat conversation per user per page
+    match /conversations/{conversationId} {
+      // Users can read their own conversations or create new ones
+      allow read: if request.auth != null &&
+        (resource == null || resource.data.userId == request.auth.uid);
+
+      // Users can create conversations for themselves
+      allow create: if request.auth != null &&
+        request.resource.data.userId == request.auth.uid;
+
+      // Users can update/delete their own conversations
+      allow update, delete: if request.auth != null &&
+        resource.data.userId == request.auth.uid;
+
+      // Admins can read all conversations (for analytics)
+      allow read: if isAdmin();
+    }
+
+    // Conversation History collection - Archived conversations for admin analysis
+    match /conversationHistory/{historyId} {
+      // Users can create history entries (when resetting conversation)
+      allow create: if request.auth != null &&
+        request.resource.data.userId == request.auth.uid;
+
+      // Users can read their own history
+      allow read: if request.auth != null &&
+        resource.data.userId == request.auth.uid;
+
+      // Admins can read all history (for analytics)
+      allow read, write: if isAdmin();
+    }
+
+    // Projects collection - Flexible project management system
+    match /projects/{projectId} {
+      // Allow read/write if user owns the project or project is public
+      allow read: if request.auth != null &&
+        (resource == null ||
+         resource.data.ownerId == request.auth.uid ||
+         resource.data.settings.isPublic == true ||
+         isAdmin());
+
+      // Allow create if user sets themselves as owner
+      allow create: if request.auth != null &&
+        request.resource.data.ownerId == request.auth.uid;
+
+      // Allow update if user owns the project
+      allow update: if request.auth != null &&
+        resource.data.ownerId == request.auth.uid;
+
+      // Allow delete if user owns it or is admin
+      allow delete: if request.auth != null &&
+        (resource.data.ownerId == request.auth.uid || isAdmin());
+
+      // Pages subcollection
+      match /pages/{pageId} {
+        // Helper function to check project ownership
+        // Returns true if project exists and user owns it
+        function ownsProject() {
+          let projectDoc = get(/databases/$(database)/documents/projects/$(projectId));
+          return projectDoc != null && projectDoc.data.ownerId == request.auth.uid;
+        }
+
+        // Helper function to check if project is public
+        function isProjectPublic() {
+          let projectDoc = get(/databases/$(database)/documents/projects/$(projectId));
+          return projectDoc != null && projectDoc.data.settings.isPublic == true;
+        }
+
+        // Allow read if user owns the project or project is public
+        allow read: if request.auth != null &&
+          (ownsProject() || isProjectPublic() || isAdmin());
+
+        // Allow create during batch write when project doesn't exist yet
+        // We rely on the parent project creation validation
+        allow create: if request.auth != null;
+
+        // Allow update if user owns the project
+        allow update: if request.auth != null && ownsProject();
+
+        // Allow delete if user owns the project or is admin
+        allow delete: if request.auth != null && (ownsProject() || isAdmin());
+      }
+    }
+
+    // ==================================
+    // ADMIN COLLECTIONS
+    // ==================================
+
+    // 4. Feedback collection - User feedback and bug reports
+    match /feedback/{feedbackId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null &&
+        (isAdmin() || resource.data.userId == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    // Admin Notifications document - Contains array of all notifications
+    match /admin/notifications {
+      allow read, write: if isAdmin();
+    }
+
+    // Mail collection - For email sending via Firebase extensions or services
+    match /mail/{emailId} {
+      // Allow users to create email documents (for sending emails)
+      allow create: if request.auth != null;
+      // Allow users to read their own email documents
+      allow read: if request.auth != null &&
+        (resource == null || resource.data.from == request.auth.token.email || resource.data.userId == request.auth.uid);
+      // Allow admins full access to mail documents
+      allow read, write: if isAdmin();
+    }
+  }
+}

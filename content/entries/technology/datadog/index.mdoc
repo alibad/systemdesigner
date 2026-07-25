@@ -1,0 +1,257 @@
+---
+registryId: datadog
+---
+
+{% section-card tone="intro" %}
+## What is Datadog?
+
+**Datadog is an observability platform that receives, stores, correlates, queries, and
+alerts on telemetry from applications and infrastructure.** Teams use it to connect a
+user-visible symptom to the service, deployment, dependency, host, trace, or log event
+that explains the symptom.
+
+Datadog does not make a system observable by itself. Applications and platforms must
+first emit useful metrics, traces, and logs with consistent identity. The Datadog Agent,
+Datadog SDKs, or an OpenTelemetry Collector can then move that evidence into the
+platform.
+
+{% callout variant="info" %}
+The core invariant is **preserve enough context to answer an incident question without
+making telemetry volume unbounded**. Keep service identity consistent, protect rare
+failure evidence, and treat collection pipelines and monitors as production systems.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Give each signal a specific job
+
+OpenTelemetry defines signals as different views of system activity. They are most
+useful when shared resource attributes and trace context let an operator move between
+them instead of searching three disconnected datasets.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Metrics" eyebrow="Detect and compare" icon="gauge" tone="blue" %}
+Numeric measurements aggregated over time answer questions such as request rate, error
+ratio, latency distribution, queue age, and resource saturation. Keep dimensions
+bounded so the number of active time series remains operable.
+{% /concept-card %}
+{% concept-card title="Traces" eyebrow="Follow causality" icon="network" tone="violet" %}
+A trace follows one request through spans across services. It exposes dependency time,
+errors, retries, and the operation that dominates latency. Sampling determines which
+request paths remain inspectable.
+{% /concept-card %}
+{% concept-card title="Logs" eyebrow="Explain local events" icon="search" tone="amber" %}
+A log records a timestamped event and its fields. Structured records with severity,
+service identity, and trace or span identifiers are easier to correlate and filter than
+free-form text.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="From running code to an operational decision" caption="The collection path is part of the system: a blocked or overloaded pipeline can remove evidence exactly when demand is highest." %}
+{% system-node title="Applications and platforms" eyebrow="Emit" icon="code" tone="blue" %}
+Produce signals with stable resource identity and enough domain context to explain user
+impact.
+{% /system-node %}
+{% system-node title="Agent or OTel Collector" eyebrow="Receive" icon="layers" tone="cyan" %}
+Accepts telemetry, enriches it with infrastructure context, batches it, and applies
+explicit filtering or sampling policy.
+{% /system-node %}
+{% system-node title="Datadog backend" eyebrow="Correlate" icon="database" tone="violet" %}
+Indexes and aggregates signals for explorers, service views, dashboards, notebooks,
+SLOs, and monitor evaluation.
+{% /system-node %}
+{% system-node title="Operator or automation" eyebrow="Act" icon="users" tone="green" %}
+Uses the evidence to diagnose, mitigate, roll back, scale, or verify recovery.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design retention around incident evidence
+
+Keeping everything is not a strategy, and dropping a uniform percentage can erase the
+rare failures that matter most. Start with workload arithmetic, then decide which
+events must remain searchable and which healthy traffic can be represented by a
+sample.
+
+Use the lab to compare three synthetic services. Change routine log retention and
+healthy trace indexing, then switch between outcome-aware and uniform policies. The
+outputs are derived from request rate, event count, span count, and byte-size inputs in
+the co-located data file.
+
+{% interactive-block id="technology/datadog-calculator" dataFile="/api/content/technology/datadog/data/telemetry-policy-model.json" /%}
+
+{% code-block file="/api/content/technology/datadog/code/telemetry-policy.py" language="python" title="Dependency-free retention arithmetic" /%}
+
+The lab deliberately keeps logs and trace spans as separate outputs. Datadog's log
+sampling processor can drop matching events before downstream processors, while trace
+retention controls which spans or complete traces are indexed for search. Neither
+number should be presented as a price without the current account contract, product
+configuration, and measured usage.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Correlate telemetry with one service identity
+
+Datadog's unified service tagging convention uses `env`, `service`, and `version` to
+connect supported telemetry with deployment context. OpenTelemetry can express the
+same identity through resource attributes such as `deployment.environment`,
+`service.name`, and `service.version`.
+
+Add only bounded dimensions to metrics and monitor groups:
+
+- Use `env`, `service`, `version`, `region`, and stable ownership labels when they
+  support filtering, deployment comparison, routing, or accountability.
+- Put request IDs, customer IDs, session IDs, and other high-cardinality values in
+  traces or logs where operators can search them without multiplying metric series.
+- Remove or transform credentials, tokens, personal data, and sensitive payloads
+  before export; an observability backend is not a reason to duplicate secrets.
+- Maintain a written tag contract so two teams do not name the same concept
+  differently or reuse one key with incompatible values.
+
+The following Collector example accepts OTLP over gRPC and HTTP, batches all three
+signals, derives Datadog trace metrics through the connector, and exports with an API
+key supplied by the environment.
+
+{% code-block file="/api/content/technology/datadog/code/otel-collector.yaml" language="yaml" title="OpenTelemetry Collector to Datadog" /%}
+
+Bind public receiver endpoints only when the network and authentication design require
+it. Production collectors also need memory limits, queue and retry policy, resource
+detection, secret management, health telemetry, and capacity tests for incident bursts.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make monitor timing match signal timing
+
+A correct threshold can still produce the wrong operational outcome when the signal is
+late or sparse. Datadog metric monitors evaluate a time window; evaluation delay shifts
+that window into the past, and the full-window option can cancel evaluation when bucket
+coverage is incomplete.
+
+Use the lab to reproduce four distinct states. Start with the delayed cloud stream,
+then add a ten-minute delay. Compare partial-window evaluation with the full-window
+policy on the sparse batch stream.
+
+{% interactive-block id="technology/datadog-monitor-lab" dataFile="/api/content/technology/datadog/data/monitor-evaluation-model.json" /%}
+
+{% code-block file="/api/content/technology/datadog/code/monitor-window.py" language="python" title="Why a delayed stream can look empty" /%}
+
+Monitor settings encode trade-offs:
+
+- A **short window** reacts quickly but is more sensitive to noise and missing points.
+- A **long window** adds evidence but can average away a sharp failure and delay
+  recovery.
+- An **evaluation delay** gives late data time to arrive but adds the same delay before
+  detection.
+- **Require full window** can protect some dense aggregations, but sparse metrics may
+  remain unevaluated even when valid points exist.
+- **No-data behavior** must reflect the service contract. A missing heartbeat can be a
+  failure; an event counter with no traffic can be legitimately quiet.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design monitors for action, not dashboard decoration
+
+Start from a user or operator response. A page should identify a condition that needs
+timely human action; a ticket or notification can carry lower urgency. Every alert
+needs an owner, evidence, and a safe first move.
+
+{% process-flow %}
+{% process-step number="1" title="Name the symptom" label="Intent" %}
+Prefer user-facing failure rate, latency, freshness, or queue-age signals over a raw
+resource metric that may not imply impact.
+{% /process-step %}
+{% process-step number="2" title="Match the stream" label="Evaluate" %}
+Measure reporting cadence and arrival lag, then choose aggregation, window, delay,
+missing-data behavior, and grouping from those facts.
+{% /process-step %}
+{% process-step number="3" title="Attach evidence" label="Diagnose" %}
+Include service, environment, version, recent change, dashboard, trace search, log query,
+owner, and runbook links in the notification context.
+{% /process-step %}
+{% process-step number="4" title="Test the lifecycle" label="Operate" %}
+Inject a known failure and verify detection, routing, acknowledgement, escalation,
+recovery, and monitor resolution without duplicate pages.
+{% /process-step %}
+{% /process-flow %}
+
+Avoid these common failure modes:
+
+- paging on every instance when one service-level alert would describe the same
+  incident;
+- grouping by unbounded dimensions and creating an unpredictable number of monitor
+  states;
+- using averages when a tail percentile or error ratio represents user impact better;
+- choosing a threshold before graphing normal, degraded, deploy, and recovery behavior;
+- leaving a monitor in `NO DATA` without deciding whether that state is healthy or
+  dangerous;
+- alerting on collector health without also checking whether end-to-end telemetry is
+  arriving.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the observability system itself
+
+Telemetry collection has queues, memory, CPU, network paths, credentials, quotas, and
+failure modes. Monitor it with the same discipline as a user-facing service.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Pipeline pressure" eyebrow="Can evidence arrive?" icon="activity" tone="amber" %}
+Track collector utilization, queue growth, refused or discarded events, export errors,
+send latency, and source lag. Load test the path above steady-state volume.
+{% /concept-card %}
+{% concept-card title="Cardinality" eyebrow="Can queries stay bounded?" icon="layers" tone="violet" %}
+Review newly introduced metric dimensions and monitor groups before deployment. One
+unbounded identifier can multiply series faster than traffic grows.
+{% /concept-card %}
+{% concept-card title="Coverage" eyebrow="Can incidents be explained?" icon="search" tone="blue" %}
+Run synthetic failures and verify the expected metric, trace, log, deployment version,
+and ownership context can be found from one starting symptom.
+{% /concept-card %}
+{% concept-card title="Governance" eyebrow="Can access stay safe?" icon="shield" tone="green" %}
+Scope API and application keys, rotate credentials, restrict sensitive datasets,
+document retention, and audit changes to monitors and pipelines.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before production, verify:
+
+- a stable owner and runbook exist for every paging monitor;
+- service identity is consistent across metrics, traces, logs, and deployment metadata;
+- sensitive fields are removed before export and access follows least privilege;
+- retention and sampling policies protect errors, slow paths, and critical workflows;
+- monitor delays and full-window behavior match actual signal arrival patterns;
+- dashboards show user impact and collection health, not only host utilization;
+- a collector or network failure produces an explicit telemetry-loss signal;
+- expected ingestion and indexed volumes are measured after every major traffic or
+  instrumentation change.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Know how Datadog and OpenTelemetry fit together
+
+Datadog is an observability backend and operating surface. OpenTelemetry is a
+vendor-neutral set of APIs, SDKs, semantic conventions, and collection components for
+producing and moving telemetry. They are complementary: an application can emit OTLP
+signals through an OpenTelemetry Collector and use the Datadog exporter as the backend
+destination.
+
+Choose an instrumentation and collection path by testing language support, signal and
+feature compatibility, resource attribution, deployment model, operational ownership,
+and migration needs. Do not assume that every Datadog feature behaves identically for
+every ingestion path; check the current compatibility documentation before committing
+an architecture.
+
+Current primary references:
+
+- [Datadog OpenTelemetry Collector setup](https://docs.datadoghq.com/opentelemetry/setup/collector_exporter/)
+- [Datadog unified service tagging](https://docs.datadoghq.com/getting_started/tagging/unified_service_tagging/)
+- [Datadog metric monitor evaluation](https://docs.datadoghq.com/monitors/types/metric/)
+- [Datadog monitor no-data troubleshooting](https://docs.datadoghq.com/monitors/guide/troubleshooting-no-data/)
+- [Datadog log sample processor](https://docs.datadoghq.com/observability_pipelines/processors/sample/)
+- [Datadog trace retention](https://docs.datadoghq.com/tracing/trace_pipeline/trace_retention/)
+- [OpenTelemetry signals](https://opentelemetry.io/docs/concepts/signals/)
+- [OpenTelemetry sampling](https://opentelemetry.io/docs/concepts/sampling/)
+{% /section-card %}
+
+{% quiz quizId="datadog" lessonSlug="datadog" title="Datadog Operational Decisions" questionsFile="/api/content/technology/datadog/quiz/datadog-operational-decisions.json" /%}

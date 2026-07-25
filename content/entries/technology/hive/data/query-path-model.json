@@ -1,0 +1,139 @@
+{
+  "title": "Where does a Hive statement fail or do work?",
+  "description": "Choose a statement and inject one condition. The trace shows which control-plane and data-plane stages are actually visited, where the path stops, and what the caller observes.",
+  "defaults": {
+    "queryId": "analytical-read",
+    "incidentId": "healthy"
+  },
+  "stages": [
+    {
+      "id": "client",
+      "label": "Beeline or application client",
+      "eyebrow": "Submit",
+      "detail": "Sends HiveQL through HiveServer2 and waits for status or rows.",
+      "kind": "client"
+    },
+    {
+      "id": "hiveserver2",
+      "label": "HiveServer2 and driver",
+      "eyebrow": "Session",
+      "detail": "Owns the session, receives the statement, and coordinates execution and result retrieval.",
+      "kind": "server"
+    },
+    {
+      "id": "compiler",
+      "label": "Parser and semantic analyzer",
+      "eyebrow": "Validate",
+      "detail": "Parses HiveQL, resolves names and types, and builds a logical operator tree.",
+      "kind": "compiler"
+    },
+    {
+      "id": "metastore",
+      "label": "Hive Metastore",
+      "eyebrow": "Describe",
+      "detail": "Supplies table definitions, locations, partitions, and available statistics from its metadata store.",
+      "kind": "metastore"
+    },
+    {
+      "id": "optimizer",
+      "label": "Rule and cost optimizer",
+      "eyebrow": "Plan",
+      "detail": "Uses predicates, relationships, and available statistics to choose a physical operator plan.",
+      "kind": "optimizer"
+    },
+    {
+      "id": "execution-engine",
+      "label": "Configured execution backend",
+      "eyebrow": "Schedule",
+      "detail": "Runs the physical stages using the configured MapReduce, Tez, or Spark integration.",
+      "kind": "engine"
+    },
+    {
+      "id": "storage",
+      "label": "HDFS or compatible storage",
+      "eyebrow": "Read or write",
+      "detail": "Provides table files from the locations recorded in metadata and receives output files for writes.",
+      "kind": "storage"
+    },
+    {
+      "id": "response",
+      "label": "Status or result returned",
+      "eyebrow": "Observe",
+      "detail": "The client receives metadata, rows, a completion status, or an error from the stage that could not continue.",
+      "kind": "client"
+    }
+  ],
+  "queries": [
+    {
+      "id": "metadata",
+      "label": "Metadata inspection",
+      "detail": "List known partitions without scanning table files.",
+      "statement": "SHOW PARTITIONS learning.events;",
+      "activeStages": ["client", "hiveserver2", "compiler", "metastore", "response"],
+      "successOutcome": "The client receives the partition names recorded in the Metastore. No distributed table scan is launched."
+    },
+    {
+      "id": "analytical-read",
+      "label": "Partitioned aggregation",
+      "detail": "Compile, optimize, and execute a filtered analytical read.",
+      "statement": "SELECT event_type, COUNT(*)\nFROM learning.events\nWHERE event_date = DATE '2026-07-21'\nGROUP BY event_type;",
+      "activeStages": ["client", "hiveserver2", "compiler", "metastore", "optimizer", "execution-engine", "storage", "response"],
+      "successOutcome": "The backend reads eligible files, computes the aggregation, and HiveServer2 returns the grouped rows."
+    },
+    {
+      "id": "write",
+      "label": "Partition overwrite",
+      "detail": "Plan a distributed write and publish one partition's output.",
+      "statement": "INSERT OVERWRITE TABLE learning.events\nPARTITION (event_date = '2026-07-21')\nSELECT event_id, user_id, event_type, payload\nFROM learning.events_staging;",
+      "activeStages": ["client", "hiveserver2", "compiler", "metastore", "optimizer", "execution-engine", "storage", "response"],
+      "successOutcome": "The distributed write completes and the target partition's files become the table output for that partition."
+    }
+  ],
+  "incidents": [
+    {
+      "id": "healthy",
+      "label": "Healthy dependencies",
+      "detail": "Trace the normal path for the selected statement.",
+      "mode": "healthy",
+      "stageId": null,
+      "userOutcome": "The statement follows its normal path.",
+      "operatorAction": "Inspect the plan and runtime counters before tuning."
+    },
+    {
+      "id": "metastore-unavailable",
+      "label": "Metastore unavailable",
+      "detail": "Table definitions and partition metadata cannot be retrieved.",
+      "mode": "blocked",
+      "stageId": "metastore",
+      "userOutcome": "Compilation cannot resolve the table contract, so the statement returns an error before distributed work begins.",
+      "operatorAction": "Restore Metastore availability and its backing database; do not treat data files alone as a complete table catalog."
+    },
+    {
+      "id": "stale-statistics",
+      "label": "Statistics are stale",
+      "detail": "The optimizer receives old cardinality or column evidence.",
+      "mode": "degraded",
+      "stageId": "optimizer",
+      "userOutcome": "The statement can still run, but join order, reducer estimates, or algorithm choices may be based on weak evidence.",
+      "operatorAction": "Refresh relevant table, partition, and column statistics, then compare EXPLAIN output before and after."
+    },
+    {
+      "id": "storage-denied",
+      "label": "Storage access denied",
+      "detail": "Metadata resolves, but the execution identity cannot access the table location.",
+      "mode": "blocked",
+      "stageId": "storage",
+      "userOutcome": "Planning succeeds, but the read or write fails when tasks reach the protected storage path.",
+      "operatorAction": "Repair the storage authorization or location contract and verify it with the same identity used by execution tasks."
+    },
+    {
+      "id": "execution-exhausted",
+      "label": "Task retries exhausted",
+      "detail": "The execution backend cannot complete a physical stage.",
+      "mode": "blocked",
+      "stageId": "execution-engine",
+      "userOutcome": "HiveServer2 reports a terminal execution failure after the backend exhausts its configured recovery behavior.",
+      "operatorAction": "Inspect the failed stage for skew, resource pressure, bad input, or dependency failure before retrying the whole query."
+    }
+  ]
+}

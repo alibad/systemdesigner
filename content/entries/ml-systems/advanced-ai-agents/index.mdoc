@@ -1,0 +1,278 @@
+---
+registryId: advanced-ai-agents
+---
+
+{% section-card tone="intro" %}
+## What are advanced AI agents?
+
+Advanced AI agents are software systems that pursue a goal through a **bounded loop**: they observe current state, propose a next action, use a tool or delegate work, inspect the result, and decide whether to continue. A language model may help choose actions, but the surrounding runtime owns authority, state, budgets, and stopping.
+
+This distinction matters because an agent can change the world. Reading a document, issuing a refund, modifying a deployment, and asking another worker to act have different consequences. Production design is therefore less about making a model appear autonomous and more about making every action attributable, authorized, reversible where possible, and safe to stop.
+
+{% callout variant="info" %}
+The core invariant is simple: the planner proposes; the runtime disposes. No plan, memory, model output, or peer-agent message bypasses fresh state checks, policy enforcement, and an explicit execution boundary.
+{% /callout %}
+
+Start with [AI agents](/ml-systems/ai-agents) for the basic observe-decide-act loop and [RLHF](/ml-systems/rlhf) for preference-based model alignment. This lesson focuses on the production system around an already-capable model.
+{% /section-card %}
+
+{% section-card %}
+## An agent is a control loop, not a long prompt
+
+An **agent loop** is repeated decision-making under changing state. A chat response normally ends after producing text. An agent may instead read external evidence, request a tool action, receive a new observation, revise its plan, and continue until a terminal condition fires.
+
+{% system-flow title="A bounded agent loop" caption="Every cycle returns control to the runtime before another external effect is allowed." %}
+{% system-node title="Observe" eyebrow="Fresh state" icon="search" tone="cyan" %}
+Assemble the task, approved memory, current resource versions, tool results, and active policy.
+{% /system-node %}
+{% system-node title="Propose" eyebrow="Model output" icon="route" tone="violet" %}
+Produce a typed action candidate with arguments, assumptions, expected evidence, and a stop condition.
+{% /system-node %}
+{% system-node title="Authorize" eyebrow="Runtime gate" icon="shield" tone="amber" %}
+Validate schema, identity, permission scope, budgets, state version, and any required approval.
+{% /system-node %}
+{% system-node title="Execute" eyebrow="External effect" icon="workflow" tone="blue" %}
+Call one tool with a timeout, idempotency key, and a record of the effective grant.
+{% /system-node %}
+{% system-node title="Evaluate" eyebrow="Continue or stop" icon="check" tone="green" %}
+Compare observed evidence with success, failure, escalation, and resource limits.
+{% /system-node %}
+{% /system-flow %}
+
+The loop has four production properties:
+
+- **Bounded:** step, time, token, money, and retry budgets have hard limits.
+- **State-aware:** each action is checked against the latest observed state rather than an old plan snapshot.
+- **Least-authority:** the runtime grants only the capability and resource scope required for the current action.
+- **Interruptible:** policy, uncertainty, user cancellation, or an incident can stop the loop before another effect.
+
+The [ReAct paper](https://arxiv.org/abs/2210.03629) is a primary research reference for interleaving reasoning and external actions. Its results motivate the loop shape, not a claim that a prompt pattern alone supplies production controls.
+{% /section-card %}
+
+{% section-card %}
+## Separate planning from runtime control
+
+A **planning boundary** separates a fallible proposal from the deterministic code that may act on it. Plans can be useful for decomposition and user review, but they become stale as tools, users, and other workers change the environment.
+
+{% interactive-block id="ml-systems/advanced-ai-agents-planning-runtime-lab" dataFile="/api/content/ml-systems/advanced-ai-agents/data/planning-runtime-scenarios.json" /%}
+
+### Give each side a narrow contract
+
+**The planning side may:**
+
+- decompose a goal into candidate steps;
+- name preconditions, expected observations, and completion evidence;
+- rank alternatives by expected utility, risk, or cost;
+- request a capability without receiving its credential.
+
+**The runtime side must:**
+
+- parse the candidate into a typed action schema;
+- load fresh policy, identity, consent, and resource state;
+- reject unknown tools, excess scope, stale versions, and invalid arguments;
+- apply timeout, retry, idempotency, concurrency, and spend limits;
+- record the result and decide whether replanning is allowed.
+
+{% callout variant="warn" %}
+A human approval is not permission to execute an arbitrary future plan. Bind approval to a specific action, arguments, resource, state version, expiration, and maximum consequence.
+{% /callout %}
+
+{% code-block file="/api/content/ml-systems/advanced-ai-agents/code/bounded-agent-runtime.py" language="python" title="Execute proposed actions through a fresh policy boundary" /%}
+{% /section-card %}
+
+{% section-card %}
+## Context is assembled; memory is governed
+
+**Context** is the information supplied for the current decision. **Memory** is state retained across decisions or runs. Treating all prior text as one ever-growing transcript makes provenance, deletion, conflict handling, and relevance difficult to reason about.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Working context" eyebrow="Current decision" icon="file-text" tone="blue" %}
+The immediate task, latest observations, active constraints, tool schemas, and a short action history. It should be small enough to inspect and rebuild.
+{% /concept-card %}
+{% concept-card title="Episodic memory" eyebrow="What happened" icon="clock" tone="cyan" %}
+Time-bounded events such as attempts, results, approvals, and incidents. Store source, timestamp, actor, and retention policy with each record.
+{% /concept-card %}
+{% concept-card title="Semantic memory" eyebrow="What is believed" icon="database" tone="violet" %}
+Normalized facts or summaries derived from evidence. Keep links to source records, confidence, validity windows, and contradiction state.
+{% /concept-card %}
+{% concept-card title="Procedural policy" eyebrow="What is allowed" icon="shield" tone="amber" %}
+Versioned tool contracts, escalation rules, and business constraints. Load these from an authoritative policy service, not from conversational memory.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Put gates on writes and reads
+
+1. **Ingest:** classify source trust, sensitivity, owner, tenant, and retention.
+2. **Normalize:** extract a candidate fact without discarding the original evidence.
+3. **Admit:** validate permissions, detect conflicts, and quarantine untrusted instructions.
+4. **Retrieve:** filter by task, tenant, time, policy, and provenance before ranking relevance.
+5. **Assemble:** include only the evidence needed for the next decision and mark untrusted content as data.
+6. **Expire:** delete or revalidate records when consent, policy, or validity changes.
+
+Research systems have demonstrated architectures that retrieve observations and synthesize reflections, including [Generative Agents](https://arxiv.org/abs/2304.03442). However, long context is not equivalent to reliable memory: [Lost in the Middle](https://aclanthology.org/2024.tacl-1.9/) found that relevant-information position can materially change performance. Production systems should evaluate retrieval and context assembly on their own tasks instead of assuming that a larger context window solves recall.
+{% /section-card %}
+
+{% section-card %}
+## Tools need capabilities, not ambient credentials
+
+A **tool** is a typed external operation available to the runtime. The model chooses among descriptions, but ordinary authorization code decides whether a concrete principal may perform the requested operation on a concrete resource.
+
+{% process-flow %}
+{% process-step number="1" title="Discover" label="Allowlist" %}
+Expose only tools approved for this agent version, tenant, environment, and task class.
+{% /process-step %}
+{% process-step number="2" title="Validate" label="Arguments" %}
+Parse a closed schema, constrain destinations and values, and reject instructions embedded in untrusted data.
+{% /process-step %}
+{% process-step number="3" title="Authorize" label="Capability" %}
+Issue a short-lived grant bound to principal, action, resource, limits, and state version.
+{% /process-step %}
+{% process-step number="4" title="Execute" label="Effect" %}
+Use isolation, timeout, idempotency, egress control, and secrets unavailable to the model context.
+{% /process-step %}
+{% process-step number="5" title="Verify" label="Evidence" %}
+Read back authoritative state and classify the action as succeeded, failed, or outcome unknown.
+{% /process-step %}
+{% /process-flow %}
+
+The [Toolformer paper](https://proceedings.neurips.cc/paper_files/paper/2023/hash/d842425e4bf79ba039352da0f658a906-Abstract-Conference.html) is evidence that models can learn when and how to call APIs. It does not remove the need for software authorization. Keep these controls outside the prompt:
+
+- deny by default and allowlist tools per task;
+- separate read, propose, write, and administrative capabilities;
+- restrict resource IDs, destinations, value ranges, and data egress;
+- use short-lived delegated credentials rather than shared service secrets;
+- make writes idempotent and reconcile an unknown outcome before retrying;
+- require step-up approval for irreversible or high-impact effects;
+- treat tool output as untrusted input, even when the tool itself is trusted.
+{% /section-card %}
+
+{% section-card %}
+## Orchestration distributes work, not accountability
+
+**Orchestration** assigns tasks to models, tools, or worker agents and reconciles their outputs. More agents can add specialization or parallelism, but they also add messages, state transitions, failure domains, and opportunities for duplicated authority.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Single loop" eyebrow="Default" icon="repeat" tone="green" %}
+One runtime owns state and invokes tools sequentially. Prefer it when the task fits one context and parallelism has little value.
+{% /concept-card %}
+{% concept-card title="Supervisor and workers" eyebrow="Clear ownership" icon="users" tone="blue" %}
+A supervisor leases bounded subtasks to specialists and integrates evidence. The supervisor is an availability and queueing dependency.
+{% /concept-card %}
+{% concept-card title="Event-driven graph" eyebrow="Parallel stages" icon="network" tone="violet" %}
+Durable events connect independently scalable workers. Every message needs an ID, schema version, deadline, and idempotent consumer.
+{% /concept-card %}
+{% concept-card title="Peer coordination" eyebrow="Rarely the default" icon="workflow" tone="amber" %}
+Peers negotiate ownership or shared state. Use only when central coordination is the actual bottleneck and conflict rules are explicit.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve ownership across every handoff
+
+- Give each subtask one owner, lease, deadline, input snapshot, and output schema.
+- Pass capability references, never another worker's raw credentials.
+- Store durable task state outside model context so a worker can restart or be replaced.
+- Detect duplicate delivery and late results with task and attempt IDs.
+- Cap fan-out, depth, wall time, and aggregate spend at the parent run.
+- Define who may cancel, retry, compensate, approve, and declare completion.
+
+An agent should not delegate a permission it does not hold, and a coordinator should not infer consensus from repeated copies of the same evidence.
+{% /section-card %}
+
+{% section-card %}
+## Contain failures before optimizing success rate
+
+**Failure containment** limits how far one bad observation, tool result, worker, or policy decision can propagate. A failure is not only an incorrect final answer; it can be a duplicate write, stale memory, leaked data, abandoned lease, or run that never reaches a terminal state.
+
+{% interactive-block id="ml-systems/advanced-ai-agents-failure-containment-lab" dataFile="/api/content/ml-systems/advanced-ai-agents/data/failure-containment-scenarios.json" /%}
+
+### Design a containment hierarchy
+
+1. **Prevent:** closed schemas, provenance filters, least privilege, isolation, and test-time adversarial cases.
+2. **Detect:** invariant checks, policy decisions, anomaly signals, deadlines, and state reconciliation.
+3. **Contain:** stop one tool or worker, revoke a capability, quarantine memory, and prevent further fan-out.
+4. **Recover:** replay from durable state, compensate a confirmed effect, or transfer the case to a human owner.
+5. **Learn:** preserve the incident trace, add a regression scenario, and review whether authority was wider than necessary.
+
+The current [NIST adversarial machine learning taxonomy](https://doi.org/10.6028/NIST.AI.100-2e2025) covers misuse and adversarial manipulation across the AI lifecycle. Use it as a risk vocabulary, then test the concrete paths and authorities in your own system.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate trajectories, not just final answers
+
+An **agent trajectory** is the ordered record of observations, proposed actions, policy decisions, tool effects, and terminal outcome for one run. A correct answer can hide unnecessary calls or a policy violation; an unsuccessful run can still demonstrate correct abstention and containment.
+
+### Build evaluation in layers
+
+- **Action validity:** Was each tool, argument, and resource appropriate for the state at that step?
+- **Task outcome:** Did authoritative evidence show success, correct refusal, or useful escalation?
+- **Policy compliance:** Were denied actions blocked, approvals bound correctly, and secrets kept out of context?
+- **Efficiency:** How many model calls, tool calls, tokens, retries, seconds, and dollars were consumed?
+- **Recovery:** Did injected timeouts, duplicates, stale plans, and poisoned inputs stay within the intended boundary?
+- **Slice quality:** How do results change by tool, risk tier, task length, tenant, language, and failure type?
+
+Use deterministic simulators for cheap regression tests, sandboxed tools for integration tests, and carefully gated live trials for online evidence. Hold out adversarial cases, version the entire runtime configuration, and retain failed trajectories in the denominator.
+
+{% code-block file="/api/content/ml-systems/advanced-ai-agents/code/trajectory-evaluation.py" language="python" title="Score outcome, policy, efficiency, and containment separately" /%}
+
+[AgentBench](https://proceedings.iclr.cc/paper_files/paper/2024/hash/e9df36b21ff4ee211a8b71ee8b7e9f57-Abstract-Conference.html) evaluated agents across eight interactive environments and reported distinct long-horizon, decision, and instruction-following failures. The production lesson is broader: no single benchmark represents your tools, authority model, users, or incident costs.
+{% /section-card %}
+
+{% section-card %}
+## Observability must explain effects without leaking them
+
+**Agent observability** connects a user request to each planning decision, policy check, tool attempt, state transition, and final outcome. Logs alone are insufficient when concurrent workers and retries interleave; use a run ID plus causally linked spans or events.
+
+Record at least:
+
+- run, task, parent-task, step, attempt, model, prompt-template, and policy versions;
+- tool name, argument schema hash, resource class, effective grant, and idempotency key;
+- state version before execution and authoritative state observed afterward;
+- latency, token use, estimated cost, retry reason, and budget remaining;
+- policy decision, approval reference, terminal status, and escalation owner;
+- redaction decisions and references to separately protected content when raw values are needed.
+
+As of July 2026, OpenTelemetry's current [Generative AI attribute registry](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/) includes agent and tool operation fields, marks relevant operation values as development, and warns that tool arguments and results may contain sensitive information. Pin the semantic-convention version you emit, keep compatibility at your telemetry boundary, and default to metadata or redacted payloads rather than full prompts and tool results.
+
+Useful operational views connect quality and systems behavior: task success beside p95 duration, policy denials by action class, unknown tool outcomes awaiting reconciliation, fan-out per parent run, memory records quarantined, and escalation age by accountable team.
+{% /section-card %}
+
+{% section-card %}
+## Governance makes autonomy an owned change
+
+**Agent governance** is the set of accountable decisions that determines where an agent may operate, how its risk is measured, and what evidence is required to change its authority. It should govern the complete system, not only the model artifact.
+
+### Maintain a production control record
+
+- **Purpose and owner:** intended users, prohibited uses, accountable product owner, and on-call operator.
+- **Authority inventory:** tools, data classes, identities, environments, approval thresholds, and maximum consequence.
+- **Evidence package:** evaluation slices, adversarial cases, containment tests, known limitations, and residual risks.
+- **Release plan:** shadow, read-only, proposal-only, canary, bounded write, and rollback stages.
+- **Change control:** review triggers for model, prompt, tool schema, memory policy, orchestration, and permission changes.
+- **Incident plan:** kill switch, grant revocation, task cancellation, reconciliation, notification, and preserved evidence.
+- **Retention and review:** memory deletion, trace access, appeal paths, periodic recertification, and retirement criteria.
+
+The [NIST Generative AI Profile](https://doi.org/10.6028/NIST.AI.600-1) organizes risk work around governing, mapping, measuring, and managing the full lifecycle. Apply that structure proportionally: a read-only research assistant and an agent that moves money should not share the same review threshold or rollout path.
+
+{% callout variant="info" %}
+Add autonomy only when evaluation shows that the extra loop or delegation creates measurable value. A deterministic workflow with a model inside one bounded step is often easier to test, operate, and govern than a general-purpose agent.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Production review checklist
+
+Before enabling external effects, verify that:
+
+- every run has success, refusal, escalation, cancellation, timeout, and budget terminal states;
+- planning output is typed and cannot directly access credentials;
+- every action is revalidated against fresh state and the effective grant;
+- memory records carry provenance, tenant, validity, sensitivity, and retention metadata;
+- tool writes are idempotent or have explicit reconciliation and compensation paths;
+- orchestration preserves single ownership, durable state, bounded fan-out, and duplicate handling;
+- evaluations include task, policy, efficiency, failure, and recovery metrics on meaningful slices;
+- traces link decisions to effects while redacting sensitive arguments and results;
+- operators can stop runs and revoke grants without model cooperation;
+- an accountable owner approves risk-tier and authority changes from a versioned evidence package.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/advanced-ai-agents/quiz/advanced-ai-agents.json" lessonSlug="advanced-ai-agents" title="Advanced AI Agents Quiz" /%}

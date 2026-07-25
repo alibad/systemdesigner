@@ -1,0 +1,297 @@
+---
+registryId: practice-conversational-ai
+---
+
+{% section-card tone="intro" %}
+## What is a conversational AI platform?
+
+A conversational AI platform receives a user's message, keeps the right context, and either answers or carries out a bounded task. It matters because a fluent response is not enough: the platform must preserve tenant boundaries, choose an affordable model, and refuse unsafe or unsupported actions.
+
+In this practice problem, design a multi-tenant support and operations assistant for 1,000 enterprise customers. It supports text and voice, serves 100,000 concurrent conversations, and may look up account data or begin approved workflows.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Keep an explicit state" eyebrow="Conversation" icon="route" tone="blue" %}
+Store only the user, tenant, task state, and approved memory that the next turn genuinely needs.
+{% /concept-card %}
+{% concept-card title="Treat authority as data" eyebrow="Safety" icon="shield" tone="violet" %}
+Bind every retrieval and tool call to the authenticated tenant, user scope, and action policy.
+{% /concept-card %}
+{% concept-card title="Degrade deliberately" eyebrow="Reliability" icon="activity" tone="rose" %}
+Reduce optional context or tools before serving a response that is slow, unsafe, or ungrounded.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Define the user-visible contract
+
+The assistant handles support questions, account lookups, and low-risk workflow requests. It returns a sourced answer, asks for missing information, invokes a permitted tool, or escalates. It does not silently make high-impact decisions, expose another tenant's information, or treat a model's guess as an account fact.
+
+**Functional requirements**
+
+- Continue a chat across web, mobile, and voice while preserving only approved session context.
+- Answer policy and product questions from tenant-authorized knowledge.
+- Read account status through typed, permissioned APIs.
+- Start reversible workflows only after the user confirms an action.
+- Transfer a conversation to a human with its relevant, redacted summary.
+
+**Non-functional requirements**
+
+- Serve 100,000 concurrent conversations with a 700 ms text p95 target for routine support.
+- Keep tenant isolation, data residency, retention, and audit requirements enforceable end to end.
+- Meet a 90% grounded-answer rate, 85% task-completion rate, and 99.9% availability target.
+- Support text first; voice and rich media use separate latency and safety budgets.
+
+{% callout variant="warn" %}
+**State the invariant first.** Conversation state, retrieved evidence, and tool authority must remain bound to the authenticated user and tenant. Filtering after the model sees data is too late.
+{% /callout %}
+
+### Ask questions that change the design
+
+1. Which workflows may the assistant execute, and which require a human approval?
+2. What is the maximum harm from an incorrect answer or duplicated action?
+3. Which system is authoritative for account state, product policy, and user permissions?
+4. How long may memory survive, and can a user inspect or delete it?
+5. What behavior is acceptable when retrieval, a tool, or the model tier is unavailable?
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Token Budget and Throughput Math" %}
+
+
+### Make the capacity assumptions visible
+
+Start with assumptions that can be corrected in an interview:
+
+- **100,000 concurrent conversations** and 10 million daily active users.
+- **6 turns per conversation** and an assumed 12,000 incoming turns per second during a global peak.
+- **1,200 input tokens** for instructions, compacted history, user state, and retrieved evidence on a typical support turn.
+- **180 output tokens** for a concise response; longer summaries and voice scripts use a separate class.
+- **30% headroom** after autoscaling so a burst, cold start, or failed replica does not consume the whole latency budget.
+
+{% metric-strip %}
+{% metric value="12K" label="Peak turns per second" detail="A design target to validate with traffic traces." tone="blue" /%}
+{% metric value="1,380" label="Typical token budget" detail="Input and output tokens for a routine support turn." tone="cyan" /%}
+{% metric value="700 ms" label="Text p95 target" detail="The budget includes policy, retrieval, tools, and generation." tone="violet" /%}
+{% metric value="30%" label="Capacity headroom" detail="Reserved for failures and demand spikes." tone="green" /%}
+{% /metric-strip %}
+
+### Allocate a p95 budget, not an average
+
+A routine text turn can reserve 80 ms for authentication and session lookup, 120 ms for retrieval, 250 ms for model generation, 100 ms for a read-only tool, and 150 ms for network and queue headroom. The exact numbers change with the product, but each stage must have a deadline and an owner.
+
+### Explore model routing under a real budget
+
+{% interactive-block id="practice/conversational-ai-capacity-routing-lab" /%}
+
+The control surface shows why one model tier cannot own every request. A compact route protects short, simple turns; a stronger route is justified when the value and latency allowance are higher. Over budget means degrade context or defer work, not silently ignore the deadline.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. High-Level Architecture and Model Tiering" %}
+
+
+### Follow one request from message to outcome
+
+{% system-flow title="Conversational AI request path" caption="The online path is deadline-aware. Training, analytics, and knowledge ingestion are asynchronous." %}
+{% system-node title="Channel gateway" eyebrow="Authenticate" icon="globe" tone="blue" %}
+Normalize a text or voice turn and bind the request to a tenant, user, channel, locale, and deadline.
+{% /system-node %}
+{% system-node title="Session orchestrator" eyebrow="Plan" icon="route" tone="cyan" %}
+Load compact conversation state, choose a response policy, and cancel work that cannot meet the remaining budget.
+{% /system-node %}
+{% system-node title="Knowledge and tools" eyebrow="Ground" icon="search" tone="violet" %}
+Retrieve permitted evidence or call a typed API only when the policy allows the requested capability.
+{% /system-node %}
+{% system-node title="Model router" eyebrow="Generate" icon="braces" tone="amber" %}
+Route simple classification and extraction to a small tier; reserve larger models for complex synthesis.
+{% /system-node %}
+{% system-node title="Response gate" eyebrow="Release" icon="shield" tone="green" %}
+Validate citations, policy, output shape, and action confirmation before sending text, speech, or a handoff.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate online data from durable records
+
+- **Session store:** short-lived state, idempotency keys, and policy version; partition by tenant and conversation ID.
+- **Profile and CRM systems:** authoritative read models accessed through scoped APIs, never copied wholesale into prompts.
+- **Knowledge indexes:** tenant-filtered documents with source, version, retention, and access metadata.
+- **Event stream:** immutable audit events for tool intent, policy result, latency stages, and completed actions.
+- **Offline pipelines:** ingestion, evaluation, redaction review, and model release run away from live request capacity.
+
+### Route by risk and work, not by a single intent label
+
+- A compact model handles classification, language detection, and short deterministic templates.
+- A balanced model summarizes authorized evidence and resolves ordinary multi-turn support questions.
+- A stronger model handles complex, asynchronous investigations after an explicit cost and deadline decision.
+- Direct API data wins over model memory for balances, entitlement, ticket status, and other structured facts.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. RAG, Prompting, and Safety Deep Dive" %}
+
+
+### Keep memory compact and purpose-bound
+
+Conversation memory is not a transcript dump. Store the active task, confirmed entities, user preferences that have consent, prior tool results with expiry, and a short summary of resolved turns. Reconstruct older context only when it is relevant and authorized.
+
+### Retrieve evidence before composing factual answers
+
+For policy, product, and troubleshooting questions, retrieve tenant-permitted documents first. Rank evidence by relevance, authority, freshness, and diversity; then place it in a delimited data section of the prompt. Retrieved text can inform an answer but cannot override system policy or request a tool call.
+
+Use retrieval sparingly when the answer is creative or conversational. Use a typed API when the user asks for a live account fact. Use a deterministic workflow when the request changes state.
+
+### Make tool calls an explicit authority decision
+
+{% interactive-block id="practice/conversational-ai-tool-authority-lab" /%}
+
+The model can propose a tool intent, but a policy service decides whether it has the tenant scope, confirmation, and idempotency protections required to run. This separates helpful language generation from authority to read or change a system.
+
+### Put safety gates before and after generation
+
+- Detect prompt injection, unsupported claims, self-harm or abuse signals, and sensitive data before model context is assembled.
+- Validate structured tool arguments against schemas and server-side authorization, not only model output.
+- Require confirmation for state-changing actions and surface a clear human handoff for high-consequence cases.
+- Scan the response for cross-tenant references, policy violations, and unsupported claims before delivery.
+- Log the policy and evidence identifiers needed for audit without storing unrestricted raw prompts by default.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Evaluation and Safety Metrics" %}
+
+
+### Measure the pipeline in layers
+
+End-to-end satisfaction alone cannot reveal whether retrieval, routing, a tool, or generation failed. Maintain versioned test conversations with expected evidence, policy decisions, tool outcomes, and valid abstentions.
+
+**Answer and task quality**
+
+- Grounded-answer rate and citation support for factual claims.
+- Task-completion and containment rate, with a separate measure for harmful or unnecessary automation.
+- Turn count and human-handoff quality for common support workflows.
+- Language, tenant-size, channel, and accessibility slices so averages do not hide regressions.
+
+**Safety and reliability**
+
+- Cross-tenant retrieval or tool-access violations, measured as a hard-zero error budget.
+- Unauthorized-action attempts blocked, confirmation bypasses, and duplicate-action rate.
+- p95 and p99 latency by policy, session, retrieval, tool, model, and response-gate stage.
+- Refusal quality, escalation rate, tool timeout rate, and conversation recovery after a dependency failure.
+
+### Release against hard gates
+
+1. Run schema, authorization, prompt-boundary, and idempotency tests on every change.
+2. Replay labeled, multilingual, and adversarial conversation suites offline.
+3. Shadow traffic without executing real tools or returning candidate answers.
+4. Canary by tenant and workflow, with automatic rollback on safety, latency, or task-quality regressions.
+5. Expand only when the candidate improves the targeted outcome and every hard guardrail passes.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Cost Control and Governance" %}
+
+
+### Optimize for completed, safe outcomes
+
+Track cost per completed and policy-compliant conversation rather than cost per model request. A low-cost answer that triggers a bad workflow or sends a user to a human unnecessarily is not efficient.
+
+- Enforce token and tool budgets by request class and tenant plan.
+- Cache only permission-safe data using tenant, user scope, policy, and source version in the key.
+- Summarize or expire stale session context before sending it to a model.
+- Route routine tasks to small models, templates, or direct APIs where they meet the product contract.
+- Keep expensive investigation and voice paths asynchronous where the user does not need an immediate answer.
+
+### Name the accountable owners
+
+{% concept-grid columns="3" %}
+{% concept-card title="Knowledge owner" eyebrow="Sources" icon="database" tone="blue" %}
+Owns authority, retention, deletion, residency, and access policy for retrieved content.
+{% /concept-card %}
+{% concept-card title="Platform owner" eyebrow="Operations" icon="activity" tone="violet" %}
+Owns routing, latency, capacity, incident response, and service-level objectives.
+{% /concept-card %}
+{% concept-card title="Workflow owner" eyebrow="Actions" icon="shield" tone="rose" %}
+Owns tool permissions, approval policy, idempotency, audits, and rollback of business actions.
+{% /concept-card %}
+{% /concept-grid %}
+
+Each audit event should carry request, tenant, policy, model, evidence, tool-intent, and outcome identifiers. Retention and deletion must cover the source, index, cache, summary, evaluation sample, and derived training data.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Scaling and Reliability" %}
+
+
+### Scale the independent bottlenecks
+
+- Keep stateless gateways and orchestrators horizontally scalable; use durable stores only for state that must survive a retry.
+- Partition session and knowledge data by tenant and stable conversation keys, then isolate hot tenants with quotas.
+- Autoscale model services from queue age, token throughput, and remaining deadline, not CPU alone.
+- Separate ingestion, analytics, and evaluation queues from live conversation capacity.
+- Use bounded retries and idempotency keys for all tools so a timeout cannot create a duplicate action.
+
+### Degrade in an order that protects the contract
+
+{% process-flow %}
+{% process-step number="1" title="Cancel stale work" label="Deadline" %}
+Stop retries and generation after disconnects or when remaining time cannot produce a valid result.
+{% /process-step %}
+{% process-step number="2" title="Reduce optional context" label="Capacity" %}
+Skip low-value retrieval, compress history, and select the lowest model tier that still meets the request class.
+{% /process-step %}
+{% process-step number="3" title="Disable optional actions" label="Tool failure" %}
+Return a sourced answer, collect a ticket, or hand off instead of retrying a degraded side-effecting workflow.
+{% /process-step %}
+{% process-step number="4" title="Fail closed" label="Policy failure" %}
+Refuse private-data retrieval and state-changing actions when identity or policy cannot be verified.
+{% /process-step %}
+{% /process-flow %}
+
+### Rehearse concrete failures
+
+- **Model saturation:** route eligible turns to a smaller tier or provide a compact, sourced response.
+- **Knowledge outage:** avoid invented answers; offer verified account data or a clear escalation.
+- **Tool timeout:** show pending status and use the idempotency key before a retry.
+- **Policy service outage:** block retrieval and actions that need a fresh authorization decision.
+- **Regional failure:** fail over only where residency and tenant controls remain valid.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Wrap-Up and Forward-Looking Extensions" %}
+
+
+### Present the design in 90 seconds
+
+1. Authenticate the turn and bind tenant, scope, policy version, channel, and deadline.
+2. Load compact session state, then choose whether the task needs retrieval, an API, a tool, or a human.
+3. Retrieve only permitted evidence and route the request to a model tier that fits its value and p95 budget.
+4. Validate response claims and tool arguments before release; ask for confirmation before side effects.
+5. Record an auditable outcome, then degrade to sourced information, ticket creation, or handoff when dependencies fail.
+
+### Defend the key trade-offs
+
+- **Personalization versus privacy:** richer memory can improve continuity but expands retention and exposure risk.
+- **Model quality versus latency and spend:** a larger model helps synthesis but cannot correct unauthorized or missing data.
+- **Automation versus control:** tools reduce handling time but require explicit ownership, confirmation, and recovery behavior.
+- **Availability versus correctness:** failing closed for private data or side effects is more valuable than an unsafe response.
+- **Global scale versus residency:** multi-region routing improves resilience only where it preserves data and policy boundaries.
+
+### Extend from measured gaps
+
+- Add a multimodal evidence path once image and document citations have an evaluation contract.
+- Add proactive workflows only after measuring false-positive cost and approval latency.
+- Add long-term preference memory only with consent, expiry, inspection, and deletion controls.
+- Add model fine-tuning for stable conversation behavior, not as a replacement for live policies or account APIs.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/conversational-ai/quiz/conversational-ai-design-review.json"
+   lessonSlug="practice-conversational-ai"
+   title="Conversational AI Design Review" /%}

@@ -1,0 +1,422 @@
+---
+registryId: redis
+---
+
+{% section-card tone="intro" %}
+## What is Redis?
+
+**Redis is an in-memory data structure server.** An application names a key, chooses a
+value type, and sends commands that Redis applies close to the data. That is a richer
+contract than a simple byte cache: Redis can increment counters, rank members, manage
+sets, retain event streams, expire keys, replicate state, and shard a keyspace.
+
+Redis matters because it can remove slower storage and coordination work from a hot
+request path. Its speed does not decide whether a value is correct or durable. A key
+may be a disposable cache copy, a recoverable session, a rate-limit counter, or the
+only current copy of state; those roles need different failure behavior.
+
+### Core invariant
+
+For every key family, define **authority, freshness, durability, and placement** before
+choosing commands. Memory makes access fast, while TTLs, eviction, persistence,
+replication, and Cluster each protect a different boundary.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Name a value" eyebrow="Keyspace" icon="key" tone="blue" %}
+Use stable namespaces and schema versions. A key is an application compatibility and
+ownership boundary, not just a lookup string.
+{% /concept-card %}
+{% concept-card title="Choose an operation" eyebrow="Data type" icon="braces" tone="violet" %}
+Select the type whose commands preserve the needed invariant: uniqueness, rank,
+ordering, field updates, counters, or replay.
+{% /concept-card %}
+{% concept-card title="Budget finite memory" eyebrow="Capacity" icon="gauge" tone="cyan" %}
+Set `maxmemory` from measured object sizes and leave RAM outside that budget for the
+process, replication, persistence, fragmentation, and temporary work.
+{% /concept-card %}
+{% concept-card title="Plan for copy loss" eyebrow="Recovery" icon="repeat" tone="green" %}
+Decide what happens after expiration, eviction, restart, replica promotion, resharding,
+or a complete cold start. Every fast path needs a bounded recovery path.
+{% /concept-card %}
+{% /concept-grid %}
+
+This lesson assumes the cache vocabulary introduced in
+[Caching Strategies](/reference/caching-strategies), then adds Redis-specific data,
+memory, durability, and distribution behavior.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Put a disposable cache on a correct request path
+
+In **cache-aside**, the application reads Redis first. A hit returns a temporary copy.
+A miss, timeout, or connection failure reads the authoritative source and may repopulate
+Redis. The source remains correct even if every Redis key disappears.
+
+{% system-flow title="One cache-aside read" caption="The hit path ends at Redis. The miss path reaches the source, then stores a bounded temporary copy." %}
+{% system-node title="Application" eyebrow="Build a key" icon="workflow" tone="blue" %}
+Create a namespaced key such as `catalog:v3:product:42`, set a short cache timeout, and
+separate misses from connection errors in telemetry.
+{% /system-node %}
+{% system-node title="Redis" eyebrow="Optional copy" icon="cache" tone="cyan" %}
+Return the typed value on a hit. On a miss, report absence; Redis does not know how to
+reconstruct application data from the source.
+{% /system-node %}
+{% system-node title="Source" eyebrow="Authority" icon="database" tone="amber" %}
+Read the database or service under its real consistency contract. Bound concurrency so
+a cache failure cannot create unlimited source work.
+{% /system-node %}
+{% system-node title="Refill" eyebrow="Temporary state" icon="repeat" tone="green" %}
+Serialize the source result and store it with a freshness rule. Use jitter and one
+refill owner for hot keys to avoid synchronized expiry and duplicate work.
+{% /system-node %}
+{% /system-flow %}
+
+### A TTL is a stale-data bound, not coherence
+
+- A short TTL reduces the stale window but increases miss and refill frequency.
+- A long TTL protects the source but can serve an obsolete copy for longer.
+- Deleting after a source commit narrows staleness, but a failed delete or racing refill
+  still needs detection and repair.
+- Versioned keys make old representations unreachable after schema changes and let them
+  expire without a dangerous global flush.
+- For hot keys, single-flight work, a short lease, or stale-while-revalidate behavior
+  prevents one expiry from multiplying source reads.
+
+{% code-block file="/api/content/technology/redis/code/cache-aside-ttl-simulation.py" language="python" title="Simulate a cache hit, stale window, and TTL expiry" /%}
+
+The example is dependency-free so the state transition is visible without a running
+server. In an application, use a maintained Redis client and one atomic command such as
+`SET key value EX seconds` when setting a value and its TTL together.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size maxmemory and source capacity together
+
+Redis memory planning starts with a distribution of serialized key and value sizes,
+not a generic operations-per-second claim. The working set must fit the dataset budget,
+and the source must survive both steady misses and a cold cache.
+
+{% metric-strip %}
+{% metric label="Working set" value="keys x bytes per key" detail="Include key bytes, value encoding, metadata, and size percentiles" tone="violet" /%}
+{% metric label="Dataset limit" value="primaries x maxmemory" detail="Replicas mirror data; they do not add unique dataset capacity" tone="cyan" /%}
+{% metric label="Steady source load" value="reads x (1 - hit rate)" detail="Use a measured hit rate split by key family and tenant" tone="rose" /%}
+{% metric label="Cold source load" value="up to full read rate" detail="Warm-up needs admission control, jitter, and refill ownership" tone="amber" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/redis-performance" dataFile="/api/content/technology/redis/data/cache-capacity-envelope.json" /%}
+
+The lab's key and object overhead and `maxmemory` share are visible planning assumptions.
+Measure real values with `MEMORY USAGE`, `INFO memory`, production serialization, and the
+target allocator before committing capacity.
+
+{% code-block file="/api/content/technology/redis/code/plan-cache-envelope.py" language="python" title="Calculate the same transparent memory and miss envelope" /%}
+
+### Test what arithmetic cannot predict
+
+- Capture p50, p95, and maximum key and value sizes; averages hide dangerous large
+  objects and temporary command results.
+- Measure access skew. Enough aggregate RAM does not prevent one hot shard, slot, key,
+  connection, or tenant from saturating.
+- Benchmark the exact command mix, client, pipeline size, codec, TLS mode, network, and
+  hardware at p50, p95, and p99.
+- Remove a primary and observe client reconnects, replica promotion, source load, tail
+  latency, buffer growth, and refill duration.
+- Restart the whole cache and prove source admission control holds while the hit rate is
+  near zero.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose a data type from the invariant
+
+Redis commands operate on typed values. Choosing a type by a familiar label such as
+"queue" is too vague; choose from the operation that must remain atomic and the growth
+that must remain bounded.
+
+{% concept-grid columns="3" %}
+{% concept-card title="String" eyebrow="Bytes, counters, flags" icon="code" tone="blue" %}
+Use `GET` and `SET` for one binary-safe value, or `INCR` for an atomic integer counter.
+Do not split one logical read-modify-write across clients when one server-side command
+can preserve it.
+{% /concept-card %}
+{% concept-card title="Hash" eyebrow="Field-value record" icon="braces" tone="violet" %}
+Use `HGET`, `HSET`, and field increments when fields belong to one bounded object and
+need independent access. A hash is not a relational join or an unbounded document.
+{% /concept-card %}
+{% concept-card title="Set" eyebrow="Unique membership" icon="users" tone="green" %}
+Use `SADD`, `SISMEMBER`, intersections, and unions for unique members. Large set-wide
+operations can still block useful work, so bound cardinality and result size.
+{% /concept-card %}
+{% concept-card title="Sorted set" eyebrow="Ranked membership" icon="scale" tone="amber" %}
+Use `ZADD` and score ranges for leaderboards, priority indexes, or time-ordered members.
+Scores order values; they do not provide a complete time-series storage contract.
+{% /concept-card %}
+{% concept-card title="List" eyebrow="Ordered ends" icon="layers" tone="cyan" %}
+Use pushes, pops, and blocking pops for bounded sequences or simple work handoff. A
+destructive pop alone does not provide replay, acknowledgments, or consumer ownership.
+{% /concept-card %}
+{% concept-card title="Stream" eyebrow="Retained event log" icon="activity" tone="rose" %}
+Use `XADD`, consumer groups, pending entries, and acknowledgments when consumers need
+retention, replay, ownership, and recovery from incomplete work.
+{% /concept-card %}
+{% /concept-grid %}
+
+The current [official data-type guide](https://redis.io/docs/latest/develop/data-types/)
+also covers specialized structures such as geospatial indexes, probabilistic types,
+JSON, time series, and vector sets. Availability depends on the deployed Redis edition
+and version, so verify commands against that server rather than assuming every client
+example is portable.
+
+### Keep command cost and result size bounded
+
+- Prefer incremental `SCAN`-family iteration over `KEYS` on a production keyspace, but
+  remember that a scan is not a point-in-time snapshot.
+- Avoid unbounded collection reads such as returning an entire large list, set, hash,
+  or sorted set to one client.
+- Use server-side atomic commands for counters, conditional writes, and bounded
+  mutations instead of a client read followed by an unguarded write.
+- Use `WATCH` with `MULTI`/`EXEC` for optimistic conflict detection when the next write
+  depends on a value previously read by the client.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make expiration and eviction separate decisions
+
+**Expiration** removes a key after its TTL. **Eviction** removes an eligible key when a
+memory-growing command crosses `maxmemory`. A key can expire without memory pressure,
+and a live key can be evicted before its TTL.
+
+{% concept-grid columns="3" %}
+{% concept-card title="allkeys policies" eyebrow="Whole keyspace" icon="repeat" tone="blue" %}
+`allkeys-lru` samples for recently used keys, while `allkeys-lfu` estimates frequency.
+Use them when all keys are disposable cache candidates and validate behavior from real
+access distributions.
+{% /concept-card %}
+{% concept-card title="volatile policies" eyebrow="TTL keys only" icon="timer" tone="amber" %}
+Only keys with an expiration are eligible. If no keys have a TTL, a volatile policy
+behaves like `noeviction` for writes that need more memory.
+{% /concept-card %}
+{% concept-card title="noeviction" eyebrow="Reject growth" icon="warning" tone="rose" %}
+Reads and non-growing operations can continue, while commands that add data return an
+error at the limit. The application must treat this as a real failure mode.
+{% /concept-card %}
+{% /concept-grid %}
+
+Replication and AOF buffers are not included in the memory total compared with
+`maxmemory`. Leave host RAM for those buffers, the server process, allocator
+fragmentation, copy-on-write during background work, client buffers, and the operating
+system. The [official eviction guide](https://redis.io/docs/latest/develop/reference/eviction/)
+documents current policies and the `mem_not_counted_for_evict` metric.
+
+### Read pressure from outcomes
+
+- `keyspace_hits` and `keyspace_misses` show reuse, not user latency or source safety.
+- `evicted_keys` indicates memory pressure; `expired_keys` indicates TTL churn.
+- `used_memory`, `used_memory_dataset`, `maxmemory`, fragmentation, and
+  `mem_not_counted_for_evict` explain different parts of the budget.
+- Rejected commands under `noeviction` or ineligible volatile policies must be visible
+  in application errors and command statistics.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose persistence from an acceptable loss window
+
+Persistence writes Redis state to durable storage so a process can reconstruct data
+after restart. It does not replace replicas, off-host backups, restore drills, or an
+application decision about whether Redis is authoritative.
+
+{% concept-grid columns="3" %}
+{% concept-card title="RDB snapshots" eyebrow="Point in time" icon="storage" tone="blue" %}
+Create compact dataset snapshots at configured conditions. Recovery can be efficient,
+but a crash can lose writes since the last completed snapshot.
+{% /concept-card %}
+{% concept-card title="Append-only file" eyebrow="Replay writes" icon="activity" tone="violet" %}
+Log write operations and replay them at startup. The `appendfsync` policy controls the
+latency and loss-window trade-off; AOF rewrite keeps the history bounded.
+{% /concept-card %}
+{% concept-card title="Both or neither" eyebrow="Workload contract" icon="shield" tone="green" %}
+Use both when recovery and backup goals justify the work. Disable both only when all
+state is deliberately disposable and a cold refill is safe.
+{% /concept-card %}
+{% /concept-grid %}
+
+The current [Redis persistence guide](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/)
+describes RDB, multipart AOF, their interaction, and backup procedures. Test recovery
+time and actual loss behavior with the same dataset size, disk, fork behavior, fsync
+policy, and container lifecycle used in production.
+
+{% callout variant="warn" %}
+Replication is not a backup. A mistaken delete, corrupting command, or empty restarted
+primary can be copied to replicas. Keep tested snapshots outside the instance and its
+failure domain when the data matters.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Trace asynchronous replication and Sentinel failover
+
+A Redis primary streams dataset changes to replicas. Replication is asynchronous by
+default: the primary normally does not wait for each replica before replying. A broken
+link may recover with a partial resynchronization from the backlog; otherwise the
+replica needs a full synchronization.
+
+**Sentinel is a control plane for a non-clustered primary and its replicas.** Independent
+Sentinel processes monitor health, agree that a primary is objectively down, authorize
+a failover, promote one replica, reconfigure the others, and tell compatible clients
+where the new primary lives. The official guidance calls for at least three Sentinel
+instances in independent failure domains for a robust deployment.
+
+{% topology-lab dataFile="/api/content/technology/redis/data/replication-failover-topology.json" /%}
+
+### State the real guarantee
+
+- An acknowledgment from the primary alone can be lost if it fails before replication.
+- `WAIT` asks for a number of replica acknowledgments and reduces the probability of
+  loss, but it does not turn Redis into a strongly consistent CP system.
+- Sentinel can restore write availability, but asynchronous promotion can discard a
+  tail the chosen replica never received.
+- `min-replicas-to-write` and `min-replicas-max-lag` can reject writes when too few
+  sufficiently recent replicas are connected; they bound risk rather than prove a
+  per-write quorum commit.
+- Client timeouts need idempotency or state verification because the server may have
+  applied a command even when the reply was not observed.
+
+See the official [replication](https://redis.io/docs/latest/operate/oss_and_stack/management/replication/)
+and [Sentinel](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/)
+documentation for the current protocol, resynchronization, quorum, and failure model.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Use Redis Cluster when one primary cannot own the dataset
+
+Redis Cluster shards keys across **16,384 hash slots**. A cluster-aware client maps a
+key to a slot, routes to the primary responsible for that slot, and handles topology
+changes and temporary redirections. Replicas protect each primary's slots; they do not
+merge independently accepted values.
+
+{% process-flow %}
+{% process-step number="1" title="Hash the key" label="Client" %}
+Compute the slot from the key. If a key contains a non-empty `{...}` hash tag, only that
+substring participates in slot selection.
+{% /process-step %}
+{% process-step number="2" title="Route to the owner" label="Slot map" %}
+Send the command to the primary that owns the slot. Refresh the map after `MOVED`; follow
+`ASK` during migration according to the client protocol.
+{% /process-step %}
+{% process-step number="3" title="Execute locally" label="Primary" %}
+Apply the command on one shard and asynchronously replicate it to that shard's replicas.
+Multi-key work must target one slot.
+{% /process-step %}
+{% process-step number="4" title="Move slots" label="Reshard" %}
+Reassign slots to add, remove, or rebalance primaries. Observe migration errors, client
+refresh behavior, hot slots, and recovery capacity.
+{% /process-step %}
+{% /process-flow %}
+
+### Hash tags are a correctness and load decision
+
+- `user:{42}:profile` and `user:{42}:cart` land in the same slot, allowing supported
+  multi-key commands, transactions, or scripts across those keys.
+- A broad tag such as `{global}` concentrates all matching keys on one primary and can
+  defeat horizontal scale.
+- Cluster does not provide strong consistency; acknowledged writes can still be lost
+  in documented partition and failover windows.
+- The cluster becomes unavailable for larger failures, including loss of a primary and
+  all eligible replicas for its slots.
+
+The [official Cluster guide](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/)
+and [Cluster specification](https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/)
+define current routing, hash-tag, availability, and consistency behavior.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Match messaging semantics to failure behavior
+
+Redis exposes several structures that can move work, but they do not promise the same
+delivery behavior.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Pub/Sub" eyebrow="Live broadcast" icon="network" tone="blue" %}
+`PUBLISH` fans a message to currently connected subscribers. Delivery is at-most-once:
+a disconnected or failing subscriber cannot replay what it missed.
+{% /concept-card %}
+{% concept-card title="Streams" eyebrow="Retained processing" icon="activity" tone="violet" %}
+Entries remain in an append-only log. Consumer groups track delivery and pending work;
+acknowledge after processing and make handlers idempotent for redelivery.
+{% /concept-card %}
+{% concept-card title="Lists" eyebrow="Simple handoff" icon="layers" tone="amber" %}
+Blocking pops can hand work to a consumer with little ceremony. Add an explicit
+processing list or choose Streams when recovery, ownership, and replay matter.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use Pub/Sub for ephemeral invalidation signals, live UI updates, or notifications whose
+loss is acceptable. Use Streams when consumers need retention, replay, acknowledgments,
+and incomplete-work recovery. The official [Pub/Sub guide](https://redis.io/docs/latest/develop/pubsub/)
+and [Streams guide](https://redis.io/docs/latest/develop/data-types/streams/) describe
+their current delivery contracts.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Reduce round trips without hiding unsafe work
+
+Many small Redis commands are limited by network round trips and socket work rather
+than in-memory lookup time. **Pipelining** sends multiple independent commands before
+waiting for replies, amortizing RTT. It does not make the batch atomic.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Pipeline" eyebrow="Fewer round trips" icon="speed" tone="cyan" %}
+Batch independent commands, then read replies in order. Keep batches bounded because
+the server must queue responses until the client consumes them.
+{% /concept-card %}
+{% concept-card title="Transaction" eyebrow="Queued atomic execution" icon="shield" tone="violet" %}
+`MULTI`/`EXEC` executes queued commands without another client interleaving commands.
+Use `WATCH` to abort if observed keys changed before `EXEC`.
+{% /concept-card %}
+{% concept-card title="Script or function" eyebrow="Server-side decision" icon="code" tone="green" %}
+Move a bounded read-compute-write decision to the server when later work depends on an
+earlier result. Keep execution deterministic, short, observable, and cluster-slot safe.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [official pipelining guide](https://redis.io/docs/latest/develop/using-commands/pipelining/)
+recommends bounded batches so queued replies do not create uncontrolled memory growth.
+Benchmark pipeline depth against latency, throughput, response size, timeout behavior,
+and client backpressure rather than maximizing batch length.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate and secure Redis as shared state
+
+A high hit rate can hide an unsafe deployment. Review correctness, saturation, and
+recovery signals together.
+
+{% metric-strip %}
+{% metric label="Latency" value="p50 / p95 / p99" detail="Split commands, cache hits, misses, timeouts, and source fallbacks" tone="amber" /%}
+{% metric label="Memory" value="used / max / buffers" detail="Track evictions, expiry, fragmentation, and fork pressure" tone="violet" /%}
+{% metric label="Replication" value="offset / lag / backlog" detail="Watch disconnected replicas, sync type, and promotion eligibility" tone="cyan" /%}
+{% metric label="Recovery" value="RTO / loss / refill" detail="Measure restore, failover, reshard, and cold-start consequences" tone="rose" /%}
+{% /metric-strip %}
+
+### Production review
+
+- Restrict network reachability, enable ACLs, rotate credentials, and use TLS when the
+  threat model requires encryption in transit. Do not expose Redis directly to the
+  public internet.
+- Set client connect, command, and pool limits; unlimited queues and retries can turn a
+  slow Redis path into application-wide resource exhaustion.
+- Track command latency, slow-log entries, error replies, blocked clients, client-buffer
+  memory, hit/miss outcomes, evictions, expirations, and hot keys without logging
+  sensitive values.
+- Drill process crash, host loss, replica lag, Sentinel minority, disk pressure, failed
+  persistence, Cluster slot loss, resharding, and full cold start.
+- Restore backups into an isolated environment and verify application invariants, not
+  only that Redis accepts the file.
+- Roll configuration and version changes through replicas first where the topology
+  allows it, verify compatibility, and preserve enough healthy copies for rollback.
+
+The design is ready only when the team can answer four questions for every key family:
+Who owns the truth? How stale may this copy be? What loss window is acceptable? Which
+path restores service after the copy or its current owner disappears?
+{% /section-card %}
+
+{% quiz quizId="redis" lessonSlug="redis" title="Redis Production Design Review" questionsFile="/api/content/technology/redis/quiz/redis-production-design.json" /%}

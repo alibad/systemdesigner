@@ -1,0 +1,281 @@
+---
+registryId: production-transformer-architecture
+---
+
+{% section-card tone="intro" %}
+## What is a production Transformer architecture?
+
+A **production Transformer architecture** is the complete execution system that turns a trained Transformer checkpoint into a dependable service. It includes the model block, attention and feed-forward kernels, model sharding, KV-cache allocation, request scheduling, batching, streaming, admission control, observability, and recovery.
+
+In plain language: the checkpoint defines the math, while the production architecture decides **where that math runs, which requests may run together, what state stays in memory, and what happens when demand or hardware breaks the plan**.
+
+The core invariant is **admitted work must fit the declared memory, latency, correctness, and availability envelope**. High accelerator utilization is useful only while that contract remains true.
+
+- **Block architecture** determines the computation repeated at every layer.
+- **Attention architecture** determines both information flow and KV-cache shape.
+- **Parallelism** partitions weights, layers, sequence positions, experts, or requests across devices.
+- **Scheduling** decides which prefill and decode tokens consume the next iteration.
+- **Operations** keep the checkpoint, tokenizer, runtime, kernels, and policies observable as one release.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Prefill" label="Build state" detail="Process prompt tokens in parallel and write their keys and values into the cache" tone="blue" /%}
+{% metric value="Decode" label="Reuse state" detail="Read the existing KV cache and emit one next token for each active sequence" tone="violet" /%}
+{% metric value="KV" label="Capacity boundary" detail="Cache bytes grow with layers, cached tokens, KV heads, head dimension, precision, and concurrency" tone="amber" /%}
+{% metric value="SLO" label="Admission contract" detail="Queue delay, time to first token, inter-token latency, quality, and availability need separate limits" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Trace one request through the serving path
+
+A request does not move directly from an API handler to a GPU. Each boundary protects a different resource and produces different evidence.
+
+{% process-flow %}
+{% process-step number="1" title="Validate and admit" label="Control plane" %}
+Resolve the model bundle, cap input and output tokens, authenticate the caller, and reserve queue and cache capacity.
+{% /process-step %}
+{% process-step number="2" title="Prefill the prompt" label="Compute-heavy phase" %}
+Run prompt tokens through every block, create the first-token logits, and write reusable key/value state.
+{% /process-step %}
+{% process-step number="3" title="Schedule decode" label="Memory-sensitive phase" %}
+Continuously combine active sequences, read their cache pages, run one token step, and retire completed work.
+{% /process-step %}
+{% process-step number="4" title="Stream and account" label="User boundary" %}
+Emit bounded output, record phase-level latency and resource use, release cache pages, and commit terminal status once.
+{% /process-step %}
+{% /process-flow %}
+
+### Measure the phases separately
+
+- **Queue delay** reveals admission pressure before model execution starts.
+- **Time to first token** combines queueing, tokenization, scheduling, and prefill.
+- **Inter-token latency** exposes decode cadence after streaming begins.
+- **End-to-end latency** includes the generated length and therefore cannot replace phase metrics.
+- **Goodput** counts requests or tokens that meet the declared service objective, not merely raw work completed.
+{% /section-card %}
+
+{% section-card %}
+## Understand the block before optimizing the server
+
+A decoder-only production model repeats the same logical block many times. A common pre-normalized form moves the representation through normalization, causal self-attention, a residual update, another normalization, a feed-forward network, and a second residual update.
+
+{% system-flow title="One pre-normalized decoder block" caption="Implementations fuse operations, but the residual and information-flow contract must remain equivalent." %}
+{% system-node title="Normalize" eyebrow="Stabilize" icon="activity" tone="blue" %}
+Prepare the incoming representation for the attention projections.
+{% /system-node %}
+{% system-node title="Project and attend" eyebrow="Move information" icon="network" tone="violet" %}
+Create queries, keys, and values; enforce the causal mask; combine permitted values.
+{% /system-node %}
+{% system-node title="Residual update" eyebrow="Preserve path" icon="repeat" tone="cyan" %}
+Add the attention update to the block input without erasing the earlier representation.
+{% /system-node %}
+{% system-node title="Normalize and transform" eyebrow="Compute features" icon="layers" tone="amber" %}
+Apply the position-wise feed-forward or gated MLP sublayer.
+{% /system-node %}
+{% system-node title="Residual output" eyebrow="Continue" icon="check" tone="green" %}
+Merge the transformed features and pass the result to the next block.
+{% /system-node %}
+{% /system-flow %}
+
+Fused kernels may combine normalization, projections, activation functions, or residual additions to reduce memory traffic. Treat a fused implementation as an optimization of the same tested contract, not as permission to change masks, position handling, precision, or residual order silently.
+{% /section-card %}
+
+{% interactive-block id="genai/production-transformer-architecture-block-execution-lab" dataFile="/api/content/genai/production-transformer-architecture/data/block-execution-model.json" /%}
+
+{% section-card %}
+## Choose the attention shape with the checkpoint
+
+The number of query heads and KV heads is part of the learned model architecture. A server cannot safely turn multi-head attention into grouped-query or multi-query attention with a configuration flag unless the checkpoint and runtime support that shape.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Multi-head attention" eyebrow="MHA" icon="network" tone="blue" %}
+Each query head has a corresponding key and value head. It preserves the checkpoint's full projection shape but uses the most KV-cache bytes among these three options.
+{% /concept-card %}
+{% concept-card title="Grouped-query attention" eyebrow="GQA" icon="combine" tone="violet" %}
+Several query heads share each KV head. It reduces incremental-decoding cache and bandwidth while retaining more KV groups than MQA.
+{% /concept-card %}
+{% concept-card title="Multi-query attention" eyebrow="MQA" icon="merge" tone="green" %}
+All query heads share one key head and one value head. It minimizes KV state for the shape, but the checkpoint must be trained or deliberately converted and evaluated for it.
+{% /concept-card %}
+{% /concept-grid %}
+
+FlashAttention changes **how exact attention is executed**, using IO-aware tiling to avoid materializing the full score matrix in high-bandwidth memory. MHA, GQA, and MQA change **how many learned KV projections exist**. They solve different problems and can be used together when the kernel supports the checkpoint shape.
+
+{% code-block file="/api/content/genai/production-transformer-architecture/code/kv-cache-capacity.py" language="python" title="Estimate KV-cache bytes for MHA, GQA, and MQA" /%}
+{% /section-card %}
+
+{% section-card %}
+## Separate prefill pressure from decode pressure
+
+Prefill processes many prompt positions together. It benefits from parallel matrix operations but can create a large one-time attention and cache-write burst. Decode usually processes one new position per active sequence. It repeatedly reads model weights and prior KV state, making memory movement and batch composition central constraints.
+
+### Protect both phases
+
+- cap prompt, output, and total-token budgets before admission;
+- chunk large prefills so one prompt cannot monopolize the scheduler;
+- isolate or prioritize latency-sensitive traffic when long prefills would delay decode;
+- measure cache allocation, prefix reuse, and eviction by request class;
+- compare throughput only at a fixed latency and quality objective.
+
+{% callout variant="warn" %}
+**Long context is not free capacity.** Kernel support can make attention execution more memory-efficient, but every admitted decoder sequence still needs checkpoint-compatible KV state for the tokens the runtime retains.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Partition the bottleneck, not the diagram
+
+Parallelism adds communication and coordination. Start with the smallest topology that fits the model and its live state, then add a partition only when measured memory, compute, or latency pressure justifies it.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Replica parallelism" eyebrow="Split requests" icon="copy" tone="green" %}
+Keep a complete model replica on each serving group and route independent requests across replicas. This gives a simple failure boundary when the model and cache fit.
+{% /concept-card %}
+{% concept-card title="Tensor parallelism" eyebrow="Split each layer" icon="split" tone="blue" %}
+Shard matrix operations across tightly connected devices. It reduces weight and KV state per device but introduces collectives on the critical token path.
+{% /concept-card %}
+{% concept-card title="Pipeline parallelism" eyebrow="Split model depth" icon="git-branch" tone="violet" %}
+Place different layer ranges on different stages. It helps very deep models fit, but pipeline bubbles, stage imbalance, and failure of any stage affect the whole replica.
+{% /concept-card %}
+{% concept-card title="Context parallelism" eyebrow="Split sequence" icon="scan-line" tone="amber" %}
+Partition sequence positions for long-context execution. Attention still needs information across partitions, so the communication pattern must be supported and measured.
+{% /concept-card %}
+{% /concept-grid %}
+
+For mixture-of-experts checkpoints, expert parallelism adds another partition over experts and an all-to-all routing path. Treat it as part of that checkpoint's architecture, not a general substitute for tensor or pipeline parallelism.
+{% /section-card %}
+
+{% interactive-block id="genai/production-transformer-architecture-serving-envelope-lab" dataFile="/api/content/genai/production-transformer-architecture/data/serving-envelope-model.json" /%}
+
+{% section-card %}
+## Schedule tokens instead of waiting for perfect batches
+
+Static request batching waits for a group, executes requests together, and may leave completed slots idle until the longest generation finishes. Iteration-level or continuous batching can admit new sequences as others finish, improving reuse of a fixed decode loop.
+
+{% process-flow %}
+{% process-step number="1" title="Bound the request" label="Admission" %}
+Estimate prompt and output tokens, deadline, cache pages, priority, and compatible model pool.
+{% /process-step %}
+{% process-step number="2" title="Allocate paged state" label="Memory" %}
+Reserve noncontiguous cache blocks so sequence growth does not require one large contiguous allocation.
+{% /process-step %}
+{% process-step number="3" title="Compose an iteration" label="Scheduler" %}
+Select decode tokens and bounded prefill chunks without exceeding token, sequence, deadline, or memory limits.
+{% /process-step %}
+{% process-step number="4" title="Retire and refill" label="Continuous batch" %}
+Release completed sequence pages and admit compatible queued work at the next safe iteration boundary.
+{% /process-step %}
+{% /process-flow %}
+
+Prefix caching can avoid recomputing identical, authorized prefixes. It does not make arbitrary responses safe to reuse: cache identity must include the exact model bundle, tokenizer, prompt bytes, adapter, position policy, and any other input that changes execution.
+{% /section-card %}
+
+{% section-card %}
+## Admit work from measured capacity
+
+Admission control should reject, queue, truncate only under an explicit product rule, or route to another tier before the allocator fails. It needs current evidence, not only a configured maximum.
+
+{% code-block file="/api/content/genai/production-transformer-architecture/code/admission-controller.py" language="python" title="A deterministic token and KV-page admission boundary" /%}
+
+### Preserve these invariants
+
+- the request's declared maximum work fits the selected pool before execution starts;
+- reserved KV pages cannot be double-allocated across active sequences;
+- queue age is bounded by a deadline or a controlled rejection path;
+- retries carry a stable request identity and cannot duplicate the committed response;
+- degraded capacity reduces admission immediately instead of waiting for an out-of-memory failure.
+{% /section-card %}
+
+{% section-card %}
+## Design reliability around serving groups
+
+A distributed model replica is healthy only when every required shard and pipeline stage is compatible and reachable. Losing one device can invalidate the whole group even when other devices are idle.
+
+### Contain failures
+
+- keep multiple independent serving groups when availability requires failover;
+- pin one versioned bundle of checkpoint, tokenizer, adapters, kernels, and runtime settings to a group;
+- drain admission before replacing a shard or changing the parallel topology;
+- bound queue length and age per tenant or request class;
+- reconcile timed-out generations by request identity before retrying expensive work;
+- test allocator exhaustion, device loss, collective timeout, cache corruption, and slow consumers.
+
+### Degrade deliberately
+
+- route eligible requests to a smaller or quantized model tier;
+- reduce maximum context or output only through a visible product contract;
+- shed low-priority work before interactive traffic misses its deadline;
+- preserve safety, authorization, and output validation during fallback;
+- fail closed when a required shard, policy, or version cannot be proven compatible.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the complete release bundle
+
+Kernel, quantization, sharding, batching, and cache changes can alter latency, capacity, or numerical behavior. Release evidence must cover both model quality and systems behavior on the exact production bundle.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Correctness gate" eyebrow="Same contract" icon="shield-check" tone="green" %}
+Verify masks, position handling, stop conditions, tokenization, structured-output constraints, and representative output quality.
+{% /concept-card %}
+{% concept-card title="Performance gate" eyebrow="Measured envelope" icon="gauge" tone="blue" %}
+Profile queue delay, TTFT, inter-token latency, throughput, cache occupancy, fragmentation, and goodput across prompt and output length buckets.
+{% /concept-card %}
+{% concept-card title="Resilience gate" eyebrow="Broken path" icon="triangle-alert" tone="rose" %}
+Inject device loss, collective stalls, overload, slow clients, allocator pressure, and rollback while checking bounded queues and duplicate suppression.
+{% /concept-card %}
+{% /concept-grid %}
+
+Compare variants at fixed workloads, quality criteria, sampling settings, and service objectives. A higher token rate is not an improvement if it shifts failures into tail latency, invalid output, or rejected requests.
+{% /section-card %}
+
+{% section-card %}
+## Operate with phase-level evidence
+
+### Request and scheduler signals
+
+- arrival rate, queue depth, oldest request age, admission decisions, and rejection reasons;
+- prompt and requested output token distributions by request class;
+- active sequences, batched tokens, prefill chunks, and decode iteration size;
+- cancellation delay, client backpressure, and abandoned streamed responses.
+
+### Model and memory signals
+
+- time to first token, inter-token latency, completion latency, and goodput percentiles;
+- model execution time separated into prefill and decode;
+- KV-cache allocation, occupancy, fragmentation, prefix-cache hit rate, and eviction;
+- device memory, memory bandwidth, compute utilization, collective latency, and stalled ranks.
+
+### Release and quality signals
+
+- checkpoint, tokenizer, adapter, precision, kernel, runtime, and policy version on every trace;
+- output-quality slices, safety outcomes, schema validity, and fallback rate;
+- canary comparison against the current bundle under the same traffic shape;
+- rollback readiness and the last proven compatible bundle for each serving pool.
+{% /section-card %}
+
+{% section-card %}
+## Review the common failure modes
+
+- **Weights fit but traffic does not:** model loading succeeds, then concurrent KV growth exhausts device memory.
+- **Prefill starves decode:** a few long prompts consume the token budget and interactive streams stall.
+- **Sharding adds latency:** extra devices reduce per-device memory while collectives lengthen every token step.
+- **Static batches strand slots:** short generations finish, but their capacity cannot serve queued work until the batch ends.
+- **A partial replica looks healthy:** process checks pass on surviving ranks even though the serving group cannot complete a collective.
+- **A retry duplicates work:** the gateway times out after generation commits, then another worker repeats the request without reconciliation.
+- **A fast kernel changes behavior:** a fused or quantized path passes throughput tests but violates precision, mask, or output-quality criteria.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) defines the original Transformer block, scaled dot-product attention, masking, residual paths, and encoder-decoder architecture.
+- [FlashAttention](https://arxiv.org/abs/2205.14135) and [FlashAttention-2](https://arxiv.org/abs/2307.08691) describe exact IO-aware attention algorithms and improved work partitioning.
+- [Fast Transformer Decoding: One Write-Head is All You Need](https://arxiv.org/abs/1911.02150) introduces multi-query attention for incremental decoding.
+- [GQA](https://arxiv.org/abs/2305.13245) evaluates grouped-query attention between MHA and MQA.
+- [Megatron-LM](https://arxiv.org/abs/1909.08053) presents intra-layer model parallelism for large Transformer models; the current [Megatron Core parallelism guide](https://docs.nvidia.com/megatron-core/developer-guide/latest/user-guide/parallelism-guide.html) documents tensor, pipeline, context, data, and expert parallel strategies.
+- [Orca](https://www.usenix.org/conference/osdi22/presentation/yu) describes iteration-level scheduling for generative model serving.
+- [PagedAttention and vLLM](https://arxiv.org/abs/2309.06180) describe paged KV-cache management and its role in high-throughput serving.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/production-transformer-architecture/quiz/production-transformer-architecture-review.json" lessonSlug="production-transformer-architecture" /%}

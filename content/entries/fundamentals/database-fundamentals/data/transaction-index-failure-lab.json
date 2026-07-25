@@ -1,0 +1,123 @@
+{
+  "title": "Trace a database decision when the happy path breaks",
+  "description": "Select an operating condition to compare the path, failure state, and recovery behavior. The database components are simplified so the important trade-off remains visible.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Client",
+      "eyebrow": "Order or status request",
+      "detail": "Submits a request with an idempotency key for a critical write. A client timeout means the result may be unknown, not automatically failed.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 44
+    },
+    {
+      "id": "service",
+      "label": "Order service",
+      "eyebrow": "Transaction boundary",
+      "detail": "Places only the required validations and writes in a short transaction. It routes reads according to the freshness promise and retries only known-safe conflicts.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 27,
+      "y": 44
+    },
+    {
+      "id": "primary",
+      "label": "Primary database",
+      "eyebrow": "Authoritative writer",
+      "detail": "Owns the committed order state. It applies transactional writes, maintains indexes, and records recovery information before acknowledging a durable commit.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 53,
+      "y": 22
+    },
+    {
+      "id": "index",
+      "label": "Composite index",
+      "eyebrow": "Query access path",
+      "detail": "Represents an index matching a frequent query such as orders by customer ordered by creation time. It reduces rows read but is maintained on each relevant write.",
+      "kind": "database",
+      "tone": "green",
+      "x": 77,
+      "y": 12
+    },
+    {
+      "id": "replica",
+      "label": "Read replica",
+      "eyebrow": "Lag-tolerant reads",
+      "detail": "Receives committed changes asynchronously for suitable reads and failover preparation. It can return a valid but older view while replication is behind.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 77,
+      "y": 48
+    },
+    {
+      "id": "recovery-log",
+      "label": "Transaction log",
+      "eyebrow": "Crash recovery",
+      "detail": "Represents the durable commit record used to recover acknowledged transactions after a crash. Exact mechanics depend on the database engine and durability configuration.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 54,
+      "y": 78
+    },
+    {
+      "id": "retry",
+      "label": "Idempotent retry",
+      "eyebrow": "Known-safe recovery",
+      "detail": "Looks up the original request key and returns the recorded result or safely re-attempts the intent. It prevents a serialization retry or unknown timeout from creating a duplicate order.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 91,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "client-service", "from": "client", "to": "service", "label": "submit or confirm" },
+    { "id": "service-primary", "from": "service", "to": "primary", "label": "transaction" },
+    { "id": "primary-index", "from": "primary", "to": "index", "label": "maintain index" },
+    { "id": "primary-replica", "from": "primary", "to": "replica", "label": "replicate commit", "mode": "async" },
+    { "id": "service-replica", "from": "service", "to": "replica", "label": "lag-tolerant read" },
+    { "id": "primary-log", "from": "primary", "to": "recovery-log", "label": "durable commit", "mode": "async" },
+    { "id": "service-retry", "from": "service", "to": "retry", "label": "conflict or timeout", "mode": "async" },
+    { "id": "retry-primary", "from": "retry", "to": "primary", "label": "find or retry", "via": { "x": 76, "y": 92 } }
+  ],
+  "scenarios": [
+    {
+      "id": "indexed-query",
+      "label": "Indexed query",
+      "summary": "A customer opens recent orders. The primary uses a composite index matching the customer filter and creation-time ordering instead of scanning the full orders table.",
+      "activeEdges": ["client-service", "service-primary", "primary-index"],
+      "focusNode": "index",
+      "result": "The index reduces read work for this observed query. Confirm the plan and keep only indexes that earn their storage and write-maintenance cost."
+    },
+    {
+      "id": "replica-lag",
+      "label": "Replica lag",
+      "summary": "The order write commits on the primary, then the customer immediately asks whether the order exists. The status read is sent to an asynchronously updated replica that has not applied the change yet.",
+      "activeEdges": ["client-service", "service-primary", "primary-replica", "service-replica"],
+      "degradedNodes": ["replica"],
+      "focusNode": "replica",
+      "result": "The replica is not corrupt; it is stale. Route read-after-write confirmation to the primary or provide an explicit freshness wait, while keeping lag-tolerant reads on replicas."
+    },
+    {
+      "id": "serialization-conflict",
+      "label": "Write conflict",
+      "summary": "Two requests try to reserve the last item. The database aborts one transaction to preserve the invariant, and the service must decide whether the original request can be retried safely.",
+      "activeEdges": ["client-service", "service-primary", "service-retry", "retry-primary"],
+      "degradedNodes": ["service"],
+      "focusNode": "retry",
+      "result": "Use a conditional write or a serializable transaction with a bounded, idempotent retry. A retry without an idempotency key can turn a correctness protection into a duplicate side effect."
+    },
+    {
+      "id": "primary-crash",
+      "label": "Crash after commit",
+      "summary": "The primary records a durable commit, replies slowly, and crashes before the client receives a clear response. The client cannot infer whether the write happened from its timeout alone.",
+      "activeEdges": ["client-service", "service-primary", "primary-log", "service-retry", "retry-primary"],
+      "failedNodes": ["primary"],
+      "focusNode": "recovery-log",
+      "result": "Recovery can restore an acknowledged durable commit, but the client still needs the idempotency key to reconcile the unknown outcome. Failover and backup recovery are separate procedures to rehearse."
+    }
+  ]
+}

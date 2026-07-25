@@ -1,0 +1,262 @@
+---
+title: "LLM Inference Optimization"
+section: genai
+level: advanced
+duration: 50 min
+description: "Design measurable LLM serving systems by budgeting TTFT and TPOT, managing KV cache and batching, and validating quantization and speculative decoding against real workloads."
+registryId: llm-inference-optimization
+---
+
+{% section-card tone="intro" %}
+## What is LLM inference optimization?
+
+**LLM inference optimization** is the engineering work that makes an already-trained language model respond within a product's latency, capacity, cost, and quality limits. It changes how requests are admitted, batched, cached, scheduled, represented in memory, and decoded; it does not retrain the model's core knowledge.
+
+In plain language: training creates the model, while inference optimization makes each request practical to serve.
+
+The core invariant is **optimize the measured request path without silently breaking the answer contract**. A faster kernel is not a production win if queueing gets worse, a quantized checkpoint fails the important task slice, or a cache crosses tenant boundaries.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="TTFT" label="Start quickly" detail="Queueing, routing, cache lookup, and prefill determine time to first token" tone="blue" /%}
+{% metric value="TPOT" label="Stream steadily" detail="Decode scheduling and memory movement determine time per output token" tone="violet" /%}
+{% metric value="TPS" label="Carry the load" detail="Useful token throughput must be measured at the required latency target" tone="green" /%}
+{% metric value="Quality" label="Preserve the contract" detail="Evaluate task outcomes after every precision, kernel, or decoding change" tone="rose" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Trace the complete request before tuning a kernel
+
+End-to-end latency includes work outside the model. Measure each stage independently so an improvement in GPU execution cannot hide a longer admission queue or a slower network path.
+
+{% system-flow title="A production inference request" caption="TTFT ends when the first token reaches the client. TPOT measures the cadence of later tokens; throughput measures shared system capacity." %}
+{% system-node title="Admission and routing" eyebrow="Bound demand" icon="route" tone="amber" %}
+Apply tenant quotas, deadlines, priorities, model routing, and overload policy before expensive work begins.
+{% /system-node %}
+{% system-node title="Prefix lookup" eyebrow="Reuse exact work" icon="cache" tone="cyan" %}
+Reuse authorized KV blocks only when the model, adapter, tokenized prefix, and cache namespace match.
+{% /system-node %}
+{% system-node title="Prefill" eyebrow="Read the prompt" icon="server" tone="blue" %}
+Process input tokens in parallel and create keys and values for every layer that the decode phase will need.
+{% /system-node %}
+{% system-node title="Decode scheduler" eyebrow="Generate tokens" icon="workflow" tone="violet" %}
+Interleave active sequences one iteration at a time while protecting latency-sensitive streams from long-running work.
+{% /system-node %}
+{% system-node title="Stream and observe" eyebrow="Close the loop" icon="activity" tone="green" %}
+Deliver tokens, propagate cancellation, and record latency, cache, capacity, quality, and stop-reason evidence.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep four measurements separate
+
+- **Queue delay:** time waiting for an eligible worker and enough memory; report p50, p95, and p99 by priority and tenant class.
+- **Prefill latency:** time to process uncached input tokens; prompt length and prefix reuse strongly affect it.
+- **Time per output token (TPOT):** decode cadence after the first token; active sequences and memory pressure matter.
+- **Goodput:** requests or useful tokens completed inside their SLO, not raw tokens generated after clients have timed out.
+{% /section-card %}
+
+{% section-card %}
+## Understand why prefill and decode need different controls
+
+{% concept-grid columns="3" %}
+{% concept-card title="Prefill" eyebrow="Prompt phase" icon="layers" tone="blue" %}
+The model processes many input tokens in parallel. Long prompts create substantial arithmetic work, while exact prefix reuse can skip already-computed blocks.
+{% /concept-card %}
+{% concept-card title="Decode" eyebrow="Generation phase" icon="repeat" tone="violet" %}
+Autoregressive generation produces one next-token step at a time. The scheduler repeatedly reads model weights and each sequence's growing KV state.
+{% /concept-card %}
+{% concept-card title="Shared serving pool" eyebrow="Contention boundary" icon="network" tone="amber" %}
+Prefill bursts can delay interactive decode, while too many active sequences can exhaust KV memory. Scheduling policy decides who waits.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose the metric that matches the product
+
+- A conversational assistant usually needs a tight TTFT and stable TPOT so the stream feels responsive.
+- Long-document extraction may accept a slower start if aggregate completion throughput remains high.
+- Offline batch generation can favor throughput, but still needs deadlines, cancellation, and bounded queue growth.
+- Real-time voice needs strict tail latency; average tokens per second cannot describe interruptions or jitter.
+
+Disaggregating prefill and decode can isolate their resource policies and tune TTFT separately from TPOT, but KV transfer adds another network and failure boundary. Treat it as an architecture choice, not a universal default.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Allocate latency and KV memory together
+
+Batching, concurrency, and prefix reuse interact. A larger batching window can improve GPU utilization while directly consuming the TTFT budget. More active sequences can raise throughput until their KV state creates memory pressure and preemption. Prefix caching helps prefill only when requests share an exact reusable prefix; it does not accelerate the generation of new tokens.
+
+Use the lab to change those controls and watch the request timeline and KV reservoir move together. Its numbers are a transparent planning model, not a hardware benchmark.
+{% /section-card %}
+
+{% interactive-block id="genai/llm-inference-optimization-serving-budget-lab" dataFile="/api/content/genai/llm-inference-optimization/data/serving-budget-scenarios.json" /%}
+
+{% section-card %}
+## Treat the KV cache as live request state
+
+During autoregressive decode, each layer stores keys and values for prior tokens so the model does not recompute the entire prefix for every new token. The cache grows with active sequence length and concurrency.
+
+A useful first-order estimate is:
+
+`KV bytes per token = 2 x layers x KV heads x head dimension x bytes per element`
+
+The factor of two represents keys and values. Grouped-query or multi-query attention reduces the number of KV heads, and runtime layouts add model- and engine-specific details. Measure the actual allocated pages rather than treating the estimate as an invoice.
+
+### Protect the cache contract
+
+- Key reusable blocks by the model, adapter, tokenizer output, cache format, and full prefix ancestry.
+- Include a tenant or trust-domain boundary when prompts or adapters contain private state.
+- Account for partially filled blocks, copy-on-write branches, preemption, and swap or recompute behavior.
+- Track allocated KV bytes, fragmentation, eviction, preemption, and prefix-hit tokens together.
+- Propagate cancellation quickly so abandoned sequences release scheduler and cache capacity.
+
+PagedAttention showed that paging and sharing KV blocks can reduce fragmentation and enable larger effective batches. Prefix caching builds on block reuse, but its benefit depends on repeated prefixes and is concentrated in prefill.
+{% /section-card %}
+
+{% section-card %}
+## Make admission control part of the optimization
+
+Continuous batching schedules at token-step granularity so completed requests can leave and new work can join without waiting for a whole static batch. This improves utilization, but it does not make capacity infinite.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the request" label="At ingress" %}
+Record tenant, priority, prompt and output bounds, streaming mode, deadline, cache eligibility, and cancellation owner.
+{% /process-step %}
+{% process-step number="2" title="Reserve memory" label="Before execution" %}
+Check model weights, runtime workspace, and projected KV pages before admitting a sequence to the worker.
+{% /process-step %}
+{% process-step number="3" title="Schedule by iteration" label="During decode" %}
+Batch compatible active sequences while preserving fairness and a bounded TPOT for latency-sensitive work.
+{% /process-step %}
+{% process-step number="4" title="Shed overload explicitly" label="At the boundary" %}
+Delay, downgrade, or reject before queues exceed the SLO; do not let timeouts become the hidden capacity policy.
+{% /process-step %}
+{% /process-flow %}
+
+### Overload controls should specify
+
+- maximum queued requests, tokens, and predicted KV bytes per pool;
+- separate budgets for interactive, batch, and internal retry traffic;
+- a deadline-aware ordering rule and a starvation bound;
+- which lower-cost model or shorter-context route is an acceptable fallback;
+- the response returned when no route can meet the contract.
+{% /section-card %}
+
+{% section-card %}
+## Calculate a serving envelope before load testing
+
+This runnable example turns a workload profile into effective prefill tokens, modeled TTFT, KV allocation, TPOT pressure, and goodput. The constants are deliberately explicit so teams replace them with measurements from their own model, engine, and hardware.
+
+{% code-block file="/api/content/genai/llm-inference-optimization/code/serving-budget.py" language="python" title="Serving budget model" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Change precision and decoding for different reasons
+
+Quantization primarily changes representation and kernel behavior. Speculative decoding changes how many sequential target-model steps are needed. They can be combined, but they introduce different evidence requirements.
+
+{% concept-grid columns="2" %}
+{% concept-card title="BF16 or FP16 baseline" eyebrow="Reference behavior" icon="scale" tone="blue" %}
+Keep a measured reference checkpoint and engine path. It anchors task quality, numerical behavior, memory, latency, and rollback comparisons.
+{% /concept-card %}
+{% concept-card title="INT8 or FP8" eyebrow="Lower-precision arithmetic" icon="gauge" tone="cyan" %}
+Weights and possibly activations use fewer bits. Kernel and hardware support determine whether fewer bytes become lower latency or higher throughput.
+{% /concept-card %}
+{% concept-card title="INT4 weight-only" eyebrow="Aggressive weight compression" icon="boxes" tone="amber" %}
+Methods such as AWQ or GPTQ can reduce weight storage substantially, but calibration, task quality, kernel support, and dequantization overhead remain workload-specific.
+{% /concept-card %}
+{% concept-card title="Speculative decoding" eyebrow="Draft then verify" icon="repeat" tone="violet" %}
+A cheaper drafter proposes several tokens and the target verifies them in parallel. Speed depends on acceptance, draft cost, target batch size, and implementation.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve two different quality claims
+
+- An exact speculative sampling algorithm can preserve the target model's output distribution; draft quality affects acceptance and speed, not the accepted distribution.
+- Quantization changes numerical representation and can change model outputs, so every precision recipe needs task-level and safety evaluation.
+- A provider implementation may support different speculative algorithms, sampling modes, tokenizers, or batch regimes. Validate the actual runtime contract.
+- Weight memory is approximately `parameters x bits / 8` before scales, metadata, padding, runtime workspace, draft weights, and KV cache.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Plan capacity with measured acceptance and quality
+
+A smaller checkpoint may fit more replicas while missing the quality floor. A speculative drafter may reduce target steps at low batch size while consuming memory and compute that could have served another request. Use the lab to pack a fixed HBM pool, adjust measured draft acceptance, and compare capacity with demand.
+{% /section-card %}
+
+{% interactive-block id="genai/llm-inference-optimization-capacity-tradeoff-lab" dataFile="/api/content/genai/llm-inference-optimization/data/capacity-tradeoff-scenarios.json" /%}
+
+{% section-card %}
+## Benchmark combinations, not isolated features
+
+An optimization is deployable only when the exact model, precision, kernel, parallelism plan, scheduler, cache policy, prompt distribution, output distribution, and concurrency level work together.
+
+### Build the benchmark matrix
+
+- Slice prompts by uncached input length, reusable-prefix length, expected output length, and sampling policy.
+- Include arrival bursts, cancellations, retries, mixed tenants, and priority inversions rather than sending a perfectly smooth load.
+- Measure p50, p95, and p99 queue delay, TTFT, TPOT, end-to-end latency, request goodput, and useful-token goodput.
+- Record GPU compute, memory bandwidth, HBM allocation, KV occupancy, cache hits, evictions, preemptions, and energy or cost when available.
+- Evaluate task success, refusal and safety behavior, structured-output validity, and long-context retrieval after every numerical change.
+
+### Compare at a fair operating point
+
+- Compare throughput at the same TTFT and TPOT SLO, not at unconstrained saturation.
+- Compare cost at the same task-quality floor, not only tokens per dollar.
+- Warm and cold cache runs answer different questions; report both.
+- Keep request traces and engine configuration versioned so a result can be reproduced.
+{% /section-card %}
+
+{% section-card %}
+## Turn the selected plan into an executable check
+
+This example estimates raw weight memory, per-replica footprint, speculative target passes, and pool capacity. It also keeps quantization risk separate from exact speculative verification.
+
+{% code-block file="/api/content/genai/llm-inference-optimization/code/capacity-plan.py" language="python" title="Compression and decoding capacity plan" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recognize optimization failures early
+
+- **Batching past the interaction budget:** throughput rises while TTFT or TPOT misses the product SLO. Cap waiting time and reserve capacity for latency-sensitive traffic.
+- **Counting cache entries instead of tokens saved:** many tiny hits look healthy but avoid little prefill work. Measure reused tokens and prefill milliseconds avoided.
+- **Unsafe prefix reuse:** a cache key omits tenant, adapter, or model identity. Treat cache namespace design as a data-isolation boundary.
+- **KV oversubscription:** long contexts cause preemption or recomputation, producing a tail-latency cliff. Admit from predicted bytes and monitor actual pages.
+- **Quantizing without slice evaluation:** average benchmark quality stays flat while a critical domain regresses. Gate release on task, safety, and structured-output slices.
+- **Speculating at the wrong operating point:** drafting overhead consumes capacity when acceptance is low or the target already runs in large efficient batches. Enable it only on measured routes.
+- **Optimizing raw throughput:** the system generates tokens after deadlines or client cancellation. Track goodput and propagate cancellation to every worker.
+- **Stacking changes without attribution:** a new kernel, precision, scheduler, and cache policy ship together. Canary one controlled bundle at a time and preserve rollback evidence.
+{% /section-card %}
+
+{% section-card %}
+## Operate inference as a versioned policy
+
+### Before release
+
+- Freeze the model, tokenizer, adapter, quantization recipe, engine, kernel, and scheduler versions.
+- Define SLOs by workload class and specify the quality and safety floors that performance work may not cross.
+- Load test healthy, burst, dependency-failure, and cancellation scenarios at realistic sequence lengths.
+- Canary with bounded traffic and an immediate route back to the reference path.
+
+### During production
+
+- Alert on queue growth, TTFT, TPOT, goodput, KV pressure, preemption, cache-hit tokens, and quality proxies by route.
+- Record why each request selected a model, precision, cache path, and decoding policy.
+- Separate model errors, overload rejection, dependency failure, and client cancellation in telemetry.
+- Re-run the benchmark matrix after model, driver, kernel, hardware, or workload-distribution changes.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources behind the design
+
+- [Orca: A Distributed Serving System for Transformer-Based Generative Models](https://www.usenix.org/conference/osdi22/presentation/yu) introduces iteration-level scheduling and selective batching for generative-model serving.
+- [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180) describes paged KV-cache management, reduced fragmentation, and cache sharing in vLLM.
+- [vLLM automatic prefix caching](https://docs.vllm.ai/en/latest/design/prefix_caching/) documents hash-based reuse of matching KV blocks; its usage guide also makes clear that prefix caching accelerates prefill rather than generation.
+- [FlashAttention](https://proceedings.neurips.cc/paper_files/paper/2022/hash/67d57c32e20fd0a7a302cb81d36e40d5-Abstract.html) demonstrates that exact attention can be reorganized around GPU memory IO instead of changing the mathematical result.
+- [Fast Inference from Transformers via Speculative Decoding](https://proceedings.mlr.press/v202/leviathan23a.html) presents exact speculative sampling whose accepted output preserves the target distribution.
+- [SmoothQuant](https://arxiv.org/abs/2211.10438) studies W8A8 post-training quantization; [AWQ](https://proceedings.mlsys.org/paper_files/paper/2024/hash/42a452cbafa9dd64e9ba4aa95cc1ef21-Abstract-Conference.html) studies activation-aware low-bit weight-only quantization.
+- [TensorRT-LLM quantization](https://nvidia.github.io/TensorRT-LLM/latest/features/quantization.html) and [speculative decoding](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/features/speculative-decoding.md) show why supported precision, hardware, sampling, and batch conditions must be checked in the deployed runtime.
+
+These sources establish mechanisms and measured results in specific systems. They do not guarantee the same speedup for a different model, workload, engine, or GPU.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/llm-inference-optimization/quiz/llm-inference-optimization.json" lessonSlug="llm-inference-optimization" /%}

@@ -1,0 +1,204 @@
+---
+registryId: mapreduce
+---
+
+{% section-card tone="intro" %}
+## What is MapReduce?
+
+MapReduce is a **distributed batch-processing model that transforms independent input records into intermediate key-value pairs, groups every value for the same logical key, and reduces each group into output**. The runtime owns input splitting, task scheduling, shuffle transfer, retries, and output commit.
+
+It matters when a large offline job can be expressed as parallel scans and key-based aggregation over data already stored across a cluster. **Core invariant: all intermediate records for one reduce key must reach exactly one logical reducer invocation, while task retries must not publish duplicate or partial final output.**
+
+MapReduce commonly runs with [HDFS](/technology/hadoop-hdfs) for storage and YARN for resource scheduling. Use Spark, Flink, or an interactive query engine when iterative, streaming, or low-latency execution is the primary requirement.
+{% /section-card %}
+
+{% section-card %}
+## Follow one record through the execution graph
+
+{% process-flow %}
+{% process-step number="1" title="Split immutable input" label="Plan" %}
+Create logical input splits, assign record readers, and prefer workers near the HDFS blocks without coupling correctness to locality.
+{% /process-step %}
+{% process-step number="2" title="Map records independently" label="Transform" %}
+Parse each input record and emit zero or more typed intermediate key-value pairs without relying on mapper execution order.
+{% /process-step %}
+{% process-step number="3" title="Combine locally when safe" label="Compress" %}
+Apply associative and commutative partial aggregation to reduce mapper spill and network volume; never require a combiner for correctness.
+{% /process-step %}
+{% process-step number="4" title="Partition, shuffle, and sort" label="Exchange" %}
+Choose a reducer for every key, transfer partitions, merge spills, sort keys, and group values so equal keys meet.
+{% /process-step %}
+{% process-step number="5" title="Reduce each key group" label="Aggregate" %}
+Apply reducer logic to a key and its values, then write task-attempt output into a temporary commit location.
+{% /process-step %}
+{% process-step number="6" title="Commit complete output" label="Publish" %}
+Atomically promote only successful task or job output so retries and speculative attempts do not expose duplicates.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/mapreduce/code/word-count-pipeline.py" language="python" title="Map, combine, shuffle, and reduce a small word count" /%}
+{% /section-card %}
+
+{% section-card %}
+## Size map waves, shuffle bytes, and reducer partitions
+
+Input bytes alone do not determine duration. Split size controls task count, cluster slots control waves, mapper selectivity controls shuffle, and reducer count controls partition size and output files.
+
+{% interactive-block id="technology/mapreduce-job" /%}
+
+### Read the envelope by phase
+
+- **Map:** input splits divided by concurrent slots determine waves; startup and tail variation make tiny tasks expensive.
+- **Spill and combine:** sort buffers, spill count, compression, and mathematically safe local aggregation determine disk and network work.
+- **Shuffle:** intermediate bytes cross machines and racks while reducers fetch, merge, and sort mapper partitions.
+- **Reduce:** partition bytes, key cardinality, skew, aggregation complexity, and output commit determine the tail.
+- **Recovery:** failed attempts, speculative duplicates, node loss, queueing, and output cleanup consume reserve beyond the healthy path.
+{% /section-card %}
+
+{% section-card %}
+## Use combiners only when partial aggregation is valid
+
+A combiner is an optional local optimization. The framework may run it zero, one, or several times, so reducer correctness cannot depend on its execution.
+
+{% concept-grid %}
+{% concept-card title="Safe: counts and sums" icon="check" tone="green" %}
+Integer addition is associative and commutative. Partial counts can be added again without changing the result.
+{% /concept-card %}
+{% concept-card title="Safe with state: averages" icon="database" tone="blue" %}
+Emit `(sum, count)` as the partial state, combine both fields, then divide only after the final reduction.
+{% /concept-card %}
+{% concept-card title="Unsafe: raw average" icon="alert" tone="rose" %}
+Averaging partition averages weights groups incorrectly when they contain different record counts.
+{% /concept-card %}
+{% concept-card title="Unsafe: order-sensitive logic" icon="route" tone="amber" %}
+String concatenation, first/last selection, and non-associative floating-point policies can change with grouping and order.
+{% /concept-card %}
+{% /concept-grid %}
+
+Test the mapper, combiner, and reducer with different partition boundaries, value orders, duplicate attempts, and empty groups.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Prevent one hot key from owning the reducer tail
+
+Average partition size can look healthy while one logical key sends a large fraction of the shuffle to a single reducer. Adding reducers does not split one key under ordinary hash partitioning.
+
+{% interactive-block id="technology/mapreduce-shuffle-skew-lab" dataFile="/api/content/technology/mapreduce/data/shuffle-skew-scenarios.json" /%}
+
+### Choose a repair that preserves semantics
+
+1. Inspect bytes, records, spill, fetch duration, and finish time for every partition, not only the average.
+2. Find whether the skew comes from a hot key, poor range boundaries, a fallback value, or uneven record expansion.
+3. For associative aggregation, salt hot keys across first-stage reducers and merge partial results in a second stage.
+4. For ordered output, sample representative keys and construct range boundaries with headroom for distribution drift.
+5. Verify that retries and the final merge still produce one correct result per logical key.
+
+{% code-block file="/api/content/technology/mapreduce/code/partition-hot-keys.py" language="python" title="Spread a hot logical key across bounded salted partitions" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat shuffle as a distributed storage and network protocol
+
+Mapper output is partitioned, buffered, spilled to local disk, optionally combined and compressed, then fetched and merged by reducers. Every reducer may contact every mapper.
+
+{% system-flow title="Intermediate data crosses the shuffle boundary" caption="The exchange becomes expensive when mapper output expands, spills repeatedly, crosses racks, or concentrates into a few reducer partitions." %}
+{% system-node title="Mapper buffers" eyebrow="Partition" icon="layers" tone="blue" %}
+Serialize key-value records, assign reducer partitions, sort in memory, and spill bounded segments to local storage.
+{% /system-node %}
+{% system-node title="Spill merge" eyebrow="Local disk" icon="database" tone="violet" %}
+Merge sorted segments, apply optional combiner and compression, and expose partition files for fetch.
+{% /system-node %}
+{% system-node title="Shuffle fetch" eyebrow="Network" icon="network" tone="amber" %}
+Reducers fetch their partition from every completed mapper attempt with retry, throttling, and checksum behavior.
+{% /system-node %}
+{% system-node title="Reducer merge" eyebrow="Grouped keys" icon="workflow" tone="green" %}
+Merge sorted streams, group equal keys, invoke reducer logic, and write attempt-scoped output.
+{% /system-node %}
+{% /system-flow %}
+
+### Reduce exchange cost deliberately
+
+- Filter and project early so the mapper emits only fields needed downstream.
+- Use a safe combiner and intermediate compression after measuring CPU versus network cost.
+- Size sort buffers to reduce spill count without causing garbage collection or memory contention.
+- Prefer map-side joins only when the smaller relation can be distributed and versioned safely.
+- Avoid chaining wide shuffles when a different engine or data layout better matches the computation.
+{% /section-card %}
+
+{% section-card %}
+## Make retries and speculative execution side-effect safe
+
+The runtime may execute a task more than once because of failure, timeout, preemption, or speculation. User code and output protocols must tolerate duplicate attempts.
+
+- Keep mapper and reducer functions deterministic for the same versioned input whenever possible.
+- Write only to attempt-scoped temporary paths, then let the output committer publish one winner atomically.
+- Do not call external payment, email, or mutation APIs directly from retryable tasks without idempotency and reconciliation.
+- Quarantine poison records explicitly instead of retrying the same deterministic failure until the job exhausts its budget.
+- Enable speculative execution only when duplicate resource use is acceptable and task duration is comparable.
+
+{% callout variant="warn" %}
+Speculation can worsen overloaded storage or network dependencies and can duplicate external side effects. It is a tail-latency tool, not a universal fault-tolerance switch.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Choose data layout before tuning tasks
+
+### Input design
+
+- Compact many small files into splittable containers or columnar files suited to the downstream engine.
+- Partition directories by stable pruning dimensions without creating tiny partitions.
+- Use splittable compression when many mappers must scan one large file.
+- Preserve schemas, event-time meaning, and input snapshot identity for reproducible jobs.
+
+### Output design
+
+- Choose reducer count with both partition work and downstream file size in mind.
+- Use map-only jobs when no global key grouping is required.
+- Write versioned output to a new location, validate it, then publish through an atomic pointer or rename contract.
+- Retain job, code, configuration, input, schema, and output lineage for replay and incident analysis.
+{% /section-card %}
+
+{% section-card %}
+## Know when MapReduce is the wrong engine
+
+{% concept-grid %}
+{% concept-card title="Good fit" icon="check" tone="green" %}
+Large offline scans, independent mapping, key-based aggregation, batch ETL, index construction, and jobs that benefit from durable phase boundaries.
+{% /concept-card %}
+{% concept-card title="Iterative algorithms" icon="repeat" tone="violet" %}
+Repeatedly materializing each stage is expensive. Spark or a specialized ML/graph engine may retain useful state across iterations.
+{% /concept-card %}
+{% concept-card title="Continuous streams" icon="activity" tone="blue" %}
+MapReduce has high scheduling and materialization latency. Flink, Kafka Streams, or another stream processor better models unbounded event time.
+{% /concept-card %}
+{% concept-card title="Interactive queries" icon="search" tone="amber" %}
+Users expect seconds, not batch-job startup and shuffle. Trino, Presto, Druid, ClickHouse, or a warehouse may fit better.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Operate from counters and tail behavior
+
+### Monitor every job
+
+- Input records/bytes, split count, mapper and reducer waves, locality, queue time, and slot utilization
+- Map output bytes/records, combiner input/output, spill count/bytes, merge passes, and intermediate compression
+- Shuffle bytes, failed fetches, cross-rack traffic, reducer partition distribution, and straggler ratio
+- Task failures by cause, attempts, speculative duplicates, killed tasks, poison records, and commit failures
+- Output records/bytes/files, schema checks, data-quality assertions, and downstream publication state
+
+### Prepare recovery
+
+- Re-run from immutable input with versioned code and configuration.
+- Preserve failed-task diagnostics and bounded samples of malformed records.
+- Test node loss, slow disks, unavailable racks, fetch retries, controller restart, and output-commit recovery.
+- Clean abandoned temporary output and old shuffle data without deleting evidence needed for diagnosis.
+
+{% callout variant="tip" %}
+A healthy MapReduce job is not merely parallel. Its input is splittable, its shuffle is bounded and balanced, its functions tolerate retries, and its final output is published exactly once from reproducible evidence.
+{% /callout %}
+{% /section-card %}
+
+{% quiz title="MapReduce Production Design Review" quizId="mapreduce" lessonSlug="mapreduce" questionsFile="/api/content/technology/mapreduce/quiz/mapreduce-production.json" /%}

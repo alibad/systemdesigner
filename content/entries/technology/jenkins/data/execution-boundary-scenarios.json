@@ -1,0 +1,198 @@
+{
+  "title": "Trace code and credentials across Jenkins boundaries",
+  "description": "Switch scenarios to see where repository-controlled code executes, which path reaches deployment authority, and how the built-in node changes the controller's exposure. Select any component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "repository",
+      "label": "Source repository",
+      "eyebrow": "Untrusted input",
+      "detail": "Stores application code and the Jenkinsfile. Pull-request authors may also change tests, build scripts, and dependencies that the pipeline executes.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 9,
+      "y": 20
+    },
+    {
+      "id": "controller",
+      "label": "Jenkins controller",
+      "eyebrow": "Control plane",
+      "detail": "Authenticates users, evaluates pipeline state, schedules work, stores configuration, and coordinates agents. It should not be a general-purpose build host.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 32,
+      "y": 20
+    },
+    {
+      "id": "built-in",
+      "label": "Built-in node",
+      "eyebrow": "Controller host",
+      "detail": "An execution context inside the controller process environment. A build here shares controller filesystem access and can interfere with the control plane.",
+      "kind": "cache",
+      "tone": "rose",
+      "x": 57,
+      "y": 9
+    },
+    {
+      "id": "validation-agent",
+      "label": "Validation agent",
+      "eyebrow": "Isolated worker",
+      "detail": "Runs repository-controlled compilation and tests with no production credential. A fresh agent or workspace reduces cross-build residue.",
+      "kind": "service",
+      "tone": "green",
+      "x": 57,
+      "y": 38
+    },
+    {
+      "id": "artifact-store",
+      "label": "Artifact repository",
+      "eyebrow": "Immutable output",
+      "detail": "Stores the verified package or image under an immutable version and digest so later environments promote the same bytes.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 82,
+      "y": 38
+    },
+    {
+      "id": "deploy-agent",
+      "label": "Deployment agent",
+      "eyebrow": "Protected worker",
+      "detail": "Runs only reviewed promotion work, retrieves a verified artifact, and receives narrowly scoped deployment authority for the target environment.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 57,
+      "y": 76
+    },
+    {
+      "id": "credential-store",
+      "label": "Credential binding",
+      "eyebrow": "Scoped authority",
+      "detail": "Makes a credential available only to the protected promotion step. Log masking reduces accidents but cannot stop trusted pipeline code from using the secret.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 80,
+      "y": 76
+    },
+    {
+      "id": "production",
+      "label": "Production target",
+      "eyebrow": "External system",
+      "detail": "Accepts the promoted artifact through an authenticated, auditable deployment operation. Jenkins does not make that operation idempotent automatically.",
+      "kind": "service",
+      "tone": "green",
+      "x": 90,
+      "y": 58
+    }
+  ],
+  "edges": [
+    {
+      "id": "repo-controller",
+      "from": "repository",
+      "to": "controller",
+      "label": "event + Jenkinsfile",
+      "mode": "sync"
+    },
+    {
+      "id": "controller-built-in",
+      "from": "controller",
+      "to": "built-in",
+      "label": "runs build",
+      "mode": "sync"
+    },
+    {
+      "id": "controller-validation",
+      "from": "controller",
+      "to": "validation-agent",
+      "label": "schedules",
+      "mode": "sync"
+    },
+    {
+      "id": "validation-artifact",
+      "from": "validation-agent",
+      "to": "artifact-store",
+      "label": "publishes",
+      "mode": "async"
+    },
+    {
+      "id": "controller-deploy",
+      "from": "controller",
+      "to": "deploy-agent",
+      "label": "approved stage",
+      "mode": "sync",
+      "via": {
+        "x": 36,
+        "y": 70
+      }
+    },
+    {
+      "id": "artifact-deploy",
+      "from": "artifact-store",
+      "to": "deploy-agent",
+      "label": "verified bytes",
+      "mode": "async",
+      "via": {
+        "x": 78,
+        "y": 62
+      }
+    },
+    {
+      "id": "credential-deploy",
+      "from": "credential-store",
+      "to": "deploy-agent",
+      "label": "bounded secret",
+      "mode": "sync"
+    },
+    {
+      "id": "deploy-production",
+      "from": "deploy-agent",
+      "to": "production",
+      "label": "promotes",
+      "mode": "sync",
+      "via": {
+        "x": 84,
+        "y": 62
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "pull-request-validation",
+      "label": "Pull request",
+      "summary": "Repository-controlled code is scheduled onto an isolated validation agent with no production credential path.",
+      "activeEdges": [
+        "repo-controller",
+        "controller-validation",
+        "validation-artifact"
+      ],
+      "focusNode": "validation-agent",
+      "result": "A faulty or malicious test can damage its worker, but the selected path keeps it away from the controller host and deployment authority."
+    },
+    {
+      "id": "built-in-execution",
+      "label": "Built-in node",
+      "summary": "The same repository-controlled build runs on the controller's built-in node instead of an agent.",
+      "activeEdges": [
+        "repo-controller",
+        "controller-built-in"
+      ],
+      "degradedNodes": [
+        "controller",
+        "built-in"
+      ],
+      "focusNode": "built-in",
+      "result": "The build shares controller filesystem access and resource pressure. Set built-in-node executors to zero and provide agents before moving production workloads."
+    },
+    {
+      "id": "protected-promotion",
+      "label": "Protected promotion",
+      "summary": "A reviewed stage retrieves the verified artifact and receives a narrowly scoped credential on a separate deployment agent.",
+      "activeEdges": [
+        "controller-deploy",
+        "artifact-deploy",
+        "credential-deploy",
+        "deploy-production"
+      ],
+      "focusNode": "credential-store",
+      "result": "The path separates untrusted validation from deployment authority and promotes the same verified bytes. The target operation still needs authorization, audit, and idempotent recovery."
+    }
+  ]
+}

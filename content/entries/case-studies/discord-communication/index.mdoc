@@ -1,0 +1,256 @@
+---
+registryId: case-study-discord-communication
+---
+
+{% section-card tone="intro" %}
+## What is Discord real-time communication architecture?
+
+Discord real-time communication architecture is the collection of persistent gateways, channel services, durable message storage, fan-out workers, and presence systems that keeps a community conversation synchronized across connected devices.
+
+In plain language: one person sends a message once, the system decides whether it is allowed, gives it a position in that channel, saves it, and delivers it to the right online sessions. A reconnect or retry must not create a second visible message or place a newer reply before an older one.
+
+{% callout variant="info" %}
+### Core invariant
+
+Every accepted message has one stable identity and one position in its channel before fan-out begins. Delivery may retry, but retries must not duplicate the visible message or violate per-channel order.
+{% /callout %}
+{% /section-card %}
+
+This case study uses an illustrative envelope of **80K accepted messages per second**, **24 online recipient sessions per message**, and a **250 ms P99 connected-delivery target**. These are design inputs, not claims about Discord's current production traffic. Review [WebSocket](/technology/websocket) first if persistent bidirectional sessions and reconnects are new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the conversation promise and boundaries" %}
+
+## The product promise is an ordered, recoverable channel conversation
+
+A text message has two user-visible moments. The sender needs an honest acknowledgement that the message was accepted, and recipients need prompt delivery in the same channel order. Those moments should be related by durable state, not one distributed transaction through every connected device.
+
+### Functional requirements
+
+- Send, edit, and delete messages after checking server, channel, and user permissions.
+- Deliver accepted messages to online channel subscribers and make missed messages available after reconnect.
+- Synchronize a user's open sessions across desktop, web, and mobile without duplicate display.
+- Expose typing and online status as useful hints without treating them as message history.
+- Support direct messages and community channels while isolating a hot channel from unrelated conversations.
+
+### Non-functional requirements
+
+- Acknowledge only authorized messages that have crossed the durable acceptance boundary.
+- Deliver to connected recipients within **250 ms P99** during the planning envelope.
+- Preserve one monotonic order per channel; do not coordinate unrelated channels through one global sequence.
+- Survive gateway reconnects and at-least-once retries through stable message IDs and replay cursors.
+- Bound fan-out queue age and degrade ephemeral work before durable message delivery.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+This design covers text messages, session gateways, channel ordering, fan-out, reconnect replay, and presence degradation. Voice, video, screen sharing, search ranking, moderation policy design, and attachment processing use separate paths with different latency and storage contracts.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Convert messages into fan-out capacity" %}
+
+## Recipient deliveries, not source writes, dominate the live workload
+
+At the baseline, **80,000 messages/s x 24 online recipient sessions = 1.92M first delivery attempts/s**. A 4% retry allowance raises the fan-out requirement to **1,996,800 attempts/s** before reconnect bursts or a hot community channel.
+
+{% metric-strip %}
+{% metric value="80K/s" label="Accepted messages" detail="Authorized and durably appended once at peak" tone="blue" /%}
+{% metric value="24" label="Online sessions" detail="Average live recipients per accepted channel message" tone="violet" /%}
+{% metric value="2.0M/s" label="Fan-out attempts" detail="Baseline recipient deliveries after a 4% retry allowance" tone="amber" /%}
+{% metric value="250 ms" label="Connected P99" detail="Target from durable acceptance to visible recipient delivery" tone="green" /%}
+{% /metric-strip %}
+
+### Message and fan-out capacity lab
+
+Change source traffic, recipient count, retries, and workers. The model exposes the multiplication between one durable message and many delivery attempts, then turns overload into queue growth and a concrete user-visible delay.
+
+{% interactive-block id="case-studies/discord-communication-message-fanout-capacity-lab" dataFile="/api/content/case-studies/discord-communication/data/message-fanout-capacity.json" /%}
+
+### What the estimate changes
+
+- **Partitioning:** keep source acceptance and channel order partitioned by `channel_id`, then spread fan-out work independently so a popular channel does not own every gateway connection.
+- **Headroom:** size steady traffic below the benchmark ceiling because retries, skew, deploys, and a failed worker group all consume the same reserve.
+- **Payload discipline:** fan out a compact message envelope and fetch large attachments through object storage or a CDN instead of copying media bytes through every gateway.
+- **Load testing:** vary channel-size skew, reconnect storms, worker loss, queue replay, and recipient devices per user rather than testing only a uniform average.
+
+{% callout variant="tip" %}
+The average recipient count is not a hot-channel guarantee. Track the largest channel partitions and oldest queued message separately; a healthy fleet-wide average can hide one conversation that is minutes behind.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate connection, channel, durability, and delivery ownership" %}
+
+## Each stage owns one decision
+
+Persistent gateways should not decide channel history, and presence should not decide whether a durable message exists. Clear ownership lets connection fleets restart, fan-out lag, and status data expire without creating two ordering authorities.
+
+{% system-flow title="One accepted message, four ownership boundaries" caption="The sender acknowledgement follows the durable append. Recipient delivery and ephemeral presence continue outside that commit boundary." %}
+{% system-node title="Gateway session" eyebrow="Connection edge" icon="network" tone="cyan" %}
+Authenticate the socket, enforce coarse rate limits, attach a session cursor, and forward the command with its stable client message ID.
+{% /system-node %}
+{% system-node title="Channel owner" eyebrow="Authorization and order" icon="shield" tone="violet" %}
+Check current membership and permissions, serialize writes for one channel partition, and assign the next channel sequence.
+{% /system-node %}
+{% system-node title="Message log and outbox" eyebrow="Durable acceptance" icon="database" tone="green" %}
+Commit the message and its fan-out event together so an accepted acknowledgement always has a replayable delivery source.
+{% /system-node %}
+{% system-node title="Fan-out and recipient gateways" eyebrow="Live delivery" icon="route" tone="amber" %}
+Resolve active subscriptions, push at least once, isolate backpressure by partition, and let clients deduplicate and replay gaps.
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership boundaries
+
+- **Gateway fleet:** connection lifecycle, heartbeats, authentication context, rate limits, subscription attachment, and reconnect cursors.
+- **Channel service:** membership authorization, one active owner per partition, message sequence assignment, edits, deletes, and channel-level admission control.
+- **Message storage:** durable records, idempotency lookup, append/outbox atomicity, retention, and history reads.
+- **Fan-out plane:** subscriber lookup, delivery queues, retry policy, per-destination isolation, queue-age objectives, and replay progress.
+- **Presence plane:** expiring session leases, online status, and typing hints; never durable membership or message authority.
+
+Actor runtimes such as Elixir/Erlang are a natural fit for connection and channel ownership because isolated processes can hold small state and fail independently. The design still depends on explicit durable boundaries, fencing, and replay; an actor runtime alone does not provide those guarantees.
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model identity, order, cursors, and expiring presence" %}
+
+## Four records make retries and recovery explainable
+
+{% concept-grid %}
+{% concept-card title="Message identity" eyebrow="Idempotency" icon="shield" tone="blue" %}
+`client_message_id`, `channel_id`, author, body reference, accepted time, and edit version identify one logical send across uncertain retries.
+{% /concept-card %}
+{% concept-card title="Channel sequence" eyebrow="Visible order" icon="layers" tone="violet" %}
+`channel_sequence` increases only within one channel and is assigned by the fenced channel owner before the message enters fan-out.
+{% /concept-card %}
+{% concept-card title="Session cursor" eyebrow="Gap recovery" icon="route" tone="green" %}
+Each subscribed session records the last contiguous sequence it displayed, so reconnect can request the exact missing range.
+{% /concept-card %}
+{% concept-card title="Presence lease" eyebrow="Ephemeral state" icon="users" tone="amber" %}
+A user, session epoch, status, and expiration time describe recent activity. Expiration means unknown, not a change to channel membership.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Storage follows the access pattern
+
+- Store message history by `channel_id` and sequence range so pagination, replay, and gap repair are ordered scans rather than global searches.
+- Keep a unique idempotency index on `(channel_id, client_message_id)` long enough to cover client retries and delayed reconnects.
+- Commit the message and an outbox event atomically, or append both to one log, so no accepted message can disappear between storage and fan-out publication.
+- Keep session cursors compact and disposable; a client can rebuild them from the last acknowledged sequence and durable history.
+- Store presence in a TTL-oriented, partitioned service. Do not join it into the transaction that accepts a durable message.
+
+{% callout variant="info" %}
+### Why no global message order?
+
+People perceive order inside one conversation. A single sequence across every channel would coordinate unrelated communities, enlarge the failure domain, and add latency without improving what any one user sees.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Make delivery semantics and ordering executable" %}
+
+## Accept once, deliver at least once, display once
+
+The server cannot guarantee exactly-once effects across gateways and client devices. A recipient may accept an envelope just before a connection drops, leaving the sender uncertain about whether to retry. The practical contract is one durable message identity, at-least-once delivery attempts, and idempotent display.
+
+{% process-flow %}
+{% process-step number="1" title="Name and authorize" label="Sender command" %}
+Reuse one client message ID across retries, authenticate the session, and check current channel permission.
+{% /process-step %}
+{% process-step number="2" title="Sequence and commit" label="Channel authority" %}
+Serialize the channel write, assign the next sequence, and atomically append the message plus fan-out event.
+{% /process-step %}
+{% process-step number="3" title="Route and retry" label="Delivery plane" %}
+Consume the durable event, target subscribed gateways, retry uncertain attempts, and expose queue age as backpressure.
+{% /process-step %}
+{% process-step number="4" title="Deduplicate and replay" label="Recipient state" %}
+Ignore a repeated message ID, display only the next contiguous sequence, and request missing history before showing newer messages.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/case-studies/discord-communication/code/ordered-message-consumer.ts" language="typescript" title="Idempotent acceptance and contiguous recipient delivery" /%}
+
+### The explicit semantics
+
+- **Sender acknowledgement:** means authorization, sequence assignment, and durable append succeeded. It does not mean every recipient displayed the message.
+- **Fan-out delivery:** is at least once. A timeout causes a retry with the same message identity, not a new logical message.
+- **Visible ordering:** is monotonic per channel. A client that receives sequence 902 after 900 requests 901 and holds 902 rather than rendering around the gap.
+- **Edits and deletes:** carry their own event version and target message identity. A stale edit cannot overwrite a later edit merely because delivery was delayed.
+- **Offline recovery:** reads durable history from the last contiguous cursor instead of requiring the live gateway to retain an unbounded session buffer.
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Design failure and backpressure behavior before the outage" %}
+
+## Degrade freshness and ephemeral hints before correctness
+
+A real-time system should state what users see when each dependency fails. The safe fallback depends on which plane owns the missing state: gateway sessions can reconnect, fan-out can replay, and presence can become unknown, but a stalled channel authority must not be bypassed by a second writer.
+
+{% topology-lab dataFile="/api/content/case-studies/discord-communication/data/gateway-channel-presence-failure-topology.json" /%}
+
+### Failure priorities
+
+1. Preserve authorization, stable identity, per-channel order, and the durable append boundary.
+2. Keep accepted events replayable and isolate backlog by channel partition, gateway destination, or consumer group.
+3. Shed typing indicators, frequent presence heartbeats, read receipts, and other ephemeral work before durable messages.
+4. Expose Connecting, Sending, Delayed, or Presence unavailable states instead of showing false success or silently reordering a conversation.
+5. Recover from the last contiguous sequence and deduplicate replay, then verify that queue age returns to normal before restoring shed traffic.
+
+{% callout variant="warn" %}
+Never route a hot or stalled channel to two unfenced owners just to improve availability. Two writers can both assign the next sequence, creating a conversation that cannot be repaired by ordinary replay.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make ordering, latency, and availability trade-offs explicit" %}
+
+## Spend coordination only at the conversation boundary
+
+- **One channel owner versus unconstrained parallel writes**
+    - One fenced owner makes authorization and sequence assignment deterministic.
+    - A hot channel can overload one partition, so ownership transfer, batching, and per-channel admission control need explicit limits.
+    - Splitting one channel across independent writers increases throughput only by weakening the visible ordering promise.
+- **Durable-before-fan-out versus gateway-first delivery**
+    - Durability before acknowledgement gives reconnect and replay an authoritative source.
+    - It adds a storage round trip to the sender path.
+    - Gateway-first delivery may look faster but can show recipients a message that disappears after a failed commit.
+- **At-least-once attempts versus an exactly-once claim**
+    - At-least-once delivery survives uncertain acknowledgements with stable IDs and idempotent display.
+    - It requires deduplication windows, cursor state, and replay-aware consumers.
+    - End-to-end exactly once would require coordination through devices that disconnect and is not an honest availability promise.
+- **Push online and pull missed history**
+    - Push keeps connected conversations immediate and avoids repeated history reads.
+    - Pull from a cursor bounds gateway memory and repairs offline or failed sessions.
+    - The hybrid requires one shared sequence contract so live delivery and history reads join without gaps or duplicates.
+- **Fresh presence versus message availability**
+    - Short leases make online status responsive but increase heartbeat traffic and transient unknown states.
+    - Longer leases reduce churn but leave stale online indicators after abrupt disconnects.
+    - Neither choice should enter the durable message acceptance transaction.
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Operate message acceptance and delivery as separate planes" %}
+
+## Measure the acknowledgement, the queue, and the replay gap
+
+An overall request-latency chart is not enough. A platform can acknowledge messages quickly while recipient delivery falls minutes behind, or show accurate presence while one channel partition cannot assign the next sequence.
+
+### Operational scorecard
+
+- **Acceptance plane:** authorization latency, duplicate-send rate, sequence-assignment latency, append failures, acknowledgement P50/P95/P99, and channel-owner fencing conflicts.
+- **Fan-out plane:** delivery attempts per accepted message, worker utilization, oldest queued message, queue growth rate, retries, dead letters, and hot-partition skew.
+- **Recipient experience:** acceptance-to-display P50/P95/P99, reconnect duration, replayed message count, sequence-gap frequency, duplicate suppression, and sessions stuck in Connecting.
+- **Presence plane:** lease write rate, expiration age, stale-online samples, heartbeat loss, typing-event drop rate, and the fraction of clients showing Unknown.
+- **Data integrity:** missing outbox events, non-contiguous channel sequences, stale edit application, replay divergence, and durable-history reconciliation failures.
+
+### Incident and release sequence
+
+1. Separate sender acceptance health from recipient delivery health; identify whether the authority, queue, gateway, or presence plane is failing.
+2. Find the smallest affected channel partitions, gateway destinations, or consumer groups instead of pausing every conversation.
+3. Preserve the durable log and channel owner fence, then shed ephemeral work and rate-limit abusive or pathological fan-out.
+4. Add or restore consumers, replay from stable offsets, and keep newer channel sequences behind any missing range.
+5. Verify duplicate suppression, cursor convergence, and oldest-message age before restoring typing and full presence frequency.
+6. Roll out changes by bounded channel partitions and gateway cohorts with queue-age, reconnect, ordering, and duplicate guardrails.
+
+The durable lesson is that real-time does not mean every subsystem completes in one transaction. Correct messaging combines one accepted identity, one channel order, a replayable log, explicit fan-out headroom, and honest degraded states.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/discord-communication/quiz/discord-communication.json" lessonSlug="discord-communication" title="Review the real-time communication design" /%}

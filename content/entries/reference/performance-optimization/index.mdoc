@@ -1,0 +1,128 @@
+---
+registryId: reference-performance-optimization
+---
+
+{% section-card tone="intro" %}
+## What is performance optimization?
+
+**Performance optimization is the practice of removing the measured limit that keeps a user task from meeting its service target.** A request can be slow because it waits in a queue, executes too much work, reads too much data, crosses a slow network, or depends on a saturated service. The fix is not "make everything faster"; it is a small change aimed at the part currently setting the end-to-end result.
+
+It matters because an apparently small delay can become a timeout, an abandoned task, or an outage when demand rises. The core invariant is: **an optimization improves the user-visible metric under representative load without making correctness, reliability, or cost unacceptable.**
+
+Start with a baseline and a question. For example: "At 1,200 requests per second, why does checkout p95 exceed 400 ms even though average CPU is only 45%?" That question gives a performance investigation a measurable finish line.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Treat optimization as a controlled experiment
+
+An average hides bursts and unlucky users. Measure the affected request class, its p50/p95/p99 latency, error rate, arrival rate, and the saturation signal nearest the slow path. Then change one causal mechanism and compare the same workload.
+
+{% process-flow %}
+{% process-step number="1" title="State the user symptom" label="Baseline" %}
+Name the request, percentile, target, workload mix, and time window. Keep the before measurement so a later improvement has something real to beat.
+{% /process-step %}
+{% process-step number="2" title="Find the limiting resource" label="Diagnose" %}
+Trace queue time, CPU, storage reads, lock waits, connection-pool waits, dependency time, and browser work along the critical path.
+{% /process-step %}
+{% process-step number="3" title="Change the narrowest cause" label="Intervene" %}
+Add the index, cache policy, batch size, capacity, or deadline that addresses the measured bottleneck. Predict the metric that should move.
+{% /process-step %}
+{% process-step number="4" title="Prove and protect the gain" label="Verify" %}
+Repeat the representative test, check correctness and cost, and keep an alert on the new limiting resource or regression signal.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 1: diagnose the bottleneck before choosing a fix
+
+The same slow endpoint can need different work. Choose a scenario, follow the active path, then select a component to inspect its responsibility. The result identifies the evidence that separates a queueing problem from a cache regression, a database plan problem, or a saturated asynchronous worker.
+
+{% topology-lab dataFile="/api/content/reference/performance-optimization/data/bottleneck-diagnosis-lab.json" /%}
+
+The diagnosis rule is simple: **the highest utilization number is not automatically the bottleneck.** A component is limiting the task when it is on the slow path and more work is arriving or waiting than it can complete within the remaining latency budget. A busy analytics worker does not explain a slow checkout; a full database connection pool on checkout might.
+{% /section-card %}
+
+{% section-card %}
+## Read evidence that changes the next action
+
+Start with the signal that can disprove your first guess. Three common patterns lead to different interventions:
+
+- **Queueing or pool wait rises with traffic:** arrivals are approaching or exceeding a bounded resource. Add measured headroom, reduce offered work, limit concurrency, or shed lower-priority traffic. A longer timeout only lets more requests wait.
+- **Database time is high while rows examined dwarf rows returned:** the query plan, index, data shape, or lock contention is the likely cause. Inspect `EXPLAIN`, buffers, lock waits, and the exact predicates before scaling application workers.
+- **A cache-hit rate falls and origin load rises:** a cache policy, invalidation event, key change, or stampede may be transferring work to the store. Check freshness policy and coalesce duplicate misses before simply enlarging the database.
+
+{% callout variant="warn" %}
+**Do not optimize a metric in isolation.** Reducing CPU by returning stale inventory, dropping writes, or moving work to an unbounded queue can make a dashboard look faster while breaking the product contract.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Apply the smallest change that matches the evidence
+
+An optimization is a hypothesis with a cost. Use a targeted mechanism, state what stays true, and name the new risk it introduces.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Make data access selective" eyebrow="Query and index" icon="database" tone="violet" %}
+Index predicates and ordering used by the measured request, return only needed columns, and bound scans with pagination. Faster reads cost storage, write work, and index maintenance.
+{% /concept-card %}
+{% concept-card title="Remove repeatable work" eyebrow="Cache and edge" icon="zap" tone="green" %}
+Cache reconstructable reads near the caller when a stated freshness budget allows it. A miss must remain correct, rate-limited, and observable because a cold cache can expose the origin.
+{% /concept-card %}
+{% concept-card title="Protect the constrained path" eyebrow="Concurrency and load" icon="gauge" tone="blue" %}
+Scale independent workers, bound queues and pools, and move non-critical fan-out off the synchronous path. More workers cannot outscale a shared lock, database, or third-party limit.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Example: verify a query before adding an index
+
+For a feed that fetches recent orders for one account, inspect the actual plan before changing schema. The index below matches the equality filter and the requested descending order; it still needs a production-like test because an index can slow writes and use memory.
+
+{% code-block file="/api/content/reference/performance-optimization/code/account-orders-query.sql" language="sql" title="Target a measured orders query" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 2: expose cache-hit regressions before the store is overwhelmed
+
+A cache is a performance optimization only while its fallback path remains healthy. Adjust the hit rate to model an invalidation, an expired working set, or a key-format regression. The diagram recomputes both branches from the same request volume and warns when authoritative-store traffic crosses its tested protection threshold.
+
+{% traffic-split dataFile="/api/content/reference/performance-optimization/data/cache-regression-traffic-split.json" /%}
+
+This is a trade-off, not a score to maximize blindly. A very long TTL can increase hits while serving data that is too old for price, entitlement, or inventory decisions. Choose the freshness limit first, then provision and test the miss path for the lowest acceptable hit rate.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make failure behavior bounded and reversible
+
+Performance failures become outages when waiting work consumes every thread, socket, or memory buffer. Give the slow path a controlled behavior:
+
+- Set a downstream deadline shorter than the caller deadline so there is time to return a fallback or explicit error.
+- Bound queues, retries, and connection pools. Reject or defer low-priority work before the shared resource is exhausted.
+- Retry only transient, idempotent work, with jitter and a limit. Retrying a saturated dependency multiplies the load that caused the incident.
+- Release changes through a baseline, a small canary, and a rollback trigger. Compare latency distribution, errors, correctness, cache hit rate, and cost with the same traffic mix.
+
+For example, serving a last-known recommendation may be an acceptable fallback; serving a stale account balance may not be. Failure behavior belongs to the product contract, not just the operations dashboard.
+{% /section-card %}
+
+{% section-card %}
+## Operate the new limit, not the old one
+
+Every successful optimization moves pressure somewhere else. Record the owner, metric, threshold, and response before declaring the work complete.
+
+- **Before release:** capture arrival rate, p95/p99, errors, queue or pool wait, and the resource saturation signal under a representative load test.
+- **During rollout:** compare the canary to the baseline by request type and cache state. Stop on a defined correctness, tail-latency, error, or cost regression rather than waiting for an aggregate average to move.
+- **After release:** alert on the new limiting resource, such as index-write amplification, cache-miss traffic, lock wait, queue age, or dependency-pool wait. Re-test after major data growth or workload changes.
+
+The goal is not the lowest number in a single benchmark. It is a system that meets a user-facing target predictably, fails within clear limits, and exposes the evidence needed to respond when assumptions drift.
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [Latency vs Throughput](/fundamentals/latency-vs-throughput): distinguish a faster individual operation from a system that can sustain more work.
+- [Bottleneck Analysis](/fundamentals/bottleneck-analysis): locate constrained resources with measurements and queueing behavior.
+- [Monitoring Metrics](/reference/monitoring-metrics): choose latency, error, saturation, and business signals for the performance loop.
+- [Caching Strategies](/reference/caching-strategies): design invalidation and freshness behavior for the data you cache.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/performance-optimization/quiz/performance-optimization-decisions.json" lessonSlug="performance-optimization" title="Performance Optimization Decision Check" /%}

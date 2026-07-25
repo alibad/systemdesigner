@@ -1,0 +1,27 @@
+{
+  "title": "Follow one RPC through its failure-sensitive boundaries",
+  "description": "Switch scenarios to see which HTTP/2 path is active, where the contract changes, and what the caller can safely conclude.",
+  "nodes": [
+    {"id": "client", "label": "Native gRPC client", "eyebrow": "Deadline owner", "detail": "Creates one call deadline, sends request metadata, consumes responses, and cancels work that is no longer useful.", "kind": "client", "tone": "blue", "x": 6, "y": 38},
+    {"id": "channel", "label": "Resolver + channel policy", "eyebrow": "Per-RPC picker", "detail": "Resolves eligible addresses, maintains subchannels, and picks a ready HTTP/2 connection according to the configured policy.", "kind": "service", "tone": "violet", "x": 29, "y": 38},
+    {"id": "backend-a", "label": "Backend A", "eyebrow": "Initial attempt", "detail": "Checks authorization and remaining deadline, runs the method, propagates context, and returns one final gRPC status.", "kind": "service", "tone": "cyan", "x": 53, "y": 18},
+    {"id": "backend-b", "label": "Backend B", "eyebrow": "Alternate subchannel", "detail": "Can receive a later eligible retry when the first attempt ends with a configured retryable status.", "kind": "service", "tone": "green", "x": 53, "y": 63},
+    {"id": "dependency", "label": "Downstream dependency", "eyebrow": "Propagated budget", "detail": "Receives only the remaining deadline and cancellation context, not a newly reset timeout.", "kind": "database", "tone": "amber", "x": 79, "y": 18},
+    {"id": "stream-buffer", "label": "Bounded stream buffer", "eyebrow": "Application backpressure", "detail": "Separates server production from client consumption with an explicit queue limit and cancellation policy.", "kind": "stream", "tone": "rose", "x": 79, "y": 68}
+  ],
+  "edges": [
+    {"id": "client-channel", "from": "client", "to": "channel", "label": "RPC + deadline"},
+    {"id": "channel-a", "from": "channel", "to": "backend-a", "label": "attempt 1"},
+    {"id": "channel-b", "from": "channel", "to": "backend-b", "label": "bounded retry"},
+    {"id": "a-dependency", "from": "backend-a", "to": "dependency", "label": "remaining timeout"},
+    {"id": "b-dependency", "from": "backend-b", "to": "dependency", "label": "remaining timeout"},
+    {"id": "a-buffer", "from": "backend-a", "to": "stream-buffer", "label": "ordered messages"},
+    {"id": "buffer-client", "from": "stream-buffer", "to": "client", "label": "consumer pace", "mode": "async", "via": {"x": 43, "y": 88}}
+  ],
+  "scenarios": [
+    {"id": "unary-success", "label": "Unary success", "summary": "A bounded lookup reaches Backend A and its dependency before the deadline.", "activeEdges": ["client-channel", "channel-a", "a-dependency"], "focusNode": "backend-a", "result": "The server returns a response and OK status. The client can use the result because it arrived inside the same call deadline."},
+    {"id": "deadline-cancel", "label": "Deadline propagation", "summary": "The downstream query is still running when the caller's original deadline expires.", "activeEdges": ["client-channel", "channel-a", "a-dependency"], "degradedNodes": ["backend-a", "dependency"], "focusNode": "dependency", "result": "The client observes DEADLINE_EXCEEDED. Cancellation propagates through Backend A; both services must stop application work. Earlier side effects are not rolled back."},
+    {"id": "safe-retry", "label": "Safe UNAVAILABLE retry", "summary": "A read-only attempt reaches Backend A, which becomes unavailable before returning response headers.", "activeEdges": ["client-channel", "channel-a", "channel-b", "b-dependency"], "failedNodes": ["backend-a"], "focusNode": "backend-b", "result": "The configured policy waits its bounded backoff and picks Backend B. The retry remains inside the original deadline and is safe because the operation has no duplicate effect."},
+    {"id": "slow-consumer", "label": "Slow stream consumer", "summary": "Backend A produces server-stream messages faster than the client application processes them.", "activeEdges": ["client-channel", "channel-a", "a-buffer", "buffer-client"], "degradedNodes": ["client", "stream-buffer"], "focusNode": "stream-buffer", "result": "HTTP/2 flow control limits transport data in flight, but the application still needs a bounded queue. Slow or abandoned consumers must pause production, shed optional messages, or cancel the stream before memory grows without bound."}
+  ]
+}

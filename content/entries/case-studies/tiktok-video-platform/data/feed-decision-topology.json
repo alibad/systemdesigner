@@ -1,0 +1,132 @@
+{
+  "title": "Trace a feed decision through freshness, safety, and delivery",
+  "description": "Switch scenarios to see how the feed keeps its online deadline while final policy, prepared media, and declared fallbacks protect the viewer contract.",
+  "nodes": [
+    {
+      "id": "viewer",
+      "label": "Viewer app",
+      "eyebrow": "Swipe request",
+      "detail": "Sends session and device context, receives an ordered eligible batch, then starts playback from a signed CDN reference.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 48
+    },
+    {
+      "id": "edge-cache",
+      "label": "Edge candidate cache",
+      "eyebrow": "Latency shield",
+      "detail": "Stores short-lived eligible candidate batches keyed by the context that affects policy and freshness. It reduces repeated origin decisions.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 25,
+      "y": 24
+    },
+    {
+      "id": "retrieval",
+      "label": "Candidate retrieval",
+      "eyebrow": "Eligible sources",
+      "detail": "Combines follows, interest, exploration, and trend sources after filtering each source for current eligibility and availability.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 45,
+      "y": 24
+    },
+    {
+      "id": "ranker",
+      "label": "Ranker and features",
+      "eyebrow": "Deadline-bound score",
+      "detail": "Scores a small candidate set with session and content features. It can time out without allowing policy checks to disappear.",
+      "kind": "analytics",
+      "tone": "cyan",
+      "x": 64,
+      "y": 24
+    },
+    {
+      "id": "policy",
+      "label": "Final policy gate",
+      "eyebrow": "Hard constraints",
+      "detail": "Rechecks safety, region, age, rights, availability, diversity, and repetition before the feed response contains a video.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 83,
+      "y": 24
+    },
+    {
+      "id": "cdn",
+      "label": "Video CDN",
+      "eyebrow": "Prepared playback",
+      "detail": "Delivers a signed, device-appropriate rendition from a healthy edge or replica. It never serves the unprocessed original as a feed fallback.",
+      "kind": "edge",
+      "tone": "green",
+      "x": 83,
+      "y": 70
+    },
+    {
+      "id": "events",
+      "label": "Exposure event stream",
+      "eyebrow": "Asynchronous learning",
+      "detail": "Captures exposure, watch, skip, completion, report, and playback outcomes without delaying the viewer response.",
+      "kind": "stream",
+      "tone": "rose",
+      "x": 47,
+      "y": 74
+    }
+  ],
+  "edges": [
+    { "id": "viewer-cache", "from": "viewer", "to": "edge-cache", "label": "feed request" },
+    { "id": "cache-viewer", "from": "edge-cache", "to": "viewer", "label": "eligible cached batch" },
+    { "id": "cache-retrieval", "from": "edge-cache", "to": "retrieval", "label": "cache miss" },
+    { "id": "retrieval-ranker", "from": "retrieval", "to": "ranker", "label": "candidate set" },
+    { "id": "ranker-policy", "from": "ranker", "to": "policy", "label": "scored candidates" },
+    { "id": "policy-viewer", "from": "policy", "to": "viewer", "label": "signed playback reference", "via": { "x": 92, "y": 49 } },
+    { "id": "viewer-cdn", "from": "viewer", "to": "cdn", "label": "video segments", "via": { "x": 42, "y": 88 } },
+    { "id": "viewer-events", "from": "viewer", "to": "events", "label": "watch and skip", "mode": "async" },
+    { "id": "cdn-events", "from": "cdn", "to": "events", "label": "playback quality", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "warm-cache",
+      "label": "Warm cache, eligible batch",
+      "summary": "A context-correct candidate batch is fresh enough for this viewer. The edge returns it, the final policy decision remains valid, and playback begins from the CDN.",
+      "activeEdges": ["viewer-cache", "cache-viewer", "viewer-cdn", "viewer-events", "cdn-events"],
+      "focusNode": "edge-cache",
+      "result": "The cache removes origin feed work for this request, but its TTL and key must still prevent policy or session staleness from becoming an exposure bug."
+    },
+    {
+      "id": "personalized-miss",
+      "label": "Cache miss, fresh rank",
+      "summary": "The edge needs a new decision. Retrieval and ranking run under the 200 ms budget, then the final policy gate removes any candidate that is no longer eligible or available.",
+      "activeEdges": ["viewer-cache", "cache-retrieval", "retrieval-ranker", "ranker-policy", "policy-viewer", "viewer-cdn", "viewer-events", "cdn-events"],
+      "focusNode": "ranker",
+      "result": "This path is freshest but consumes origin capacity. It is the path sized by the cache-miss traffic in the capacity lab."
+    },
+    {
+      "id": "ranker-timeout",
+      "label": "Ranker deadline exceeded",
+      "summary": "The heavy ranker misses its deadline. The service uses a bounded-age eligible batch instead of extending the swipe request, then applies final constraints before release.",
+      "activeEdges": ["viewer-cache", "cache-viewer", "viewer-cdn", "viewer-events", "cdn-events"],
+      "degradedNodes": ["ranker", "edge-cache"],
+      "focusNode": "ranker",
+      "result": "Personalization may be less current, but playback stays fast and no cached candidate bypasses safety, rights, availability, or session repetition checks."
+    },
+    {
+      "id": "policy-uncertain",
+      "label": "Moderation uncertainty",
+      "summary": "A selected video is awaiting human review or has uncertain policy evidence. The policy gate removes it even though retrieval, ranking, and delivery are healthy.",
+      "activeEdges": ["viewer-cache", "cache-retrieval", "retrieval-ranker", "ranker-policy"],
+      "degradedNodes": ["policy"],
+      "focusNode": "policy",
+      "result": "The video does not enter the response. The feed can choose another eligible candidate, but it must not use the original upload or a stale score to override uncertainty."
+    },
+    {
+      "id": "cdn-region-outage",
+      "label": "CDN region unavailable",
+      "summary": "The selected rendition cannot be reached from one delivery region. The delivery layer routes to a prepared healthy replica or a lower bitrate, while the feed avoids promising a dead playback URL.",
+      "activeEdges": ["viewer-cache", "cache-viewer", "viewer-cdn", "viewer-events", "cdn-events"],
+      "degradedNodes": ["cdn"],
+      "focusNode": "cdn",
+      "result": "Availability becomes part of eligibility. A fast feed response is still a failure if it points to media that cannot start."
+    }
+  ]
+}

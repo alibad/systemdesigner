@@ -1,0 +1,272 @@
+---
+registryId: case-study-anthropic-constitutional-ai
+---
+
+{% section-card tone="intro" %}
+## What is Constitutional AI?
+
+Constitutional AI is a published alignment method that turns a written set of behavioral principles, called a constitution, into supervision for an AI assistant. A model first critiques and revises candidate answers against those principles. In a later phase, AI-generated preferences can help train a reward model that guides policy optimization.
+
+In plain language: people define the behavioral rules, the model practices finding and repairing violations, and independent evaluation checks whether the resulting behavior actually improved. The core invariant is: **AI-generated feedback can scale a stated policy, but it cannot prove that the policy is complete, correctly interpreted, or safe outside the evidence used to test it.**
+
+This case study explains the method reported in Anthropic's 2022 [Constitutional AI paper](https://arxiv.org/abs/2212.08073), then designs the surrounding evaluation and production controls a real system would need. It does not claim to describe Anthropic's current private training pipeline, constitution, model behavior, or deployment architecture. Review [AI Safety](/genai/ai-safety) and [RLHF](/ml-systems/rlhf) first if preference modeling is unfamiliar.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the alignment contract and scope" %}
+
+## Define what the constitution can and cannot guarantee
+
+A constitution is a versioned policy artifact. It names desired behavior, but the training system still has to translate prose into critiques, comparisons, optimization targets, evaluations, and release decisions. Each translation can preserve, weaken, or distort the original intent.
+
+### Functional scope
+
+- Version principles, their priority rules, examples, exceptions, and owners.
+- Generate candidate responses for prompts that exercise important behavior boundaries.
+- Critique a response against one or more named principles and produce a revision.
+- Generate preference labels for response pairs under a stated principle and evaluator version.
+- Train and validate a preference model, then constrain policy optimization against it.
+- Evaluate the candidate with independent behavioral tests, human review, and predefined release gates.
+- Retain runtime policy enforcement, monitoring, incident response, and rollback controls.
+
+### Safety properties for this reference design
+
+- **Traceability:** every critique, preference, and release result identifies its constitution, model, prompt, and evaluator versions.
+- **Conflict handling:** helpfulness, honesty, autonomy, and harm prevention cannot be collapsed into an unlabeled average when they disagree.
+- **Escalation:** ambiguous, high-impact, or novel cases reach qualified human review instead of receiving fabricated certainty.
+- **Independent evidence:** the same model-generated signal used for optimization is not the only signal used to approve release.
+- **Fail-closed release:** missing critical-slice evidence, rollback readiness, or required runtime controls blocks promotion.
+
+### Deliberate exclusions
+
+- This lesson does not claim that a written constitution guarantees harmlessness or universal agreement about values.
+- It does not infer Anthropic's current principle set, feedback models, thresholds, dataset size, or production defenses.
+- It does not treat refusals as the only safe behavior; a bounded, useful answer can be better than either unrestricted assistance or blanket refusal.
+- It does not replace legal, domain-expert, cultural, or affected-community review with model judgment.
+
+{% callout variant="warn" %}
+The word "constitutional" describes a source of behavioral principles, not a formal proof. The resulting model still optimizes learned proxies and can fail under ambiguity, evaluator bias, optimization pressure, or distribution shift.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="method" title="2. Trace the published two-stage method" %}
+
+## Turn principles into supervised revisions, then AI preferences
+
+The published method has two related loops. The supervised loop teaches the assistant to produce better revisions. The reinforcement-learning loop turns AI comparisons into a learned preference signal and uses that signal to update the policy.
+
+{% process-flow %}
+{% process-step number="1" title="Sample and critique" label="Supervised phase" %}
+Generate a response to a difficult prompt, select a constitutional principle, and ask a model to identify the specific violation rather than merely assigning a score.
+{% /process-step %}
+{% process-step number="2" title="Revise and fine-tune" label="Behavioral examples" %}
+Rewrite the answer to address the critique, preserve useful content where possible, and fine-tune a policy on the revised responses.
+{% /process-step %}
+{% process-step number="3" title="Compare response pairs" label="AI feedback" %}
+Sample two candidate answers and ask an evaluator model which one better follows a selected principle. Preserve the prompt, pair order, rationale, and evaluator version.
+{% /process-step %}
+{% process-step number="4" title="Optimize and evaluate" label="RLAIF" %}
+Train a preference model from the comparisons, optimize a policy against that proxy, and require independent human and behavioral evidence before release.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep the stages conceptually separate
+
+- **Critique explains a defect.** It should identify which principle applies and how the response conflicts with it.
+- **Revision proposes a repair.** It can preserve safe, relevant help rather than defaulting to refusal.
+- **Preference labels compare candidates.** They supply an ordering under a rubric, not an absolute safety score.
+- **Reward modeling generalizes the labels.** It creates a proxy that can be wrong on new response styles or underrepresented slices.
+- **Policy optimization searches against the proxy.** Stronger optimization can expose blind spots faster, so external evaluation becomes more important, not less.
+
+The original study called the reinforcement-learning phase **Reinforcement Learning from AI Feedback (RLAIF)**. Its key scaling move was to obtain harmfulness preferences from a model guided by written principles rather than requiring direct human harmfulness labels for every pair. Human judgment still enters through principle design, helpfulness data, calibration, evaluation, and governance.
+
+{% /accordion-item %}
+
+{% accordion-item id="constitution" title="3. Make principle conflicts explicit" %}
+
+## A useful constitution needs operational conflict rules
+
+Principles such as "be helpful" and "avoid harm" are directionally useful but incomplete. A training example becomes more reliable when it names the context, affected party, prohibited assistance, permitted assistance, uncertainty rule, and escalation path.
+
+### Characteristics of an operational principle
+
+1. **Specific trigger:** describe when the principle applies and what evidence activates it.
+2. **Observable behavior:** state what a compliant answer should do, not only the value it should express.
+3. **Conflict rule:** explain how to preserve lower-risk helpfulness when another principle limits the original request.
+4. **Counterexamples:** include plausible answers that look compliant but evade, over-refuse, fabricate, or leak restricted detail.
+5. **Owner and version:** identify who can change the rule and which evaluations must rerun after a change.
+
+### Resolve a response, not just a score
+
+Choose a scenario and a revision strategy. The lab uses an illustrative rubric to make the trade-off visible; its scores are teaching aids, not measurements of any Anthropic model.
+
+{% interactive-block id="case-studies/anthropic-constitutional-ai-principle-conflict-lab" dataFile="/api/content/case-studies/anthropic-constitutional-ai/data/principle-conflict-scenarios.json" /%}
+
+### Interpret the consequence
+
+- A **blanket refusal** can control immediate risk while discarding safe context, alternatives, or uncertainty disclosure.
+- **Unrestricted compliance** can appear helpful while violating the very boundary the constitution is meant to teach.
+- A **bounded revision** names the limit, preserves permitted assistance, and offers a safer next step.
+- The best revision is contextual. A factual uncertainty needs calibrated language; a high-risk action may need a firm boundary and a qualified escalation path.
+
+{% /accordion-item %}
+
+{% accordion-item id="pipeline" title="4. Build a traceable feedback pipeline" %}
+
+## Preserve evidence from principle to policy update
+
+The feedback system should make it possible to answer one incident question: why did this behavior receive positive training pressure? That requires immutable identifiers across generation, critique, comparison, reward modeling, and optimization.
+
+{% system-flow title="Constitutional supervision path" caption="Each boundary records versions and confidence so a later release decision can trace the training signal." %}
+{% system-node title="Principle registry" eyebrow="Human governance" icon="scroll-text" tone="blue" %}
+Store principle text, precedence, examples, exceptions, owner, approval history, and evaluation dependencies under a stable version.
+{% /system-node %}
+{% system-node title="Critique and revision workers" eyebrow="Supervised evidence" icon="messages-square" tone="violet" %}
+Generate candidates, bind each critique to a principle, produce a revision, and route ambiguous or high-impact cases for adjudication.
+{% /system-node %}
+{% system-node title="AI preference service" eyebrow="RLAIF evidence" icon="scale" tone="amber" %}
+Randomize response order, compare candidates under one stated rubric, retain rationale and uncertainty, and measure agreement with calibrated humans.
+{% /system-node %}
+{% system-node title="Training and release gate" eyebrow="Bounded optimization" icon="shield-check" tone="green" %}
+Fit the preference proxy, constrain policy movement, run independent evaluations by slice, and promote only with runtime and rollback readiness.
+{% /system-node %}
+{% /system-flow %}
+
+### Minimum records at each boundary
+
+- **Critique record:** prompt ID, draft hash, principle ID and version, critique, revision hash, critic model, sampling settings, and escalation state.
+- **Preference record:** both response hashes, randomized presentation order, selected response, rationale, confidence, evaluator model, and adjudication result.
+- **Training record:** dataset manifest, reward-model revision, policy and reference revisions, objective, update budget, and reproducible configuration.
+- **Evaluation record:** candidate revision, evaluator independence, scenario slice, result, uncertainty, threshold version, reviewer decision, and evidence URI.
+
+{% callout variant="info" %}
+Do not store only the winning answer. Pair order, the rejected answer, rationale, and evaluator version are necessary to detect position bias, inconsistent principles, and changes in evaluator behavior.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Separate optimization evidence from release evidence" %}
+
+## A higher learned reward is not a release decision
+
+The preference model is part of the training objective, so its score is not independent evidence that the optimized policy behaves correctly. Release evaluation should combine several signals with different failure modes.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Behavioral suites" eyebrow="Repeatable tests" icon="list-checks" tone="blue" %}
+Measure helpfulness, calibrated honesty, refusal quality, harmful assistance, capability retention, and important language or domain slices on held-out prompts.
+{% /concept-card %}
+{% concept-card title="Human adjudication" eyebrow="Grounded judgment" icon="users" tone="violet" %}
+Review ambiguous, high-impact, and evaluator-disagreement cases with qualified people who can challenge the constitution and the model's interpretation.
+{% /concept-card %}
+{% concept-card title="Adversarial and runtime evidence" eyebrow="Novel behavior" icon="shield-alert" tone="rose" %}
+Probe prompt variation, multi-turn attacks, reward shortcuts, and deployment shift; retain monitors, incident response, bounded rollout, and rollback after launch.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Evaluate by conflicts and slices
+
+- Report helpfulness and harm-control results together so a blanket-refusal regression cannot hide behind one aggregate safety number.
+- Separate explicit policy violations from ambiguous value conflicts and from factual uncertainty.
+- Compare evaluator decisions with calibrated human judgments on held-out prompts and retain disagreement rather than forcing false consensus.
+- Test principle paraphrases, ordering, response position, verbosity, and style so superficial cues do not become preference shortcuts.
+- Freeze critical slices and release thresholds before examining the candidate result.
+
+The following executable sketch encodes a fail-closed release policy. Its thresholds are illustrative and must be set by the product's actual risk owners.
+
+{% code-block file="/api/content/case-studies/anthropic-constitutional-ai/code/constitutional-release-gate.py" language="python" title="Fail-closed constitutional policy release gate" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="failures" title="6. Diagnose oversight failures before adding more optimization" %}
+
+## Match the control to where the signal failed
+
+Constitutional supervision can fail before, during, or after optimization. More training against the same signal is the wrong response when the signal itself is ambiguous, biased, exploitable, or stale.
+
+Select a failure and a first response. The pipeline identifies where the failure enters, which later stages inherit it, and what evidence is still needed before release can be reconsidered.
+
+{% interactive-block id="case-studies/anthropic-constitutional-ai-oversight-failure-lab" dataFile="/api/content/case-studies/anthropic-constitutional-ai/data/oversight-failure-controls.json" /%}
+
+### Four failure patterns to keep distinct
+
+1. **Ambiguous principle:** critics produce incompatible revisions because the policy lacks a context or precedence rule.
+2. **Evaluator bias:** AI preferences track position, verbosity, dialect, identity cue, or the evaluator's own blind spot rather than the stated principle.
+3. **Proxy exploitation:** the optimized policy earns reward through evasive refusal, polished moralizing, or another shortcut that independent evaluators reject.
+4. **Deployment shift:** production conversations combine languages, tools, long context, or adversarial turns absent from the evaluation distribution.
+
+Fix the earliest faulty boundary, regenerate dependent evidence, and rerun downstream evaluations. A runtime filter can contain exposure while that work happens, but it cannot repair a corrupted training signal retroactively.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate alignment as defense in depth" %}
+
+## Keep production authority outside the training method
+
+Constitutional training changes model behavior probabilities. The serving system still owns identity, authorization, tool permissions, data access, policy enforcement, observability, and incident response.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Request controls" eyebrow="Before generation" icon="shield" tone="blue" %}
+Authenticate the caller, enforce product and tool permissions, isolate context, validate inputs, and route high-risk requests through the required policy path.
+{% /concept-card %}
+{% concept-card title="Response controls" eyebrow="During delivery" icon="activity" tone="amber" %}
+Bound generation, validate structured actions, apply required output policy, preserve refusal and escalation reason codes, and stop side effects independently of prose.
+{% /concept-card %}
+{% concept-card title="Assurance controls" eyebrow="After and outside" icon="file-warning" tone="green" %}
+Monitor slices and incidents, sample privacy-bounded traces, stage policy changes, maintain rollback artifacts, and feed confirmed failures into governed evaluations.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Production signals that preserve diagnosis
+
+- Constitution, policy, model, evaluator, tool, and runtime-classifier versions for every sampled event.
+- Refusal, bounded-assistance, escalation, and policy-violation rates by important slice rather than one global percentage.
+- AI-evaluator versus human-adjudicator disagreement, including the direction and consequence of the disagreement.
+- Changes in response length, hedging, unsupported certainty, repeated moralizing, and other potential optimization shortcuts.
+- Runtime interventions, user appeals, incident severity, rollout cohort, and time-to-rollback.
+
+### Incident response sequence
+
+1. Bound exposure with a rollout pause, known-good rollback, permission reduction, or stricter runtime control.
+2. Freeze the exact constitution, critic, preference, reward-model, policy, evaluator, and serving revisions.
+3. Locate the earliest boundary where expected evidence diverged from observed behavior.
+4. Add the incident as a versioned evaluation case without leaking sensitive production data.
+5. Repair the principle, data, evaluator, objective, or runtime control that owns the failure, then rerun every dependent gate.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="8. Make the trade-offs and governance visible" %}
+
+## Constitutional AI scales supervision assumptions, including mistakes
+
+The method's value is not that models become their own final authority. Its value is that a versioned policy can generate many critiques and comparisons, making behavioral intent more explicit and feedback collection more scalable. The same mechanism can amplify an omitted stakeholder, vague precedence rule, biased evaluator, or reward shortcut.
+
+### Design lessons
+
+- **Scale versus grounding:** AI feedback can cover more prompts, while human calibration and affected-party review ground whether the policy and evaluator remain valid.
+- **Consistency versus context:** a stable constitution improves repeatability, while examples, exceptions, and escalation preserve necessary context.
+- **Harmlessness versus helpfulness:** over-refusal is a real regression; evaluate bounded assistance instead of treating every refusal as success.
+- **Optimization versus assurance:** reward improvement supports training diagnosis, while independent tests, human adjudication, and runtime outcomes support release.
+- **Transparency versus attack surface:** publish enough policy and evaluation rationale for accountability without exposing sensitive abuse signatures or personal data.
+- **Training versus production control:** aligned behavior reduces risk, while authorization, tool boundaries, classifiers, monitors, and rollback retain independent authority.
+
+### Questions a review board should ask
+
+1. Who selected the principles, whose interests can they affect, and how can conflicts be appealed?
+2. Which model generated critiques or preferences, and how was it calibrated against qualified human judgment?
+3. What behavior did policy optimization discover that was absent from the feedback data?
+4. Which independent evaluator can block release even when learned reward improves?
+5. Which production control contains a novel failure, and how quickly can the model or policy be rolled back?
+
+### Primary sources and scope
+
+- Anthropic's [Constitutional AI: Harmlessness from AI Feedback](https://arxiv.org/abs/2212.08073) describes the supervised critique-revision phase and the RLAIF preference phase studied here.
+- Anthropic's [Collective Constitutional AI](https://www.anthropic.com/research/collective-constitutional-ai-aligning-a-language-model-with-public-input) explores one process for incorporating public input into a constitution; it does not resolve representation or governance automatically.
+- This reference architecture adds general release, observability, and production-defense practices. Those additions are engineering recommendations, not claims about Anthropic's private systems.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/anthropic-constitutional-ai/quiz/anthropic-constitutional-ai.json" lessonSlug="anthropic-constitutional-ai" title="Review the Constitutional AI System" /%}

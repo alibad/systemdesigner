@@ -1,0 +1,279 @@
+---
+registryId: apache-flink
+---
+
+{% section-card tone="intro" %}
+## What is Apache Flink?
+
+**Apache Flink is a distributed engine for computing continuously over bounded and
+unbounded data.** A Flink job reads records from sources, transforms them through a
+parallel operator graph, keeps managed state where a result depends on history, and
+writes results to sinks.
+
+Flink matters when a result must remain useful while events arrive late, machines fail,
+state grows, or traffic changes. Common examples include fraud rules, live product
+metrics, device monitoring, enrichment, and continuously updated materialized views.
+
+### Core invariant
+
+A correct streaming result needs more than fast record handling. The design must make
+**time, state ownership, recovery position, and external side effects** explicit. Flink
+can coordinate these boundaries, but it cannot infer the business meaning of a
+timestamp or make an arbitrary external call exactly once.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Carry business time" eyebrow="Event" icon="timer" tone="cyan" %}
+Event time records when the business event happened. Processing time records when an
+operator happened to handle it. Choose deliberately because failures and backlog alter
+processing time.
+{% /concept-card %}
+{% concept-card title="Partition by key" eyebrow="State" icon="key" tone="violet" %}
+`keyBy` routes the same key to one logical state partition. Flink can redistribute those
+partitions when operator parallelism changes.
+{% /concept-card %}
+{% concept-card title="Snapshot consistently" eyebrow="Recovery" icon="storage" tone="blue" %}
+Checkpoints bind managed state to source positions. A failed job restores one completed
+snapshot and reprocesses input after that point.
+{% /concept-card %}
+{% concept-card title="Close the sink boundary" eyebrow="Effect" icon="shield" tone="green" %}
+A supported transactional sink or an application-level idempotency key prevents replay
+from becoming a second business effect.
+{% /concept-card %}
+{% /concept-grid %}
+
+This lesson builds on [Streaming Systems](/fundamentals/streaming), especially durable
+logs, partitioning, delivery semantics, and backpressure.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Make event-time progress visible with watermarks
+
+**Event time** is a timestamp carried by a record that describes when the event
+occurred. A **watermark** is Flink's progress signal: watermark `t` means the stream
+does not expect more records at or before `t`, although a late record can still violate
+that expectation.
+
+An event-time window uses the watermark, not the wall clock, to decide when to emit.
+Watermark strategy and allowed lateness solve different problems:
+
+{% metric-strip %}
+{% metric label="Event timestamp" value="When it happened" detail="Extracted from each record or source metadata" tone="cyan" /%}
+{% metric label="Watermark" value="Progress estimate" detail="Advances when the source believes older event time is complete" tone="blue" /%}
+{% metric label="Allowed lateness" value="State retention" detail="Keeps a fired window available for accepted late updates" tone="amber" /%}
+{% metric label="Side output" value="Explicit overflow" detail="Preserves too-late records for review or compensation" tone="rose" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/apache-flink-performance" dataFile="/api/content/technology/apache-flink/data/event-time-scenarios.json" /%}
+
+The lab is a whole-second teaching model. Before each arrival it computes a watermark
+from the largest event timestamp already observed minus the configured disorder bound.
+It then asks whether the record's window is still waiting, retained for late updates,
+or already eligible for cleanup. Production watermark emission is periodic or
+source-driven and is calculated independently by parallel source partitions.
+
+{% code-block file="/api/content/technology/apache-flink/code/event-time-window-model.py" language="python" title="Execute the event-time classification model" /%}
+
+### Protect progress across source partitions
+
+- Generate timestamps and watermarks at the source when partition-level information is
+  available.
+- Mark truly idle inputs as idle; otherwise one silent partition can hold back the
+  minimum downstream watermark.
+- Use watermark alignment when a fast partition would otherwise force downstream
+  operators to buffer excessive state while slower partitions catch up.
+- Route too-late records to an observable side output when silent loss is unacceptable.
+- Treat a late firing as an update to an earlier result. The sink must upsert,
+  retract, version, or deduplicate that update correctly.
+
+See Flink's official documentation for
+[watermark generation](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/event-time/generating_watermarks/)
+and [window lifecycle and allowed lateness](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/operators/windows/).
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Match the window to the business boundary
+
+A **window assigner** maps each record to one or more finite groups. The choice should
+describe the question the product asks, not merely which API is familiar.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Tumbling window" eyebrow="One fixed bucket" icon="boxes" tone="blue" %}
+Fixed, non-overlapping intervals place each record in one window. Use them for metrics
+such as orders per calendar minute when aligned boundaries have business meaning.
+{% /concept-card %}
+{% concept-card title="Sliding window" eyebrow="Overlapping view" icon="repeat" tone="violet" %}
+A fixed-size window advances by a smaller slide. One record can contribute to several
+results, which improves temporal resolution but multiplies state and update work.
+{% /concept-card %}
+{% concept-card title="Session window" eyebrow="Activity-defined" icon="activity" tone="amber" %}
+Records with the same key merge until an inactivity gap closes the session. A late
+record can bridge two sessions, so downstream results must tolerate corrections.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose with four questions
+
+1. **Which timestamp defines membership?** Use event time when replay must reproduce the
+   same grouping.
+2. **When is the first result useful?** A larger watermark delay can improve
+   completeness while postponing emission.
+3. **How long may a correction arrive?** Allowed lateness retains window state and can
+   create later firings.
+4. **Can the sink revise a prior result?** If not, emitting early and correcting later
+   violates the output contract.
+
+Aggregate incrementally when possible. A reduce or aggregate function can keep a small
+accumulator, while a process function that stores every record makes state grow with
+window traffic. Evictors also prevent pre-aggregation because the operator must retain
+elements for inspection.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Keep state colocated with the records that change it
+
+**Managed state** is application history whose lifecycle, partitioning, and snapshots
+are controlled by Flink. Keyed state is available after a keyed partitioning step and
+is accessible only for the current record's key.
+
+{% process-flow %}
+{% process-step number="1" title="Read a durable position" label="Source" %}
+The connector emits records with identities, timestamps, and positions that can be
+restored after failure.
+{% /process-step %}
+{% process-step number="2" title="Partition by business key" label="Keyed exchange" %}
+All updates for one account, device, or order reach the same logical keyed-state owner.
+Choose a key that avoids one hot tenant or value dominating a subtask.
+{% /process-step %}
+{% process-step number="3" title="Update bounded state" label="Stateful operator" %}
+The operator updates values, timers, windows, or aggregates. State TTL and cleanup
+policies bound history only when their semantics permit expiration.
+{% /process-step %}
+{% process-step number="4" title="Publish with a contract" label="Sink" %}
+The sink appends, upserts, or commits transactionally. Output identity and replay
+behavior must match the business effect.
+{% /process-step %}
+{% /process-flow %}
+
+Flink organizes keyed state into **key groups**, the atomic units redistributed during
+rescaling. Set maximum parallelism with future growth in mind, assign stable operator
+UIDs before relying on savepoint-based upgrades, and test that schema changes can read
+existing serialized state.
+
+### Choose the state backend from measured constraints
+
+{% concept-grid columns="2" %}
+{% concept-card title="HashMapStateBackend" eyebrow="Heap-resident state" icon="speed" tone="cyan" %}
+State access operates on Java heap objects and can be fast, but the state assigned to a
+TaskManager must fit its heap. It supports full snapshots rather than incremental ones.
+{% /concept-card %}
+{% concept-card title="EmbeddedRocksDBStateBackend" eyebrow="Large local state" icon="database" tone="violet" %}
+Serialized state can extend onto local disk and supports incremental checkpoints.
+Access adds serialization and storage cost, so measure throughput and latency with the
+real key and value shapes.
+{% /concept-card %}
+{% /concept-grid %}
+
+The backend controls working-state representation. **Checkpoint storage** separately
+controls where durable snapshot data is written. Production checkpoints belong on a
+durable filesystem or object store, not only JobManager heap or ephemeral worker disk.
+See the official [state backend guide](https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/state_backends/).
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Recover from the latest completed checkpoint
+
+A **checkpoint** is an automatically coordinated snapshot of managed state and stream
+positions. Checkpoint barriers flow with records through the operator graph; a
+checkpoint becomes a recovery point only after all required tasks and storage actions
+complete successfully.
+
+{% interactive-block id="technology/apache-flink-checkpoint-recovery" dataFile="/api/content/technology/apache-flink/data/checkpoint-recovery-scenarios.json" /%}
+
+The lab assumes one durable baseline at `t=0`, periodic checkpoint triggers, one active
+snapshot at a time, and a fixed snapshot duration no longer than the interval. Its
+replay span is transparent: failure time minus the barrier time of the latest
+**completed** checkpoint. That span is not a recovery-time prediction.
+
+{% code-block file="/api/content/technology/apache-flink/code/checkpoint-recovery-model.py" language="python" title="Execute the restore and replay model" /%}
+
+### Exactly once has an explicit boundary
+
+Flink checkpoints can make managed state and replayable source positions consistent as
+if a failure-free execution occurred. End-to-end exactly-once output additionally needs
+a sink that participates in checkpoint coordination, such as a supported transactional
+connector, or an external operation made idempotent by a stable business key.
+
+- A retried record can execute user code more than once during recovery.
+- A checkpoint that was active at failure is not a valid restore point unless it had
+  completed.
+- A transactional database call, HTTP request, email, or payment outside the supported
+  sink protocol needs its own idempotency or reconciliation boundary.
+- Checkpoint interval, duration, timeout, minimum pause, concurrency, and storage should
+  be tuned from observed checkpoint history rather than copied from another job.
+
+Flink's official [checkpointing guide](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/fault-tolerance/checkpointing/)
+describes these controls and recommends durable checkpoint storage for production.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate automated recovery from planned operations
+
+Checkpoints and savepoints use related snapshot mechanisms but have different owners and
+lifecycle contracts.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Checkpoint" eyebrow="Automatic recovery" icon="repeat" tone="green" %}
+Flink creates checkpoints as part of job execution and normally manages their cleanup.
+Use retained checkpoints only with an explicit storage and ownership policy.
+{% /concept-card %}
+{% concept-card title="Savepoint" eyebrow="Planned operation" icon="storage" tone="blue" %}
+An operator deliberately creates and owns a savepoint for upgrades, rescaling, migration,
+or controlled stop-and-resume. Stable operator UIDs preserve state mapping across job
+graph changes.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not use savepoints as the routine failure-recovery mechanism or assume every job
+change is state-compatible. Follow Flink's official
+[checkpoint and savepoint comparison](https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/checkpoints_vs_savepoints/)
+and test the exact upgrade path with production-like state.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the slowest edge, not the average job
+
+**Backpressure** occurs when a downstream subtask cannot accept records as quickly as
+upstream tasks produce them. Pressure propagates backward through bounded network
+buffers; it is a signal that one path is saturated, blocked, skewed, or waiting.
+
+### Diagnose in this order
+
+1. Find the backpressured and busy subtasks in the job graph rather than scaling every
+   operator.
+2. Compare records in and out, busy time, backpressured time, idle time, checkpoint
+   alignment or start delay, state size, and sink latency at subtask level.
+3. Inspect key distribution. Raising parallelism cannot split one hot key across keyed
+   state owners.
+4. Check external rate limits, connection pools, transaction duration, and sink commit
+   behavior before adding TaskManagers.
+5. Re-run failure and restore tests after changing parallelism, backend, checkpoint mode,
+   buffer behavior, or connector guarantees.
+
+Flink exposes `backPressuredTimeMsPerSecond` and related task metrics in its
+[backpressure monitoring guide](https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/monitoring/back_pressure/).
+
+### Production review checklist
+
+- Define source replay guarantees, timestamp extraction, watermark behavior, and idle
+  partition policy.
+- Bound keyed and window state with aggregation, TTL, cleanup, and skew controls whose
+  data-loss consequences are understood.
+- Store checkpoints durably; alert on failed, slow, growing, and persistently in-flight
+  checkpoints.
+- Verify sink delivery semantics with forced TaskManager, JobManager, network, and
+  destination failures.
+- Give stateful operators stable UIDs and rehearse savepoint restore before upgrades.
+- Track end-to-end freshness and correctness, not only records per second.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/apache-flink/quiz/apache-flink-production-design.json" lessonSlug="apache-flink" title="Apache Flink Production Design Review" /%}

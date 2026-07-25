@@ -1,0 +1,229 @@
+---
+registryId: yolo
+---
+
+{% section-card tone="intro" %}
+## What is YOLO?
+
+**YOLO is a family of object detectors that predicts object locations and labels from
+an image in one neural-network evaluation.** Object detection answers two questions:
+what objects are present, and where is each one? The output is usually a set of boxes,
+class labels, and confidence scores rather than one label for the whole image.
+
+The original [YOLO paper](https://arxiv.org/abs/1506.02640) framed detection as direct
+regression from the full image to bounding boxes and class probabilities. That unified
+path established the general one-stage idea. Later systems carrying the YOLO name come
+from multiple research groups and toolchains, so a version number alone does not define
+one canonical architecture, license, output format, or deployment contract.
+
+{% callout variant="info" %}
+### Core invariant
+
+A detection is not just a model score. The production result depends on the exact
+preprocessing, model export, confidence policy, overlap handling, class mapping, and
+runtime. Validate that complete path on representative data and target hardware.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one image through the detector
+
+{% process-flow %}
+{% process-step number="1" title="Prepare the tensor" label="Input contract" %}
+Decode color consistently, resize or letterbox to an accepted shape, normalize exactly
+as training expected, and retain the transform needed to map boxes back to source
+pixels.
+{% /process-step %}
+{% process-step number="2" title="Extract multi-scale features" label="Network" %}
+A backbone produces visual features. Many implementations combine coarse semantic
+features with finer spatial features so one prediction system can cover several object
+scales.
+{% /process-step %}
+{% process-step number="3" title="Decode candidates" label="Detection head" %}
+The head emits candidate geometry and class-related scores. Anchor use, score
+composition, and tensor layout vary by model family and export, so use that model's
+documented contract.
+{% /process-step %}
+{% process-step number="4" title="Apply product policy" label="Post-processing" %}
+Map coordinates to the source image, filter scores, enforce class rules, and handle
+duplicate overlaps with NMS or the selected model's end-to-end alternative.
+{% /process-step %}
+{% /process-flow %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="One-stage detector" eyebrow="General idea" icon="search" tone="blue" %}
+One learned system directly predicts dense candidates from image features. "One stage"
+does not mean one software operation: decode, copies, post-processing, and application
+logic still add work.
+{% /concept-card %}
+{% concept-card title="Model-specific head" eyebrow="Verify the export" icon="boxes" tone="violet" %}
+Some heads use anchors; others are anchor-free. Some combine objectness and class
+scores; others expose class confidence differently. Read the actual output schema
+instead of assuming all YOLO releases match.
+{% /concept-card %}
+{% concept-card title="Production detector" eyebrow="System boundary" icon="workflow" tone="green" %}
+Capture, decode, resize, inference, post-processing, tracking, serving, and monitoring
+form the user-visible path. A fast forward pass alone does not prove a real-time system.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: make every threshold decision inspectable
+
+Candidate scores answer "how strongly does this model support this candidate?" They are
+not universal probabilities and may be miscalibrated after a domain shift. A confidence
+threshold removes candidates below the product's chosen score floor.
+
+Traditional Non-Maximum Suppression (NMS) then considers candidates from highest score
+to lowest. For two boxes `A` and `B`:
+
+`IoU(A, B) = intersection area / union area`
+
+The common rule implemented by
+[`torchvision.ops.nms`](https://docs.pytorch.org/vision/main/generated/torchvision.ops.nms.html)
+removes a lower-score box when its IoU with a kept box is **greater than** the configured
+threshold. A lower NMS threshold therefore suppresses more overlap; a higher threshold
+allows more overlapping boxes to survive.
+
+{% interactive-block id="technology/yolo-performance" dataFile="/api/content/technology/yolo/data/detection-candidates.json" /%}
+
+### Read the controls as two different policies
+
+- Raise the **confidence floor** when false positive candidates are too costly, but
+  measure the recall lost for small, occluded, or shifted objects.
+- Lower the **NMS IoU threshold** when duplicate detections are too costly, but inspect
+  crowded scenes where two real same-class objects overlap.
+- Decide whether suppression is **class-aware** or **class-agnostic**. Cross-class
+  suppression can remove a legitimate object that happens to occupy the same pixels.
+- Define deterministic tie behavior if equal scores matter. The Torchvision contract
+  notes that equal-score selections can differ across CPU and GPU.
+
+NMS is not an invariant of every YOLO-branded model. For example,
+[YOLOv10](https://arxiv.org/abs/2405.14458) explicitly proposes NMS-free end-to-end
+detection. The lab teaches a traditional post-processing path; verify whether the
+chosen model/export emits pre-NMS candidates or final detections.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 2: fit the complete path, not a marketing benchmark
+
+Input resolution and batching are system decisions:
+
+- A larger input contains more pixels and can preserve more small-object detail, but
+  only validation can show whether that improves the required slices.
+- A larger batch can amortize some execution overhead and improve throughput on some
+  hardware, while adding batch wait and memory pressure.
+- FP16 reduces raw tensor storage relative to FP32, but supported operators, internal
+  precision, output quality, and runtime allocations still need verification.
+
+The lab below calculates raw RGB input storage exactly. It treats model weights,
+activations, runtime workspace, and allocator overhead as a **profiled non-input
+reserve**, because those values cannot be inferred honestly from a YOLO family name.
+Its capacity and latency equations use the batch latency you enter from the target
+runtime.
+
+{% interactive-block id="technology/yolo-deployment-envelope-lab" dataFile="/api/content/technology/yolo/data/deployment-envelope.json" /%}
+
+NVIDIA's current
+[TensorRT optimization guidance](https://docs.nvidia.com/deeplearning/tensorrt/latest/performance/optimization.html)
+describes why batching can improve parallel execution, while also requiring operators
+to try multiple batch sizes because hardware and cache behavior can reverse a generic
+expectation. Measure median and tail latency, throughput, memory, transfers, and the
+whole pipeline under the arrival pattern you actually serve.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Build a reproducible detection contract
+
+### 1. Define the task and error costs
+
+Write the classes, ignored regions, minimum object size, occlusion policy, and
+annotation rules before choosing a model. State the cost of:
+
+- a missed object;
+- a false positive;
+- duplicate boxes around one object;
+- a class confusion;
+- a late or stale result.
+
+These costs determine validation slices and thresholds. They cannot be recovered from
+one aggregate mean Average Precision (mAP) score.
+
+### 2. Preserve geometry across preprocessing
+
+Record the source dimensions, resize scale, and padding offsets. A box predicted in
+model-input coordinates must be mapped back through the inverse transform. Test
+portrait, landscape, tiny, and odd-sized images; never infer correctness from one
+square sample.
+
+### 3. Pin the model and output schema
+
+Version the weights, class-name map, preprocessing, export options, runtime, input
+shape profile, output tensor layout, confidence formula, and post-processing code.
+Current [Ultralytics prediction documentation](https://docs.ultralytics.com/modes/predict/)
+exposes controls such as `conf`, `iou`, `imgsz`, `batch`, and streaming mode, but those
+are toolchain-specific APIs rather than universal YOLO semantics.
+
+### 4. Validate end to end
+
+Measure precision and recall by class, object size, scene type, camera, geography, and
+other safety-relevant slices. Include decode and transfer time, queueing, warm-up,
+post-processing, serialization, and downstream consumers in latency tests.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Implement the two auditable models
+
+The first example implements the exact confidence-first, class-aware NMS rule used in
+the threshold lab. It prints a reason for every candidate and uses deterministic
+score/ID ordering.
+
+{% code-block file="/api/content/technology/yolo/code/class-aware-nms.py" language="python" title="Class-aware NMS with an exact decision trace" /%}
+
+The second example separates exact input-buffer accounting from values that must come
+from a profiler. Its throughput ceiling assumes full batches, so it remains a capacity
+screen rather than a queueing or tail-latency claim.
+
+{% code-block file="/api/content/technology/yolo/code/deployment-envelope.py" language="python" title="Transparent deployment-envelope arithmetic" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate object detection as a changing system
+
+### Monitor the path, not one score
+
+- **Input health:** source dimensions, decode failures, frame age, blur, brightness,
+  crop/letterbox choices, and unexpected camera or codec changes.
+- **Detection health:** candidate and final counts, confidence distributions, NMS
+  suppression rate, class mix, box-size distribution, and threshold version.
+- **Quality health:** delayed labels, slice-level precision/recall, false-positive and
+  miss reviews, annotation disagreement, and drift from the release dataset.
+- **Serving health:** queue age, batch fill, batch wait, input-copy time, model latency,
+  post-processing latency, memory headroom, throttling, and restarts.
+- **Consumer health:** tracker association errors, duplicate alerts, stale events, and
+  application decisions that outlive the frame that produced them.
+
+### Protect known failure boundaries
+
+1. **Preprocessing drift:** training used RGB letterboxing while serving uses a
+   different color order or crop. The model runs successfully but sees a different
+   input contract.
+2. **Coordinate drift:** boxes remain in padded model coordinates and are drawn or
+   acted on as if they were source pixels.
+3. **Threshold transfer:** defaults tuned on a general dataset are applied to a
+   crowded, medical, industrial, or safety-critical domain without slice validation.
+4. **Export mismatch:** the application applies NMS to already-final detections, or
+   assumes final boxes when the export emits raw candidates.
+5. **Capacity collapse:** dynamic batching improves average throughput but batch wait,
+   burst queueing, memory pressure, or a slow post-processor violates the deadline.
+6. **Closed-set overreach:** the detector is forced to choose among known labels and
+   downstream code treats every confident output as proof that the object belongs to
+   the trained class set.
+
+Use canary traffic, shadow comparisons, recorded rollback artifacts, and threshold
+versioning for model or runtime changes. In safety-sensitive systems, object detection
+is evidence for a guarded decision, not the guardrail by itself.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/yolo/quiz/yolo-production-decisions.json" lessonSlug="yolo" title="YOLO Detection and Deployment Decisions" /%}

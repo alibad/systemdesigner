@@ -1,0 +1,195 @@
+---
+registryId: case-study-spotify-recommendations
+---
+
+{% section-card tone="intro" %}
+## What is Spotify's recommendation architecture?
+
+Spotify's recommendation architecture is the system that chooses a small set of songs, artists, podcasts, or playlists for one listener from a catalog far too large to inspect one item at a time. It combines long-term listening history with the listener's current session, then returns results quickly enough to feel immediate.
+
+In plain language: the system first finds plausible music, then decides what belongs near the top, and finally applies product rules such as diversity and availability. The central design problem is not just predicting a click. It is balancing a familiar, low-risk next play with worthwhile discovery while keeping the response fast and explainable.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retrieve a few thousand" eyebrow="Recall" icon="search" tone="blue" %}
+Use several inexpensive sources, such as listening similarity, audio similarity, follows, and local popularity, so relevant tracks enter the pool.
+{% /concept-card %}
+{% concept-card title="Rank the current moment" eyebrow="Precision" icon="activity" tone="violet" %}
+Score a bounded pool using listener history, session signals, and the product surface rather than treating every context the same.
+{% /concept-card %}
+{% concept-card title="Shape a healthy slate" eyebrow="Policy" icon="shield" tone="green" %}
+Remove ineligible results and prevent repetition so one artist, mood, or already-known track does not dominate the experience.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Establish the Listener Decision and Product Boundaries" %}
+
+### Define the decision before the model
+
+This case study focuses on a personalized music surface such as a home shelf, Daily Mix, radio queue, or discovery playlist. A recommendation request needs an ordered slate, not a single prediction: a listener can skip the first track, continue listening, save a song, or leave the product.
+
+The first version should answer these questions explicitly:
+
+- **Who is the listener and what is the moment?** Account history, session sequence, device, locale, time, and surface intent can change what is relevant.
+- **What outcome matters?** Completion and saves are useful positive signals; rapid skips, hides, and repeated exposure are negative signals. Longer-horizon satisfaction needs separate measurement.
+- **What is in scope?** Candidate retrieval, ranking, slate policy, event logging, and fallback serving are in scope. Licensing, catalog ingest, playback delivery, and payments remain upstream dependencies.
+- **What must never happen?** Do not return unavailable content, repeat an item already played in the session, or let an experimental model bypass listener safety and product policy.
+
+{% callout variant="info" %}
+An impression is a training fact. Log the candidates, their positions, the selected slate, policy decisions, and model versions before interpreting a play or skip as preference.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="scale" title="2. Set the Online Budget and Bound the Work" %}
+
+### Work backward from one response deadline
+
+Assume a surface handles **10,000 recommendation requests per second at peak** and has a **100 ms p99** response budget. A naive design that scores 100 million tracks per request is impossible: it would require one trillion scores each second before feature fetches and network time.
+
+Instead, give each stage a smaller, explicit budget:
+
+{% metric-strip %}
+{% metric value="100 ms" label="End-to-end p99" detail="The deadline shared by retrieval, features, ranking, policy, and network overhead." tone="blue" /%}
+{% metric value="1K-10K" label="Candidates" detail="A broad but bounded pool from cheap retrieval sources." tone="cyan" /%}
+{% metric value="100-500" label="Ranked items" detail="The subset that receives rich, request-time features and a heavier model." tone="violet" /%}
+{% metric value="20-50" label="Returned slate" detail="A diverse, policy-compliant set that the product can display or queue." tone="green" /%}
+{% /metric-strip %}
+
+Candidate generation favors recall and speed. Ranking spends more compute on fewer items. A final policy pass protects the listener experience even if a model is wrong or a cached candidate is stale.
+
+{% /accordion-item %}
+
+{% accordion-item id="signals" title="3. Build Evidence from Listening, Audio, and Context" %}
+
+### Use complementary signals, not one universal taste score
+
+Music relevance has social, sonic, and situational parts. A hybrid system gives each source a clear job:
+
+- **Collaborative signals** connect listeners and tracks through co-listening, follows, saves, playlist additions, and shared consumption patterns. They are powerful when interaction history is rich.
+- **Content signals** represent the audio, metadata, and descriptive text of a track or show. They help a new or niche item find similar content before it has much audience behavior.
+- **Context signals** capture the current session: recent plays and skips, device, locale, time of day, and the surface that requested recommendations. Context should be available at decision time, not inferred from future behavior.
+
+The important invariant is point-in-time correctness: a training example may use only information that existed when the listener saw the item. Otherwise the offline evaluation silently leaks the answer from the future.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Long-term profile" eyebrow="Stable preference" icon="user" tone="blue" %}
+Artist affinity, genre patterns, language, and historic saves change more slowly and can be precomputed.
+{% /concept-card %}
+{% concept-card title="Session intent" eyebrow="Fresh context" icon="clock" tone="amber" %}
+Recent skips, repeats, and the active queue show what the listener wants now and need low-latency updates.
+{% /concept-card %}
+{% concept-card title="Item representation" eyebrow="Catalog understanding" icon="disc-3" tone="violet" %}
+Embeddings and metadata make a track retrievable even when it has sparse interaction data.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. Trace the Retrieval, Ranking, and Feedback Loop" %}
+
+### Keep the request path short and the learning path asynchronous
+
+{% system-flow title="Personalized music recommendation request" caption="The online request is bounded; event processing and model training learn from it later without delaying playback." %}
+{% system-node title="Request context" eyebrow="Identify" icon="user" tone="blue" %}
+Resolve listener, session, surface, locale, experiment, and deadline.
+{% /system-node %}
+{% system-node title="Candidate sources" eyebrow="Retrieve" icon="search" tone="cyan" %}
+Merge listening similarity, audio similarity, follows, fresh releases, and controlled popularity fallbacks.
+{% /system-node %}
+{% system-node title="Rank and blend" eyebrow="Score" icon="activity" tone="violet" %}
+Hydrate features and estimate completion, save, skip, and discovery value for the bounded pool.
+{% /system-node %}
+{% system-node title="Policy and response" eyebrow="Protect" icon="shield" tone="green" %}
+Filter unavailable or repeated items, diversify the slate, log the decision, and return the result.
+{% /system-node %}
+{% /system-flow %}
+
+{% process-flow %}
+{% process-step number="1" title="Log exposure" label="Events" %}
+Record the request context, candidate source, score, position, policy actions, and final slate.
+{% /process-step %}
+{% process-step number="2" title="Join outcomes" label="Labels" %}
+Attach plays, skips, completions, saves, hides, and downstream listening using event time and an attribution window.
+{% /process-step %}
+{% process-step number="3" title="Evaluate offline" label="Evidence" %}
+Test time-based holdouts, cold-start slices, calibration, and diversity before exposing a new model.
+{% /process-step %}
+{% process-step number="4" title="Release carefully" label="Operations" %}
+Shadow, canary, experiment, monitor guardrails, and retain an independent rollback path.
+{% /process-step %}
+{% /process-flow %}
+
+{% /accordion-item %}
+
+{% accordion-item id="slate" title="5. Shape the Slate: Relevance, Discovery, and Diversity" %}
+
+### Ranking is not the final decision
+
+A ranker can give every track a useful score, yet a slate made by simply taking the top results may be repetitive. A listener who enjoys one artist should not receive five near-identical tracks in a row, and a discovery product should reserve some exposure for credible but less-certain candidates.
+
+The policy layer applies deterministic constraints after ranking:
+
+- Remove items that are unavailable, blocked, duplicated, or already played in the current session.
+- Cap repeated artists or tightly similar tracks when the surface is meant to support exploration.
+- Allocate a small, measured discovery budget only to candidates that clear a relevance floor.
+- Preserve the source, model version, score, and policy reason for each displayed item so outcomes can be audited.
+
+{% interactive-block id="case-studies/spotify-recommendations-slate-lab" /%}
+
+The lab separates a ranking objective from slate policy. Try a high discovery allocation and compare a calm, context-aware session with a generic strategy: discovery should change the returned tracks and the predicted trade-off, not merely change a label.
+
+{% /accordion-item %}
+
+{% accordion-item id="cold-start" title="6. Handle New Listeners and New Catalog Items" %}
+
+### Begin useful, then earn personalization
+
+Cold start is the period when the system lacks the evidence it normally relies on. A new listener has no history; a new release has few plays; a regional catalog change may make an old candidate set invalid. Treat each case as a gradual transition rather than a reason to force a weak personalized prediction.
+
+| Situation | Useful initial evidence | Safe transition |
+| --- | --- | --- |
+| New listener | Selected genres, artists, language, locale, and broadly popular editorial content | Increase personal weight after observed plays, skips, saves, and follows arrive |
+| New track | Audio and metadata embeddings, artist neighborhood, release context | Add behavioral evidence as real impressions and outcomes accumulate |
+| Sparse session | Long-term profile and surface defaults | Let recent session actions take precedence only after enough current-session evidence exists |
+
+{% callout variant="warn" %}
+Popularity is a fallback, not proof of personal relevance. It can make an empty profile feel alive, but it can also reinforce exposure bias and hide long-tail music unless the product reserves measured discovery opportunities.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="resilience" title="7. Degrade Gracefully Without Breaking Listener Trust" %}
+
+### Decide the fallback before the outage
+
+An online ranker, feature store, or candidate source will eventually be late or unavailable. Serving no recommendations may be acceptable on a secondary shelf, but disrupting playback is usually worse. Define a deadline and a deterministic fallback that still enforces availability, session deduplication, and safety policy.
+
+{% interactive-block id="case-studies/spotify-recommendations-fallback-lab" /%}
+
+The fallback plan is part of the product contract. A cached personalized slate may be safer than generic popularity for an established listener, but only if final policy rechecks availability and removes recently played tracks.
+
+{% /accordion-item %}
+
+{% accordion-item id="measurement" title="8. Measure Quality Beyond Immediate Plays" %}
+
+### Evaluate the system, the listener experience, and the ecosystem
+
+Offline ranking metrics are useful but incomplete because they are trained on previously exposed items. Combine them with controlled experiments and guardrails that test whether the product remains useful over time.
+
+- **Immediate quality:** completion rate, rapid-skip rate, saves, follows, and hide actions by surface and listener segment.
+- **Slate health:** artist concentration, genre and language coverage, repeated exposure, and the share of eligible discovery candidates that receive impressions.
+- **System health:** p50/p95/p99 latency, timeout rate, candidate-source coverage, feature freshness, fallback rate, and policy-filter rate.
+- **Longer horizon:** return frequency, sustained listening, satisfaction research, and creator or catalog exposure effects where relevant.
+
+{% callout variant="tip" %}
+The durable lesson is to make every stage observable. A recommendation that performs poorly could be a retrieval-coverage problem, stale features, a ranker regression, an over-restrictive policy, or a fallback path; the event record must let operators tell those apart.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/spotify-recommendations/quiz/spotify-recommendations.json" lessonSlug="spotify-recommendations" title="Review the recommendation system" /%}

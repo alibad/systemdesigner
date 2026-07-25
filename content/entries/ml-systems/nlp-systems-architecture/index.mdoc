@@ -1,0 +1,207 @@
+---
+registryId: nlp-systems-architecture
+---
+
+{% section-card tone="intro" %}
+## What is an NLP system architecture?
+
+An NLP system architecture is the complete path that turns language into a dependable product decision. It accepts text, applies the exact preprocessing expected by a model, schedules inference, interprets the output, and records enough evidence to operate and improve the system.
+
+This matters because users do not experience a model checkpoint in isolation. They experience queueing, truncation, stale versions, unsafe outputs, and recovery behavior. **The core invariant is that every accepted input must keep its identity, representation version, model version, and decision policy connected from ingestion to outcome.**
+
+If serving and release mechanics are new, review [Real-time ML inference](/ml-systems/real-time-ml-inference) and [Distributed training](/ml-systems/distributed-training-advanced) first.
+{% /section-card %}
+
+{% section-card %}
+## Start with the language decision, not the model
+
+Different NLP products need different paths. Name the decision, deadline, and error cost before selecting an architecture.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Classify or extract" eyebrow="Bounded output" icon="braces" tone="cyan" %}
+Moderation, intent, language, and entity systems map text to a small result. They often use encoder models and can batch inputs with similar lengths.
+{% /concept-card %}
+{% concept-card title="Retrieve or rank" eyebrow="Corpus state" icon="search" tone="blue" %}
+Search and recommendation systems encode queries or documents, then depend on an index whose embedding model, tokenizer, and corpus version must remain compatible.
+{% /concept-card %}
+{% concept-card title="Generate text" eyebrow="Variable output" icon="repeat" tone="violet" %}
+Summarization and conversational systems pay for input prefill and token-by-token output. Context limits, streaming, safety policy, and cancellation become first-class controls.
+{% /concept-card %}
+{% /concept-grid %}
+
+For every workload, write down:
+
+- **Input contract:** supported languages, formats, maximum tokens, privacy class, and malformed-input behavior.
+- **Decision contract:** output schema, confidence or abstention rule, policy checks, and whether humans can override it.
+- **Service contract:** traffic distribution, deadline, freshness, availability, and cost ceiling.
+- **Learning contract:** outcome signal, evaluation slices, retraining trigger, and audit retention.
+{% /section-card %}
+
+{% section-card %}
+## Trace one online request end to end
+
+The model runtime is only one stage. A useful trace joins the same request ID to the exact transformations and decisions that produced the response.
+
+{% system-flow title="Online NLP decision path" caption="The representation contract travels with the request; telemetry links system behavior to later quality evidence." %}
+{% system-node title="Admission" eyebrow="Bound the work" icon="shield" tone="blue" %}
+Authenticate, validate format, detect obvious abuse, enforce token and deadline limits, and assign a request ID.
+{% /system-node %}
+{% system-node title="Representation" eyebrow="Version the input" icon="braces" tone="cyan" %}
+Normalize deliberately, select language handling, tokenize with the pinned vocabulary, and record truncation or chunk boundaries.
+{% /system-node %}
+{% system-node title="Scheduling" eyebrow="Protect the deadline" icon="layers" tone="amber" %}
+Group compatible work within a token budget, cap queue age, and reject or defer requests that cannot finish safely.
+{% /system-node %}
+{% system-node title="Inference" eyebrow="Execute the artifact" icon="server" tone="violet" %}
+Run the pinned model and precision profile, then preserve scores, generated tokens, stop reason, latency, and errors.
+{% /system-node %}
+{% system-node title="Decision" eyebrow="Apply product policy" icon="scale" tone="green" %}
+Calibrate, aggregate chunks, validate output shape, apply safety rules, and return, abstain, escalate, or fall back.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Size tokens and deadlines together
+
+Request count alone hides the work. Two requests can differ by thousands of tokens, and dynamic batching can trade queue wait for throughput. Use the lab to compare encoder and generator profiles, create a deadline miss, then recover by changing the workload or model profile.
+
+The figures are an **illustrative calibration**, not a hardware benchmark. Replace the per-profile throughput, latency, and memory values with measurements from your model, accelerator, tokenizer, precision, and real request-length distribution.
+
+{% interactive-block id="ml-systems/nlp-systems-architecture-calculator" dataFile="/api/content/ml-systems/nlp-systems-architecture/data/serving-capacity-model.json" /%}
+
+Read the result in this order:
+
+1. **Token demand:** `requests/second x tokens/request` is the admitted work rate.
+2. **Replica floor:** divide demand by measured per-replica throughput at a deliberately safe utilization target, then round up.
+3. **Deadline budget:** preprocessing, batch wait, queueing, inference, post-processing, and network time must all fit inside the user-facing target.
+4. **Validation step:** load-test a distribution of short and long inputs. Averages can hide memory pressure and tail latency.
+
+For online generation, time to first token and inter-token latency expose different user experiences. For fixed-output classification, end-to-end decision latency is usually the more useful contract.
+{% /section-card %}
+
+{% section-card %}
+## Choose synchronous and asynchronous paths deliberately
+
+{% concept-grid columns="2" %}
+{% concept-card title="Synchronous serving" eyebrow="The caller is waiting" icon="zap" tone="blue" %}
+Use it when the decision is needed immediately. Keep the path short, enforce a deadline at admission, bound every queue, and define a fallback or explicit rejection.
+{% /concept-card %}
+{% concept-card title="Asynchronous processing" eyebrow="The job can outlive the request" icon="radio" tone="violet" %}
+Use it for large documents, backfills, enrichment, and offline embeddings. Persist job identity, input and model versions, retry state, progress, and idempotent result writes.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not hide an unbounded background queue behind a quick `202 Accepted`. The asynchronous contract still needs maximum job age, retry ownership, cancellation, progress, and a terminal failure state.
+{% /section-card %}
+
+{% section-card %}
+## Inject failures at the representation and serving boundaries
+
+Switch scenarios below and trace the active path. Select a component to inspect its responsibility. The important distinction is whether the system protects **availability**, **correctness**, or **quality**; one fallback rarely protects all three.
+
+{% topology-lab dataFile="/api/content/ml-systems/nlp-systems-architecture/data/runtime-failure-topology.json" /%}
+
+Use explicit responses for each boundary:
+
+- **Input exceeds the contract:** reject, chunk, or route to an asynchronous workflow; never silently discard decisive text.
+- **Tokenizer and model disagree:** stop the rollout. A healthy process can still produce semantically invalid tensors.
+- **Online capacity is exhausted:** shed low-priority work, cap queue age, or use a quality-validated smaller model.
+- **Output confidence is insufficient:** abstain, request more context, or escalate rather than forcing a confident-looking answer.
+- **Quality drifts after deployment:** isolate the affected slice, halt promotion, and roll back the full representation-model-policy bundle.
+{% /section-card %}
+
+{% section-card %}
+## Release one compatible decision bundle
+
+Treat these artifacts as one versioned release. Changing only one can move the decision boundary even when the model weights stay fixed.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze representation" label="Input semantics" %}
+Pin normalization, language routing, tokenizer files, vocabulary, maximum length, truncation or chunking, and feature schemas.
+{% /process-step %}
+{% process-step number="2" title="Package the decision" label="Model plus policy" %}
+Version weights, runtime and precision, calibration, labels, thresholds, prompt or decoder settings, and safety rules.
+{% /process-step %}
+{% process-step number="3" title="Gate by slice" label="Offline and shadow" %}
+Compare quality, abstention, latency, and error-cost metrics across languages, length buckets, protected groups where appropriate, and known hard cases.
+{% /process-step %}
+{% process-step number="4" title="Canary with rollback" label="Production evidence" %}
+Join system metrics to delayed outcomes, preserve the prior compatible bundle, and stop automatically when a guardrail fails.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Implement token-aware admission and batching
+
+Batching by request count can combine one huge sequence with many small ones and exceed the intended work budget. This dependency-free example admits requests by total tokens, preserves arrival order, and rejects an item that cannot fit the configured ceiling.
+
+{% code-block file="/api/content/ml-systems/nlp-systems-architecture/code/token-budget-batcher.py" language="python" title="token-budget-batcher.py" /%}
+
+The production scheduler also needs:
+
+- a maximum wait tied to the remaining end-to-end deadline;
+- separate limits for concurrent sequences and scheduled tokens;
+- cancellation when the caller leaves or the deadline expires;
+- fairness so long requests do not starve or monopolize capacity;
+- metrics for queue age, admitted and rejected tokens, batch fill, and execution time.
+{% /section-card %}
+
+{% section-card %}
+## Gate releases on slices, not one average
+
+A global score can improve while one language or long-document slice regresses. The example below evaluates each slice against explicit accuracy and abstention limits, then proves that one weak slice blocks the release.
+
+{% code-block file="/api/content/ml-systems/nlp-systems-architecture/code/slice-release-gate.py" language="python" title="slice-release-gate.py" /%}
+
+Choose metrics from the product error:
+
+- **Classification:** precision and recall by class, calibration, abstention coverage, and cost-weighted errors.
+- **Extraction:** span or field accuracy, missing-field rate, provenance, and review rate.
+- **Retrieval:** recall at a cutoff, ranking quality, empty-result rate, freshness, and slice coverage.
+- **Generation:** task success, groundedness where evidence exists, safety violations, refusal quality, and human preference with a defined rubric.
+
+Keep system and quality metrics joinable by bundle version and privacy-safe request cohort. Latency without quality can reward a broken fallback; quality without traffic and error data can hide who never received an answer.
+{% /section-card %}
+
+{% section-card %}
+## Operate the full decision path
+
+### Watch four signal families
+
+- **Traffic and shape**
+  - requests and tokens per second;
+  - input and output length distributions;
+  - language, task, tenant, and priority mix without high-cardinality raw text labels.
+- **System behavior**
+  - queue age, batch fill, accelerator utilization, memory pressure, timeouts, cancellations, and fallback rate;
+  - latency distributions for admission, representation, queueing, inference, and policy.
+- **Decision behavior**
+  - confidence or score distribution, abstention, class mix, output length, safety decisions, and schema failures;
+  - disagreement between champion, shadow, and fallback paths.
+- **Outcome quality**
+  - delayed labels, human corrections, appeals, task completion, and slice-specific regressions;
+  - data freshness and the age of the evaluation set.
+
+### Prepare recovery before incidents
+
+- Keep the prior representation-model-policy bundle deployable.
+- Make asynchronous writes idempotent and replayable from an explicit checkpoint.
+- Quarantine malformed or incompatible inputs with enough metadata to diagnose them safely.
+- Rehearse overload, accelerator loss, dependency timeout, and rollback under realistic request lengths.
+- Define who can lower a threshold, activate a fallback, stop a rollout, or replay jobs.
+{% /section-card %}
+
+{% section-card %}
+## Verify the primary contracts
+
+These official references support the implementation details used in this lesson:
+
+- [Hugging Face padding and truncation](https://huggingface.co/docs/transformers/main/pad_truncation) explains how variable-length batches become rectangular tensors and how maximum-length policies are applied.
+- [Ray Serve dynamic request batching](https://docs.ray.io/en/latest/serve/advanced-guides/dyn-req-batch.html) documents batch wait, maximum batch size, and custom token-based batch sizing for NLP workloads.
+- [vLLM optimization and tuning](https://docs.vllm.ai/en/stable/configuration/optimization/) documents scheduled-token budgets and the latency-throughput trade-offs of chunked prefill.
+- [Prometheus histograms and summaries](https://prometheus.io/docs/practices/histograms/) explains latency distributions and why precomputed quantiles cannot simply be averaged across replicas.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/nlp-systems-architecture/quiz/nlp-systems-architecture.json" lessonSlug="nlp-systems-architecture" title="NLP Systems Architecture Production Check" /%}

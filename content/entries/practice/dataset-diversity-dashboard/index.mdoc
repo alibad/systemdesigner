@@ -1,0 +1,314 @@
+---
+registryId: practice-dataset-diversity-dashboard
+---
+
+{% section-card tone="intro" %}
+## What is a dataset diversity dashboard?
+
+A dataset diversity dashboard measures whether training data covers the people, topics, language patterns, task types, and difficulty levels a model is expected to handle. It turns thousands of examples into an evidence-backed release decision: accept the dataset, collect targeted data, or investigate an uncertain slice.
+
+The core invariant is simple: **a high average score must never hide a weak critical slice or missing evidence**. Every score needs a named population, dimension, target, uncertainty estimate, and metric version.
+
+- **Design challenge:** Build an ML system that analyzes 10,000 prompt-response pairs per dataset and gives customers trustworthy, actionable diversity evidence.
+- **Duration:** 45 minutes
+- **Difficulty:** Intermediate
+- **Focus:** ML analytics, product decisions, and dataset governance
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Measure coverage" eyebrow="Question 1" icon="search" tone="blue" %}
+Does the dataset represent the domains, structures, difficulty levels, and populations required by its intended use?
+{% /concept-card %}
+{% concept-card title="Expose uncertainty" eyebrow="Question 2" icon="warning" tone="amber" %}
+Are missing metadata, unstable clusters, and small sample sizes visible instead of silently becoming reassuring scores?
+{% /concept-card %}
+{% concept-card title="Recommend action" eyebrow="Question 3" icon="route" tone="green" %}
+Can a customer move from a failed slice to a specific collection, cleanup, annotation, or taxonomy task?
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Business Boundary" %}
+
+
+### Define what the product decides
+
+The dashboard helps a customer decide whether a conversational training dataset is ready for delivery. It does not claim that diversity alone proves model quality or fairness. A release decision combines automated coverage metrics with reviewable examples and explicit customer requirements.
+
+**Functional requirements**
+
+- Upload a dataset and validate its schema, consent metadata, and project boundary.
+- Profile topics, prompt structures, response lengths, difficulty, language, and regional representation.
+- Compare each dimension and slice with a versioned customer target.
+- Drill from a score into representative, missing, and suspicious examples.
+- Recommend targeted remediation and preserve the evidence used for approval.
+
+**Non-functional requirements**
+
+- Analyze a 10,000-item dataset within 30 minutes.
+- Keep cached dashboard filtering and drill-down interactions below 500 ms p95.
+- Isolate raw examples, embeddings, targets, and reports by tenant and project.
+- Mark incomplete or uncertain analysis as `insufficient evidence`, never as a passing score.
+- Reproduce any report from its dataset, taxonomy, metric, and model versions.
+
+### Ask questions that change the architecture
+
+1. **What is the intended model use?** A tutoring assistant and a legal support assistant need different domains, language styles, and risk slices.
+2. **Which dimensions are contractual?** Some customers require hard floors for language or regional coverage; others treat those dimensions as advisory.
+3. **What metadata is trustworthy?** Demographic or regional attributes may be absent, inferred, sensitive, or legally restricted.
+4. **What costs more?** A false pass can ship a brittle dataset, while a false failure creates avoidable collection and review work.
+5. **How should examples be exposed?** Customer reviewers need evidence, but access must obey consent, retention, and least-privilege rules.
+
+### State the initial scope
+
+- Include English prompt-response datasets with supplied project metadata.
+- Analyze text only; defer image, audio, and cross-modal coverage.
+- Produce decision support, not an automatic claim of fairness or legal compliance.
+- Recompute metrics when the dataset, target contract, taxonomy, or analysis model changes.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Data, Compute, and Dashboard Load" %}
+
+
+### Turn the scenario into explicit assumptions
+
+- **Dataset size:** 10,000 prompt-response pairs, averaging 2 KB each.
+- **Project volume:** 20 projects per month normally and 35 during peak periods.
+- **Analysis cadence:** three snapshots per project: draft, remediation, and final review.
+- **Embedding shape:** one 768-dimension float32 vector per prompt-response pair.
+- **Dashboard audience:** up to 10 concurrent reviewers per project.
+
+{% metric-strip %}
+{% metric value="20 MB" label="Raw text" detail="10,000 pairs x 2 KB before object-store overhead." tone="blue" /%}
+{% metric value="31 MB" label="Embeddings" detail="10,000 x 768 x 4 bytes before index overhead." tone="violet" /%}
+{% metric value="105" label="Peak analyses/month" detail="35 projects x 3 snapshots." tone="amber" /%}
+{% metric value="<500 ms" label="Cached filter p95" detail="Serve pre-aggregated slices instead of rescanning text." tone="green" /%}
+{% /metric-strip %}
+
+### Budget the batch path
+
+At 40 items/s, embedding 10,000 items takes about **250 seconds** of model time. Topic assignment, linguistic features, slice aggregation, uncertainty estimation, and report materialization can comfortably fit inside the 30-minute target with bounded parallel workers.
+
+The raw dataset is small; the operational cost comes from repeated embeddings, similarity analysis, model-version overlap, and reviewable evidence. Store immutable raw snapshots in object storage, compact numeric features in an analytical store, and precompute the most common slice queries.
+
+### Size the serving path separately
+
+Dashboard reads should never wait for the batch pipeline. Publish a versioned report snapshot containing:
+
+- scorecards and confidence intervals;
+- histogram and slice aggregates;
+- representative and flagged example IDs;
+- target contract and analysis lineage;
+- remediation status and reviewer decisions.
+
+{% /accordion-item %}
+
+{% accordion-item id="ml-framing" title="3. Frame Diversity as a Measured Decision" %}
+
+
+### Separate diversity dimensions before combining them
+
+There is no universal ground-truth diversity label. The system computes several interpretable measurements and evaluates them against a use-case contract.
+
+- **Topic coverage:** distribution across required domains and subdomains.
+- **Linguistic variety:** prompt openings, syntax, register, and question or instruction forms.
+- **Complexity coverage:** basic, intermediate, and advanced reasoning or response demands.
+- **Representation coverage:** supplied language, locale, or population metadata where collection and use are permitted.
+- **Uniqueness:** exact and near-duplicate rates so repetition cannot masquerade as coverage.
+
+Use exact counts and simple histograms as the baseline. Add embeddings, topic models, and clustering only when they reveal semantic repetition or uncategorized themes that rules miss.
+
+### Build a scorecard without hiding weak slices
+
+{% interactive-block id="practice/dataset-diversity-dashboard-scorecard-lab" /%}
+
+The weighted score helps prioritize work, but release policy needs hard floors and evidence checks. Version the weights and thresholds as a customer contract rather than tuning them until one dataset passes.
+
+### Treat inferred attributes carefully
+
+- Prefer consented, supplied metadata over demographic inference from text.
+- Report `unknown` as a real slice instead of distributing it across known groups.
+- Show confidence intervals when a slice contains few examples.
+- Never infer protected attributes merely to make a dashboard look complete.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. Design the End-to-End ML Architecture" %}
+
+
+### Keep raw evidence separate from derived judgments
+
+{% system-flow title="Versioned diversity analysis path" caption="Every report points back to an immutable dataset snapshot and forward to reviewable examples and actions." %}
+{% system-node title="Upload gateway" eyebrow="Validate" icon="cloud" tone="blue" %}
+Authenticate the project, scan the schema, enforce consent and retention policy, and create an immutable snapshot ID.
+{% /system-node %}
+{% system-node title="Feature pipeline" eyebrow="Represent" icon="braces" tone="cyan" %}
+Compute text statistics, approved metadata features, embeddings, topic assignments, and duplicate signals.
+{% /system-node %}
+{% system-node title="Metric engine" eyebrow="Measure" icon="gauge" tone="violet" %}
+Aggregate dimensions and slices, estimate uncertainty, and compare results with the versioned target contract.
+{% /system-node %}
+{% system-node title="Report store" eyebrow="Publish" icon="database" tone="amber" %}
+Materialize scorecards, distributions, lineage, and example references for low-latency reads.
+{% /system-node %}
+{% system-node title="Review workspace" eyebrow="Act" icon="users" tone="green" %}
+Let customers inspect evidence, assign remediation, rerun analysis, and record the final approval decision.
+{% /system-node %}
+{% /system-flow %}
+
+### Split responsibilities by workload
+
+**Batch analysis plane**
+
+- Orchestrate idempotent feature jobs by snapshot and model version.
+- Reuse compatible embeddings while preventing version mixing.
+- Write partial results to staging and publish only a complete report manifest.
+- Bound retries and dead-letter corrupt or policy-restricted records.
+
+**Interactive serving plane**
+
+- Read immutable report snapshots through a tenant-scoped API.
+- Filter pre-aggregated slices and page example references.
+- Resolve raw text only after a separate authorization check.
+- Send remediation and approval events to an append-only audit log.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep Dive on Metrics, Topics, and Evidence" %}
+
+
+### Compute interpretable metrics first
+
+For a categorical dimension, normalized Shannon entropy can describe evenness, but it does not know whether the categories are correct or required. Pair it with explicit target coverage and minimum sample counts.
+
+For semantic uniqueness, avoid an all-pairs comparison. Use embeddings and approximate nearest-neighbor retrieval to find likely duplicate neighborhoods, then verify candidates with lexical and pairwise signals. Report both cluster size and representative examples.
+
+### Make topic modeling reviewable
+
+1. Seed a customer-approved taxonomy for known required domains.
+2. Assign examples with confidence and keep an `other/unknown` bucket.
+3. Cluster the unassigned examples to discover emerging themes.
+4. Ask a reviewer to name, merge, split, or reject unstable topics.
+5. Freeze the reviewed taxonomy version before computing a release report.
+
+### Preserve evidence at every level
+
+{% concept-grid columns="3" %}
+{% concept-card title="Score" eyebrow="Summary" icon="gauge" tone="blue" %}
+Show the value, target, weight, hard floor, sample count, and confidence interval.
+{% /concept-card %}
+{% concept-card title="Slice" eyebrow="Diagnosis" icon="layers" tone="violet" %}
+Show which domain, structure, complexity, or approved metadata group created the gap.
+{% /concept-card %}
+{% concept-card title="Examples" eyebrow="Evidence" icon="search" tone="amber" %}
+Show representative, missing, duplicate, and outlier examples under access control.
+{% /concept-card %}
+{% /concept-grid %}
+
+An overall score without this drill-down is not an explanation. It is only a number.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Build Evaluation and QA Release Gates" %}
+
+
+### Validate each analytical stage
+
+- **Taxonomy assignment:** precision, recall, calibration, and `unknown` rate on reviewer-labeled examples.
+- **Near-duplicate detection:** pair precision and recall plus cluster over-merge and fragmentation rates.
+- **Complexity classification:** agreement with a rubric-based, multi-reviewer audit set.
+- **Recommendations:** percentage accepted by reviewers and measured gap reduction after remediation.
+- **System behavior:** report completeness, p95 analysis time, cached filter latency, and failed-job recovery.
+
+### Build leakage-resistant evaluation data
+
+- Split by source, collection batch, and duplicate cluster so templates do not cross train and test sets.
+- Keep a stable audit set for comparing metric and model versions.
+- Report results by domain, prompt structure, length, language, and customer-defined critical slice.
+- Measure reviewer agreement; an ambiguous rubric should not become a confident model label.
+
+### Require a report release manifest
+
+A publishable report records the raw snapshot checksum, consent policy, feature code, embedding model, taxonomy, metric formulas, target contract, sample counts, and completion state. Release only when critical jobs succeeded and minimum evidence thresholds are met.
+
+{% callout variant="warn" %}
+**A dashboard is not a fairness certificate.** Dataset coverage metrics can reveal gaps within their declared scope. They cannot prove that a downstream model will be unbiased, safe, or effective without model-level evaluation.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate the Pipeline and Repair Failed Coverage" %}
+
+
+### Monitor the evidence pipeline, not only the infrastructure
+
+- Track queue age, job failures, model latency, report freshness, and cache errors.
+- Track `unknown` rates, cluster-size shifts, score distributions, small-slice counts, and reviewer overrides.
+- Alert when a report mixes versions, loses required metadata, or remains partially published.
+- Assign separate owners for data policy, metric validity, pipeline reliability, and customer approval.
+
+### Practice choosing the right remediation
+
+{% interactive-block id="practice/dataset-diversity-dashboard-remediation-lab" /%}
+
+### Design bounded degraded modes
+
+{% process-flow %}
+{% process-step number="1" title="Quarantine the snapshot" label="Schema or consent failure" %}
+Reject unsafe records before feature computation and return exact repair instructions.
+{% /process-step %}
+{% process-step number="2" title="Publish no verdict" label="Partial analysis" %}
+Keep the previous complete report visible and label the new run as incomplete.
+{% /process-step %}
+{% process-step number="3" title="Freeze approval" label="Version mismatch" %}
+Allow exploration, but block release until features, taxonomy, metrics, and targets align.
+{% /process-step %}
+{% process-step number="4" title="Rerun affected stages" label="Corrected evidence" %}
+Invalidate only dependent aggregates, preserve audit history, and publish a new report version.
+{% /process-step %}
+{% /process-flow %}
+
+Never retry a corrupt record forever or silently drop it from the denominator. Both behaviors can make a broken dataset appear healthier.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Compare Trade-offs and Plan Extensions" %}
+
+
+### Defend the main choices
+
+- **One score vs a scorecard:** one number is easy to scan, but a scorecard with hard floors preserves critical slice failures. Use the aggregate only as a summary.
+- **Fixed taxonomy vs unsupervised topics:** fixed categories support contracts and comparison; clustering discovers new themes. Combine them through a reviewed `other/unknown` path.
+- **Batch vs streaming:** batch snapshots are reproducible and sufficient for 10,000 items; add incremental updates only when collection teams need rapid feedback.
+- **Inferred vs supplied metadata:** inference may fill charts but creates ethical, legal, and validity risks. Prefer consented metadata and show unknown coverage explicitly.
+- **Automation vs human review:** automate counting and candidate discovery; keep ambiguous labels, sensitive attributes, and final acceptance reviewable.
+
+### Name the residual risks
+
+- A customer target can encode a poor or discriminatory definition of diversity.
+- Small slices create unstable percentages and misleading rank changes.
+- Topic and complexity models drift as language and product scope evolve.
+- Reviewers may disagree or optimize toward the visible score.
+- Raw examples and embeddings can expose sensitive customer data.
+
+### Summarize the interview answer
+
+Start with the intended model use and a versioned diversity contract. Analyze immutable dataset snapshots, compute interpretable dimensions, expose unknowns and uncertainty, and materialize a low-latency report with drill-down evidence. Use weighted scores for prioritization, hard floors for critical slices, and targeted remediation for failures. Publish only complete, reproducible reports and evaluate the downstream model separately.
+
+**Extensions after the core system is healthy**
+
+- Add multilingual and cross-lingual coverage with language-specific evaluation.
+- Support image, audio, and video dimensions without forcing incompatible embeddings onto one scale.
+- Suggest collection tasks ranked by expected gap reduction and cost.
+- Compare dataset versions while separating real improvement from metric-version changes.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/dataset-diversity-dashboard/quiz/dataset-diversity-dashboard-design-review.json"
+   lessonSlug="practice-dataset-diversity-dashboard"
+   title="Dataset Diversity Dashboard Design Review" /%}

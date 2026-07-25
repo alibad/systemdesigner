@@ -1,0 +1,190 @@
+---
+registryId: flashattention-memory-optimization
+---
+
+{% section-card tone="intro" %}
+## What is FlashAttention?
+
+**FlashAttention is an IO-aware way to compute dense, exact scaled dot-product attention without writing the full attention matrix to slow accelerator memory.** It tiles queries, keys, and values into fast on-chip memory, maintains numerically stable softmax statistics, and writes compact results back to high-bandwidth memory (HBM).
+
+It is a systems optimization, not a different attention rule. Dense self-attention still evaluates:
+
+`Attention(Q, K, V) = softmax(QK^T / sqrt(d))V`
+
+and still performs quadratic work in sequence length. The change is the execution order and memory traffic. Floating-point results can differ slightly because operations are regrouped, so “exact” means the same mathematical attention rather than bitwise identity.
+
+{% callout variant="info" %}
+### Core invariant
+
+A FlashAttention path is releasable only when it preserves the model's attention contract within reviewed numeric tolerances, dispatches to a supported kernel for every required shape, improves measured target workloads, fits the full device budget, and retains an exercised fallback.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Name the tensors before optimizing them
+
+Let `B` be batch size, `Hq` query heads, `Hkv` key/value heads, `N` sequence length, and `d` head dimension.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Q, K, and V" eyebrow="Inputs" icon="layers" tone="blue" %}
+Queries have shape `B x Hq x N x d`. Keys and values use `B x Hkv x N x d`. In standard multi-head attention `Hq = Hkv`; grouped-query attention can use fewer KV heads.
+{% /concept-card %}
+{% concept-card title="Scores and probabilities" eyebrow="Quadratic intermediates" icon="boxes" tone="rose" %}
+`S = QK^T / sqrt(d)` and `P = softmax(S)` each have shape `B x Hq x N x N` when materialized. These tensors create the familiar quadratic activation pressure.
+{% /concept-card %}
+{% concept-card title="Output and row statistics" eyebrow="Exact result" icon="gauge" tone="green" %}
+`O = PV` has shape `B x Hq x N x d`. A tiled algorithm carries a running row maximum and normalization term so independently processed blocks combine into the same softmax result.
+{% /concept-card %}
+{% concept-card title="KV cache" eyebrow="Autoregressive serving" icon="database" tone="violet" %}
+Serving stores keys and values across layers. Cache storage scales with `B x Hkv x N x d x layers`; FlashAttention does not remove this separate linear memory term.
+{% /concept-card %}
+{% /concept-grid %}
+
+A simple materialized implementation may hold both `S` and `P`, roughly `2 x B x Hq x N^2 x bytes_per_element` before other saved tensors. FlashAttention avoids those full HBM allocations. The original algorithm proves linear additional storage beyond inputs and output for one attention problem, but that statement is not an end-to-end model-memory guarantee.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow the IO-aware execution
+
+{% process-flow %}
+{% process-step number="1" title="Load bounded tiles" label="HBM to on chip" %}
+Move blocks of Q, K, and V into SRAM or shared memory sized for the target kernel and head dimension.
+{% /process-step %}
+{% process-step number="2" title="Compute local scores" label="Quadratic math" %}
+Evaluate a score tile. Dense exact attention still visits the required query-key pairs.
+{% /process-step %}
+{% process-step number="3" title="Merge softmax state" label="Stable reduction" %}
+Update the running maximum and normalization sum, rescaling prior partial output when the maximum changes.
+{% /process-step %}
+{% process-step number="4" title="Accumulate and discard" label="Less HBM traffic" %}
+Apply the local probabilities to V, accumulate O, then discard the score tile instead of materializing the full N by N surface.
+{% /process-step %}
+{% /process-flow %}
+
+The backward pass recomputes attention tiles from Q, K, V, O, and saved normalization state rather than loading a stored probability matrix. That can add arithmetic while reducing reads, writes, and saved activation bytes. Whether wall-clock time improves depends on the device and workload being limited by the traffic that the kernel removes.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 1: budget the whole training or serving step
+
+Change sequence length and microbatch, then compare materialized and tiled execution inside two workload envelopes. The model shows why deleting an N by N intermediate can be decisive at long context while weights, optimizer state, KV cache, and other activations can still dominate the device.
+
+{% interactive-block id="ml-systems/flashattention-memory-optimization-calculator" dataFile="/api/content/ml-systems/flashattention-memory-optimization/data/attention-memory-budget.json" /%}
+
+Read the controls as scaling laws:
+
+- Doubling `N` multiplies materialized score storage and dense-attention FLOPs by about four. Tiled saved state grows roughly linearly, but the dense arithmetic remains quadratic.
+- Doubling `B` or `Hq` doubles the score surface. Grouped-query attention reduces K/V and KV-cache terms through `Hkv`; it does not remove query-head score work.
+- Increasing `d` grows Q/K/V/output bytes and matrix-multiply work. It also raises register and on-chip-memory pressure, which can change kernel eligibility or performance.
+- More resident layers multiply saved training activations. Activation checkpointing changes how many layers stay resident, but recomputation has a compute cost.
+
+The lab is deliberately a planning estimate. Allocator fragmentation, padding, compiler workspaces, distributed collectives, logits, temporary casts, and framework-specific saved tensors require measurement on the real step.
+{% /section-card %}
+
+{% section-card %}
+## Dispatch is an input-dependent runtime decision
+
+PyTorch's `scaled_dot_product_attention` can select among enabled fused implementations and a math implementation. Each fused path has input limitations. If a caller forces a fused backend and the input is unsupported, PyTorch reports why it cannot run; production code must choose whether to fail closed or use a broader exact fallback.
+
+The official `flash-attn` package currently documents these important boundaries:
+
+- The CUDA FlashAttention-2 path targets Ampere, Ada, and Hopper, accepts FP16 or BF16, and supports head dimensions up to 256.
+- Turing uses a separate repository with a narrower feature surface.
+- The ROCm composable-kernel path targets documented AMD families, accepts FP16 or BF16, and supports forward/backward head dimensions up to 256.
+- Hardware generation is only one gate. Dtype, head dimension, layout, causal or other masking, dropout, forward/backward mode, variable-length representation, and package/framework version also participate.
+
+{% callout variant="warn" %}
+Do not infer the selected kernel from an API name. A call to `scaled_dot_product_attention` describes the operation; the installed runtime decides the implementation from the actual inputs and enabled backends.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 2: exercise support, fallback, and rejection
+
+Choose hardware, dtype, head dimension, masking, and training mode. The lab checks a direct official-package candidate and routes unsupported combinations to PyTorch auto-dispatch or an explicit pre-run rejection.
+
+{% interactive-block id="ml-systems/flashattention-kernel-dispatch-lab" dataFile="/api/content/ml-systems/flashattention-memory-optimization/data/kernel-dispatch-matrix.json" /%}
+
+Use a capability probe at process start and again in release tests. Log the device, framework and kernel-package versions, dtype, shape, mask mode, dropout, and selected execution evidence. Keep the math backend enabled for graceful fallback unless latency or memory policy requires the service to reject unsupported inputs.
+
+{% code-block file="/api/content/ml-systems/flashattention-memory-optimization/code/sdpa-dispatch-and-fallback.py" language="python" title="Probe a fused SDPA path and preserve fallback" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Prove correctness before claiming performance
+
+Tiling and online softmax preserve the exact attention formula, but low-precision arithmetic, backend accumulation choices, masking semantics, and evaluation order can produce numeric differences. Compare against a trusted math path across the release shape matrix.
+
+Test at least:
+
+- forward outputs and Q/K/V gradients, using tolerances reviewed per dtype and task;
+- causal and non-causal behavior, including unequal query and key lengths if supported;
+- minimum, typical, boundary, and maximum `B`, `Hq`, `Hkv`, `N`, and `d`;
+- variable-length batches, padding or packing, GQA/MQA, dropout, and deterministic settings used by the model;
+- all-masked rows, extreme logits, empty or tiny sequences, and non-contiguous layouts where legal;
+- model-level loss, task metrics, and critical output slices, not only one random tensor.
+
+Do not use a single universal tolerance or require bitwise equality. Compare the candidate's error with the numeric behavior of the chosen reference and investigate shape-specific outliers.
+
+{% code-block file="/api/content/ml-systems/flashattention-memory-optimization/code/verify-attention-correctness.py" language="python" title="Compare outputs and gradients with the math backend" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Benchmark the kernel and the end-to-end workload
+
+A fused kernel is not a universal speedup. Short sequences may not amortize launch and setup costs; a large head dimension can increase on-chip pressure; unsupported inputs can fall back; and model time may be dominated by projections, MLPs, communication, data loading, KV-cache movement, or sampling.
+
+Use two benchmark levels:
+
+1. **Kernel microbenchmark:** hold `B`, heads, `N`, `d`, dtype, mask, dropout, and pass direction constant. Warm up, synchronize asynchronous work, collect repeated latency statistics, and record peak allocated and reserved bytes.
+2. **End-to-end benchmark:** compare full training steps or serving requests with identical model, compile state, batch/sequence distribution, concurrency, preprocessing, device clocks, and runtime versions. Track throughput and latency percentiles as well as memory and correctness.
+
+Benchmark a matrix, not one favorable point. Include tiny, common, long-context, boundary head-dimension, ragged, and fallback shapes. Record OOM as a result rather than silently shrinking one backend's batch.
+
+{% code-block file="/api/content/ml-systems/flashattention-memory-optimization/code/benchmark-attention-kernels.py" language="python" title="Measure synchronized latency and peak allocation" /%}
+{% /section-card %}
+
+{% section-card %}
+## Release the optimization as a reversible change
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the contract" label="Artifact" %}
+Pin framework, kernel package, compiler, driver, and container versions. Store the supported shape and dtype manifest.
+{% /process-step %}
+{% process-step number="2" title="Gate with evidence" label="Preproduction" %}
+Run dispatch probes, output/gradient checks, target-shape benchmarks, and full-step memory tests on each hardware class.
+{% /process-step %}
+{% process-step number="3" title="Canary by workload" label="Production" %}
+Start with bounded traffic. Monitor fallback or rejection counts, OOMs, latency percentiles, throughput, peak memory, and model-quality proxies.
+{% /process-step %}
+{% process-step number="4" title="Rollback cleanly" label="Operations" %}
+Keep a compatible SDPA math or prior-kernel path warm, define automatic stop conditions, and retain the exact evidence manifest for incident review.
+{% /process-step %}
+{% /process-flow %}
+
+Re-run the release matrix when the model changes sequence policy, head layout, mask or dropout behavior, when the runtime stack changes, or when traffic moves to a new device family. Kernel support and dispatch rules are versioned dependencies.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Avoid conclusions the measurements cannot support
+
+- Do not say FlashAttention changes dense exact-attention compute from quadratic to linear.
+- Do not report removed score-matrix bytes as the total model-memory reduction.
+- Do not assume an eligible kernel is faster for every sequence, batch, or head dimension.
+- Do not silently benchmark a fallback and label the result FlashAttention.
+- Do not compare unsynchronized GPU launch time or unmatched compile/warmup states.
+- Do not ship without output and gradient checks, target-hardware evidence, telemetry, and rollback.
+{% /section-card %}
+
+{% section-card %}
+## Primary and official references
+
+- [FlashAttention paper: exact attention with IO awareness](https://arxiv.org/abs/2205.14135)
+- [FlashAttention-2 paper: parallelism and work partitioning](https://tridao.me/publications/flash2/flash2.pdf)
+- [Official flash-attn implementation and current support matrix](https://github.com/Dao-AILab/flash-attention)
+- [PyTorch scaled dot-product attention and backend controls](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+- [PyTorch numerical accuracy notes for SDPA](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
+- [PyTorch benchmark utilities](https://docs.pytorch.org/docs/stable/benchmark_utils.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/flashattention-memory-optimization/quiz/flashattention-memory-optimization.json" lessonSlug="flashattention-memory-optimization" title="FlashAttention and Memory Check" /%}

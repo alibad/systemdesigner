@@ -1,0 +1,160 @@
+---
+registryId: fundamentals-message-queues
+---
+
+{% section-card tone="intro" %}
+## What is a message queue?
+
+A **message queue** is a durable handoff between a producer that creates work and a consumer that performs it later. The producer publishes a message to a broker, receives confirmation that the broker accepted it, and continues without waiting for the consumer to finish.
+
+Queues matter when traffic arrives faster than work can be processed or when a slow dependency should not hold an entire request open. They absorb short bursts, isolate failures, and let producers and consumers scale independently.
+
+The core invariant is: **every accepted message must reach an explicit outcome: processed, retrying, dead-lettered, or deliberately expired.** A low queue depth is not enough if work is lost or applied twice.
+{% /section-card %}
+
+{% system-flow title="One message, four ownership boundaries" caption="Durable acceptance ends the producer's responsibility. Acknowledgement ends the broker's delivery responsibility only after the consumer has made the business effect safe." %}
+{% system-node title="Producer" eyebrow="Create work" icon="send" tone="blue" %}
+Publish a small message with a stable ID, schema version, correlation ID, and the data or reference needed to process it.
+{% /system-node %}
+{% system-node title="Broker" eyebrow="Accept and buffer" icon="layers" tone="cyan" %}
+Persist the message, apply routing and ordering rules, and make unacknowledged work available again after a timeout.
+{% /system-node %}
+{% system-node title="Consumer" eyebrow="Apply the effect" icon="settings" tone="violet" %}
+Validate the message, perform one duplicate-safe business operation, and record enough evidence to explain the outcome.
+{% /system-node %}
+{% system-node title="Recovery path" eyebrow="Acknowledge or isolate" icon="shield-alert" tone="amber" %}
+Acknowledge successful work. Retry transient failures with delay, then isolate permanent failures in a dead-letter queue.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card accent="blue" %}
+## Choose asynchronous handoff for a named reason
+
+A queue changes when the caller learns the final result. Use one when a pending state is acceptable and the workflow benefits from buffering, retry, or fan-out. Keep a direct call when the user cannot continue without an immediate answer.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Direct request" eyebrow="Wait for the result" icon="arrow-right-left" tone="blue" %}
+Use for authentication, inventory checks, or other short interactions whose result is needed before the request can complete. The caller owns the timeout and failure response.
+{% /concept-card %}
+{% concept-card title="Work queue" eyebrow="One worker owns one task" icon="list-todo" tone="green" %}
+Use for image conversion, email delivery, report generation, or payment capture after an order is committed. Competing consumers share the work.
+{% /concept-card %}
+{% concept-card title="Publish-subscribe" eyebrow="Many consumers observe one fact" icon="radio" tone="violet" %}
+Use when billing, analytics, search, and notifications each need an independent reaction to the same business event.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A queue does not make the operation complete
+
+After the broker accepts `order.confirmed`, the producer may return a pending or confirmed order state. Email, analytics, and fulfillment can happen later. The product must make that delay visible and provide a source of truth for the current state.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: turn a traffic burst into a capacity decision
+
+Arrival rate and processing capacity determine whether the queue drains or grows. Change the burst, worker count, and handler time. Watch the modeled backlog and oldest-message age, then decide whether scaling workers can actually recover before the business deadline.
+
+{% interactive-block id="fundamentals/message-queues-pressure-lab" dataFile="/api/content/fundamentals/message-queues/data/queue-pressure-model.json" /%}
+
+### Read queue pressure with three equations
+
+- **Burst ingress** = baseline arrival rate x burst multiplier.
+- **Consumer capacity** = workers x `1,000 / service time in milliseconds`.
+- **Backlog growth** = max(0, ingress - capacity). When capacity later exceeds baseline traffic, drain time = accumulated backlog / spare capacity.
+
+Oldest-message age is usually more actionable than depth. Ten thousand queued thumbnails may be harmless; a single password-reset message that has waited beyond its deadline is not.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Match the pattern to the ownership model
+
+{% concept-grid columns="2" %}
+{% concept-card title="Competing consumers" eyebrow="Distribute tasks" icon="users" tone="blue" %}
+Each message is owned by one worker at a time. Add workers to increase throughput until a partition, downstream dependency, or hot key becomes the limit.
+{% /concept-card %}
+{% concept-card title="Independent subscriptions" eyebrow="Broadcast facts" icon="rss" tone="violet" %}
+Each subscriber keeps its own progress and recovery state. One slow subscriber should not prevent another subscriber from advancing.
+{% /concept-card %}
+{% concept-card title="Partitioned ordering" eyebrow="Order within a key" icon="git-branch" tone="amber" %}
+Route related events, such as one order's updates, to the same partition. More partitions increase parallelism but do not provide a global order.
+{% /concept-card %}
+{% concept-card title="Delayed redrive" eyebrow="Recover failed work" icon="history" tone="green" %}
+Retry transient errors after a delay and with jitter. Stop after a bounded number of attempts so one bad message cannot consume the queue forever.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep messages small and self-identifying
+
+A useful message contract contains:
+
+- a globally stable message or event ID;
+- the business entity ID and an ordering or partition key when needed;
+- a schema name and version;
+- a creation time, deadline, and correlation ID;
+- the minimum payload needed to process safely, or a durable reference to larger data.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: inject failure and observe the delivery consequence
+
+Delivery labels are incomplete without an acknowledgement point. Choose when the broker may delete a message, inject a crash or poison payload, and toggle the consumer's idempotency guard. The lab separates repeated delivery from a repeated business effect.
+
+{% interactive-block id="fundamentals/message-queues-delivery-contract-lab" dataFile="/api/content/fundamentals/message-queues/data/delivery-failure-scenarios.json" /%}
+
+### Use delivery guarantees precisely
+
+- **At-most-once behavior:** acknowledge before processing. The broker will not redeliver, but a crash can lose accepted work.
+- **At-least-once behavior:** acknowledge after the durable effect. A lost acknowledgement can cause redelivery, so the consumer must tolerate duplicates.
+- **Effectively-once business result:** combine at-least-once delivery with a stable message ID and an idempotent or transactional effect. The broker can repeat delivery while the user observes one result.
+
+No broker can automatically make an arbitrary email, card charge, or remote API call occur exactly once. Correctness crosses the broker boundary only when the consumer and external system share an idempotency contract or a reconciliation path.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make publication and consumption recoverable
+
+Two uncertainty windows need explicit design. A database write can commit while publication fails, and a consumer effect can commit while acknowledgement fails.
+
+{% process-flow %}
+{% process-step number="1" title="Commit state and intent" label="Producer" %}
+Write the business state and an outbox event in one database transaction. A relay can retry publication without inventing a new event ID.
+{% /process-step %}
+{% process-step number="2" title="Accept durable work" label="Broker" %}
+Confirm publication only after the configured durability level is met. Retain unacknowledged messages long enough for recovery.
+{% /process-step %}
+{% process-step number="3" title="Apply one business effect" label="Consumer" %}
+Store the message ID with the business update in one transaction when possible. A redelivery then becomes a no-op with a known result.
+{% /process-step %}
+{% process-step number="4" title="Acknowledge or redrive" label="Recovery" %}
+Acknowledge after success. Retry transient failures with a deadline; dead-letter permanent failures with enough context to repair and replay them.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/fundamentals/message-queues/code/transactional-outbox.ts" language="typescript" title="Commit the order and publication intent together" /%}
+
+{% code-block file="/api/content/fundamentals/message-queues/code/idempotent-consumer.ts" language="typescript" title="Commit the effect and processed-message identity together" /%}
+
+The acknowledgement is intentionally outside the consumer's database transaction. If it is lost, the broker may redeliver, but the stored message identity prevents a second order confirmation.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate the queue as unfinished business
+
+Monitor whether accepted work is progressing toward an owned outcome:
+
+- **Age and lag:** oldest-message age, consumer lag, and deadline breaches by message type or priority.
+- **Flow:** ingress rate, successful throughput, utilization, and backlog growth during bursts.
+- **Retry pressure:** attempt count, retry rate, next-visible time, and downstream dependency errors.
+- **Isolation:** dead-letter arrivals, oldest dead-letter age, reason, owner, and successful repair or replay rate.
+- **Correctness:** duplicate suppression, idempotency conflicts, expired messages, and reconciliation mismatches.
+
+### Rehearse recovery before production needs it
+
+Run a drill that pauses consumers, loses an acknowledgement after a committed effect, introduces one invalid message, and replays the repaired message. An operator should be able to answer where the work is, why it stopped, whether it is safe to retry, and how many business effects occurred.
+
+{% callout variant="tip" %}
+Scale from sustained oldest-message age and utilization, not a single depth threshold. Depth has different meaning for a large replayable stream, a bursty task queue, and a five-second user deadline.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/message-queues/quiz/message-queues.json" lessonSlug="message-queues" title="Message Queues Review" /%}

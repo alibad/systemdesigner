@@ -1,0 +1,309 @@
+---
+registryId: practice-image-captioning
+---
+
+{% section-card tone="intro" %}
+## What is an image captioning system?
+
+An image captioning system turns visual evidence into a short natural-language description. It combines a vision encoder, which recognizes objects and relationships, with a language model, which expresses that evidence as a caption. The result supports screen readers, image search, cataloging, and content workflows.
+
+The central invariant is simple: **describe what the image supports; do not turn a plausible guess into a fact**. A fluent caption can still be wrong, biased, or harmful. For this interview, design a service for **100 million images per day**, a **5,000 request/s peak**, an interactive target under **500 ms at p95**, and batch processing for work that does not need an immediate answer.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Ground every claim" eyebrow="Correctness" icon="shield" tone="blue" %}
+Objects, text, actions, and relationships need visible or verified evidence. Omit uncertain details instead of inventing them.
+{% /concept-card %}
+{% concept-card title="Route by consequence" eyebrow="Product" icon="route" tone="violet" %}
+Accessibility, search metadata, social copy, and regulated imagery require different latency, model, and review policies.
+{% /concept-card %}
+{% concept-card title="A partial caption is valid" eyebrow="Degraded mode" icon="activity" tone="green" %}
+When OCR, grounding, or capacity is weak, return a conservative description, queue review, or return no caption.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify Requirements and Guardrails" %}
+
+
+### Separate the user journeys
+
+The word "caption" hides several products. Ask which one is being built before choosing a model or metric.
+
+- **Accessibility alt text**
+    - Describe the information a screen-reader user needs to understand the image in context.
+    - Prefer factual completeness and predictable wording over creativity.
+- **Search and catalog metadata**
+    - Extract objects, attributes, and text that improve retrieval.
+    - Structured tags may matter more than a polished sentence.
+- **Social assistance**
+    - Suggest editable copy, but never publish it without an explicit user action.
+    - Brand voice is a soft preference; safety and grounding remain hard gates.
+- **Regulated imagery**
+    - Route medical, legal, biometric, or safety-critical images to specialized policy and human review.
+    - Do not present a general captioner as a diagnostic system.
+
+### State the service promises
+
+**Functional requirements**
+
+- Accept common image formats and an optional language, use-case, and style policy.
+- Return a caption, grounded entities, confidence metadata, and a review status.
+- Support at least 25 languages without translating unsupported claims into new certainty.
+- Let authorized users correct captions and send those corrections into a governed feedback pipeline.
+
+**Non-functional requirements**
+
+- Meet 500 ms p95 for the interactive tier and process the remaining workload asynchronously.
+- Keep raw images private, encrypted, region-aware, and short-lived by default.
+- Measure quality by use case, language, image type, and user-impact slice.
+- Degrade safely during model, OCR, moderation, or regional failure.
+
+### Define the first-version boundary
+
+- No diagnosis, identity inference, emotion labeling, or protected-attribute guessing.
+- No promise that every image receives a useful caption.
+- No permanent image retention unless a separate product policy requires it.
+- No open-ended creative generation on the accessibility path.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Traffic, Compute, and Latency" %}
+
+
+### Convert daily volume into capacity
+
+Start with replaceable assumptions:
+
+1. Average request rate = 100M / 86,400 = about **1,157 images/s**.
+2. A 4.3x daily peak produces about **5,000 images/s**.
+3. If 30% is interactive, the immediate path receives **1,500 images/s** at peak.
+4. At a 2 MB average image size, ingress is roughly **200 TB/day** before compression, deduplication, or retention policy.
+
+{% metric-strip %}
+{% metric value="100M/day" label="Images" detail="A planning assumption, not a production claim." tone="blue" /%}
+{% metric value="5K/s" label="Peak requests" detail="About 4.3 times the daily average." tone="cyan" /%}
+{% metric value="30%" label="Interactive share" detail="The rest can use efficient batch queues." tone="violet" /%}
+{% metric value="500 ms" label="Interactive p95" detail="Includes upload, preprocessing, inference, checks, and response." tone="green" /%}
+{% /metric-strip %}
+
+### Size from measured service capacity
+
+Do not derive accelerator count from model parameter count. Benchmark a complete serving replica with the intended image resolution, precision, batching policy, and output length. Then divide peak routed traffic by measured requests per second and add regional-failure and deployment headroom.
+
+### Make the capacity decision
+
+{% interactive-block id="practice/image-captioning-capacity-lab" /%}
+
+The important interview move is to connect the product split to the fleet: moving work from batch to interactive changes both replica demand and queueing risk, even though daily image volume stays constant.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the High-Level Architecture" %}
+
+
+### Keep policy around the model
+
+{% system-flow title="Grounded caption request path" caption="The generator proposes language; independent evidence and policy checks decide whether that language may leave the service." %}
+{% system-node title="Upload edge" eyebrow="Protect" icon="globe" tone="blue" %}
+Authenticate, enforce size and format limits, scan the file, and write a short-lived object.
+{% /system-node %}
+{% system-node title="Image router" eyebrow="Classify" icon="route" tone="cyan" %}
+Detect domain, use case, language, complexity, and whether OCR or specialist review is required.
+{% /system-node %}
+{% system-node title="Vision-language tier" eyebrow="Generate" icon="sparkles" tone="violet" %}
+Encode visual regions and decode one or more caption candidates under a bounded token budget.
+{% /system-node %}
+{% system-node title="Grounding gate" eyebrow="Verify" icon="shield" tone="amber" %}
+Compare claims with detected regions, OCR evidence, sensitive-attribute policy, and confidence thresholds.
+{% /system-node %}
+{% system-node title="Caption response" eyebrow="Deliver" icon="check" tone="green" %}
+Return the safe caption and evidence metadata; emit audit and feedback events asynchronously.
+{% /system-node %}
+{% /system-flow %}
+
+### Use tiers with explicit responsibilities
+
+- **On-device or compact tier:** private, low-latency captions for common photographs; limited vocabulary and quality.
+- **Interactive cloud tier:** the default path for diverse images under the 500 ms budget.
+- **Batch quality tier:** larger model, richer decoding, and better accelerator utilization for libraries and re-indexing.
+- **Specialist route:** OCR-heavy charts, documents, medical images, and other domains with different evidence and review rules.
+
+### Separate synchronous and asynchronous work
+
+The request path performs only work needed to make a release decision. Dataset curation, aggregate analytics, feedback processing, retraining, and bulk re-captioning consume events from durable queues. They must not extend an interactive response deadline.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Design the Model, Data, and Grounding Layers" %}
+
+
+### Frame the ML task
+
+- **Input:** decoded image regions plus optional locale, use-case, and permitted context.
+- **Output:** a bounded caption and claim-level evidence metadata.
+- **Training objective:** next-token prediction plus image-text alignment and preference signals.
+- **Serving objective:** useful grounded captions per unit cost under a latency and policy budget.
+
+### Build the model in three responsibilities
+
+{% process-flow %}
+{% process-step number="1" title="Encode visual evidence" label="Perception" %}
+Create patch or region features while preserving objects, spatial relationships, and text-bearing areas.
+{% /process-step %}
+{% process-step number="2" title="Generate candidates" label="Language" %}
+Decode concise alternatives conditioned on use case and language without granting the decoder factual authority.
+{% /process-step %}
+{% process-step number="3" title="Align claims to regions" label="Grounding" %}
+Map nouns, attributes, actions, and OCR-derived text back to evidence and attach confidence.
+{% /process-step %}
+{% process-step number="4" title="Apply release policy" label="Decision" %}
+Remove unsupported details, hedge genuine uncertainty, or route the image to review.
+{% /process-step %}
+{% /process-flow %}
+
+### Curate data by purpose
+
+- Use licensed, consented, and documented image-caption pairs with provenance and deletion support.
+- Balance geography, language, skin tone, disability representation, indoor and outdoor scenes, and image quality.
+- Add domain sets for charts, screenshots, artwork, documents, and other supported routes.
+- Include hard negatives where a fluent sentence mentions an object or relationship that is absent.
+- Keep a human-written, slice-balanced evaluation set outside the training and tuning loop.
+
+### Avoid metric-shaped shortcuts
+
+Reference overlap rewards captions that resemble annotator wording, but valid captions can differ. Conversely, a sentence can score well while hallucinating a detail. Use BLEU, CIDEr, and embedding similarity as diagnostics, then pair them with claim grounding, human usefulness, and safety evaluation.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Evaluation and Release Gates" %}
+
+
+### Evaluate claims, not only sentences
+
+**Offline quality**
+
+- Claim precision: the fraction of mentioned objects, attributes, actions, and relationships supported by evidence.
+- Coverage: whether important visible information for the use case is omitted.
+- Human usefulness: factuality, clarity, relevance, and accessibility value.
+- Language quality: fluency and terminology, measured separately from factual grounding.
+
+**Production behavior**
+
+- p50, p95, and p99 latency by route, image size, region, and model tier.
+- Caption acceptance, correction, deletion, and fallback rates by use case.
+- OCR disagreement, unsupported-claim rate, sensitive-inference blocks, and review volume.
+- Cost per released caption, not merely cost per attempted inference.
+
+**Hard launch guardrails**
+
+- No cross-tenant image or caption leakage.
+- No increase in unsupported sensitive attributes.
+- No critical regression for a language, image domain, or accessibility slice.
+- Regulated routes cannot bypass their required human-review policy.
+
+### Inspect a caption before releasing it
+
+{% interactive-block id="practice/image-captioning-grounding-gate" /%}
+
+Automatic text similarity cannot make this decision. The release gate needs claim-level evidence and a use-case policy that treats omission, uncertainty, and regulated content differently.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="6. Operate, Retrain, and Govern the System" %}
+
+
+### Observe the whole decision path
+
+- **Input health:** decode failures, image size, domain mix, OCR rate, corruption, and policy rejects.
+- **Serving health:** queue age, batch size, accelerator utilization, stage latency, timeout, and fallback rate.
+- **Output health:** unsupported claims, omission, language mismatch, sensitive-inference blocks, and review outcomes.
+- **Data health:** source provenance, consent, deletion, drift, duplicate rate, and evaluation-slice coverage.
+
+### Turn feedback into governed labels
+
+User edits are valuable but ambiguous: a rewrite may reflect tone rather than factual error. Store the original claim-evidence record, correction category, model version, and policy version. Sample corrections for trained review, deduplicate near-identical images, and prevent automatically generated captions from silently becoming trusted training labels.
+
+### Promote artifacts like code
+
+1. Validate data lineage and training configuration.
+2. Run deterministic, slice, adversarial, and privacy tests.
+3. Shadow on production-shaped traffic without returning output.
+4. Canary by stable user or tenant assignment with stop conditions.
+5. Retain the previous model, tokenizer, and policy bundle for rollback.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Plan Scalability, Reliability, and Trade-offs" %}
+
+
+### Degrade in a deliberate order
+
+{% process-flow %}
+{% process-step number="1" title="Reject invalid work" label="Protect" %}
+Stop oversized, corrupted, unsupported, or unauthorized uploads before expensive inference.
+{% /process-step %}
+{% process-step number="2" title="Route to a compact tier" label="Capacity" %}
+Reduce resolution, decoding width, or model size while preserving grounding checks.
+{% /process-step %}
+{% process-step number="3" title="Move eligible work to batch" label="Queue" %}
+Return a job status for catalog workloads that do not require an immediate caption.
+{% /process-step %}
+{% process-step number="4" title="Return no caption" label="Safety" %}
+Do not bypass evidence or policy checks to make an availability graph look healthy.
+{% /process-step %}
+{% /process-flow %}
+
+### Name the trade-offs
+
+- **Resolution versus latency:** larger images preserve small objects and text but raise preprocessing and encoder cost.
+- **Beam width versus throughput:** more candidates may improve wording while multiplying decoder work.
+- **One model versus specialist routes:** a unified fleet is simpler; specialists can improve difficult domains but add routing and governance complexity.
+- **Creative detail versus factual trust:** descriptive variety helps social copy but is dangerous for accessibility and search metadata.
+- **Cross-region failover versus privacy:** moving work may restore capacity but can violate residency or consent boundaries.
+
+### Handle failure by user consequence
+
+- If OCR is unavailable, omit text-dependent claims or send the image to review.
+- If the grounding service is unavailable, do not release freshly generated captions automatically.
+- If one region fails, route only requests permitted to move and batch the rest.
+- If the new model regresses a critical slice, roll back the full model-policy bundle rather than adjusting thresholds blindly.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Summarize Risks and Extensions" %}
+
+
+### Present the design in 90 seconds
+
+1. Classify each request by product use case, domain, latency, privacy, and review policy.
+2. Route interactive and batch work to separately optimized vision-language tiers.
+3. Keep generation inside an evidence gate that checks claims, OCR, sensitive inference, and uncertainty.
+4. Return a conservative caption, review status, or no caption when the service cannot protect the invariant.
+5. Launch only when usefulness improves across slices and every hard grounding, safety, privacy, and latency gate passes.
+
+### Call out unresolved risks
+
+- Small or occluded objects may be important even when the model assigns low confidence.
+- Human captions contain cultural assumptions and omissions that training can amplify.
+- OCR can faithfully extract private or harmful text that should not be repeated.
+- Corrections and acceptance signals favor active users and common languages.
+- Domain routing mistakes can send specialist images through an unsafe general policy.
+
+### Offer credible extensions
+
+- Generate interactive region-to-phrase explanations for editors and auditors.
+- Add document, chart, and screenshot routes with layout-aware OCR.
+- Support on-device private captions with cloud escalation only after consent.
+- Produce multiple caption lengths for screen readers, search indexes, and editorial workflows.
+- Re-caption stored libraries after a model upgrade through versioned, reversible batch jobs.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/image-captioning/quiz/image-captioning-design-review.json"
+   lessonSlug="practice-image-captioning"
+   title="Image Captioning Design Review" /%}

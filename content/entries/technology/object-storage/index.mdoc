@@ -1,0 +1,195 @@
+---
+registryId: object-storage
+---
+
+{% section-card tone="intro" %}
+## What is object storage?
+
+**Object storage is a data architecture that stores a value as an object addressed by a bucket or container and a key, together with system and application metadata.** Clients use an API to create, read, list, copy, version, and delete whole objects rather than mounting a general-purpose filesystem and mutating arbitrary byte ranges in place.
+
+Object storage matters for media, backups, artifacts, logs, data lakes, model datasets, and other large namespaces because capacity and durability can scale independently from one server. The application still owns object naming, publication, authorization, lifecycle, consistency assumptions, recovery, and cost-sensitive access patterns.
+
+The core invariant is **every published object version must be addressable, authorized, integrity-checked, and recoverable according to its declared lifecycle**. A successful upload is not enough if the wrong version becomes current, retention deletes required data, or no one can prove which copy is authoritative.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Model the object and namespace explicitly
+
+{% concept-grid columns="4" %}
+{% concept-card title="Bucket or container" eyebrow="Policy boundary" icon="database" tone="blue" %}
+Groups a namespace under region, ownership, encryption, public-access, versioning, lifecycle, logging, and replication configuration.
+{% /concept-card %}
+{% concept-card title="Object key" eyebrow="Application address" icon="key" tone="cyan" %}
+Identifies the object within the bucket. Prefixes can support listing and partitioning, but they are not automatically filesystem directories.
+{% /concept-card %}
+{% concept-card title="Version" eyebrow="Mutation history" icon="layers" tone="violet" %}
+Distinguishes historical values or delete markers when versioning is enabled. Retention and lifecycle determine which versions survive.
+{% /concept-card %}
+{% concept-card title="Metadata and checksum" eyebrow="Meaning + integrity" icon="shield" tone="green" %}
+Carries content type, schema, owner, tags, encryption state, source, and integrity evidence used by downstream consumers.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Do not assume filesystem behavior
+
+- Object APIs usually replace or create whole values; in-place append and random write semantics differ by service.
+- Rename may be copy plus delete rather than one atomic namespace operation.
+- List, overwrite, conditional request, and version behavior must be verified for the selected implementation.
+- Locks, directory transactions, hard links, and local filesystem permissions do not appear automatically.
+{% /section-card %}
+
+{% section-card %}
+## Publish objects through a commit protocol
+
+{% process-flow %}
+{% process-step number="1" title="Authorize the intended key" label="Identity" %}
+Bind tenant, bucket, prefix, content type, maximum size, checksum algorithm, retention, and expiry before accepting bytes.
+{% /process-step %}
+{% process-step number="2" title="Upload bytes or parts" label="Transfer" %}
+Use a unique upload ID, deterministic part numbers, per-part checksums, bounded retries, and a deadline. Parts are not yet the published object.
+{% /process-step %}
+{% process-step number="3" title="Complete and verify" label="Commit" %}
+Explicitly complete multipart upload, verify final size and checksum, and capture the returned object version or entity tag.
+{% /process-step %}
+{% process-step number="4" title="Publish application metadata" label="Reference" %}
+Commit the verified version ID into authoritative application state so readers do not race an ambiguous “latest” object.
+{% /process-step %}
+{% process-step number="5" title="Clean provisional state" label="Reconcile" %}
+Abort abandoned multipart uploads, quarantine checksum mismatches, and reconcile metadata records whose object commit is unknown.
+{% /process-step %}
+{% /process-flow %}
+
+Conditional writes and immutable generated keys reduce lost updates. Do not let two writers overwrite the same key unless the application defines conflict and version-selection behavior.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Plan lifecycle from access and recovery evidence
+
+Moving old bytes to a cheaper tier can add request charges, minimum-duration rules, restore workflow, and hours of retrieval delay. Versioning, replicas, incomplete uploads, and small-object overhead can multiply physical footprint beyond logical data.
+
+{% interactive-block id="technology/object-storage-cost" /%}
+
+### Base transitions on measured cohorts
+
+- Group by owner, dataset, object age, size, last access, read frequency, retention, legal hold, and recovery class.
+- Keep the active working set in an immediate tier and test transitions on representative objects.
+- Model request, retrieval, early-deletion, version, replication, and transfer behavior alongside stored bytes.
+- Preview lifecycle changes, exclude protected prefixes, and record the policy version that moved or deleted each object.
+
+{% code-block file="/api/content/technology/object-storage/code/plan-lifecycle.py" language="python" title="Classify objects from age, access, and retention" /%}
+{% /section-card %}
+
+{% section-card %}
+## Design multipart upload for retries
+
+Multipart upload divides a large object into independently retriable parts. The client must retain the upload ID, part number, checksum, and provider receipt so retries do not assemble the wrong bytes.
+
+{% system-flow title="Multipart publication path" caption="Parts remain provisional until completion and application publication both succeed." %}
+{% system-node title="Initiate" eyebrow="Upload identity" icon="key" tone="blue" %}
+Receive one upload identity and declared metadata.
+{% /system-node %}
+{% system-node title="Upload parts" eyebrow="Parallel transfer" icon="activity" tone="cyan" %}
+Use bounded workers with checksums and stable part numbers.
+{% /system-node %}
+{% system-node title="Complete" eyebrow="Object commit" icon="check" tone="green" %}
+Commit the exact received part set in order.
+{% /system-node %}
+{% system-node title="Publish" eyebrow="Application reference" icon="database" tone="violet" %}
+Record the committed version and checksum in authoritative application state.
+{% /system-node %}
+{% /system-flow %}
+
+### Bound the protocol
+
+- Set minimum and maximum part size, total object size, concurrent workers, retry count, and upload lifetime.
+- Abort stale uploads so provisional parts do not accumulate forever.
+- Treat a timeout during completion as ambiguous until the object version is queried and reconciled.
+- Scan or validate content before exposing it to downstream processors or public delivery.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Recover from destructive operations
+
+Replication and backup solve different problems. A replica can provide another serving location, but valid deletion, encryption, or corrupt overwrite may replicate normally. Versioning preserves history, while immutable retention can prevent selected mutations during a declared period.
+
+{% interactive-block id="technology/object-storage-recovery-lab" dataFile="/api/content/technology/object-storage/data/recovery-incidents.json" /%}
+
+### Keep independent recovery evidence
+
+1. Inventory expected keys, version IDs, checksums, retention state, replication state, and owning application records.
+2. Detect unusual delete, overwrite, copy, policy, key, and lifecycle activity quickly.
+3. Stop writers and automation before destructive operations propagate further.
+4. Select a pre-incident authoritative version from time and integrity evidence.
+5. Restore into a controlled namespace, validate the application, then publish through an explicit cutover.
+
+{% code-block file="/api/content/technology/object-storage/code/recover-object-version.py" language="python" title="Select a verified pre-incident object version" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Enforce access as a bounded capability
+
+{% concept-grid columns="4" %}
+{% concept-card title="Workload identity" icon="key" tone="blue" %}
+Use short-lived roles and resource policies scoped to exact operations, buckets, prefixes, encryption keys, network paths, and conditions.
+{% /concept-card %}
+{% concept-card title="Signed access" icon="clock" tone="amber" %}
+Pre-signed URLs delegate one method on one key for a short time. Bind content limits where supported and never expose broad credentials.
+{% /concept-card %}
+{% concept-card title="Encryption" icon="shield" tone="green" %}
+Encrypt in transit and at rest, separate key administration, restrict decrypt and grant permissions, and test rotation and recovery.
+{% /concept-card %}
+{% concept-card title="Public delivery" icon="globe" tone="rose" %}
+Keep the origin private behind a CDN or controlled gateway, validate cache keys, and prevent untrusted content from executing in a privileged origin.
+{% /concept-card %}
+{% /concept-grid %}
+
+Log administrative changes, access denials, destructive operations, unusual reads, signed-URL issuance where the application controls it, and key-policy changes. Avoid logging sensitive query signatures or object data.
+{% /section-card %}
+
+{% section-card %}
+## Shape objects for the consuming system
+
+### Content and artifacts
+
+- Use immutable content-addressed or versioned keys and publish a small pointer or manifest after validation.
+- Put a CDN in front of public read-heavy objects; include authorization and variant dimensions in cache behavior.
+- Preserve content type, checksum, provenance, and software supply-chain evidence.
+
+### Data lakes and ML datasets
+
+- Prefer fewer appropriately sized columnar objects over millions of tiny files.
+- Partition by stable pruning dimensions without creating high-cardinality directory explosions.
+- Keep schemas, snapshots, manifests, compaction, and data-quality results versioned with the objects.
+- Separate raw, validated, curated, and published zones through identity and metadata contracts, not only prefixes.
+
+### Backups and archives
+
+- Use independent credentials, immutable retention where justified, and inventory-driven restore tests.
+- Record which application version, database log position, schema, key, and dependency set belong to each recovery point.
+- Prove deletion after retention expires, including replicas, versions, exports, and legal holds.
+{% /section-card %}
+
+{% section-card %}
+## Operate the namespace and data lifecycle
+
+### Monitor usage and correctness
+
+- Logical bytes, physical bytes, versions, replicas, incomplete multipart parts, object count, and size distribution
+- Requests and errors by operation, prefix, owner, client, status, latency, throttling, and conditional-write result
+- Lifecycle transitions, retrieval requests, restore completion, early deletion, replication lag, and failed copies
+- Internet, cross-region, cross-zone, CDN-origin, and managed-service transfer paths
+- Inventory drift, checksum mismatch, missing application references, orphan objects, public exposure, and key-policy changes
+
+### Prepare failure drills
+
+- Multipart interruption, duplicate completion, ambiguous timeout, and abandoned part cleanup
+- Accidental deletion, malicious overwrite, lifecycle misconfiguration, expired encryption access, and restore at scale
+- Regional endpoint loss, replication lag, application cutover, stale cache, and safe failback
+- Inventory rebuild, checksum verification, schema validation, and downstream replay
+
+{% callout variant="tip" %}
+Object storage is operationally simple only when keys, versions, publication, lifecycle, authorization, transfer paths, and recovery evidence are designed as one system.
+{% /callout %}
+{% /section-card %}
+
+{% quiz quizId="object-storage" lessonSlug="object-storage" title="Object Storage Production Review" questionsFile="/api/content/technology/object-storage/quiz/object-storage-production.json" /%}

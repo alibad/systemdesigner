@@ -1,0 +1,79 @@
+{
+  "title": "Trace playback through edge and control-plane failure",
+  "description": "Choose an incident, then compare mitigations. The model shows a simplified playback route and user impact; real systems need regional, ISP, title, device, and package-version evidence before broad steering.",
+  "nodes": [
+    { "id": "player", "label": "Netflix client", "responsibility": "Holds a playback buffer, downloads segments, applies ABR, and reports session quality." },
+    { "id": "control", "label": "Playback control", "responsibility": "Validates entitlement and package availability, then returns a manifest and delivery guidance." },
+    { "id": "primary-edge", "label": "Preferred edge", "responsibility": "Serves cached segments from the nearby delivery location." },
+    { "id": "alternate-edge", "label": "Alternate edge", "responsibility": "Receives steered traffic when the preferred edge or its route is unsafe." },
+    { "id": "origin", "label": "Package origin", "responsibility": "Supplies validated segments for controlled cache fills and holds the complete package." },
+    { "id": "network", "label": "Access network", "responsibility": "Carries segment bytes between the chosen edge and the viewer device." }
+  ],
+  "mitigations": [
+    { "id": "hold-and-retry", "label": "Hold current route and retry", "detail": "Keep the existing destination and allow bounded client retry." },
+    { "id": "coalesce-and-degrade", "label": "Coalesce fills and lower safely", "detail": "Deduplicate cache fills, bound origin work, and use a lower sustainable rendition." },
+    { "id": "steer-and-fallback", "label": "Steer to a healthy fallback", "detail": "Move new or failing work to an alternate edge or stable control response." }
+  ],
+  "scenarios": [
+    {
+      "id": "cache-miss-storm",
+      "label": "Cache miss storm",
+      "detail": "A newly popular package is absent from the local cache, so many players request the same early segments.",
+      "recommendedMitigation": "coalesce-and-degrade",
+      "statuses": { "player": "healthy", "control": "healthy", "primary-edge": "degraded", "alternate-edge": "healthy", "origin": "degraded", "network": "healthy" },
+      "outcomes": {
+        "hold-and-retry": { "path": ["player", "primary-edge", "origin"], "startupDelay": "High", "rebufferRisk": "High", "blastRadius": "Popular title in one edge region", "result": "Independent retries multiply identical origin fills and make both startup and origin protection worse.", "recovery": ["Detect the hit-rate cliff and repeated object keys.", "Rate-limit unsafe retries at the edge and player policy boundary.", "Warm the package only after origin queues return to a bounded level."] },
+        "coalesce-and-degrade": { "path": ["player", "primary-edge", "origin"], "startupDelay": "Moderate", "rebufferRisk": "Low after fill", "blastRadius": "Affected title and local cache", "result": "One fill serves waiting requests while ABR prefers a lower ready rendition, protecting origin concurrency.", "recovery": ["Coalesce requests by package version and segment key.", "Cap fill concurrency and serve ready lower renditions where possible.", "Verify hit rate, fill wait, and origin queue depth before releasing limits."] },
+        "steer-and-fallback": { "path": ["player", "alternate-edge", "origin"], "startupDelay": "Moderate", "rebufferRisk": "Moderate", "blastRadius": "Steered cohort", "result": "Steering can spread load, but an alternate edge without the package may simply move the miss storm unless its cache state is known.", "recovery": ["Confirm alternate-edge cache availability before broad steering.", "Move a bounded cohort and observe origin miss amplification.", "Keep coalescing enabled until both caches are warm."] }
+      }
+    },
+    {
+      "id": "edge-outage",
+      "label": "Preferred edge outage",
+      "detail": "The nearest edge cannot serve segments because its process, appliance, or upstream route is unavailable.",
+      "recommendedMitigation": "steer-and-fallback",
+      "statuses": { "player": "healthy", "control": "healthy", "primary-edge": "failed", "alternate-edge": "healthy", "origin": "healthy", "network": "degraded" },
+      "outcomes": {
+        "hold-and-retry": { "path": ["player", "primary-edge"], "startupDelay": "High", "rebufferRisk": "High", "blastRadius": "All viewers pinned to the failed edge", "result": "Retrying a dead destination consumes the playback buffer without creating a route to media.", "recovery": ["Quarantine the failed edge from new assignments.", "Expire or override stale delivery guidance.", "Confirm players can receive a replacement route."] },
+        "coalesce-and-degrade": { "path": ["player", "primary-edge"], "startupDelay": "High", "rebufferRisk": "High", "blastRadius": "All viewers pinned to the failed edge", "result": "Lowering rendition cannot help when no segment path is reachable; it only becomes useful after route recovery.", "recovery": ["Remove the failed edge from steering first.", "Preserve buffered playback where possible.", "Apply a conservative rendition only on the replacement path."] },
+        "steer-and-fallback": { "path": ["player", "alternate-edge", "network"], "startupDelay": "Moderate", "rebufferRisk": "Low to moderate", "blastRadius": "Affected edge region", "result": "A healthy alternate edge restores media delivery, though a longer route may require an immediate ABR step-down.", "recovery": ["Fence the failed edge from assignment.", "Issue alternate delivery guidance and retry the current segment once.", "Watch startup, rebuffering, and alternate-edge reserve before returning traffic."] }
+      }
+    },
+    {
+      "id": "origin-degradation",
+      "label": "Package origin degradation",
+      "detail": "The origin is slow or erroring, so cache fills become unreliable even though some edge hits still work.",
+      "recommendedMitigation": "coalesce-and-degrade",
+      "statuses": { "player": "healthy", "control": "healthy", "primary-edge": "degraded", "alternate-edge": "healthy", "origin": "degraded", "network": "healthy" },
+      "outcomes": {
+        "hold-and-retry": { "path": ["player", "primary-edge", "origin"], "startupDelay": "High", "rebufferRisk": "High on misses", "blastRadius": "Every edge missing the package", "result": "Retries add work to an already slow origin and may convert a partial fill problem into a broader outage.", "recovery": ["Stop retry amplification and identify the failing origin dependency.", "Protect existing edge hits from eviction pressure.", "Recover origin capacity before reopening uncontrolled fills."] },
+        "coalesce-and-degrade": { "path": ["player", "primary-edge"], "startupDelay": "Moderate", "rebufferRisk": "Low for cached renditions", "blastRadius": "Misses and uncached quality rungs", "result": "The edge preserves cached segments and lower ready renditions while a small number of fills wait behind bounded origin work.", "recovery": ["Prioritize cache-resident renditions and segment continuity.", "Coalesce and queue only essential origin fills.", "Restore higher-quality fills after origin latency and errors stabilize."] },
+        "steer-and-fallback": { "path": ["player", "alternate-edge", "origin"], "startupDelay": "Moderate", "rebufferRisk": "Moderate", "blastRadius": "Steered cache-miss cohort", "result": "A second edge helps only when it already has the needed package; otherwise origin degradation follows the request.", "recovery": ["Check alternate cache residency before steering.", "Move only the cohorts that gain a cache hit.", "Keep origin admission bounded across both edges."] }
+      }
+    },
+    {
+      "id": "manifest-failure",
+      "label": "Manifest failure",
+      "detail": "Playback control cannot issue or validate a manifest for a new session, even though media may still be cached.",
+      "recommendedMitigation": "steer-and-fallback",
+      "statuses": { "player": "healthy", "control": "failed", "primary-edge": "healthy", "alternate-edge": "healthy", "origin": "healthy", "network": "healthy" },
+      "outcomes": {
+        "hold-and-retry": { "path": ["player", "control"], "startupDelay": "High", "rebufferRisk": "None for already-started sessions", "blastRadius": "New starts and manifest refreshes", "result": "The edge cannot authorize or describe a new playback package; retrying the failed control endpoint delays startup.", "recovery": ["Separate new-session failures from active-session continuity.", "Rate-limit retries and inspect entitlement, signing, and package-version signals.", "Restore a valid control response before advertising normal startup."] },
+        "coalesce-and-degrade": { "path": ["player", "control"], "startupDelay": "High", "rebufferRisk": "None for already-started sessions", "blastRadius": "New starts and manifest refreshes", "result": "A lower rendition is not selectable without a valid manifest, so media-side mitigation does not repair the control failure.", "recovery": ["Keep active sessions on their existing manifest where policy permits.", "Fail new starts honestly rather than exposing stale authorization.", "Repair the control dependency and validate a signed manifest end to end."] },
+        "steer-and-fallback": { "path": ["player", "control", "primary-edge", "network"], "startupDelay": "Moderate", "rebufferRisk": "Low after start", "blastRadius": "Failed control region or cohort", "result": "A healthy control-plane fallback can issue a valid manifest, after which normal cached media delivery resumes.", "recovery": ["Fence the failed manifest issuer or configuration version.", "Route a bounded cohort to a compatible healthy control endpoint.", "Verify authorization, package version, startup time, and edge delivery together."] }
+      }
+    },
+    {
+      "id": "network-loss",
+      "label": "Viewer network loss",
+      "detail": "The access network loses throughput or packets while the control plane and edges remain healthy.",
+      "recommendedMitigation": "coalesce-and-degrade",
+      "statuses": { "player": "degraded", "control": "healthy", "primary-edge": "healthy", "alternate-edge": "healthy", "origin": "healthy", "network": "failed" },
+      "outcomes": {
+        "hold-and-retry": { "path": ["player", "network", "primary-edge"], "startupDelay": "Moderate", "rebufferRisk": "High", "blastRadius": "One access network or viewer cohort", "result": "Repeatedly asking for the same high rendition does not create bandwidth; the player drains its buffer and pauses.", "recovery": ["Detect sustained download loss rather than one slow segment.", "Avoid uncontrolled parallel retries on the same access path.", "Resume from the current segment when usable throughput returns."] },
+        "coalesce-and-degrade": { "path": ["player", "network", "primary-edge"], "startupDelay": "Low", "rebufferRisk": "Low to moderate", "blastRadius": "One access network or viewer cohort", "result": "ABR chooses a lower sustainable rendition and preserves buffer when some capacity remains; it does not hide a complete disconnection.", "recovery": ["Step down on buffer and throughput evidence.", "Retry a bounded number of segment requests after backoff.", "Upgrade only after several stable transfers refill the buffer."] },
+        "steer-and-fallback": { "path": ["player", "network", "alternate-edge"], "startupDelay": "Moderate", "rebufferRisk": "Moderate", "blastRadius": "One access network or viewer cohort", "result": "Changing edges may help if the route is the problem, but it cannot repair the viewer's last-mile loss without evidence of a better path.", "recovery": ["Compare route and transfer evidence before steering.", "Move one bounded cohort to the alternate edge.", "Keep ABR conservative until buffer health is restored."] }
+      }
+    }
+  ]
+}

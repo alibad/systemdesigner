@@ -1,0 +1,318 @@
+---
+registryId: practice-ad-targeting
+---
+
+{% section-card tone="intro" %}
+## What is an ad targeting system?
+
+An ad targeting system decides which eligible advertisement to show for one opportunity,
+such as an ad slot in an app or on a web page. It first removes campaigns that are not
+allowed to compete, then predicts useful outcomes, chooses a winner through an auction,
+and records what happened for measurement and future training.
+
+This is an ML systems problem because a high score is never enough. The serving path must
+meet its deadline while enforcing consent, campaign budget, frequency limits, and
+fairness rules. The core invariant is simple: **do not serve an ad unless its hard
+constraints can be verified.**
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Eligibility is a gate" eyebrow="Correctness" icon="shield" tone="rose" %}
+Consent, inventory rules, budget, frequency caps, and policy exclusions run before a
+model score can influence the auction.
+{% /concept-card %}
+{% concept-card title="Ranking is a prediction" eyebrow="ML task" icon="activity" tone="violet" %}
+Estimate a calibrated probability of a useful outcome from approved context and
+features, then combine it with a bid under explicit pacing rules.
+{% /concept-card %}
+{% concept-card title="Logging closes the loop" eyebrow="Operations" icon="database" tone="cyan" %}
+Log the candidate set, positions, decisions, and outcomes asynchronously so measurement
+does not hold the user-facing response open.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML problem and business context" %}
+
+
+### Start with one decision, not a vague personalization goal
+
+For every eligible impression, choose at most one campaign and return a bid before the
+exchange deadline. The advertiser wants efficient spend and reach; the publisher wants
+relevant, policy-compliant ads; and the person viewing the page expects their choices
+and limits to be respected.
+
+**In scope**
+
+- Consent-aware contextual and first-party audience targeting.
+- Campaign eligibility, frequency caps, daily pacing, ranking, and a second-price-like
+  auction with a transparent reserve policy.
+- Impression, click, and conversion logging for reporting and controlled model updates.
+
+**Out of scope for the first version**
+
+- Cross-site identity graphs built from unconsented data.
+- Automatic creative generation or unconstrained reinforcement learning on live spend.
+- A claim that clicks alone prove incremental business value.
+
+### Name the costly mistakes
+
+- **Serving without verified consent** is a privacy and policy failure, not a relevance
+  trade-off. Fail closed for the affected targeting signal.
+- **Overspending a campaign** breaks the advertiser contract. A late budget update must
+  never become permission to keep bidding.
+- **Optimizing click-through rate alone** can overexpose a group, reward misleading
+  creative, or concentrate impressions in a narrow audience.
+- **Timing out an auction** loses the opportunity. A bounded contextual fallback is
+  acceptable only after the same hard gates pass.
+
+{% callout variant="info" %}
+Before discussing models, write down the auction deadline, the regions where data may
+be processed, the daily budget rule, the frequency-cap window, and the protected or
+high-risk slices that require separate evaluation. These are product requirements that
+the architecture must preserve.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="estimates" title="2. Back-of-the-envelope data and compute estimates" %}
+
+
+### Make the serving estimate concrete
+
+Assume one region handles **250,000 eligible auction requests per second** at peak. Each
+request starts with 200 candidates after coarse matching, then sends only the best 40
+to a richer scorer. A 100 ms end-to-end exchange deadline leaves a 45 ms internal
+budget after network and serialization allowance.
+
+{% metric-strip %}
+{% metric value="250K" label="Peak auctions / second" detail="Regional qualified auction load" tone="blue" /%}
+{% metric value="50M" label="Candidates / second" detail="250K auctions times 200 coarse candidates" tone="violet" /%}
+{% metric value="10M" label="Rich scores / second" detail="250K auctions times 40 rerank candidates" tone="amber" /%}
+{% metric value="45 ms" label="Internal deadline" detail="Eligibility, feature joins, score, auction, and response" tone="rose" /%}
+{% /metric-strip %}
+
+### Targeting and auction capacity lab
+
+Precomputed, consent-safe features let the auction avoid expensive online joins. Move
+the cache control and watch a fixed peak auction load move between the fast path and
+the online feature-plus-rich-scoring path. The two branch values always sum to the
+source load; the warning marks the point where the online fleet loses planned headroom.
+
+{% traffic-split dataFile="/api/content/practice/ad-targeting/data/auction-feature-capacity.json" /%}
+
+At 92% cache coverage, about **20,000 auctions/second** use online features. At 80%,
+that becomes **50,000 auctions/second**. Plan the feature and scoring fleet for the
+lower coverage state, not the average dashboard value. A cached feature is usable only
+when its consent state, feature version, and freshness window still match the request.
+
+{% /accordion-item %}
+
+{% accordion-item id="framing" title="3. Formal ML framing" %}
+
+
+### Define the prediction and its constraints
+
+For an eligible candidate campaign `c` and approved request context `x`, predict a
+calibrated probability of the chosen outcome inside a declared horizon: `P(conversion
+within 7 days | x, c, shown)`. A practical ranking score is expected value, for example
+`bid(c) * P(conversion)`, then adjusted by an explicit pacing multiplier. Policy,
+budget, and frequency constraints are gates, not learned penalties that the model may
+choose to ignore.
+
+**Use features that could exist at decision time**
+
+- Page or app context, placement, locale, device class, and time bucket.
+- Campaign configuration, approved creative metadata, remaining budget, and exposure
+  count from an authoritative capped counter.
+- Consented first-party interest features with an as-of timestamp and retention policy.
+
+**Avoid two common training errors**
+
+- Training on clicks without the impression position and candidate set confuses model
+  quality with the old ranker's exposure bias.
+- Joining conversions or profile values that arrived after the impression creates
+  leakage. Every training row needs an event-time feature snapshot and a label cutoff.
+
+### Baseline before complexity
+
+Begin with contextual eligibility plus a calibrated gradient-boosted CTR or conversion
+model, budget pacing, and a deterministic auction. Compare it with contextual-only
+ranking on consent, geography, device, new-user, campaign-size, and frequency slices.
+Only add embeddings or exploration after the baseline is observable and reversible.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. End-to-end architecture: data, training, and serving" %}
+
+
+### Separate the response path from the learning path
+
+{% system-flow title="Consent-aware auction path" caption="The synchronous path makes one bounded decision. Events leave asynchronously for attribution, evaluation, and training." %}
+{% system-node title="Request gateway" eyebrow="Validate" icon="check" tone="blue" %}
+Normalize the bid request, attach a deadline and region, verify consent and inventory,
+then discard fields the auction is not permitted to use.
+{% /system-node %}
+{% system-node title="Eligibility service" eyebrow="Filter" icon="filter" tone="rose" %}
+Match campaigns, enforce targeting rules, frequency caps, budget reservations, and
+creative policy before ranking. It returns an auditable candidate set.
+{% /system-node %}
+{% system-node title="Feature and rank" eyebrow="Predict" icon="activity" tone="violet" %}
+Read versioned online features, score a bounded set, apply pacing multipliers, and
+return scores with model and feature versions.
+{% /system-node %}
+{% system-node title="Auction and response" eyebrow="Choose" icon="scale" tone="amber" %}
+Apply reserve price and final policy checks, atomically reserve spend, return the winner,
+and include a trace ID for later explanation.
+{% /system-node %}
+{% /system-flow %}
+
+The event stream is outside the deadline. It stores the full eligible candidate set,
+ranked positions, winning price, policy version, consent state, and outcome events.
+Stream jobs build point-in-time features and attribution tables. Offline training reads
+only versioned snapshots; a model registry records training data range, slices, and
+approval evidence before deployment.
+
+{% code-block file="/api/content/practice/ad-targeting/code/rtb-bid-request.json" language="json" title="Bounded bid request" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep dive on model, policy, and auction decisions" %}
+
+
+### Policy, fairness, and failure decision lab
+
+Choose a scenario, then select a node to inspect its responsibility. This lab shows why
+policy and fairness evaluation remain on the request path while observability and model
+training stay asynchronous. A system may degrade from personalized to contextual
+ranking; it may not invent consent, ignore a frequency cap, or serve when a required
+eligibility check is unavailable.
+
+{% topology-lab dataFile="/api/content/practice/ad-targeting/data/policy-fairness-failure-lab.json" /%}
+
+### Make the auction deterministic at the boundary
+
+The ranker produces a score, not permission to spend. After final eligibility, choose
+the winning campaign using a documented pricing rule, atomically reserve a small budget
+amount, and emit a decision record. If the reservation cannot complete before the
+deadline, remove that campaign and continue with other eligible candidates. Never
+charge based on a score that was computed before a campaign became exhausted.
+
+{% code-block file="/api/content/practice/ad-targeting/code/rtb-bid-response.json" language="json" title="Bid decision response" /%}
+
+**Cold start and skew controls**
+
+- A new campaign can use contextual features and conservative bid caps until enough
+  representative exposure exists; do not manufacture a behavioral profile.
+- Downweight or cap repeated exposure per person and report reach, frequency, and
+  outcome quality by campaign and audience slice.
+- Keep a small randomized exploration allocation only where consent and product policy
+  allow it, with a fixed spend ceiling and holdout reporting.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Evaluation and QA strategy" %}
+
+
+### Evaluate the funnel, not just a click metric
+
+Offline, check calibration, AUC or log loss, and ranking quality on impression groups
+with position-aware or randomized data. Measure prediction quality separately for
+contextual-only traffic, new users, regions, device classes, campaign sizes, and
+protected or high-risk product slices where allowed by policy. A model cannot be
+approved from an aggregate lift that hides a harmful slice regression.
+
+**Online release gates**
+
+- Primary: incremental conversions or advertiser value measured with a holdout, not
+  attributed conversions alone.
+- User and publisher: frequency distribution, complaint rate, creative-policy escapes,
+  and page latency.
+- System: p95/p99 auction latency, timeout rate, cache coverage, feature freshness,
+  budget-reservation conflicts, and serving cost.
+- Fairness and privacy: delivery and outcome disparities on approved slices, consent
+  mismatch rate, and use of restricted targeting fields.
+
+### Test data integrity before a model test
+
+Replay captured consent-valid requests against the candidate service. Contract-test
+feature defaults and schema versions, compare online values with the training snapshot,
+and test that an expired consent string, exhausted budget, and failed cap counter each
+remove a candidate. Audit impression logs for duplicates, missing position, delayed
+conversions, and missing policy versions before trusting an A/B result.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operations and retraining plan" %}
+
+
+### Operate with owners and stop conditions
+
+The auction owner watches deadline, error, and budget-reservation health. The ML owner
+watches feature freshness, calibration, slice quality, and training-data drift. The
+policy owner watches consent validation, creative-rule changes, and appeals or
+complaints. Each alert needs a preapproved action, not only a dashboard.
+
+**Page immediately**
+
+- Required consent, frequency-cap, or budget-reservation checks are unavailable or
+  returning inconsistent results.
+- Any region exceeds its hard auction deadline or a campaign overspends its tolerance.
+- A policy mismatch or restricted-feature use is detected.
+
+**Retrain and release deliberately**
+
+- Build daily point-in-time training snapshots; retrain only when label maturity,
+  coverage, and data-quality gates pass.
+- Shadow-score first, then canary a small traffic share with the same hard filters and
+  an instant rollback to the prior model.
+- Freeze promotion when calibration, a protected slice, privacy metrics, or serving
+  latency breaches a release gate even if aggregate revenue rises.
+
+{% code-block file="/api/content/practice/ad-targeting/code/consent-api.http" language="http" title="Consent is an explicit service boundary" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Trade-offs and future improvements" %}
+
+
+### Choose the trade-off consciously
+
+{% concept-grid columns="3" %}
+{% concept-card title="Contextual first" eyebrow="Privacy" icon="search" tone="green" %}
+Uses page and placement context with less personal data. It is a robust fallback, but
+can be less precise for returning users.
+{% /concept-card %}
+{% concept-card title="Richer online features" eyebrow="Quality" icon="layers" tone="violet" %}
+Can improve calibration and conversion prediction, but adds freshness, latency, and
+consent-propagation risk to the serving path.
+{% /concept-card %}
+{% concept-card title="Strict fail-closed gates" eyebrow="Safety" icon="shield" tone="rose" %}
+Protects privacy and spend when an authority fails, but may reduce fill rate and short
+term revenue during an incident.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Extend only after the invariant is stable
+
+Possible next steps include privacy-preserving aggregate measurement, causal lift models,
+creative diversity constraints, on-device interest signals, and contextual exploration.
+Each needs a separate data-use review, counterfactual evaluation plan, and rollback
+condition. Do not add a more complex model to compensate for missing consent, unreliable
+budget state, or biased labels.
+
+{% callout variant="warn" %}
+The useful final interview answer is not "maximize CTR." It is: serve the best eligible
+ad within a bounded deadline, preserve budget and consent invariants, and prove that
+quality gains survive counterfactual, operational, and fairness checks.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/ad-targeting/quiz/ad-targeting-design-review.json"
+   lessonSlug="practice-ad-targeting"
+   title="Ad Targeting Design Review" /%}

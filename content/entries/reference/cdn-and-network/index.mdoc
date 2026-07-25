@@ -1,0 +1,202 @@
+---
+registryId: cdn-and-network
+---
+
+{% section-card tone="intro" %}
+## What is a content delivery network?
+
+A content delivery network, or CDN, is a distributed data plane that answers eligible requests from edge locations near users. The edge can terminate connections, enforce request policy, cache reusable responses, and forward misses to a protected origin path.
+
+A CDN matters because distance and shared origin capacity affect every global request. Serving a reusable object at the edge shortens the network path and removes work from the origin. The CDN does not make all traffic fast automatically: the response must be safe to reuse, requests must converge on a stable cache key, and the miss path must remain inside tested capacity.
+
+{% callout variant="info" %}
+The core invariant is **representation safety**. Two requests may share a cached response only when they are authorized to receive the same representation under the same freshness contract.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## A CDN changes the request path, not the source of truth
+
+{% system-flow title="A bounded CDN delivery path" caption="A cache hit ends at the edge. A miss continues through a shield to the authoritative origin, then stores a response only when policy permits reuse." %}
+{% system-node title="Viewer" eyebrow="Demand" icon="users" tone="blue" %}
+Resolve the hostname, negotiate a secure connection, and send an authorized request.
+{% /system-node %}
+{% system-node title="Edge location" eyebrow="Nearby decision" icon="globe" tone="cyan" %}
+Normalize the key, apply edge policy, and serve a fresh or explicitly permitted stale object.
+{% /system-node %}
+{% system-node title="Regional shield" eyebrow="Miss protection" icon="shield" tone="violet" %}
+Coalesce repeated misses and limit fan-out from many edge locations to the origin.
+{% /system-node %}
+{% system-node title="Origin service" eyebrow="Authority" icon="server" tone="amber" %}
+Generate or retrieve the canonical response and attach its cacheability and freshness policy.
+{% /system-node %}
+{% system-node title="Object store" eyebrow="Durable asset" icon="database" tone="green" %}
+Hold immutable versions and source objects behind a protected origin identity.
+{% /system-node %}
+{% /system-flow %}
+
+The origin remains authoritative even when the edge serves most reads. A cache purge changes derived copies; it does not replace the versioned source object, application state, or access-control decision.
+{% /section-card %}
+
+{% section-card %}
+## The cache key is a correctness boundary
+
+A cache key identifies the reusable representation. A typical key starts with scheme, host, path, and normalized query parameters, then includes only request dimensions that genuinely change the response.
+
+### Include a dimension when it changes the representation
+
+- **Asset version:** a content hash or release identifier separates changed bytes.
+- **Language or encoding:** include negotiated variants only when the response actually differs.
+- **Tenant or authorization class:** separate private representations before shared caching; many authenticated responses should remain private instead.
+- **Query parameter:** keep parameters that select content; drop tracking parameters that do not.
+- **Device class:** vary only when the server emits materially different assets, not merely because the header exists.
+
+### Fragmentation is the opposite failure
+
+Adding cookies, full user-agent strings, request IDs, or irrelevant query parameters can create a unique key for nearly every request. The configured TTL may be long, yet effective hit rate remains low because equivalent requests never meet in the same entry.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Collision" eyebrow="Too little separation" icon="warning" tone="rose" %}
+Different authorized representations share one key. The failure is data leakage or incorrect content, not merely poor performance.
+{% /concept-card %}
+{% concept-card title="Fragmentation" eyebrow="Too much separation" icon="layers" tone="amber" %}
+Equivalent requests create many keys. Memory is diluted and misses transfer load to the origin.
+{% /concept-card %}
+{% concept-card title="Convergence" eyebrow="Deliberate dimensions" icon="check" tone="green" %}
+Safe equivalent requests map to the same entry, while private or genuinely different representations stay separate.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Trace failure through the actual delivery topology
+
+An edge hit, a cold object, a fragmented key, and an origin timeout can all feel like “the CDN is slow.” The corrective action differs because each event activates a different path.
+
+{% topology-lab dataFile="/api/content/reference/cdn-and-network/data/cdn-failure-topology.json" /%}
+
+### Keep data-plane and control-plane behavior separate
+
+- The **data plane** serves requests using currently active routing, cache, certificate, and policy state.
+- The **control plane** publishes configuration, invalidations, routes, and certificates to the data plane.
+- A control-plane delay should not automatically stop healthy cached delivery.
+- A purge or configuration rollout needs progress, failure, and rollback evidence across regions.
+- Regional failover must account for the cold-cache pressure created at the destination.
+{% /section-card %}
+
+{% section-card %}
+## Cache-hit rate is an origin-capacity multiplier
+
+For cacheable request rate `R` and hit rate `H`, the first origin-load estimate is:
+
+`origin requests per second = R x (1 - H)`
+
+At 100,000 requests per second, moving from a 95% hit rate to 90% doubles origin demand from 5,000 to 10,000 requests per second. Percentage points that look small on a dashboard can be a large absolute capacity event.
+
+{% traffic-split dataFile="/api/content/reference/cdn-and-network/data/cdn-hit-rate-pressure.json" /%}
+
+The origin model should include more than average request count:
+
+- peak demand and regional concentration;
+- cold-start and invalidation bursts;
+- shield hit rate and request coalescing;
+- origin latency, concurrency, and connection limits;
+- object size and egress bandwidth;
+- retries, timeout budgets, and stale fallback eligibility.
+
+Plan the miss path as a production path, not an exceptional path. A CDN configuration that works only while the cache is warm has no safe recovery state.
+{% /section-card %}
+
+{% section-card %}
+## Freshness is a product decision
+
+HTTP caching distinguishes how long an object is fresh from what a cache may do after freshness ends. The correct policy depends on how costly stale data is and how quickly a new version must become visible.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Versioned immutable asset" eyebrow="Change the URL" icon="file-text" tone="green" %}
+Use a content hash in the path and a long freshness lifetime. Publishing new bytes creates a new key, so old versions can remain safely cached.
+{% /concept-card %}
+{% concept-card title="Revalidatable document" eyebrow="Check before reuse" icon="repeat" tone="blue" %}
+Use validators such as `ETag` or `Last-Modified` so a stale entry can be confirmed without transferring the full body again.
+{% /concept-card %}
+{% concept-card title="Bounded stale response" eyebrow="Resilience window" icon="shield" tone="violet" %}
+Use `stale-while-revalidate` or `stale-if-error` only when an older representation remains safe during the stated window.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Invalidation is not the default versioning strategy
+
+Purges are useful for emergency removal and bounded mutable objects, but they are distributed control-plane operations. They can be delayed, partially applied, rate limited, or issued with an incorrect scope. Prefer versioned URLs for immutable assets and measure purge completion when invalidation is required.
+
+{% code-block file="/api/content/reference/cdn-and-network/code/cache-policy.ts" language="typescript" title="Build an explicit shared-cache policy" /%}
+{% /section-card %}
+
+{% section-card %}
+## Network latency has multiple budgets
+
+“Edge latency” is not one number. A viewer may pay DNS resolution, transport setup, TLS, request travel, edge processing, cache lookup, origin fetch, and response transfer. Connection reuse and modern transports can remove repeated setup work, but they cannot make a distant miss behave like a local hit.
+
+{% process-flow %}
+{% process-step number="1" title="Resolve and route" label="DNS" %}
+Map the hostname to a healthy edge route. Respect TTL and failover behavior instead of assuming every resolver changes immediately.
+{% /process-step %}
+{% process-step number="2" title="Establish transport" label="Connect" %}
+Negotiate TCP plus TLS or QUIC, then reuse the connection where possible. Loss and path changes affect the setup cost.
+{% /process-step %}
+{% process-step number="3" title="Make the edge decision" label="Cache" %}
+Authenticate as required, normalize the key, check freshness, and choose hit, stale, revalidation, or miss behavior.
+{% /process-step %}
+{% process-step number="4" title="Fetch and transfer" label="Deliver" %}
+Reach the shield or origin on a miss, then transfer bytes under the remaining deadline and populate only safe responses.
+{% /process-step %}
+{% /process-flow %}
+
+HTTP/2 multiplexes streams over one connection but can still suffer when packet loss blocks progress at the TCP layer. HTTP/3 maps HTTP onto QUIC streams so loss on one stream does not impose the same cross-stream transport blocking. Actual benefit still depends on network conditions, implementation, connection reuse, and workload.
+{% /section-card %}
+
+{% section-card %}
+## Choose a CDN from workload constraints
+
+Provider branding is less useful than a decision contract. Compare the behavior your workload must prove.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Cache and origin control" eyebrow="Delivery" icon="database" tone="blue" %}
+Evaluate key normalization, shield behavior, request coalescing, stale policy, invalidation semantics, range requests, and origin authentication.
+{% /concept-card %}
+{% concept-card title="Network and security" eyebrow="Edge boundary" icon="shield" tone="violet" %}
+Evaluate TLS and protocol support, DDoS controls, web application policy, private connectivity, regional restrictions, and certificate operations.
+{% /concept-card %}
+{% concept-card title="Operations and economics" eyebrow="Ownership" icon="activity" tone="green" %}
+Evaluate logs, real-time metrics, configuration rollout, rollback, support, egress pricing, request charges, and predictable failure behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+Run a representative test with your object sizes, cacheability mix, countries, protocols, and miss behavior. A published point-of-presence count or best-case latency does not prove that a specific request path meets its target.
+{% /section-card %}
+
+{% section-card %}
+## Operate the edge with outcome evidence
+
+Monitor the full distribution and the reason behind each outcome:
+
+- **Cache outcomes:** hit, miss, stale, revalidated, bypassed, and error by route and safe key dimensions.
+- **Age and freshness:** object age at serve time and time spent outside the intended policy.
+- **Origin pressure:** request rate, bytes, concurrency, shield efficiency, timeout, and retry amplification.
+- **User latency:** DNS, connection, time to first byte, and transfer time by region and protocol.
+- **Correctness:** authorization leakage tests, wrong-variant reports, purge completion, and stale-policy violations.
+- **Resilience:** regional failover time, cold-cache recovery, stale fallback use, and origin saturation.
+- **Cost:** edge egress, origin egress, request classes, invalidations, and compute at the edge.
+
+Use a synthetic probe for known paths, but correlate it with real-user measurements and server-side cache status. One fast probe from a major city cannot represent a global network.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [RFC 9111: HTTP Caching](https://www.rfc-editor.org/rfc/rfc9111)
+- [RFC 9114: HTTP/3](https://www.rfc-editor.org/rfc/rfc9114)
+- [RFC 9000: QUIC](https://www.rfc-editor.org/rfc/rfc9000)
+- [RFC 9211: Cache-Status](https://www.rfc-editor.org/rfc/rfc9211)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/cdn-and-network/quiz/cdn-network-decisions.json" lessonSlug="cdn-and-network" title="CDN and Network Quiz" /%}

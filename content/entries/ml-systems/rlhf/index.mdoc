@@ -1,0 +1,182 @@
+---
+registryId: rlhf
+---
+
+{% section-card tone="intro" %}
+## What is RLHF?
+
+**Reinforcement Learning from Human Feedback (RLHF)** is a way to tune a model toward responses people judge as better. A team asks people to compare candidate responses, trains a reward model to predict those preferences, then updates a policy to earn more predicted reward.
+
+RLHF matters because next-token training can produce fluent language without reliably producing useful, honest, safe, or instruction-following behavior. It changes the training target from "predict text" to "behave in ways a specified group tends to prefer."
+
+### Core invariant
+
+Optimization quality is bounded by preference-data validity, reward-model generalization, and constrained policy updates. A strong optimizer cannot repair biased labels, a reward model cannot reliably score unfamiliar behavior, and an unconstrained policy can exploit either weakness.
+
+RLHF builds on [policy gradients](/ml-systems/policy-gradient-theorem). You only need one idea from that lesson here: a policy update increases the probability of sampled behavior with positive learning signal, so the signal and the update boundary both need independent scrutiny.
+{% /section-card %}
+
+{% section-card %}
+## How does an RLHF system turn feedback into a release?
+
+An RLHF system is a feedback loop, not a single training run. Each stage creates evidence for the next stage and adds a place to stop unsafe or low-confidence work.
+
+{% process-flow %}
+{% process-step number="1" title="Start from SFT" label="Capable baseline" %}
+Supervised fine-tuning (SFT) trains on high-quality demonstrations so the policy can already follow instructions before preference optimization begins.
+{% /process-step %}
+{% process-step number="2" title="Collect preferences" label="Valid signal" %}
+Show comparable candidate responses under a rubric, randomize presentation, record disagreement, and preserve prompt, annotator, and policy-version metadata.
+{% /process-step %}
+{% process-step number="3" title="Fit a reward model" label="Generalizing proxy" %}
+Train a scalar scorer to rank chosen responses above rejected responses, then test it on held-out prompts and important slices.
+{% /process-step %}
+{% process-step number="4" title="Update conservatively" label="Bounded policy" %}
+Use rollouts and the reward model to improve the policy while penalizing divergence from a frozen reference policy.
+{% /process-step %}
+{% /process-flow %}
+
+### Where SFT ends and RLHF begins
+
+- **SFT learns demonstrations.** Given a prompt and a preferred answer, it learns to imitate the answer tokens.
+- **Preference collection learns comparisons.** Given the same prompt and two answers, it records which answer better meets the rubric; it does not require a perfect target answer.
+- **Reward modeling learns a proxy.** It maps a prompt-response pair to a score that should order the two answers like the annotators did.
+- **Policy optimization searches against that proxy.** It can find behavior not present in the demonstrations, which is useful only while the proxy and constraints remain trustworthy.
+{% /section-card %}
+
+{% section-card %}
+## Is the preference signal ready to optimize?
+
+Preference data is training data with an unusually important semantic contract: the comparison rubric must mean the same thing across people, prompts, and slices. Pair count alone does not create that contract.
+
+{% interactive-block id="ml-systems/rlhf-preference-signal-lab" dataFile="/api/content/ml-systems/rlhf/data/preference-signal-lab.json" /%}
+
+### Collect comparisons that answer the intended question
+
+1. Define a rubric before sampling responses. Separate factual accuracy, instruction following, tone, refusal quality, and policy compliance when they can conflict.
+2. Sample from relevant policy versions and decoding settings. Otherwise the reward model may learn to compare only stale or easy candidates.
+3. Blind and randomize response order. Position, length, and model identity can become accidental label features.
+4. Measure agreement and retain disagreement. Low agreement can indicate a vague rubric, a hard task, or a legitimate value conflict; collapsing it into a single majority label hides the cause.
+5. Audit coverage by language, domain, risk level, user group, prompt length, and response style. Important rare slices need deliberate collection rather than hope.
+
+{% callout variant="info" %}
+Annotator agreement is not a universal quality score. High agreement on a narrow, biased rubric can still produce a systematically wrong reward model. Use agreement with rubric audits and slice coverage.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## How does reward modeling convert comparisons into a training signal?
+
+A reward model is usually a language model with a scalar head. For a prompt `x`, a chosen response `y+`, and a rejected response `y-`, it learns to make `r(x, y+)` greater than `r(x, y-)`.
+
+### Pairwise objective
+
+A common Bradley-Terry-style loss is:
+
+`L_RM = -log sigmoid(r(x, y+) - r(x, y-))`
+
+The loss asks for an ordering, not an absolute truth score. A high held-out pairwise accuracy is useful evidence, but it does not prove that the model ranks new response styles correctly or represents all affected users.
+
+### Validate the reward model before using it as an objective
+
+- Hold out complete prompts and response pairs, not merely shuffled response tokens from the same prompt.
+- Report ranking accuracy and calibration or score-distribution checks by important slices.
+- Run adversarial probes for verbosity, flattery, refusal, citation, formatting, and style shortcuts that could look good without satisfying intent.
+- Compare the reward model with fresh human judgments and task-grounded checks. Do not use the same data or the same reward model as the only release evaluator.
+
+{% code-block file="/api/content/ml-systems/rlhf/code/pairwise-reward-loss.py" language="python" title="Pairwise reward-model loss" /%}
+{% /section-card %}
+
+{% section-card %}
+## What keeps a policy update from exploiting the reward model?
+
+Policy optimization can improve a reward-model score quickly. That is precisely why it needs a reference policy, a divergence budget, and independent release gates.
+
+{% interactive-block id="ml-systems/rlhf-policy-update-lab" dataFile="/api/content/ml-systems/rlhf/data/policy-update-lab.json" /%}
+
+### The constrained objective
+
+Let `pi_theta` be the policy being updated, `pi_ref` the frozen SFT or prior policy, and `r_phi` the learned reward model. A simplified objective is:
+
+`maximize E[r_phi(x, y)] - beta * KL(pi_theta(. | x) || pi_ref(. | x))`
+
+The KL term measures how much the new token distribution differs from the reference. It is not a safety proof. It is a brake: keeping the policy nearer to behavior where the reward model and regression suite have more evidence.
+
+### PPO and update control
+
+Proximal Policy Optimization (PPO) commonly limits a probability-ratio objective with clipping and adjusts `beta` to maintain a KL target. Practical controls include:
+
+- Stop or reduce optimization epochs when measured KL exceeds the target.
+- Keep the reference model frozen and store behavior-policy log probabilities with every rollout.
+- Normalize or clip advantages carefully, then log clip fraction, reward, KL, entropy, and length together.
+- Use larger or more diverse rollout sets to reduce noisy updates, while recognizing that rollouts, reference scoring, and reward scoring raise cost.
+
+{% code-block file="/api/content/ml-systems/rlhf/code/constrained-policy-objective.py" language="python" title="A KL-penalized PPO-style objective" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Which failures must the system detect?
+
+### Reward hacking is proxy exploitation
+
+Reward hacking happens when the policy finds a pattern that raises the learned score without satisfying the real intent. Examples include unnecessary length, confident-sounding fabrication, excessive refusal, superficial empathy, or repeating a phrase the reward model overvalues.
+
+- Add adversarial and counterfactual examples to preference data.
+- Evaluate outcome quality with independent humans, deterministic checks, and task-specific tests.
+- Treat a rising reward score paired with falling external quality, unusual length, or slice regressions as a stop signal.
+
+### Oversight bias is a data and governance failure
+
+The annotation pool, rubric, sampling policy, and adjudication process define what the system is optimized to value. Majority labels can erase a legitimate minority need, and annotators may optimize a visible style cue instead of correctness.
+
+- Use clear escalation paths for domain, safety, and value conflicts.
+- Audit annotator, prompt, and response-distribution coverage without collecting unnecessary personal data.
+- Preserve disagreement and inspect who is harmed by an aggregate preference decision.
+
+### Distribution shift grows as optimization succeeds
+
+As the policy moves, it generates responses unlike the reward model's training pairs. A reward model can be accurate in-distribution and unreliable exactly where an aggressive policy searches.
+
+- Bound updates with KL or a comparable trust region.
+- Refresh preference data with new policy samples, especially from failure slices.
+- Mix SFT or regression data into training when capability retention matters.
+{% /section-card %}
+
+{% section-card %}
+## How do teams operate RLHF safely and economically?
+
+### Release and monitoring loop
+
+1. Version the SFT policy, prompt distribution, preference dataset, rubric, reward model, reference policy, optimizer configuration, and evaluation suite together.
+2. Promote only after independent quality, safety, and capability gates pass overall and on predefined slices.
+3. Start with a bounded canary. Monitor external evaluator results, refusal and length distributions, user outcomes, complaints, and reward-versus-human disagreement.
+4. Roll back to a known policy when a guardrail breaches. Save rollouts and evaluator evidence so the next data-collection round targets the observed failure.
+
+### Cost drivers
+
+- **Human feedback:** expert annotation, calibration, adjudication, and quality control can dominate when prompts are specialized.
+- **Rollouts:** every candidate requires generation; PPO commonly adds reference-policy, reward-model, value-model, and optimizer work.
+- **Evaluation:** independent human studies and adversarial testing are not optional overhead; they are evidence that the optimized proxy still matches intent.
+
+Active learning can focus annotation on disagreement, uncertainty, and high-impact slices. It reduces waste only when the selection policy itself is audited for coverage bias.
+{% /section-card %}
+
+{% section-card %}
+## When should a team use an alternative to RLHF?
+
+### DPO and RLAIF
+
+- **Direct Preference Optimization (DPO)** learns from preference pairs with a direct classification-style objective relative to a reference policy. It avoids fitting a separate reward model and online PPO loop, which can simplify training. It still depends on valid preferences and can still overfit preference artifacts.
+- **Reinforcement Learning from AI Feedback (RLAIF)** obtains some comparisons or critiques from a model or rule-based process. It can scale feedback, but moves oversight assumptions into the critic, constitution, prompts, and audit process. Human evaluation remains necessary for grounding.
+
+### Decision guide
+
+- Choose **SFT** when demonstrations are available and the desired behavior is mostly imitation.
+- Choose **DPO** when high-quality offline preference pairs fit the objective and simpler, more stable training is valuable.
+- Choose **RLHF with online policy optimization** when exploration against a carefully validated reward signal is worth its systems cost and the team can enforce strong evaluation gates.
+- Choose **RLAIF** to expand coverage or generate critique candidates, not as evidence that the desired behavior is correct.
+
+The trade-off is not "simple versus aligned." Every method must define whose preferences count, where the signal generalizes, what cannot be optimized, and how a release can be reversed.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/rlhf/quiz/rlhf.json" lessonSlug="rlhf" /%}

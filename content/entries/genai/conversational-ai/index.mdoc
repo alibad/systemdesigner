@@ -1,0 +1,181 @@
+---
+registryId: conversational-ai
+---
+
+{% section-card tone="intro" %}
+## What is conversational AI?
+
+**Conversational AI is a system that accepts natural-language turns, assembles bounded context, generates or executes an answer, and preserves only the state needed for useful continuity.** The product is not just a chat box around a model. It is a stateful request protocol with identity, memory, retrieval, tools, streaming, safety, and terminal outcomes.
+
+In plain language, the assistant should understand a follow-up without pretending it remembers information that was never stored, has expired, belongs to another user, or no longer fits in the context window.
+
+The core invariant is **every turn must be attributable to one authorized session, and every response or side effect must reflect the context and outcome that actually occurred**. A missing memory, failed tool, cancelled stream, or blocked answer cannot be rewritten as success.
+
+Start with [LLM fundamentals](/genai/llm-intro) if tokens, context windows, or model inference are unfamiliar. Add [retrieval-augmented generation](/genai/rag) only when the assistant needs external evidence.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one turn through the runtime
+
+{% process-flow %}
+{% process-step number="1" title="Accept an authorized turn" label="Gateway" %}
+Bind user, tenant, session, locale, quotas, request ID, and a cancellation signal before reading state.
+{% /process-step %}
+{% process-step number="2" title="Assemble bounded context" label="Orchestrator" %}
+Select recent turns, approved memories, permission-filtered evidence, tool schemas, instructions, and output budget.
+{% /process-step %}
+{% process-step number="3" title="Generate or request a tool" label="Model" %}
+Produce a candidate response or structured action proposal inside the remaining token and time envelope.
+{% /process-step %}
+{% process-step number="4" title="Validate the outcome" label="Policy" %}
+Check grounding, privacy, tool arguments, output policy, and whether claimed external actions actually completed.
+{% /process-step %}
+{% process-step number="5" title="Stream an explicit terminal state" label="Client" %}
+Deliver deltas followed by complete, cancelled, timed-out, blocked, or failed so partial text is never mistaken for a final answer.
+{% /process-step %}
+{% /process-flow %}
+
+The topology lab makes degraded paths visible. Change the scenario, then inspect the component that owns the fallback.
+
+{% topology-lab dataFile="/api/content/genai/conversational-ai/data/conversation-runtime-topology.json" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Budget context before calling the model
+
+Instructions, conversation history, retrieved evidence, tool results, and generated output all compete for one finite context window. A production system decides what to admit before inference rather than trimming arbitrary text after the provider rejects the request.
+
+{% interactive-block id="genai/conversational-ai-context-lab" dataFile="/api/content/genai/conversational-ai/data/context-budget-scenarios.json" /%}
+
+### Preserve the assembly trace
+
+- Record source IDs, versions, authorization decisions, scores, and token counts for admitted context.
+- Give system and safety instructions stable priority over retrieved or user-supplied text.
+- Reserve output capacity and tool-result capacity instead of filling the window with history.
+- Expose truncation and degraded memory to the user when continuity changes the answer.
+
+{% code-block file="/api/content/genai/conversational-ai/code/assemble-context.js" language="javascript" title="Assemble authorized context under a hard budget" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose a memory contract, not a memory feature
+
+{% concept-grid columns="3" %}
+{% concept-card title="Recent-turn window" eyebrow="Verbatim and bounded" icon="clock" tone="blue" %}
+Keep the newest turns exactly as written. It is predictable and correct for local follow-ups, but older dialogue disappears at a declared boundary.
+{% /concept-card %}
+{% concept-card title="Summary plus recency" eyebrow="Compressed continuity" icon="layers" tone="violet" %}
+Summarize older turns and keep recent messages verbatim. Version the summary input because compression can omit or distort important facts.
+{% /concept-card %}
+{% concept-card title="Retrieved memory" eyebrow="Selective recall" icon="search" tone="cyan" %}
+Store approved facts with provenance, confidence, retention, and tenant scope; retrieve only memories relevant to the current task.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Govern memory throughout its lifecycle
+
+1. **Write:** persist only facts with a user-visible purpose and an explicit owner.
+2. **Read:** filter by identity and tenant before similarity or ranking.
+3. **Use:** label recalled facts separately from current user input and external evidence.
+4. **Correct:** support update, deletion, expiry, and user review without rebuilding the whole conversation.
+5. **Audit:** retain enough provenance to explain why a memory entered a particular turn.
+
+Do not store secrets, raw tool credentials, unsafe model guesses, or every generated token as long-term memory.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat streaming as a state machine
+
+Streaming reduces time to first visible output, not total inference time. The client still needs ordering, backpressure, cancellation, reconnection rules, and one terminal outcome.
+
+{% system-flow title="A streamed turn has explicit states" caption="Partial text remains provisional until one terminal event closes the request." %}
+{% system-node title="Accepted" eyebrow="Request" icon="check" tone="blue" %}
+Request ID, session version, and budgets are fixed.
+{% /system-node %}
+{% system-node title="Generating" eyebrow="Events" icon="activity" tone="violet" %}
+Token and tool events carry monotonically ordered sequence IDs.
+{% /system-node %}
+{% system-node title="Validating" eyebrow="Policy" icon="shield" tone="amber" %}
+Buffered claims or actions wait for policy and execution evidence.
+{% /system-node %}
+{% system-node title="Terminal" eyebrow="Outcome" icon="flag" tone="green" %}
+Complete, cancelled, timed out, blocked, or failed closes the request.
+{% /system-node %}
+{% /system-flow %}
+
+### Define client behavior for every outcome
+
+- Keep partial text visibly provisional until a terminal event arrives.
+- Stop provider work when the user cancels or disconnects where the transport supports it.
+- On reconnect, resume from an event cursor or start a new request; never append a second stream blindly.
+- Preserve typed tool and citation events instead of flattening everything into text.
+- Measure time to first meaningful token, completion latency, cancellation, and abandoned partial responses.
+
+{% code-block file="/api/content/genai/conversational-ai/code/stream-turn.js" language="javascript" title="Stream deltas with deadline and terminal-state handling" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Put tools behind an execution boundary
+
+A model proposes an action; it does not authorize or prove the action. Parse structured arguments, validate them against current identity and policy, execute with scoped credentials, and return a typed result the model cannot overwrite.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Validate" icon="check" tone="blue" %}
+Reject unknown tools, excess fields, invalid types, unsafe targets, and arguments derived from untrusted instructions.
+{% /concept-card %}
+{% concept-card title="Authorize" icon="shield" tone="green" %}
+Evaluate user, tenant, resource, and action at execution time rather than trusting permissions copied into the prompt.
+{% /concept-card %}
+{% concept-card title="Execute" icon="settings" tone="amber" %}
+Use deadlines, idempotency keys, bounded retries, least-privilege credentials, and isolated network access.
+{% /concept-card %}
+{% concept-card title="Reconcile" icon="refresh" tone="rose" %}
+Record whether the effect committed, failed, or is unknown; never let generated prose convert ambiguity into success.
+{% /concept-card %}
+{% /concept-grid %}
+
+Require user confirmation for destructive, expensive, external, or hard-to-reverse actions. Show the exact target and effect before execution.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate conversations as trajectories
+
+Single-turn answer quality misses context drift, memory contamination, correction handling, tool recovery, and whether a later turn contradicts an earlier commitment.
+
+### Build a release suite
+
+- **Task completion:** multi-turn goals with clarifications, corrections, topic changes, and early termination
+- **Context fidelity:** references resolved from the right turn, explicit behavior when history is absent, and no cross-session leakage
+- **Grounding:** citation support, permission-filtered retrieval, abstention, and contradictory evidence
+- **Tool behavior:** valid proposals, confirmation, idempotency, timeout, partial failure, and reconciliation
+- **Safety:** prompt injection, sensitive data, disallowed requests, unsafe memory writes, and policy-consistent refusal
+- **Experience:** first-token latency, final latency, cancellation, recovery, response length, and user effort
+
+Run deterministic checks for schemas and state transitions, model-based grading for bounded rubrics, and human review for high-impact slices. Compare releases on the same frozen cases before exposing live traffic.
+{% /section-card %}
+
+{% section-card %}
+## Operate the conversation, not only the model
+
+### Monitor each turn
+
+- Request, session, user, tenant, model, prompt version, and experiment identifiers
+- Tokens by context source, truncation reason, output reservation, cache use, latency, and cost
+- Memory reads/writes, retrieval candidates, authorization filters, citations, and stale-state conflicts
+- Tool proposal, confirmation, execution, retries, idempotency, side-effect result, and reconciliation state
+- Safety decisions, stream lifecycle, disconnects, cancellations, terminal outcomes, and user feedback
+
+### Prepare degraded modes
+
+- Answer from the current turn when memory is unavailable and say that continuity is limited.
+- Fall back to no retrieval or a read-only evidence cache when freshness permits it.
+- Disable tools independently while preserving safe informational responses.
+- Route to a smaller model, concise output, queue, or human handoff when budgets are exhausted.
+- Reject the turn when identity, tenant isolation, policy, or action outcome cannot be established.
+
+{% callout variant="tip" %}
+A trustworthy assistant can explain what it remembered, what evidence it used, what action occurred, and why a partial or degraded response is not the same as success.
+{% /callout %}
+{% /section-card %}
+
+{% quiz quizId="conversational-ai" title="Conversational AI Production Review" lessonSlug="conversational-ai" questionsFile="/api/content/genai/conversational-ai/quiz/conversational-ai-production.json" /%}

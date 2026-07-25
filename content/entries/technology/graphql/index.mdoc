@@ -1,0 +1,280 @@
+---
+registryId: graphql
+---
+
+{% section-card tone="intro" %}
+## What is GraphQL?
+
+**GraphQL is a typed language and execution model for asking an API for a specific
+shape of data.** A client sends an operation containing fields and variables. The
+server checks that operation against a schema, runs the selected field resolvers, and
+returns an execution result whose response names mirror the selection.
+
+GraphQL matters when several clients need different views over connected domain data.
+It gives clients flexibility inside a governed schema, but that flexibility moves
+important work to the server: authorization, bounded list sizes, query admission,
+resolver batching, nullability, compatible evolution, and field-level observability.
+Start with [API design](/technology/api-design) if schemas and transport contracts are
+new to you.
+
+{% callout variant="info" %}
+The core invariant is: **the schema defines what can be requested, not what is cheap or
+permitted for every user.** Validation, authorization, and demand control are separate
+decisions, and all three must pass before expensive work is allowed to fan out.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow an operation from document to result
+
+A GraphQL request has a predictable lifecycle. Keeping each boundary explicit makes it
+easier to diagnose whether a failure belongs to the caller, the API policy, a resolver,
+or a downstream system.
+
+{% process-flow %}
+{% process-step number="1" title="Parse the document" label="Syntax" %}
+Turn the operation text into a structured document. Syntax errors stop the request
+before execution.
+{% /process-step %}
+{% process-step number="2" title="Validate the selection" label="Schema" %}
+Check fields, arguments, variables, fragments, and operation selection against the
+current type system.
+{% /process-step %}
+{% process-step number="3" title="Apply request policy" label="Admission" %}
+Authenticate the caller, enforce trusted-document or public-query rules, cap list
+arguments, and reject excessive depth, breadth, aliases, batches, or estimated cost.
+{% /process-step %}
+{% process-step number="4" title="Execute fields" label="Resolvers" %}
+Resolve the selected graph, authorize domain access, batch compatible data loads, and
+propagate deadlines to dependencies.
+{% /process-step %}
+{% process-step number="5" title="Complete the result" label="Response" %}
+Coerce values to declared types and return data, errors, or both. An execution error
+includes a path to the response position that failed.
+{% /process-step %}
+{% /process-flow %}
+
+The [September 2025 GraphQL specification](https://spec.graphql.org/September2025/)
+defines validation, execution, value completion, and response semantics. The official
+[execution guide](https://graphql.org/learn/execution/) provides a shorter walkthrough
+of field resolvers and result construction.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Model a domain contract, not database tables
+
+The schema is the client-facing graph. It should name stable domain concepts and
+workflows even when the underlying stores, service boundaries, or joins change.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Object types" eyebrow="Domain entities" icon="layers" tone="blue" %}
+Group fields around concepts such as `Product`, `Account`, or `Order`. Object fields
+may resolve from different systems without exposing those storage details.
+{% /concept-card %}
+{% concept-card title="Input types" eyebrow="Write intent" icon="code" tone="violet" %}
+Describe structured mutation input separately from output. Validate business rules in
+the domain layer after GraphQL has validated the input shape.
+{% /concept-card %}
+{% concept-card title="Interfaces and unions" eyebrow="Shared shape" icon="network" tone="cyan" %}
+Represent polymorphic results while forcing clients to select fields valid for each
+possible runtime type.
+{% /concept-card %}
+{% concept-card title="Nullability" eyebrow="Failure boundary" icon="warning" tone="amber" %}
+Nullable fields can preserve partial data. A failed non-null field propagates null to
+the nearest nullable parent, potentially removing a larger result subtree.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/graphql/code/commerce-schema.graphql" language="graphql" title="A bounded commerce schema" /%}
+
+### Treat nullability as a product decision
+
+- Use non-null when the field is required for the parent value to be useful and the
+  service can reliably uphold that promise.
+- Keep optional enrichment nullable so one weak dependency does not erase unrelated
+  core data.
+- Distinguish missing data, denied data, and failed resolution in error codes and
+  client behavior without leaking sensitive server details.
+- Test null propagation whenever a schema change tightens or relaxes a field contract.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Budget selection cost before resolver work begins
+
+Depth alone does not describe GraphQL work. A shallow operation can repeat an expensive
+field through aliases, while nested lists can multiply the number of response values
+and backend reads. Assign service-owned weights, cap list arguments, and combine
+per-operation admission with per-client traffic budgets.
+
+The lab uses transparent design weights rather than invented benchmark latency. Change
+the operation shape, page size, traffic, and resolver access pattern. Compare the
+schema cost limit with the backend call envelope; either can become the binding
+constraint.
+
+{% interactive-block id="technology/graphql-performance" dataFile="/api/content/technology/graphql/data/operation-budget-model.json" /%}
+
+The official GraphQL [security guide](https://graphql.org/learn/security/) recommends
+layered demand control: trusted documents where the client set is known, pagination,
+depth and breadth limits, batch limits, rate limits, and query complexity analysis.
+No single limit covers all operation shapes.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Batch resolver access without crossing request boundaries
+
+The N+1 pattern appears when one parent lookup returns N objects and a child resolver
+then performs another backend call for each object. GraphQL did not create the
+relationship, but field-by-field execution can make the repeated access easy to miss.
+
+Use a request-scoped loader to collect compatible keys, fetch them together, and return
+results in key order. The cache should normally live only for one request because its
+values can depend on caller identity, authorization, locale, or transaction state.
+
+{% code-block file="/api/content/technology/graphql/code/request-scoped-loader.mjs" language="javascript" title="Dependency-free request batching model" /%}
+
+The official [GraphQL performance guide](https://graphql.org/learn/performance/)
+describes the N+1 pattern and batching. The maintained
+[DataLoader reference implementation](https://github.com/graphql/dataloader) requires
+batch results to align with the requested keys and describes request-scoped memoization.
+
+### Keep batching honest
+
+- Batch only keys that share the same backend, authorization context, and consistency
+  requirement.
+- Preserve input order and return one value or error for every requested key.
+- Propagate cancellation and deadlines instead of allowing detached batch work to run
+  after the operation is no longer useful.
+- Trace operation name, field path, batch size, backend calls, and resolver duration;
+  endpoint-level latency alone hides the fan-out.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Trace partial data, rejection, and null bubbling
+
+GraphQL distinguishes **request errors**, which prevent execution, from **execution
+errors**, which happen while resolving or completing a response position. An execution
+result may contain both `data` and `errors`. Clients must inspect the body and error
+paths rather than treating transport success as proof that every selected field
+succeeded.
+
+Select each scenario and inspect the active path. Compare a cost rejection before
+execution, a nullable enrichment failure, a non-null core-field failure, and a valid
+operation denied by domain authorization.
+
+{% topology-lab dataFile="/api/content/technology/graphql/data/resolver-failure-topology.json" /%}
+
+The specification's [response section](https://spec.graphql.org/September2025/#sec-Response)
+defines request and execution result behavior, including error paths and non-null
+propagation. Keep application error codes stable, mask internal details, and record the
+full cause in server-side telemetry.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Bound reads and make writes explicit
+
+### Paginate every potentially large list
+
+Cursor pagination is a contract for ordering and continuation, not just a response
+wrapper. Give the list a maximum `first` or `last`, use a deterministic sort with a
+stable tie-breaker, and keep cursors opaque. Define what happens when rows are inserted,
+deleted, or become unauthorized between pages.
+
+### Design mutations around business outcomes
+
+- Accept one structured input and return a payload containing the updated domain value
+  plus stable, client-actionable errors where appropriate.
+- Include an idempotency key when a retry after a timeout could repeat a payment,
+  reservation, message publication, or other external effect.
+- Authorize from trusted server context; never accept caller identity or ownership as
+  authoritative mutation input.
+- Execute top-level mutation fields serially as GraphQL specifies, but do not mistake
+  that ordering for a transaction across services.
+- Publish events with an outbox or another recoverable handoff when a committed state
+  change must reach asynchronous consumers.
+
+The official [pagination guide](https://graphql.org/learn/pagination/) explains cursor
+connections. For HTTP deployments, follow the current
+[GraphQL over HTTP specification](https://graphql.github.io/graphql-over-http/draft/)
+for methods, media types, status behavior, and request parameters instead of inventing
+transport semantics in resolvers.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Evolve the graph without silent client breakage
+
+Additive changes are usually easier to adopt than removals, but an added field can
+still create cost, privacy, or ownership problems. Treat schema changes as reviewed API
+changes with usage evidence.
+
+{% process-flow %}
+{% process-step number="1" title="Assign ownership" label="Domain" %}
+Name the team responsible for field semantics, authorization, reliability, cost, and
+deprecation support.
+{% /process-step %}
+{% process-step number="2" title="Check compatibility" label="Schema" %}
+Run schema diff checks and validate known operations. Review nullability, enum changes,
+argument defaults, and possible-type changes deliberately.
+{% /process-step %}
+{% process-step number="3" title="Observe real usage" label="Operations" %}
+Track named or trusted documents and field use. Anonymous operation text makes impact
+analysis and incident response harder.
+{% /process-step %}
+{% process-step number="4" title="Deprecate, migrate, remove" label="Lifecycle" %}
+Publish a replacement, notify owners, measure remaining use, and remove only after the
+agreed support window and enforcement checks pass.
+{% /process-step %}
+{% /process-flow %}
+
+For a federated graph, apply the same discipline to subgraph composition, entity keys,
+field ownership, cross-subgraph fetches, and rollout order. A composed schema can be
+valid while one operation still creates an unsafe distributed call chain.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose GraphQL for the right boundary
+
+{% concept-grid columns="3" %}
+{% concept-card title="GraphQL" eyebrow="Flexible graph reads" icon="network" tone="violet" %}
+Fits product-facing APIs where several clients need related, typed views and the server
+team can operate schema governance, demand control, batching, and field-level telemetry.
+{% /concept-card %}
+{% concept-card title="REST-style HTTP" eyebrow="Resource and protocol semantics" icon="globe" tone="blue" %}
+Fits APIs that benefit from explicit resource URLs, standard HTTP caching and status
+semantics, simple operations, and broad tooling with little execution indirection.
+{% /concept-card %}
+{% concept-card title="gRPC" eyebrow="Service-to-service RPC" icon="activity" tone="green" %}
+Fits strongly typed internal calls, generated clients, streaming, and explicit service
+methods where client-selected graph traversal is not the main requirement.
+{% /concept-card %}
+{% /concept-grid %}
+
+GraphQL can coexist with both: it may aggregate domain services behind a client-facing
+graph, while large files, webhooks, health checks, and operational endpoints keep
+purpose-built HTTP contracts. Choose from workload and ownership needs, not from a goal
+of replacing every API with one endpoint.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Run a production readiness review
+
+- **Contract:** domain-oriented names, bounded lists, deliberate nullability, stable
+  error codes, and an owner for every field.
+- **Admission:** operation naming, trusted documents where appropriate, depth and
+  breadth limits, alias and batch caps, cost weights, and per-client quotas.
+- **Correctness:** resolver authorization, idempotent mutations, request-scoped loaders,
+  deadlines, cancellation, and explicit partial-data behavior.
+- **Performance:** measured field and backend latency, batch sizes, response bytes,
+  compression, cache policy, and dependency saturation under peak operation mixes.
+- **Evolution:** schema checks, operation validation, usage telemetry, deprecation
+  windows, and coordinated federation rollout when applicable.
+- **Recovery:** dependency timeout drills, replay-safe writes, masked client errors,
+  trace correlation, and reconciliation for ambiguous side effects.
+
+{% code-block file="/api/content/technology/graphql/code/operation-admission.mjs" language="javascript" title="Executable operation admission model" /%}
+
+Run the example with Node.js to see a bounded operation admitted and a broad operation
+rejected before execution. Its weights are intentionally local to the example; a real
+service should derive weights and limits from its own traces and dependency budgets.
+{% /section-card %}
+
+{% quiz quizId="graphql" lessonSlug="graphql" title="GraphQL Production Design Review" questionsFile="/api/content/technology/graphql/quiz/graphql-production-design.json" /%}

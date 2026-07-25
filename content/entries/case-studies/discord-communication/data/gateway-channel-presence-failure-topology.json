@@ -1,0 +1,252 @@
+{
+  "title": "Trace gateway, channel, fan-out, and presence failures",
+  "description": "Select a failure to see which path remains authoritative, which work can retry, and what the sender or recipient should actually see.",
+  "nodes": [
+    {
+      "id": "sender",
+      "label": "Sender app",
+      "eyebrow": "Stable message ID",
+      "detail": "Creates one client message ID, sends the command over a persistent session, and retries that same identity after an uncertain response.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 47
+    },
+    {
+      "id": "gateway",
+      "label": "Gateway fleet",
+      "eyebrow": "Connection edge",
+      "detail": "Authenticates the session, applies rate limits, tracks subscriptions and cursors, and forwards channel commands without becoming message history authority.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 27,
+      "y": 25
+    },
+    {
+      "id": "channel-owner",
+      "label": "Channel owner",
+      "eyebrow": "Authorization and order",
+      "detail": "Serializes accepted writes for one channel partition, checks current membership, assigns the next channel sequence, and rejects conflicting ownership.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 47,
+      "y": 25
+    },
+    {
+      "id": "message-log",
+      "label": "Message log and outbox",
+      "eyebrow": "Durable boundary",
+      "detail": "Commits the message and its fan-out event together. A successful append is the sender acknowledgement boundary and the replay source.",
+      "kind": "database",
+      "tone": "green",
+      "x": 47,
+      "y": 72
+    },
+    {
+      "id": "fanout",
+      "label": "Fan-out workers",
+      "eyebrow": "Backpressure boundary",
+      "detail": "Consume accepted messages, resolve active gateway subscriptions, retry at least once, and expose queue age without changing channel sequence order.",
+      "kind": "stream",
+      "tone": "amber",
+      "x": 68,
+      "y": 25
+    },
+    {
+      "id": "presence",
+      "label": "Presence service",
+      "eyebrow": "Expiring hint",
+      "detail": "Tracks online status, typing, and session leases with short expiration. It can become unknown without invalidating durable membership or message history.",
+      "kind": "analytics",
+      "tone": "rose",
+      "x": 68,
+      "y": 72
+    },
+    {
+      "id": "recipient-gateway",
+      "label": "Recipient gateways",
+      "eyebrow": "Subscribed sessions",
+      "detail": "Push each envelope to currently attached clients, suppress duplicate message IDs, and retain a replay cursor for every subscribed channel.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 89,
+      "y": 25
+    },
+    {
+      "id": "recipient",
+      "label": "Recipient app",
+      "eyebrow": "Visible state",
+      "detail": "Displays only contiguous channel sequences, requests a missing range after reconnect, and shows explicit connecting, delayed, or presence-unknown states.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 89,
+      "y": 72
+    }
+  ],
+  "edges": [
+    {
+      "id": "sender-gateway",
+      "from": "sender",
+      "to": "gateway",
+      "label": "send or retry"
+    },
+    {
+      "id": "gateway-channel",
+      "from": "gateway",
+      "to": "channel-owner",
+      "label": "authorized command"
+    },
+    {
+      "id": "channel-log",
+      "from": "channel-owner",
+      "to": "message-log",
+      "label": "ordered append"
+    },
+    {
+      "id": "log-fanout",
+      "from": "message-log",
+      "to": "fanout",
+      "label": "accepted event",
+      "mode": "async",
+      "via": {
+        "x": 58,
+        "y": 52
+      }
+    },
+    {
+      "id": "presence-fanout",
+      "from": "presence",
+      "to": "fanout",
+      "label": "active sessions"
+    },
+    {
+      "id": "fanout-recipient-gateway",
+      "from": "fanout",
+      "to": "recipient-gateway",
+      "label": "at-least-once push",
+      "mode": "async"
+    },
+    {
+      "id": "recipient-gateway-client",
+      "from": "recipient-gateway",
+      "to": "recipient",
+      "label": "contiguous sequence"
+    },
+    {
+      "id": "recipient-presence",
+      "from": "recipient-gateway",
+      "to": "presence",
+      "label": "lease heartbeat",
+      "mode": "async",
+      "via": {
+        "x": 79,
+        "y": 55
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-delivery",
+      "label": "Healthy delivery",
+      "summary": "The gateway forwards one idempotent command, the channel owner assigns order, the durable append succeeds, and fan-out targets active recipient sessions.",
+      "activeEdges": [
+        "sender-gateway",
+        "gateway-channel",
+        "channel-log",
+        "log-fanout",
+        "presence-fanout",
+        "fanout-recipient-gateway",
+        "recipient-gateway-client",
+        "recipient-presence"
+      ],
+      "focusNode": "channel-owner",
+      "result": "The sender receives an accepted acknowledgement after durability. Recipients deduplicate retries and display the next contiguous channel sequence promptly."
+    },
+    {
+      "id": "gateway-zone-loss",
+      "label": "Gateway zone loss",
+      "summary": "Part of the gateway fleet disappears. Sessions reconnect to healthy capacity and resend uncertain commands with the original message ID and last received channel cursor.",
+      "activeEdges": [
+        "sender-gateway",
+        "gateway-channel",
+        "channel-log",
+        "log-fanout",
+        "fanout-recipient-gateway",
+        "recipient-gateway-client"
+      ],
+      "degradedNodes": [
+        "gateway",
+        "recipient-gateway"
+      ],
+      "focusNode": "gateway",
+      "result": "Affected clients briefly show Connecting. Duplicate sends return the original accepted result, and recipients replay from their cursor instead of losing or reordering messages."
+    },
+    {
+      "id": "channel-owner-stall",
+      "label": "Channel owner stalls",
+      "summary": "The partition that owns one channel cannot commit the next sequence before the deadline. Routing around it would create two possible ordering authorities.",
+      "activeEdges": [
+        "sender-gateway",
+        "gateway-channel"
+      ],
+      "degradedNodes": [
+        "channel-owner"
+      ],
+      "focusNode": "channel-owner",
+      "result": "The sender sees Sending or Retry, not a false success. No unsequenced event reaches fan-out; other channel partitions continue while this hot channel recovers or moves ownership safely."
+    },
+    {
+      "id": "fanout-backpressure",
+      "label": "Fan-out backlog",
+      "summary": "Messages continue to commit, but recipient delivery workers consume more slowly than accepted events arrive. The durable log preserves the replay order.",
+      "activeEdges": [
+        "sender-gateway",
+        "gateway-channel",
+        "channel-log",
+        "log-fanout",
+        "fanout-recipient-gateway",
+        "recipient-gateway-client"
+      ],
+      "degradedNodes": [
+        "fanout"
+      ],
+      "focusNode": "fanout",
+      "result": "Senders may still see accepted messages while recipients see delayed synchronization. Shed typing and presence traffic, isolate hot partitions, add consumers, and replay durable messages in channel order."
+    },
+    {
+      "id": "presence-outage",
+      "label": "Presence unavailable",
+      "summary": "Session leases and typing updates are unavailable, but durable channel membership, message order, and history remain healthy dependencies.",
+      "activeEdges": [
+        "sender-gateway",
+        "gateway-channel",
+        "channel-log",
+        "log-fanout",
+        "fanout-recipient-gateway",
+        "recipient-gateway-client"
+      ],
+      "failedNodes": [
+        "presence"
+      ],
+      "focusNode": "presence",
+      "result": "Messages continue through known subscriptions and cursor replay. Clients show presence as Unknown and disable or age out typing indicators instead of hiding channel history."
+    },
+    {
+      "id": "recipient-gateway-loss",
+      "label": "Recipient gateway loss",
+      "summary": "The message is durable and fan-out reaches the recipient edge, but the attached gateway fails before the client advances its local cursor.",
+      "activeEdges": [
+        "sender-gateway",
+        "gateway-channel",
+        "channel-log",
+        "log-fanout",
+        "fanout-recipient-gateway"
+      ],
+      "failedNodes": [
+        "recipient-gateway"
+      ],
+      "focusNode": "recipient-gateway",
+      "result": "The recipient briefly shows Connecting, resumes from the last contiguous sequence on another gateway, and suppresses any duplicate envelope delivered during replay."
+    }
+  ]
+}

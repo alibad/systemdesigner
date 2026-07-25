@@ -1,0 +1,248 @@
+---
+registryId: chaos-engineering
+---
+
+{% section-card tone="intro" %}
+## What is chaos engineering?
+
+Chaos engineering is the discipline of experimenting on a system to build confidence
+that it can withstand disruptive conditions. A team declares normal, user-visible
+behavior, predicts that behavior will continue during a specific fault, injects the
+fault within a bounded scope, and compares the evidence with the prediction.
+
+The core invariant is simple: **an experiment must test a falsifiable system behavior
+without creating more risk than its safety envelope permits**. Random breakage,
+unmeasured fault injection, and an outage without a hypothesis are not chaos
+engineering.
+
+Chaos experiments complement unit, integration, load, disaster-recovery, and incident
+response tests. They answer a different question: *when a realistic disturbance
+reaches the running system, do its defenses produce the outcome we promised?*
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Steady state" eyebrow="Measure output" icon="activity" tone="cyan" %}
+Define normal behavior with a customer or system output such as successful checkouts,
+p95 latency, completed jobs, or queue age. Component health can support the diagnosis,
+but it is not the hypothesis by itself.
+{% /concept-card %}
+{% concept-card title="Fault variable" eyebrow="Create evidence" icon="warning" tone="rose" %}
+Inject one realistic condition: instance loss, dependency latency, connection reset,
+expired credentials, full disk, traffic pressure, or loss of a failure domain.
+{% /concept-card %}
+{% concept-card title="Safety envelope" eyebrow="Contain risk" icon="shield" tone="green" %}
+Bound targets, traffic, time, permissions, abort conditions, cleanup, and accountable
+operators before the experiment starts.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="cyan" %}
+## Turn an assumption into a falsifiable experiment
+
+A useful experiment begins with a claim about observable behavior, not with a tool
+action. “Terminate a pod” is a fault. “Checkout success stays at or above 99% when one
+replica disappears” is a hypothesis.
+
+{% process-flow %}
+{% process-step number="1" title="Measure normal behavior" label="Baseline" %}
+Choose a short, representative window and record the customer-facing output, traffic
+shape, release, topology, and existing alerts.
+{% /process-step %}
+{% process-step number="2" title="State the hypothesis" label="Prediction" %}
+Name the fault, target, expected steady-state boundary, and recovery behavior in a form
+that evidence can prove wrong.
+{% /process-step %}
+{% process-step number="3" title="Define the abort boundary" label="Guardrail" %}
+Set a stricter customer-impact threshold that stops the fault. The hypothesis boundary
+and abort boundary serve different purposes.
+{% /process-step %}
+{% process-step number="4" title="Run, observe, recover" label="Evidence" %}
+Inject the bounded fault, compare control and experiment behavior, remove the fault,
+and verify recovery before declaring the run complete.
+{% /process-step %}
+{% /process-flow %}
+
+### A complete contract names every decision
+
+- **Steady-state metric:** the system output expected to remain acceptable.
+- **Fault and target:** the specific disruption and the resources eligible to receive it.
+- **Blast radius:** the maximum traffic, tenants, instances, or failure domains exposed.
+- **Duration:** the bounded injection window and total observation window.
+- **Hypothesis boundary:** the value that distinguishes held from falsified.
+- **Abort condition:** the value that stops the fault to protect users or the system.
+- **Recovery proof:** the metrics, queues, replicas, and side effects checked after cleanup.
+
+The [Principles of Chaos Engineering](https://principlesofchaos.org/) frame the practice
+around measurable steady state, realistic events, continuous experimentation, and a
+minimized blast radius.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design the evidence and safety envelope together
+
+Use the lab to separate three legitimate outcomes:
+
+- The hypothesis holds for the selected conditions.
+- The hypothesis is falsified inside the safety envelope, creating useful remediation work.
+- The abort boundary is crossed, requiring immediate stop, cleanup, and recovery verification.
+
+The fourth outcome is not legitimate: crossing an abort boundary without an automatic
+or dependable manual stop.
+
+{% interactive-block id="technology/chaos-engineering-calculator" dataFile="/api/content/technology/chaos-engineering/data/experiment-contract-model.json" /%}
+
+### Keep fault authority narrower than application authority
+
+- Target only explicitly onboarded or tagged resources, and preview resolved targets
+  before a run when the platform supports it.
+- Grant the experiment identity only the fault actions it needs; separate permission
+  to create a template from permission to start it.
+- Use automatic stop conditions for time-sensitive boundaries. A dashboard watched by
+  an operator is useful context, not equivalent automation.
+- Make cleanup idempotent and verify the target returned to its intended state.
+- Keep an owner, communication channel, runbook, and manual stop path available for the
+  entire observation window.
+
+AWS Fault Injection Service templates define
+[targets, actions, stop conditions, and an experiment role](https://docs.aws.amazon.com/fis/latest/userguide/experiment-templates.html).
+Its [stop conditions](https://docs.aws.amazon.com/fis/latest/userguide/stop-conditions.html)
+use CloudWatch alarms to stop a running experiment when a declared threshold is
+reached.
+
+{% code-block file="/api/content/technology/chaos-engineering/code/aws-fis-stop-one-instance.json" language="json" title="Bound one AWS FIS instance-loss experiment" /%}
+
+Replace every placeholder account, role, alarm, tag, Region, and action with
+environment-specific values. Confirm the current action contract, resource behavior,
+and cleanup semantics before execution.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace how a local fault becomes a user-visible failure
+
+Fault injection changes a component. Resilience controls determine whether the change
+remains local or propagates through the request path.
+
+{% system-flow title="Dependency failure propagation" caption="A bounded policy interrupts the amplification loop between a slow dependency and the calling service." %}
+{% system-node title="Caller traffic" eyebrow="Demand" icon="users" tone="blue" %}
+Fresh requests enter while earlier requests may still be waiting. The arrival rate does
+not slow down merely because a dependency has degraded.
+{% /system-node %}
+{% system-node title="Dependency client" eyebrow="Failure policy" icon="route" tone="violet" %}
+Timeouts bound waiting, breakers limit repeated calls, bulkheads isolate capacity, and
+fallbacks preserve only the product behavior they were designed to support.
+{% /system-node %}
+{% system-node title="Shared resources" eyebrow="Amplification" icon="server" tone="amber" %}
+Workers, connections, queues, CPU, and retry budgets turn a local slowdown into a wider
+incident when they remain occupied or duplicate work.
+{% /system-node %}
+{% system-node title="User outcome" eyebrow="Steady state" icon="activity" tone="green" %}
+Success, latency, correctness, and recovery time reveal whether the system contained
+the fault. A healthy process count alone cannot answer that question.
+{% /system-node %}
+{% /system-flow %}
+
+### Controls protect different boundaries
+
+- **Timeouts** limit how long one attempt can consume a request budget.
+- **Retries** can recover transient faults, but require backoff, jitter, a retry budget,
+  and an idempotency decision.
+- **Circuit breakers** stop repeated calls after evidence of failure and admit limited
+  probes during recovery.
+- **Bulkheads** keep one dependency or tenant from consuming every shared worker or
+  connection.
+- **Fallbacks** preserve a specific degraded product behavior; they do not make stale,
+  missing, or fabricated data correct.
+- **Capacity reserve and failure-domain placement** keep surviving paths able to absorb
+  rerouted work.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Compare containment policies with recorded evidence
+
+The same injected fault can produce different system outcomes. Select a scenario and a
+response policy, then inspect the fixture's success, latency, worker pressure, retry
+amplification, and user-visible result.
+
+{% interactive-block id="technology/chaos-engineering-failure-lab" dataFile="/api/content/technology/chaos-engineering/data/failure-containment-evidence.json" /%}
+
+### Read the result without hiding trade-offs
+
+- A fast error can protect capacity while still violating the product's success objective.
+- A high success percentage can hide an unsafe latency or saturation boundary.
+- A fallback can preserve continuity while weakening freshness or functionality.
+- A breaker can contain repeated calls, but it needs probes and a recovery policy.
+- A timeout cannot replace independent capacity after a zone or region loss.
+
+Use one evaluation function for every sample so the experiment cannot silently change
+its success criteria after observing the result.
+
+{% code-block file="/api/content/technology/chaos-engineering/code/evaluate-steady-state.py" language="python" title="Classify held, falsified, and abort outcomes" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Increase realism only after the safeguards prove themselves
+
+Production experiments can capture traffic, topology, dependencies, and utilization
+that a test environment misses. That realism is valuable only after the team has shown
+that targeting, stop conditions, cleanup, observability, and incident ownership work.
+
+{% process-flow %}
+{% process-step number="1" title="Model and review" label="No fault" %}
+Write the hypothesis, dependency path, likely amplification, permissions, abort
+condition, cleanup, and expected remediation owner.
+{% /process-step %}
+{% process-step number="2" title="Rehearse outside production" label="Controlled" %}
+Validate action semantics, target selection, observability, cleanup, and the manual stop
+path without customer traffic.
+{% /process-step %}
+{% process-step number="3" title="Expose a small production cohort" label="Bounded" %}
+Use representative traffic with one target, a short duration, an automatic stop
+condition, and active operators.
+{% /process-step %}
+{% process-step number="4" title="Automate a proven contract" label="Continuous" %}
+Schedule only stable, owned experiments. Pause them during unrelated incidents and
+rerun them after architecture or recovery behavior changes.
+{% /process-step %}
+{% /process-flow %}
+
+Azure Chaos Studio likewise describes faults as
+[controlled and time-bounded](https://learn.microsoft.com/en-us/azure/chaos-studio/chaos-studio-chaos-engineering-overview)
+and distinguishes target selection, fault parameters, experiment steps, and
+operational evidence.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Turn every run into a reliability decision
+
+An experiment is complete only when its evidence changes confidence, design, or
+operations.
+
+### Before the run
+
+- Record the owner, hypothesis, fixture or workload, release, topology, and experiment ID.
+- Confirm dashboards, traces, logs, business metrics, target preview, stop conditions,
+  permissions, and cleanup.
+- Announce the window and define who may stop the experiment.
+
+### During the run
+
+- Watch the steady-state and abort metrics, not only the fault tool's status.
+- Record when the fault starts, when the system reacts, when the stop condition fires,
+  and when users recover.
+- Stop for unexpected impact even if the original alarm has not fired.
+
+### After the run
+
+- Verify fault removal, capacity restoration, queue drain, replica health, and delayed
+  side effects.
+- Preserve the evidence and state whether the hypothesis held, was falsified, or was
+  inconclusive.
+- Create owned remediation work with a rerun condition.
+- Retire experiments whose target, action, or product invariant is no longer valid.
+
+An inconclusive run is not a pass. Missing telemetry, a target that never received the
+fault, unrelated deploy activity, or a failed cleanup path means the team must repair
+the experiment before drawing a resilience conclusion.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/chaos-engineering/quiz/chaos-engineering-production-decisions.json" lessonSlug="chaos-engineering" title="Chaos Engineering Production Review" /%}

@@ -1,0 +1,305 @@
+---
+registryId: hazelcast
+---
+
+{% section-card tone="intro" %}
+## What is Hazelcast?
+
+Hazelcast is a distributed platform for keeping data and computation close together in
+memory. Applications connect to a cluster and use shared maps, caches, queues, topics,
+SQL, and stream-processing pipelines without assigning every key or task to a server by
+hand.
+
+The central idea is **partition ownership**. Hazelcast hashes a key to a partition,
+assigns that partition to one member as its primary owner, and can place backup copies
+on other members. When membership changes, the cluster migrates partition ownership so
+the application continues to address the logical data structure rather than one host.
+
+Hazelcast is not automatically the system of record. In-memory copies, asynchronous
+backups, Near Caches, split clusters, and external sinks all have distinct durability
+and consistency boundaries. A production design must declare which state may be stale,
+which operation must have one authoritative order, and how the cluster recovers after
+member or network failure.
+{% /section-card %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Partitioned state" eyebrow="Placement" icon="layers" tone="blue" %}
+Map entries are assigned to partitions by key. Partition ownership is distributed
+across members and moves as the cluster grows, shrinks, or recovers.
+{% /concept-card %}
+{% concept-card title="Backup copies" eyebrow="Availability" icon="copy" tone="cyan" %}
+Synchronous backups participate in mutation completion; asynchronous backups catch up
+later. Every backup is another full copy that consumes memory.
+{% /concept-card %}
+{% concept-card title="AP and CP contracts" eyebrow="Consistency" icon="shield" tone="violet" %}
+Ordinary distributed structures favor availability during some failures. The separate
+CP Subsystem uses Raft for locks, counters, semaphores, and references that need a
+single authoritative order.
+{% /concept-card %}
+{% concept-card title="Data-local compute" eyebrow="Processing" icon="bolt" tone="green" %}
+Entry processors, SQL, and pipelines can run work near partitioned data, reducing
+network transfer when the operation and partition key are designed together.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="blue" %}
+## Follow one key from client to partition owner
+
+A distributed map looks like one key-value structure to the caller, but each operation
+crosses a placement and ownership protocol. Stable serialization and keys are part of
+that protocol because they determine partition assignment, object size, and wire cost.
+
+{% system-flow title="One distributed-map mutation" caption="The caller addresses a logical map; Hazelcast resolves a partition owner, applies the mutation, and updates the configured backup copies." %}
+{% system-node title="Application client" eyebrow="Declare intent" icon="workflow" tone="blue" %}
+Choose the map, key, timeout, operation identity, and consistency requirement. Avoid an
+unbounded retry that can repeat a non-idempotent mutation.
+{% /system-node %}
+{% system-node title="Partition service" eyebrow="Resolve ownership" icon="route" tone="violet" %}
+Hash the serialized key to a partition and route the request to its current primary
+owner. Membership changes can move that ownership.
+{% /system-node %}
+{% system-node title="Primary owner" eyebrow="Apply operation" icon="database" tone="cyan" %}
+Execute the map operation or entry processor against the authoritative primary copy for
+that partition.
+{% /system-node %}
+{% system-node title="Backup owners" eyebrow="Protect a copy" icon="copy" tone="green" %}
+Store synchronous or asynchronous replicas on different members according to the map's
+backup configuration.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep keys and work partition-aware
+
+- Use stable, deterministic key serialization across every client and release.
+- Co-locate related entries with partition-aware keys only when operations genuinely
+  need to update or read them together.
+- Prefer entry processors for small data-local mutations; sending a large object to a
+  client, changing one field, and writing it back adds transfer and race risk.
+- Treat listeners and events as notifications, not as an authoritative replay log
+  unless the selected structure explicitly provides the retention and ordering needed.
+- Measure partition skew. Evenly distributed partition counts do not prevent a hot key
+  or hot tenant from saturating one owner.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size primaries, backups, and recovery headroom together
+
+One backup doubles the stored map footprint before object overhead, indexes, Near
+Caches, pipeline state, and platform memory. The default of one synchronous map backup
+is a starting point, not proof that the cluster can tolerate the intended failure while
+remaining below its memory and latency limits.
+
+{% metric-strip %}
+{% metric label="Stored copies" value="primary x (1 + backups)" detail="Each configured backup is a complete additional copy" tone="violet" /%}
+{% metric label="Protected footprint" value="copies + overhead + reserve" detail="Reserve room for skew, migration, and safety restoration" tone="cyan" /%}
+{% metric label="Write path" value="primary + sync acknowledgements" detail="Synchronous safety can add blocking latency" tone="amber" /%}
+{% metric label="Failure budget" value="lost members before lost copies" detail="Copies must be placed on distinct surviving members" tone="rose" /%}
+{% /metric-strip %}
+
+Change members, primary data, backup count, and heap independently. The visible result
+distinguishes raw copies from the operational headroom required to migrate partitions
+and rebuild safety after failure.
+
+{% interactive-block id="technology/hazelcast-cluster" dataFile="/api/content/technology/hazelcast/data/cluster-capacity.json" /%}
+
+{% code-block file="/api/content/technology/hazelcast/code/plan-cluster-envelope.py" language="python" title="Estimate a protected Hazelcast map footprint" /%}
+
+### Validate the model with real data
+
+- Measure serialized key and value distributions instead of multiplying object count
+  by an in-process language-object estimate.
+- Include indexes, query results, pipeline snapshots, Near Caches, off-heap/native
+  memory, and JVM or container overhead in the complete node budget.
+- Remove a member at peak traffic and observe migration duration, partition-operation
+  latency, heap pressure, and the time until every backup is restored.
+- Test simultaneous failures that match the infrastructure fault domain; multiple
+  virtual machines in one zone are not independent copies of a zonal outage.
+- Benchmark synchronous and asynchronous backups against the real mutation mix. Faster
+  acknowledgement is a weaker loss boundary, not free performance.
+
+The current [map backup documentation](https://docs.hazelcast.com/hazelcast/5.6/data-structures/backing-up-maps)
+describes copy placement, synchronous and asynchronous behavior, and the configured
+backup-count limits.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose an AP structure or a CP primitive deliberately
+
+Hazelcast exposes two different consistency families. They are not interchangeable
+implementations of the same promise.
+
+{% concept-grid columns="2" %}
+{% concept-card title="AP distributed structures" eyebrow="Serve through some partitions" icon="network" tone="cyan" %}
+`IMap` and the ordinary structures under `HazelcastInstance` are designed around
+availability and partition tolerance. During a network split, both sides may otherwise
+continue and later require merge-policy reconciliation.
+{% /concept-card %}
+{% concept-card title="CP Subsystem primitives" eyebrow="Preserve one order" icon="shield" tone="violet" %}
+Raft-backed locks, atomic values, semaphores, latches, and references require a valid CP
+majority. A side without that majority stops serving the CP operation rather than
+creating two authoritative outcomes.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Match the model to the business invariant
+
+- Use an AP map for disposable cache entries, rebuildable projections, sessions with a
+  declared merge policy, or state whose temporary divergence is acceptable.
+- Use a CP primitive for leader election, a fencing decision, a global permit, or a
+  coordination value that must not have two successful owners.
+- Do not use a distributed lock without fencing downstream writes. A paused lock holder
+  can resume after its lease or session is no longer authoritative.
+- Cache CP object handles rather than repeatedly fetching and destroying them; CP
+  lifecycle operations have distributed consequences.
+- Keep durable business truth in a system whose recovery and audit contract matches
+  the domain. A CP counter is not a replacement for a ledger.
+
+See the current [distributed data structures guide](https://docs.hazelcast.com/hazelcast/5.6/data-structures/distributed-data-structures)
+for the AP and CP structure families supported by the deployed edition and version.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Observe the consequence of member loss and network partition
+
+Backups protect copies, split-brain protection can reject selected AP operations below
+a minimum observed cluster size, and the CP Subsystem requires a valid majority. These
+controls protect different boundaries. None removes the delay before failure detection
+or invents a correct merge policy for conflicting business updates.
+
+{% interactive-block id="technology/hazelcast-failure-lab" dataFile="/api/content/technology/hazelcast/data/failure-scenarios.json" /%}
+
+{% code-block file="/api/content/technology/hazelcast/code/gate-state-contract.py" language="python" title="Gate a state operation by its declared failure contract" /%}
+
+### Rehearse the complete incident
+
+- Kill one member, then another before backup restoration completes; verify the result
+  matches the configured copy count and placement domains.
+- Partition the member network while clients remain connected to both sides. Confirm
+  which AP operations reject, which CP operations stop, and which alerts identify the
+  consistency decision.
+- Heal the network and inspect merge results at the business-record level, not only the
+  cluster-member count.
+- Restart or disconnect Near Cache clients so missed invalidations and stale local
+  copies are visible.
+- Delay failure detection and backup acknowledgement independently; instant process
+  death is not the only production failure shape.
+
+Hazelcast documents an eventual detection window for
+[split-brain protection](https://docs.hazelcast.com/hazelcast/5.6/network-partitioning/split-brain-protection).
+The application must handle rejected operations and monitor that window explicitly.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Add Near Cache only with a freshness contract
+
+A Near Cache stores selected map entries inside or beside the client. It can remove a
+network hop from hot reads, but it creates another copy whose invalidation and expiry
+behavior must match the product's tolerance for stale data.
+
+{% process-flow %}
+{% process-step number="1" title="Read the local copy" label="Fast path" %}
+The client checks its Near Cache using the same serialized key and local eviction
+policy. A hit avoids a cluster request.
+{% /process-step %}
+{% process-step number="2" title="Resolve a miss" label="Owner path" %}
+The client routes the read to the current partition owner and receives the authoritative
+map value for that instant.
+{% /process-step %}
+{% process-step number="3" title="Populate locally" label="Additional copy" %}
+The client stores the returned value under its local capacity, TTL, and maximum-idle
+rules.
+{% /process-step %}
+{% process-step number="4" title="Invalidate on change" label="Coherence" %}
+Map mutations trigger invalidation metadata. Reconnects, missed messages, and repair
+behavior determine the real stale-read window.
+{% /process-step %}
+{% /process-flow %}
+
+### Use Near Cache where stale reads are explicitly acceptable
+
+- Good candidates are frequently read, infrequently changed values whose temporary
+  staleness has a named product consequence.
+- Poor candidates include authorization decisions, inventory reservations, uniqueness
+  checks, and coordination state unless the business contract independently verifies
+  freshness.
+- Track local hit rate, invalidation lag, repair activity, memory use, and stale-read
+  incidents by client fleet.
+- Do not count Near Cache memory as server-cluster capacity; it is replicated client
+  memory with its own eviction behavior.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Run computation and streams with explicit delivery semantics
+
+Hazelcast can execute entry processors near map data, query data with SQL, and run
+batch or streaming pipelines. The operation should state where its mutable state lives,
+how it is partitioned, and what a retry or restart may repeat.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Entry processor" eyebrow="One partitioned entry" icon="bolt" tone="blue" %}
+Move a bounded mutation to the key owner so the application does not transfer and race
+an entire value. Keep processing short and avoid blocking the partition thread.
+{% /concept-card %}
+{% concept-card title="SQL and projections" eyebrow="Distributed query" icon="search" tone="cyan" %}
+Indexes and predicates change memory, transfer, and execution cost. Inspect plans and
+bound result size before exposing an ad hoc query path to user traffic.
+{% /concept-card %}
+{% concept-card title="Streaming pipeline" eyebrow="Snapshot and sink" icon="activity" tone="violet" %}
+At-least-once recovery can repeat records. Exactly-once support depends on the complete
+source, transform, snapshot, and sink contract, not only one job setting.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep processing recoverable
+
+- Give external side effects stable event or operation IDs and make sinks idempotent
+  where replay is possible.
+- Bound window state, allowed lateness, snapshot interval, and backpressure so a slow
+  sink cannot consume unbounded memory.
+- Test member failure during snapshot, source reconnect, sink timeout, and deployment
+  upgrade.
+- Separate online map traffic from heavy analytical work when they compete for the
+  same CPU, network, heap, or partition threads.
+- Verify ordering assumptions. Parallel stream stages do not imply a global event
+  order unless the pipeline explicitly establishes one.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose deployment and operating boundaries
+
+Embedded members put application code and cluster ownership in one process. Client-
+server mode separates application clients from data members. The choice changes failure
+coupling, scaling, upgrade cadence, network latency, and resource isolation.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Embedded members" eyebrow="Tight locality" icon="layers" tone="blue" %}
+Choose embedded mode when application and data lifecycles can move together and the
+team can isolate partition work from application CPU, heap, and deployment churn.
+{% /concept-card %}
+{% concept-card title="Client-server cluster" eyebrow="Independent lifecycle" icon="network" tone="cyan" %}
+Choose clients when data members need independent sizing, upgrades, placement, and
+failure containment. Budget the network hop and client reconnect behavior.
+{% /concept-card %}
+{% concept-card title="External system of record" eyebrow="Durable authority" icon="database" tone="amber" %}
+Use MapStore, events, or application writes only with an explicit ordering, retry, and
+reconciliation contract. Write-behind queues are not a transaction with the source.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Production review checklist
+
+- Pin and test member/client versions, serialization formats, discovery configuration,
+  and rolling-upgrade compatibility.
+- Place copies across real infrastructure fault domains and rehearse degraded capacity.
+- Encrypt member and client traffic where required, authenticate workloads, authorize
+  data-structure access, and keep secrets out of map values and diagnostics.
+- Monitor partition migration, backup safety, heap/native memory, garbage collection,
+  operation latency, rejected operations, client reconnects, Near Cache repair, and
+  pipeline snapshot health.
+- Alert on user-visible consequences: stale authorization, lost session, duplicate side
+  effect, unavailable lock, delayed event, or source overload.
+- Keep Management Center and cluster discovery endpoints on restricted administrative
+  networks with audited access.
+{% /section-card %}
+
+{% quiz quizId="hazelcast" lessonSlug="hazelcast" title="Hazelcast Production Design Review" questionsFile="/api/content/technology/hazelcast/quiz/hazelcast-production-design.json" /%}

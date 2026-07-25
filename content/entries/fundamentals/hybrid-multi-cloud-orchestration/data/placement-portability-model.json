@@ -1,0 +1,409 @@
+{
+  "title": "Placement and portability decision model",
+  "description": "Compare three workload contracts against three placement models. The model separates a reusable operating surface from state, network, identity, and provider capabilities that still need an explicit home.",
+  "assumptions": "Illustrative planning model, not a provider quote or benchmark. Changed-state volume, WAN round-trip time, and the eight-layer portability inventory are visible so a team can replace them with measured values before approving a design.",
+  "defaults": {
+    "workloadId": "regulated-ledger",
+    "strategyId": "anchored-state"
+  },
+  "workloads": [
+    {
+      "id": "regulated-ledger",
+      "label": "EU order ledger",
+      "detail": "Critical writes need one authority, EU data residency, a recovery copy, and a tested 30-minute recovery path.",
+      "stateLabel": "6 TiB authority, 180 GiB/day changed",
+      "changeGiBPerDay": 180,
+      "wanRttMs": 55,
+      "requirements": [
+        "Customer records remain in approved EU locations",
+        "One write authority protects order and payment invariants",
+        "Recovery point stays within five minutes",
+        "Recovery service resumes within 30 minutes"
+      ]
+    },
+    {
+      "id": "global-media",
+      "label": "Global media API",
+      "detail": "Large immutable objects should serve near users while metadata writes retain one clear authority.",
+      "stateLabel": "80 TiB objects, 900 GiB/day changed",
+      "changeGiBPerDay": 900,
+      "wanRttMs": 85,
+      "requirements": [
+        "Media reads stay off the metadata write path",
+        "Object copies have an owner and retention policy",
+        "Metadata writes remain idempotent during retries",
+        "Cross-cloud transfer is measured by source and destination"
+      ]
+    },
+    {
+      "id": "private-inference",
+      "label": "Private inference gateway",
+      "detail": "Raw features remain on premises; sanitized jobs may burst to cloud GPUs when local capacity is exhausted.",
+      "stateLabel": "2 TiB private features, 120 GiB/day changed",
+      "changeGiBPerDay": 120,
+      "wanRttMs": 42,
+      "requirements": [
+        "Raw features never leave the private boundary",
+        "Only policy-approved derived payloads may burst",
+        "Local inference remains available when the WAN fails",
+        "Cloud jobs have bounded queues and deletion evidence"
+      ]
+    }
+  ],
+  "strategies": [
+    {
+      "id": "uniform-everywhere",
+      "label": "Uniform stack everywhere",
+      "detail": "Recreate every tier in each domain and coordinate state across providers.",
+      "portableSurfacePercent": 88,
+      "crossCloudMultiplier": 2,
+      "operatingDomains": 3,
+      "criticalPathWanRoundTrips": 1,
+      "layers": [
+        {
+          "label": "Runtime",
+          "placement": "Three domains",
+          "portable": true,
+          "note": "The same image and workload contract run in each cluster."
+        },
+        {
+          "label": "Traffic",
+          "placement": "Global steering",
+          "portable": false,
+          "note": "Health, DNS, load balancing, certificates, and routes differ by provider."
+        },
+        {
+          "label": "State",
+          "placement": "Cross-cloud replicas",
+          "portable": true,
+          "note": "A common database engine still needs a WAN consistency and recovery model."
+        },
+        {
+          "label": "Operations",
+          "placement": "Federated evidence",
+          "portable": true,
+          "note": "Shared telemetry semantics feed separate quotas, incidents, and billing exports."
+        }
+      ],
+      "fits": {
+        "regulated-ledger": {
+          "status": "reject",
+          "summary": "A synchronous cross-cloud write path spends latency and partition tolerance without creating a safe two-site quorum.",
+          "decision": "Keep the ledger authority in one approved failure domain and build a separately tested recovery path. Revisit multi-writer state only when the product invariant and conflict model require it.",
+          "checks": [
+            {
+              "label": "EU residency",
+              "passed": true,
+              "detail": "All modeled state copies can be restricted to approved EU locations."
+            },
+            {
+              "label": "Single write authority",
+              "passed": false,
+              "detail": "The strategy coordinates writes across providers instead of preserving one authority."
+            },
+            {
+              "label": "Partition behavior",
+              "passed": false,
+              "detail": "A two-site synchronous dependency cannot keep accepting safe writes after the link splits."
+            },
+            {
+              "label": "Recovery evidence",
+              "passed": true,
+              "detail": "Multiple copies exist, but promotion and restore still need independent tests."
+            }
+          ]
+        },
+        "global-media": {
+          "status": "review",
+          "summary": "Portable stateless tiers help, but copying every object and metadata change multiplies transfer and lifecycle work.",
+          "decision": "Use this model only for objects that need a second provider. Serve immutable media through caches and keep the metadata authority out of the user read path.",
+          "checks": [
+            {
+              "label": "Read locality",
+              "passed": true,
+              "detail": "Traffic can reach a nearby serving tier in each domain."
+            },
+            {
+              "label": "Metadata authority",
+              "passed": false,
+              "detail": "The placement does not identify one authoritative metadata write path."
+            },
+            {
+              "label": "Transfer ownership",
+              "passed": false,
+              "detail": "Two modeled remote copies move 1,800 GiB/day before retries or catch-up."
+            },
+            {
+              "label": "Provider exit",
+              "passed": true,
+              "detail": "Images and data formats are reusable, assuming copy time has been measured."
+            }
+          ]
+        },
+        "private-inference": {
+          "status": "reject",
+          "summary": "Replicating the full stack conflicts with the rule that raw features stay inside the private boundary.",
+          "decision": "Keep feature retrieval and the default inference path on premises. Export only a policy-approved derived job when cloud burst capacity is needed.",
+          "checks": [
+            {
+              "label": "Private feature boundary",
+              "passed": false,
+              "detail": "The uniform model assumes state is copied to remote domains."
+            },
+            {
+              "label": "WAN-independent service",
+              "passed": false,
+              "detail": "A WAN round trip sits on the modeled critical path."
+            },
+            {
+              "label": "Reusable runtime",
+              "passed": true,
+              "detail": "The same inference image can run against provider-neutral interfaces."
+            },
+            {
+              "label": "Deletion evidence",
+              "passed": false,
+              "detail": "Three state domains increase the evidence and retention surface."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anchored-state",
+      "label": "Portable compute, anchored state",
+      "detail": "Keep one state authority; reuse images, policy, and recovery artifacts in a second domain.",
+      "portableSurfacePercent": 68,
+      "crossCloudMultiplier": 1,
+      "operatingDomains": 2,
+      "criticalPathWanRoundTrips": 0,
+      "layers": [
+        {
+          "label": "Runtime",
+          "placement": "Primary plus warm target",
+          "portable": true,
+          "note": "The image, health contract, resource envelope, and deployment intent are reused."
+        },
+        {
+          "label": "Traffic",
+          "placement": "Local primary path",
+          "portable": false,
+          "note": "Global routing changes only after the recovery target is promoted and verified."
+        },
+        {
+          "label": "State",
+          "placement": "One authority",
+          "portable": false,
+          "note": "Backups or an asynchronous copy move off-path with an explicit recovery point."
+        },
+        {
+          "label": "Operations",
+          "placement": "Shared contract",
+          "portable": true,
+          "note": "SLOs, telemetry names, policy tests, and runbooks remain common."
+        }
+      ],
+      "fits": {
+        "regulated-ledger": {
+          "status": "fit",
+          "summary": "The critical write remains local to one authority while a recovery copy moves asynchronously to an approved target.",
+          "decision": "Approve only after restore, replica promotion, routing, credential access, and data-integrity checks meet the stated five-minute RPO and 30-minute RTO.",
+          "checks": [
+            {
+              "label": "EU residency",
+              "passed": true,
+              "detail": "The authority and recovery target are both constrained to approved EU locations."
+            },
+            {
+              "label": "Single write authority",
+              "passed": true,
+              "detail": "The user write path reaches one authoritative ledger."
+            },
+            {
+              "label": "Partition behavior",
+              "passed": true,
+              "detail": "Interconnect loss creates replication backlog but does not split the write authority."
+            },
+            {
+              "label": "Recovery evidence",
+              "passed": true,
+              "detail": "The design exposes a promotion gate that can be tested against RPO and RTO."
+            }
+          ]
+        },
+        "global-media": {
+          "status": "fit",
+          "summary": "One metadata authority and object origin can coexist with portable serving tiers and selected recovery copies.",
+          "decision": "Keep media delivery near users through caches. Replicate only objects and metadata required by the recovery or provider-exit objective.",
+          "checks": [
+            {
+              "label": "Read locality",
+              "passed": true,
+              "detail": "Serving tiers and caches can remain close to users without owning metadata writes."
+            },
+            {
+              "label": "Metadata authority",
+              "passed": true,
+              "detail": "One path owns media metadata and idempotent update rules."
+            },
+            {
+              "label": "Transfer ownership",
+              "passed": true,
+              "detail": "The model exposes 900 GiB/day of changed data before compression, retries, or cache fill."
+            },
+            {
+              "label": "Provider exit",
+              "passed": true,
+              "detail": "A warm target and object inventory make copy duration and missing capabilities testable."
+            }
+          ]
+        },
+        "private-inference": {
+          "status": "fit",
+          "summary": "The private site stays authoritative and serves the default path; cloud capacity remains an optional bounded target.",
+          "decision": "Use a redaction or feature-release gate before burst jobs leave the site. The local queue and inference path must continue when cloud connectivity fails.",
+          "checks": [
+            {
+              "label": "Private feature boundary",
+              "passed": true,
+              "detail": "Raw features remain in the on-premises state authority."
+            },
+            {
+              "label": "WAN-independent service",
+              "passed": true,
+              "detail": "The default inference path adds no cross-cloud round trip."
+            },
+            {
+              "label": "Reusable runtime",
+              "passed": true,
+              "detail": "Approved model images and resource contracts can target local or cloud GPU pools."
+            },
+            {
+              "label": "Deletion evidence",
+              "passed": true,
+              "detail": "Only released job payloads enter the cloud retention and deletion scope."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "capability-split",
+      "label": "Split by capability",
+      "detail": "Anchor each bounded capability where it has a clear advantage and connect them through explicit contracts.",
+      "portableSurfacePercent": 52,
+      "crossCloudMultiplier": 0.25,
+      "operatingDomains": 3,
+      "criticalPathWanRoundTrips": 0,
+      "layers": [
+        {
+          "label": "Runtime",
+          "placement": "Per-capability",
+          "portable": false,
+          "note": "Only shared services use a common image; specialized tiers use provider-native interfaces."
+        },
+        {
+          "label": "Traffic",
+          "placement": "Contract boundaries",
+          "portable": true,
+          "note": "Versioned APIs and events keep cross-domain calls explicit and measurable."
+        },
+        {
+          "label": "State",
+          "placement": "Owned with capability",
+          "portable": false,
+          "note": "Each dataset has one owner, export format, retention rule, and recovery target."
+        },
+        {
+          "label": "Operations",
+          "placement": "Federated evidence",
+          "portable": true,
+          "note": "Shared SLO and trace semantics sit above provider-specific health and quota signals."
+        }
+      ],
+      "fits": {
+        "regulated-ledger": {
+          "status": "review",
+          "summary": "Keeping the ledger anchored can work, but optional fraud, analytics, or reporting services create new data-release boundaries.",
+          "decision": "Approve each export separately. Keep authorization and payment completion independent from a remote optional capability, and define deletion and replay behavior.",
+          "checks": [
+            {
+              "label": "EU residency",
+              "passed": true,
+              "detail": "Every state-owning capability can be restricted to an approved EU location."
+            },
+            {
+              "label": "Single write authority",
+              "passed": true,
+              "detail": "The order ledger remains authoritative."
+            },
+            {
+              "label": "Partition behavior",
+              "passed": true,
+              "detail": "Optional remote capabilities consume events and do not block the ledger write."
+            },
+            {
+              "label": "Recovery evidence",
+              "passed": false,
+              "detail": "Three capability domains require coordinated replay and deletion drills."
+            }
+          ]
+        },
+        "global-media": {
+          "status": "fit",
+          "summary": "Media serving, transcoding, metadata, and analytics have different scaling and locality needs that can justify separate homes.",
+          "decision": "Keep contracts asynchronous where the user path permits. Record which derived artifacts may be rebuilt and which originals need independent recovery copies.",
+          "checks": [
+            {
+              "label": "Read locality",
+              "passed": true,
+              "detail": "Serving and cache capabilities can run independently near users."
+            },
+            {
+              "label": "Metadata authority",
+              "passed": true,
+              "detail": "The metadata capability retains one write owner."
+            },
+            {
+              "label": "Transfer ownership",
+              "passed": true,
+              "detail": "The model moves selected derivatives rather than every object copy."
+            },
+            {
+              "label": "Provider exit",
+              "passed": true,
+              "detail": "Original object formats and capability contracts define what must move during exit."
+            }
+          ]
+        },
+        "private-inference": {
+          "status": "review",
+          "summary": "A provider GPU capability can add burst capacity, but the release boundary becomes part of the security invariant.",
+          "decision": "Require policy evidence for every exported field, cap the remote queue, and prove the private service remains useful during a prolonged WAN outage.",
+          "checks": [
+            {
+              "label": "Private feature boundary",
+              "passed": true,
+              "detail": "Only approved derived payloads cross the boundary."
+            },
+            {
+              "label": "WAN-independent service",
+              "passed": true,
+              "detail": "Local inference continues while cloud burst jobs pause."
+            },
+            {
+              "label": "Reusable runtime",
+              "passed": false,
+              "detail": "Provider-native GPU queues and identity APIs need an adapter and exit test."
+            },
+            {
+              "label": "Deletion evidence",
+              "passed": false,
+              "detail": "Remote payload, logs, caches, and failed jobs need end-to-end deletion evidence."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,232 @@
+---
+registryId: grafana
+---
+
+{% section-card tone="intro" %}
+## What is Grafana?
+
+Grafana is an observability and data-visualization platform. It connects to data sources,
+runs source-specific queries, and turns the returned metrics, logs, traces, profiles, or
+business records into dashboards, exploratory views, and alerts. Grafana normally does
+not replace the systems that store that evidence.
+
+That boundary matters. A polished panel can still be late, incomplete, expensive, or
+misleading when its query, time range, units, labels, or missing-data behavior are
+wrong. Grafana becomes useful when each view is tied to a decision and each alert is
+tied to an owned response.
+
+{% callout variant="info" %}
+### Core invariant
+
+A dashboard is a query client, not proof that the underlying signal is correct. Every
+panel needs a declared question, source, unit, time context, and failure interpretation.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Data source" eyebrow="Evidence" icon="database" tone="blue" %}
+Stores the data and provides its query language. The Grafana plugin handles connection,
+authentication, query editing, and conversion into data frames.
+{% /concept-card %}
+{% concept-card title="Dashboard and panel" eyebrow="Shared view" icon="workflow" tone="violet" %}
+A dashboard carries time and variable context. Each panel runs one or more queries and
+maps the result to a visualization, table, text, or other presentation.
+{% /concept-card %}
+{% concept-card title="Explore" eyebrow="Investigation" icon="search" tone="cyan" %}
+Provides an ad hoc workspace for following evidence without first turning every
+diagnostic query into permanent dashboard furniture.
+{% /concept-card %}
+{% concept-card title="Grafana Alerting" eyebrow="Response" icon="warning" tone="amber" %}
+Evaluates rule queries on a schedule, creates an alert instance per returned series or
+dimension, and sends firing or resolved instances through notification policy.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Budget dashboard demand against the data source
+
+One dashboard refresh can execute panel queries, variable queries, and annotation
+queries. Multiply that work by active viewers and refresh cadence before deciding that
+the backend is slow.
+
+The lab uses two transparent equations:
+
+- **Queries per refresh** = panel count x queries per panel + variable queries.
+- **Steady query executions per second** = viewers x queries per refresh / refresh
+  interval.
+
+Returned time-series points are modeled separately from query executions. The model
+assumes each panel query returns the displayed series count at a fixed step over the
+selected range. Real backend work also depends on storage layout, functions, label
+matching, caching, concurrency, and source-specific query planning.
+
+{% interactive-block id="technology/grafana-deployment" dataFile="/api/content/technology/grafana/data/dashboard-query-pressure.json" /%}
+
+Use a measured query budget from a representative load test. Grafana does not publish
+one universal safe query rate for every source, query, and deployment shape.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design a dashboard around an operator question
+
+Start with a workflow, not a pile of available metrics. A service overview should make
+the current user impact obvious, show enough context to reject common explanations,
+and link to a narrower investigation surface.
+
+{% process-flow %}
+{% process-step number="1" title="Name the decision" label="Audience" %}
+Write who uses the view and what they must decide: declare an incident, find a failing
+region, verify a release, or explain a business exception.
+{% /process-step %}
+{% process-step number="2" title="Choose trustworthy evidence" label="Signal" %}
+Select user-facing outcomes first, then add dependency and resource evidence that can
+explain those outcomes. Define units and null behavior explicitly.
+{% /process-step %}
+{% process-step number="3" title="Preserve investigation context" label="Navigate" %}
+Carry time range, service, environment, region, and release through variables, data
+links, dashboard links, and correlated telemetry.
+{% /process-step %}
+{% process-step number="4" title="Test pressure and failure" label="Operate" %}
+Measure load time and source query demand with concurrent viewers. Rehearse delayed,
+partial, empty, and failed data-source responses.
+{% /process-step %}
+{% /process-flow %}
+
+### Match the view to the job
+
+{% concept-grid columns="3" %}
+{% concept-card title="Service overview" eyebrow="Is the service healthy?" icon="activity" tone="blue" %}
+Show request rate, failures, latency distribution, saturation, dependency health,
+objective status, and recent changes. Link each symptom to a focused investigation.
+{% /concept-card %}
+{% concept-card title="Incident drill-down" eyebrow="Why is it failing?" icon="search" tone="rose" %}
+Use higher-resolution component evidence and bounded variables. Keep it separate from
+the overview so diagnostic fan-out does not tax every routine viewer.
+{% /concept-card %}
+{% concept-card title="Business operations" eyebrow="What needs action?" icon="gauge" tone="green" %}
+Show volume, backlog, conversion, freshness, and exceptions with an owner and response
+threshold. Do not hide delayed source data behind a healthy-looking aggregate.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Write source-aware queries
+
+Grafana provides a query editor for each data-source plugin, but the backend still
+executes the query. Use source-native aggregation, indexed filters, and bounded label
+sets; reserve Grafana transformations for presentation work that cannot be expressed
+more safely or efficiently at the source.
+
+### Prometheus: aggregate a histogram before the quantile
+
+This panel query calculates p95 request duration for the selected service and
+environment. `$__rate_interval` adapts the rate window to the dashboard resolution,
+while the explicit variable formats preserve valid PromQL matchers.
+
+{% code-block file="/api/content/technology/grafana/code/grafana-prometheus-query.promql" language="promql" title="Prometheus p95 request duration" /%}
+
+### MySQL: group in the database
+
+The SQL macro binds the panel time range and groups orders into five-minute buckets.
+The production table should have an index that supports the time predicate and any
+additional filters used by the panel.
+
+{% code-block file="/api/content/technology/grafana/code/grafana-time-series-query.sql" language="sql" title="MySQL order volume time series" /%}
+
+Before sharing a query:
+
+- inspect the generated source query and verify variable interpolation with one,
+  multiple, all, and empty selections;
+- compare short and long time ranges, because a harmless one-hour query may be
+  destructive over 30 days;
+- cap or aggregate unbounded series before they become legends, repeated panels, or
+  alert instances;
+- set units, decimal behavior, thresholds, and null display from the signal contract;
+- test authorization with the least-privileged data-source identity, not an
+  administrator credential.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make alert timing and missing data intentional
+
+Grafana-managed alert rules evaluate on an interval. A rule can create multiple alert
+instances, one per returned series or dimension, so labels determine both state and
+notification grouping.
+
+The pending period asks whether a breach persists long enough to act on. A recovery
+threshold adds hysteresis, and `keep firing for` delays resolution after the recovery
+condition is met. These controls solve different problems; combining long values can
+make both detection and recovery unacceptably slow.
+
+{% interactive-block id="technology/grafana-alert-lifecycle-lab" dataFile="/api/content/technology/grafana/data/alert-lifecycle-model.json" /%}
+
+No Data and Error are not synonyms:
+
+- **No Data** means the query ran successfully but returned no points.
+- **Error** means the rule could not evaluate its query successfully, including a
+  timeout after the configured attempts.
+- The default Grafana-managed behavior can create separate `DatasourceNoData` or
+  `DatasourceError` alert instances with labels different from the original alert.
+- **Keep Last State** can prevent a brief source interruption from resolving or firing
+  the original instance, but a separate availability rule must detect a prolonged
+  telemetry blind spot.
+
+Route and test these states explicitly. A silence or notification policy matching the
+original alert's labels may not match the separate data-source alert.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Provision shared Grafana resources as code
+
+Provisioning gives shared data sources and dashboards a reviewable source of truth.
+Grafana reads data-source YAML and dashboard-provider YAML, then creates or updates the
+corresponding resources. Stable UIDs preserve references and URLs across environments.
+
+{% code-block file="/api/content/technology/grafana/code/prometheus-datasource.yaml" language="yaml" title="Least-privileged Prometheus data source" /%}
+
+{% code-block file="/api/content/technology/grafana/code/dashboard-provider.yaml" language="yaml" title="Version-controlled dashboard provider" /%}
+
+Operational rules for this workflow:
+
+- inject secrets through the deployment environment or a secret manager; never commit
+  a query token or private key with the provisioning file;
+- use a read-only backend identity scoped to the datasets dashboard viewers require;
+- keep `allowUiUpdates: false` when source control is authoritative, or define an
+  explicit export-and-review workflow for UI edits;
+- increment a provisioned data source's version when several Grafana instances may
+  start with different configuration revisions;
+- test deletion behavior before enabling `prune` or allowing provisioned dashboards to
+  be removed;
+- monitor Grafana request errors, database health, alert evaluation, plugin failures,
+  and data-source latency alongside the services shown in Grafana.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Review the production contract
+
+Before treating a dashboard or alert as operational infrastructure, verify:
+
+- the owner, audience, decision, source, time range, unit, and freshness expectation
+  are written down;
+- routine and peak viewer counts stay inside a measured source query budget;
+- variables cannot create unbounded fan-out or expose data outside the viewer's scope;
+- deployment and incident annotations appear on the same timeline as the symptom;
+- alert labels are stable, bounded, and compatible with notification grouping;
+- pending, recovery, No Data, Error, and resolved paths reach the intended owner;
+- dashboard definitions, data sources, folders, and alert rules have a reviewed change
+  path and rollback plan;
+- a synthetic incident proves that the page contains enough evidence and links for the
+  first safe response.
+
+Current primary references:
+
+- [Grafana data sources](https://grafana.com/docs/grafana/latest/datasources/)
+- [Grafana dashboard settings](https://grafana.com/docs/grafana/latest/visualizations/dashboards/build-dashboards/modify-dashboard-settings/)
+- [Grafana variables](https://grafana.com/docs/grafana/latest/visualizations/dashboards/variables/)
+- [Grafana alert rule evaluation](https://grafana.com/docs/grafana/latest/alerting/fundamentals/alert-rule-evaluation/)
+- [Grafana No Data and Error states](https://grafana.com/docs/grafana/latest/alerting/fundamentals/alert-rule-evaluation/nodata-and-error-states/)
+- [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/grafana/quiz/grafana-operational-decisions.json" lessonSlug="grafana" title="Grafana Operational Decisions" /%}

@@ -1,0 +1,154 @@
+---
+registryId: data-pipeline-design
+---
+
+{% section-card tone="intro" %}
+## What is ML data pipeline design?
+
+ML data pipeline design is the work of turning raw business events into trustworthy training examples and serving-time features. It matters because a model can appear healthy while learning from the wrong past or receiving different inputs in production.
+
+The invariant is simple: **training and serving must consume data with explicit lineage, time semantics, and reproducible transformations.** For every feature, a team should be able to answer where it came from, what it meant at the prediction time, and which version of code produced it. Review [ML Systems Design](/ml-systems/ml-systems-design) for the larger system this supports.
+{% /section-card %}
+
+{% system-flow title="One contract, two consumers" caption="Raw events remain replayable; validated event-time data and versioned feature logic feed both offline and online paths." %}
+{% system-node title="Capture" eyebrow="Immutable input" icon="radio" tone="cyan" %}
+Record source, schema version, event time, ingestion time, identity key, and consent context before changing the event.
+{% /system-node %}
+{% system-node title="Validate" eyebrow="Contract gate" icon="shield-check" tone="amber" %}
+Quarantine records that violate schema, freshness, uniqueness, or business constraints. Keep reason codes for investigation.
+{% /system-node %}
+{% system-node title="Transform" eyebrow="Feature definition" icon="braces" tone="violet" %}
+Apply one versioned, point-in-time-safe definition for windows, defaults, joins, and aggregations.
+{% /system-node %}
+{% system-node title="Publish" eyebrow="Compatible views" icon="database" tone="green" %}
+Materialize offline training snapshots and low-latency online values with the same feature names and semantics.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Choose a processing mode from the product promise
+
+**Batch** processes a bounded historical set on a schedule. **Streaming** evaluates events continuously. **Hybrid** keeps a durable batch truth while a streaming path maintains recent state. Start with the required freshness, not a preferred tool.
+
+- Choose **batch** when hours of freshness are acceptable, large scans dominate, and simple reproducible reruns matter most.
+- Choose **streaming** when an event must change a decision within seconds or minutes, such as fraud controls or session recommendations.
+- Choose **hybrid** when serving needs recent events but training, reporting, or correction needs a complete recomputable history.
+
+{% callout variant="tip" %}
+Streaming is not merely faster batch. It introduces state, partitions, watermarks, late records, checkpoint recovery, and replay operations. Use it only when the freshness SLO requires it.
+{% /callout %}
+{% /section-card %}
+
+{% interactive-block id="ml-systems/data-pipeline-design-mode-lab" dataFile="/api/content/ml-systems/data-pipeline-design/data/pipeline-mode-lab.json" /%}
+
+{% section-card %}
+## Ingest events without losing their meaning
+
+An event usually has at least two useful clocks:
+
+- **Event time** is when the business action happened. Use it for feature windows, labels, and point-in-time joins.
+- **Ingestion time** is when the platform received it. Use it to observe source delay, transport outages, and replay progress.
+
+Keep the raw event immutable and attach a source ID, schema version, event ID, entity key, and permission or retention context. An event can arrive late, out of order, or more than once. The pipeline should decide how to handle those cases explicitly instead of letting processor defaults decide.
+
+### Watermarks and late data
+
+A **watermark** is a practical statement such as "we expect events through 10:00, allowing 15 minutes of lateness." A streaming job can close an event-time window after the watermark, then route very late records to correction or replay. The choice has a trade-off:
+
+- A longer allowance improves correctness for delayed sources but postpones complete aggregates.
+- A shorter allowance improves freshness but requires more corrections and makes downstream values temporarily incomplete.
+- Never use ingestion time as a shortcut for event time in historical training joins; it can leak future information or omit valid late events.
+{% /section-card %}
+
+{% section-card %}
+## Make data contracts executable
+
+A data contract is an agreement between a producer and every downstream consumer. It includes more than column names: it states types, optionality, semantic meaning, ownership, delivery expectations, and compatibility rules.
+
+### Validate at each boundary
+
+- **Schema:** required fields, types, allowed enumerations, and additive versus breaking changes.
+- **Quality:** null rate, numeric range, duplicate rate, referential coverage, and business invariants.
+- **Freshness:** maximum source delay, partition completeness, stream lag, and online feature age.
+- **Distribution:** shifts in important feature values and slices, interpreted alongside product context.
+
+Use three outcomes: accept valid records, quarantine repairable records with reason codes, and stop publication for changes that could silently corrupt features. A contract failure should expose an owner and a path to recovery, not only a red dashboard.
+{% /section-card %}
+
+{% section-card %}
+## Generate features once, then test offline and online parity
+
+A feature is a measurable input to a model, such as a customer's purchases in the prior 30 days. The feature definition must state the entity key, event-time window, source set, defaults, version, and whether it is safe at prediction time.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Offline feature view" eyebrow="Training" icon="archive" tone="blue" %}
+Build historical rows as of each prediction timestamp. Point-in-time joins prevent labels and future events from leaking backward.
+{% /concept-card %}
+{% concept-card title="Online feature view" eyebrow="Serving" icon="zap" tone="violet" %}
+Retrieve the latest eligible values under a bounded latency budget. Record feature version and freshness with each prediction.
+{% /concept-card %}
+{% concept-card title="Parity test" eyebrow="Release gate" icon="scale" tone="green" %}
+Replay representative events through both paths and compare values, defaults, windows, and entity coverage before promotion.
+{% /concept-card %}
+{% /concept-grid %}
+
+Avoid two independently maintained implementations of the same feature. Where one runtime cannot be shared, share a declarative definition and enforce replay-based parity tests.
+
+{% code-block file="/api/content/ml-systems/data-pipeline-design/code/point-in-time-feature.py" language="python" title="Build a leakage-safe 30-day feature with explicit event time" /%}
+{% /section-card %}
+
+{% section-card %}
+## Orchestrate runs and design backfills before an incident
+
+**Orchestration** schedules dependencies, parameters, retries, and publication gates. A reliable workflow is idempotent: rerunning the same input interval produces the same output version rather than duplicate data.
+
+{% process-flow %}
+{% process-step number="1" title="Plan the interval" label="Scope" %}
+Pin input partitions, event-time bounds, schema and feature versions, and the target consumer before starting work.
+{% /process-step %}
+{% process-step number="2" title="Write a candidate" label="Build" %}
+Compute into an isolated version or staging location. Do not overwrite a serving view while validation is incomplete.
+{% /process-step %}
+{% process-step number="3" title="Validate and compare" label="Gate" %}
+Run contracts, row counts, distribution checks, and offline/online parity checks against the previous known-good version.
+{% /process-step %}
+{% process-step number="4" title="Publish atomically" label="Release" %}
+Promote the compatible feature or dataset version, retain lineage, and record exactly which consumers moved.
+{% /process-step %}
+{% /process-flow %}
+
+A **backfill** recomputes a bounded event-time range after a correction. Prefer the smallest range that repairs the error, but use a full replay when a feature definition or source history changed globally. Backfill both training snapshots and online materializations when the defect could create training-serving skew.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/data-pipeline-design-failure-lab" dataFile="/api/content/ml-systems/data-pipeline-design/data/pipeline-failure-lab.json" /%}
+
+{% section-card %}
+## Operate the pipeline as a product
+
+Observability should answer whether data is usable, not only whether a job exited successfully. Attach a run ID, source and feature versions, event-time interval, input counts, output counts, quarantine counts, and publication state to every materialization.
+
+- **Watch freshness and lag:** source delay, watermark age, queue depth, and online feature age against an SLO.
+- **Watch correctness:** contract failures, duplicate rate, late-event rate, join coverage, parity mismatches, and sampled feature values.
+- **Watch impact:** affected models, feature consumers, prediction slices, training snapshots, and fallback use.
+- **Recover deliberately:** pause publication, preserve raw inputs and checkpoints, scope the bad interval, rebuild a candidate, validate, then release in a reversible step.
+
+### Cost controls that preserve correctness
+
+- Partition raw and derived data by event date or a similarly selective key; avoid scanning the whole history for routine work.
+- Use incremental state where safe, but retain enough raw history to replay after a bug.
+- Set retention and compaction policies per data class; cheap retained lineage is often less expensive than an unreproducible incident.
+- Size stream workers from event rate, transform cost, state size, and peak replay traffic, not average throughput alone.
+{% /section-card %}
+
+{% section-card %}
+## Make trade-offs explicit
+
+- **Freshness versus completeness:** lower watermark delay improves responsiveness but accepts more corrections for late records.
+- **One path versus two:** a hybrid design can meet distinct latency targets, but every extra implementation increases parity and operating cost.
+- **Strict gating versus availability:** blocking a critical feature protects correctness; serving a documented fallback can protect users when a noncritical source fails.
+- **Incremental processing versus replayability:** incrementality reduces routine cost, while immutable raw data and versioned transforms make corrections defensible.
+
+The best pipeline is the simplest one that demonstrably satisfies data correctness, latency, and recovery promises for the ML decision it supports.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/data-pipeline-design/quiz/data-pipeline-design.json" lessonSlug="data-pipeline-design" title="Data Pipeline Design Mastery Check" /%}

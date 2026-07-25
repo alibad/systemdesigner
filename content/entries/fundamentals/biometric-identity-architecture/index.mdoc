@@ -1,0 +1,207 @@
+---
+registryId: biometric-identity-architecture
+---
+
+{% section-card tone="intro" %}
+## What is biometric identity architecture?
+
+**Biometric identity architecture is the set of capture, comparison, credential, privacy, and recovery boundaries used when a system recognizes a person from a biological or behavioral characteristic.** A face, fingerprint, or iris measurement is noisy: the system compares a fresh sample with a reference and decides whether the similarity crosses one fixed operating threshold.
+
+In plain language, biometrics can help answer "is the person using this authenticator the enrolled person?" They should not become the only thing that unlocks an account. A person can replace a password or key after compromise, but cannot simply replace their face or fingerprints.
+
+{% callout variant="warn" %}
+### Core invariant
+
+Treat a biometric as sensitive personal information and an activation factor, not a secret. Pair it with a physical authenticator, keep the comparison inside the smallest defensible trust boundary, limit attempts, and always provide an independently authenticated non-biometric path.
+{% /callout %}
+
+The current [NIST SP 800-63B-4 biometric requirements](https://pages.nist.gov/800-63-4/sp800-63b.html#use-of-biometrics) use that model for remote authentication: biometrics participate in multi-factor authentication with a physical authenticator, and an alternative non-biometric option must remain available.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate verification, identification, and authentication
+
+These terms describe different decisions. Mixing them leads to the wrong datastore, error model, and recovery path.
+
+{% concept-grid columns="3" %}
+{% concept-card title="1:1 verification" eyebrow="Is this the claimed person?" icon="check" tone="blue" %}
+A claimed account selects one reference. The system compares a fresh sample with that reference and returns match or no match at a fixed threshold.
+{% /concept-card %}
+{% concept-card title="1:N identification" eyebrow="Who might this be?" icon="search" tone="violet" %}
+One sample is searched against a gallery. The output is a candidate or ranked list, not an authenticated session. Gallery size, adjudication, consent, and privacy change the risk.
+{% /concept-card %}
+{% concept-card title="Authentication" eyebrow="May this session proceed?" icon="key" tone="green" %}
+The verifier checks an authenticator output, freshness, binding, account state, and policy. A biometric result alone does not provide replay or phishing resistance.
+{% /concept-card %}
+{% /concept-grid %}
+
+An authenticator-local passkey keeps these responsibilities clean:
+
+{% system-flow title="Biometric activation of a public-key credential" caption="The biometric comparison remains local. The application receives a signed assertion and verifies the transaction, not the person's face or fingerprint." %}
+{% system-node title="Local capture" eyebrow="1. Present" icon="users" tone="cyan" %}
+The user presents a biometric to a platform or roaming authenticator. The authenticator owns sample quality, matching, attempt limits, and its alternative activation method.
+{% /system-node %}
+{% system-node title="Local user verification" eyebrow="2. Compare" icon="shield" tone="violet" %}
+The authenticator compares the sample locally. On success it makes the credential private key available for this operation and records user verification in signed authenticator data.
+{% /system-node %}
+{% system-node title="Fresh assertion" eyebrow="3. Prove" icon="key" tone="blue" %}
+The credential signs a fresh challenge scoped to the relying party. The biometric sample, template, and score do not enter the WebAuthn application interface.
+{% /system-node %}
+{% system-node title="Server verification" eyebrow="4. Decide" icon="server" tone="green" %}
+The relying party validates challenge, origin, RP ID, signature, credential state, and the signed user-verification flag before issuing a session.
+{% /system-node %}
+{% /system-flow %}
+
+This architecture follows the privacy boundary in [Web Authentication Level 3](https://www.w3.org/TR/webauthn-3/#sctn-local-authnr-bio): authenticator-local biometric recognition signals user verification without revealing biometric data to the relying party.
+
+The signed UV flag proves that the authenticator performed user verification. It does
+not generally tell the relying party whether the local method was a fingerprint, face,
+or PIN. That abstraction is useful: the authenticator can offer an accessible
+non-biometric method without sending a biometric modality or score to the application.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## A threshold trades false matches for false non-matches
+
+A biometric matcher emits a similarity or distance score. The threshold converts that score into a decision. Tightening it usually reduces false matches but increases false non-matches; loosening it usually does the reverse. Vendor score scales are not interchangeable, so validate an operating point on the actual sensor, software, environment, and intended population.
+
+{% metric-strip %}
+{% metric value="FMR" label="False match rate" detail="Fraction of zero-effort impostor comparisons that match" tone="rose" /%}
+{% metric value="FNMR" label="False non-match rate" detail="Fraction of genuine comparisons that fail to match" tone="amber" /%}
+{% metric value="IAPAR" label="Attack acceptance" detail="Fraction of tested presentation attacks accepted by PAD" tone="violet" /%}
+{% metric value="1 threshold" label="Operating rule" detail="Evaluate the same fixed threshold across relevant groups" tone="blue" /%}
+{% /metric-strip %}
+
+Current NIST SP 800-63B-4 sets an FMR of `1 in 10,000` or better for every demographic group and says systems should demonstrate FNMR below `5%`. It requires performance testing under the relevant ISO standards and does not permit a different threshold for each demographic. Those are policy benchmarks, not a claim that one threshold fits every non-NIST use case.
+
+### Lab 1: qualify a fixed operating point
+
+Choose one illustrative measured operating point and test size. Every trial count, group rate, and expected error is visible. The lab deliberately fails when an aggregate could hide a group that misses the benchmark.
+
+{% interactive-block id="fundamentals/biometric-identity-architecture-calculator" dataFile="/api/content/fundamentals/biometric-identity-architecture/data/threshold-validation-model.json" /%}
+
+Use expected counts only for planning:
+
+- `expected false matches = zero-effort impostor trials x FMR`
+- `expected false non-matches = genuine trials x FNMR`
+- A measured rate needs a confidence interval and enough trials to support the claimed operating point. A tiny test with zero observed errors does not prove a zero error rate.
+- Report sample quality failures and enrollment failures separately. Excluding difficult captures after the fact can make matching metrics look better while hiding exclusion.
+- Re-test after sensor, matcher, threshold, capture guidance, environment, or enrolled-population changes.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Put the biometric inside the smallest defensible boundary
+
+Architecture determines who can see the sample or template and what a breach exposes. Authenticator-local matching usually gives an online relying party the smallest biometric boundary. Central comparison can be justified for some controlled verification or identity-proofing workflows, but it creates a sample path, template service, and privacy lifecycle that must all be defended.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Capture integrity" eyebrow="Can the sample be trusted?" icon="shield" tone="cyan" %}
+Presentation attack detection examines attacks at capture. Digital injection is a separate threat: authenticate the sensor or resistant endpoint and protect the channel to the verifier.
+{% /concept-card %}
+{% concept-card title="Template protection" eyebrow="What can a breach reveal?" icon="lock" tone="violet" %}
+Do not assume that a feature vector is safe because it is called a template. Document confidentiality, integrity, unlinkability, revocability or renewability, and the key boundaries that provide them.
+{% /concept-card %}
+{% concept-card title="Recovery" eyebrow="What if matching is unavailable?" icon="repeat" tone="amber" %}
+Offer another already-bound factor. Do not lower the threshold, enroll a replacement from an unauthenticated session, or force endless recapture when a person cannot use the modality.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Lab 2: inject a trust-boundary failure
+
+Compare authenticator-local verification, central 1:1 verification, and central 1:N identification. Then inject a relying-party breach, capture injection, unavailable biometric, or template compromise. The active path and recovery duty change together.
+
+{% interactive-block id="fundamentals/biometric-identity-architecture-boundary-lab" dataFile="/api/content/fundamentals/biometric-identity-architecture/data/biometric-boundary-model.json" /%}
+
+Protected-template claims should be tied to a concrete scheme and evaluation. [ISO/IEC 24745:2022](https://www.iso.org/standard/75302.html) covers confidentiality, integrity, and renewability or revocability requirements for biometric information. Encryption at rest is useful, but it does not by itself prove irreversibility, unlinkability, or safe renewal after compromise.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design enrollment, authentication, and recovery as one lifecycle
+
+The authentication path can only be trusted if enrollment bound the right authenticator to the right account. Recovery is another binding event and needs equal scrutiny.
+
+{% process-flow %}
+{% process-step number="1" title="Declare purpose and obtain consent" label="Before capture" %}
+State which modality is collected, why it is needed, where comparison happens, what is retained, who can access it, when it is deleted, and which alternative exists.
+{% /process-step %}
+{% process-step number="2" title="Bind a protected authenticator" label="Enrollment" %}
+Authenticate the subscriber, assess capture quality and attack resistance, create the protected reference or local credential, and record version, consent, and lifecycle ownership.
+{% /process-step %}
+{% process-step number="3" title="Verify a fresh operation" label="Authentication" %}
+Apply the fixed threshold in a trusted subsystem, enforce attempt ceilings, verify a fresh cryptographic authenticator output, and create an auditable policy decision.
+{% /process-step %}
+{% process-step number="4" title="Recover without weakening binding" label="Failure" %}
+Use an already-bound alternative or a separately controlled account-recovery ceremony. Revoke lost credentials and renew protected templates only when the scheme supports it.
+{% /process-step %}
+{% /process-flow %}
+
+### Bound retries and distinguish attack classes
+
+Under the NIST SP 800-63B-4 profile:
+
+- Facial recognition must implement presentation attack detection (PAD); fingerprint and iris should implement it.
+- Voice biometric comparison is not permitted for this authentication profile.
+- Without conformant PAD, no more than `5` consecutive failed biometric attempts are allowed before at least a `30-second` delay for each later attempt; the overall ceiling is `50`.
+- With conformant PAD, the corresponding upper bounds are `10` before delay and `100` overall.
+- At the overall ceiling, disable biometric authentication and offer another already-available factor.
+
+These are upper limits, not targets. A risk assessment can impose lower limits. PAD addresses artifacts presented to a sensor; endpoint emulation or injected digital samples also need sensor or endpoint integrity and an authenticated protected channel.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement protocol and policy boundaries explicitly
+
+The browser example requests WebAuthn user verification. It serializes only the assertion fields that a server-side WebAuthn library needs; it never handles a biometric sample or match score.
+
+{% code-block file="/api/content/fundamentals/biometric-identity-architecture/code/request-local-user-verification.ts" language="typescript" title="Request authenticator-local user verification" /%}
+
+The policy example starts after a trusted biometric subsystem has evaluated the sample. It keeps the physical-factor requirement, non-biometric alternative, prohibited modality, delay threshold, and disable threshold visible rather than hiding them in a weighted risk score.
+
+{% code-block file="/api/content/fundamentals/biometric-identity-architecture/code/evaluate-biometric-attempt.ts" language="typescript" title="Apply explicit biometric attempt ceilings" /%}
+
+Do not implement biometric matching, presentation attack detection, template protection, or WebAuthn signature verification from scratch in an application lesson. Use evaluated biometric products and maintained protocol libraries, then make application policy and evidence boundaries explicit.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate accuracy, security, privacy, and inclusion together
+
+### Before launch
+
+- Define whether the use case is 1:1 verification, 1:N identification, authenticator activation, or identity proofing.
+- Inventory every raw sample, derived feature, protected template, matching score, decision, audit event, key, replica, backup, export, and retention owner.
+- Evaluate FMR, FNMR, failure to acquire, failure to enroll, PAD performance, and uncertainty under representative sensors, environments, and groups.
+- Threat-model presentation artifacts, digital injection, endpoint compromise, template theft, administrator misuse, replay, account recovery, and denial of service.
+- Test the non-biometric path with people who cannot or do not wish to use the modality.
+
+### In production
+
+- Monitor capture and enrollment failure, FMR and FNMR from adjudicated test programs, retry and lockout rates, fallback use, abandonment, latency, and outcomes by responsibly measured group.
+- Version sensor, firmware, matcher, threshold, PAD model, template format, protection keys, and policy. A change to any of them can invalidate prior evidence.
+- Erase transient samples and derived biometric data after the transaction unless a separately consented, purpose-limited process is authorized to retain them.
+- Minimize samples and scores in logs. Keep identity, biometric, security, and support access separately authorized and audited.
+- Exercise sensor compromise, verifier outage, protected-template exposure, false-match escalation, mass lockout, credential replacement, deletion, and recovery.
+- Publish the biometric purpose, retention, protection, deletion, and alternative path in language subscribers can understand.
+
+### Common failure modes
+
+- Calling biometrics "passwordless" while ignoring the physical credential and recovery system.
+- Reporting one aggregate accuracy percentage instead of separate error rates and affected groups.
+- Treating liveness, PAD, and injection detection as interchangeable.
+- Assuming encrypted templates are automatically irreversible, unlinkable, and revocable.
+- Lowering the threshold for a struggling user instead of offering an accessible alternative.
+- Letting support bind a replacement biometric from a weak or already-compromised session.
+{% /section-card %}
+
+{% section-card %}
+## Use current standards as contracts
+
+- [NIST SP 800-63B-4, Use of Biometrics](https://pages.nist.gov/800-63-4/sp800-63b.html#use-of-biometrics) defines the remote-authentication factor model, group performance benchmarks, PAD guidance, retry ceilings, central-verifier controls, and non-biometric alternative.
+- [Web Authentication Level 3](https://www.w3.org/TR/webauthn-3/) defines origin-bound public-key credentials, registration and authentication ceremonies, signed user-verification state, and authenticator-local biometric privacy.
+- [ISO/IEC 30107-3:2023](https://www.iso.org/standard/79520.html) defines principles and methods for testing and reporting presentation attack detection performance.
+- [ISO/IEC 24745:2022](https://www.iso.org/standard/75302.html) covers protection and privacy requirements for biometric information during storage, transfer, and processing.
+- [NIST SP 800-63A-4](https://pages.nist.gov/800-63-4/sp800-63a.html) adds consent, retention, deletion, PAD, and performance requirements when biometrics are collected for identity proofing.
+
+Standards do not select a modality, vendor, threshold, retention period, lawful basis, or recovery process for a product. Record those decisions, the evidence behind them, and the accountable owner.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/biometric-identity-architecture/quiz/biometric-identity-architecture.json" lessonSlug="biometric-identity-architecture" title="Biometric Identity Architecture Decisions" /%}

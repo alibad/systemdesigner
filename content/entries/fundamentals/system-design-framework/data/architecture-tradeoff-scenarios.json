@@ -1,0 +1,44 @@
+{
+  "scenarios": [
+    {
+      "id": "reservation",
+      "label": "Reserve a concert seat",
+      "requirement": "Confirm one available seat without double-selling it; notify the buyer after the durable reservation succeeds.",
+      "invariant": "A seat may be confirmed at most once for the same show.",
+      "preferred": {
+        "path": "commit-first",
+        "source": "transactional-store",
+        "boundary": "outbox-queue",
+        "consistency": "strong-write",
+        "failure": "pending-after-commit"
+      },
+      "components": {
+        "commit-first": "API -> reservation service -> transactional store -> outbox -> notification worker",
+        "async-first": "API -> queue -> worker -> transactional store -> notification worker",
+        "transactional-store": "Transactional reservation store with a unique show-and-seat constraint",
+        "cache": "Read-through availability cache",
+        "outbox-queue": "Transactional outbox plus durable queue for notifications"
+      }
+    },
+    {
+      "id": "tracking",
+      "label": "Show a courier location",
+      "requirement": "Serve a recent location quickly; a delayed point may be acceptable if it is visibly stale.",
+      "invariant": "A location update cannot be attributed to a different delivery.",
+      "preferred": {
+        "path": "async-first",
+        "source": "event-log",
+        "boundary": "cache",
+        "consistency": "eventual-read",
+        "failure": "labeled-stale"
+      },
+      "components": {
+        "commit-first": "API -> location service -> event log -> materialized location view",
+        "async-first": "Courier -> durable event stream -> location consumer -> cached customer view",
+        "event-log": "Append-only location event stream keyed by delivery ID",
+        "cache": "Read-through cache with the last-update timestamp",
+        "outbox-queue": "Outbox queue for downstream notifications"
+      }
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+---
+registryId: human-in-the-loop-ml
+---
+
+{% section-card tone="intro" %}
+## What is human-in-the-loop ML?
+
+Human-in-the-loop (HITL) ML is a system design in which people label, review, correct, approve, or override model behavior at defined decision points. It is useful when uncertainty, potential harm, ambiguity, or the value of expert judgment makes full automation unsafe or uneconomical.
+
+In plain language, the model handles routine cases while a routing policy decides which cases need a person. The human decision is final for the current case; it becomes training evidence only after a separate quality process validates it.
+
+The core invariant is **a case reaches a person because an explicit policy says human judgment adds value**, not merely because the model returned a low score. Risk, reviewer capacity, feedback quality, and release controls are all part of that policy.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate the decision loop from the learning loop
+
+A production HITL system has two related loops. The **decision loop** resolves one case within its service-level objective. The **learning loop** turns a validated collection of past decisions into a candidate model and releases it through normal evaluation gates.
+
+{% system-flow title="The review and learning path" caption="Human feedback crosses a quality gate before it can influence a future model version." %}
+{% system-node title="Model predicts" eyebrow="Decision loop" icon="speed" tone="cyan" %}
+Return a prediction with calibrated uncertainty, reason signals, and the model version.
+{% /system-node %}
+{% system-node title="Policy routes" eyebrow="Decision boundary" icon="route" tone="amber" %}
+Combine confidence with risk, novelty, policy requirements, and available review capacity.
+{% /system-node %}
+{% system-node title="Human decides" eyebrow="Current case" icon="users" tone="blue" %}
+Show enough context to approve, correct, reject, escalate, or abstain with a recorded rationale.
+{% /system-node %}
+{% system-node title="Feedback is validated" eyebrow="Learning gate" icon="shield" tone="violet" %}
+Measure agreement, resolve disputes, remove leakage, and version authoritative labels.
+{% /system-node %}
+{% system-node title="Candidate is released" eyebrow="Controlled change" icon="repeat" tone="green" %}
+Retrain, evaluate by slice, canary, and monitor instead of learning directly from every click.
+{% /system-node %}
+{% /system-flow %}
+
+Three patterns define where people add value:
+
+- **Exception review:** route ambiguous or high-risk predictions to a general reviewer queue.
+- **Expert escalation:** send policy-sensitive or unusually uncertain cases to qualified specialists.
+- **Active learning:** select informative, representative cases for labeling to improve a later model version.
+
+These patterns may share infrastructure, but they have different latency, staffing, and evidence requirements.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Route uncertainty without overwhelming reviewers
+
+An escalation policy is the boundary between automation and human judgment. A lower auto-decision threshold increases automation but lets more errors bypass review. A higher escalation threshold protects difficult cases but consumes scarce expert capacity.
+
+Use the lab to tune both boundaries for different risk domains. Watch the escaped-risk estimate and queue delay together; optimizing either one in isolation produces a brittle system.
+
+{% interactive-block id="ml-systems/human-in-the-loop-ml-escalation-lab" /%}
+
+{% callout variant="info" %}
+Model confidence is not a risk score. A highly confident prediction can still require review because of regulation, irreversible harm, a novel input, or a policy rule.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Build a durable review path
+
+A review request must preserve enough evidence to reproduce the decision. Store the input reference, prediction, confidence and uncertainty signals, routing rule version, model version, priority, deadline, and eventual human rationale under one durable case ID.
+
+{% process-flow %}
+{% process-step number="1" title="Create the case" label="Inference" %}
+Persist the model output and policy context before acknowledging that review has been requested.
+{% /process-step %}
+{% process-step number="2" title="Assign the right queue" label="Routing" %}
+Match domain, language, risk, and deadline to a reviewer with the required permissions.
+{% /process-step %}
+{% process-step number="3" title="Capture a reasoned decision" label="Review" %}
+Support approve, correct, abstain, and escalate actions without forcing a false answer.
+{% /process-step %}
+{% process-step number="4" title="Close and audit" label="Outcome" %}
+Record the final owner, timestamps, rationale, policy version, and downstream side effect.
+{% /process-step %}
+{% /process-flow %}
+
+The service implementation below illustrates prediction, routing, review queues, and expert escalation around a durable request ID.
+
+{% code-block file="/api/content/ml-systems/human-in-the-loop-ml/code/example-03.py" language="python" title="HITL service and routing workflow" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Turn feedback into evidence, not an automatic truth
+
+A feedback loop is the pipeline that samples completed cases, validates their labels, builds a versioned dataset, and proposes a new model. Its central risk is circularity: the deployed model influences which cases people see, so naive feedback can reinforce the model's existing blind spots.
+
+Use the lab to compare sampling strategies, quality-control overlap, and retraining delay. Higher review effort may improve label quality, but it also reduces throughput; faster learning may be less representative or less reliable.
+
+{% interactive-block id="ml-systems/human-in-the-loop-ml-feedback-loop-lab" /%}
+
+{% callout variant="warn" %}
+Never train directly from every correction. Reviewer mistakes, adversarial input, disagreement, interface defaults, and selection bias must be measured before a correction is promoted to an authoritative label.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Implement active learning with coverage guardrails
+
+Active learning selects examples expected to add information to the training set. Uncertainty sampling is useful, but an uncertainty-only queue overrepresents the current model's boundary and can miss quiet failures in underrepresented groups.
+
+Combine multiple sources:
+
+- **Uncertainty samples** expose cases near the model's present decision boundary.
+- **Stratified samples** preserve coverage across classes, regions, languages, devices, and risk groups.
+- **Random audit samples** estimate performance on ordinary production traffic without routing bias.
+- **User-reported cases** reveal severe product failures but do not represent the full population.
+
+The implementation example compares entropy, least-confidence, margin, and diversity sampling. In production, add quotas and slice-level evaluation around these selectors.
+
+{% code-block file="/api/content/ml-systems/human-in-the-loop-ml/code/example-02.py" language="python" title="Active-learning sample selection" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate quality, capacity, delay, and fairness together
+
+No single automation or accuracy number describes a healthy HITL system. Monitor the decision and learning loops separately, then break every aggregate down by risk tier and relevant user slice.
+
+{% metric-strip %}
+{% metric value="< 2h" label="Review age SLO" detail="Measure by priority, not only an overall average" tone="blue" /%}
+{% metric value="> 85%" label="Reviewer agreement" detail="Track disagreement before adjudication" tone="violet" /%}
+{% metric value="< 5%" label="Escaped error target" detail="Errors that bypass the intended review path" tone="rose" /%}
+{% metric value="< $0.50" label="Cost per resolved case" detail="Include review, escalation, QA, and tooling" tone="green" /%}
+{% /metric-strip %}
+
+### Queue health
+
+- Track arrival rate, completion rate, oldest-case age, deadline breaches, and reassignments by priority.
+- Shed low-value labeling work before delaying safety-critical review.
+- Staff expert queues separately; general review capacity cannot substitute for unavailable expertise.
+
+### Label quality and bias
+
+- Measure raw inter-annotator agreement and the rate at which adjudication changes the first label.
+- Audit sample coverage against production traffic, including cases that the model auto-decides.
+- Compare model quality before and after retraining on stable holdouts and protected slices.
+
+### Release safety
+
+- Version the routing policy, reviewer guidance, label schema, dataset, and model together.
+- Run offline evaluation, shadow traffic, and a bounded canary before wider promotion.
+- Keep rollback independent from the review queue so a bad model can be removed immediately.
+{% /section-card %}
+
+{% section-card %}
+## Deploy the workflow as independently scalable services
+
+Inference, queueing, reviewer UI, workflow orchestration, and analytics have different scaling and security requirements. Keep the synchronous prediction path available even when labeling or retraining is paused, and protect review data with least-privilege access and auditable retention.
+
+{% code-block file="/api/content/ml-systems/human-in-the-loop-ml/code/example-05.yaml" language="yaml" title="Example production deployment" /%}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/human-in-the-loop-ml/quiz/human-in-the-loop-ml.json" lessonSlug="human-in-the-loop-ml" title="Human-in-the-Loop ML Design Check" /%}
+
+## Technology references
+
+- [Label Studio](/technology/label-studio): data labeling and annotation workflows
+- [Snorkel](/technology/snorkel): weak supervision and programmatic labels
+- [Prodigy](/technology/prodigy): active-learning annotation workflows
+- [Weights & Biases](/technology/wandb): experiment and evaluation tracking
+- [MLflow](/technology/mlflow): model lifecycle and release management
+- [Kubeflow](/technology/kubeflow): ML workflow orchestration

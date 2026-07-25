@@ -1,0 +1,285 @@
+---
+registryId: practice-computer-vision
+---
+
+{% section-card tone="intro" %}
+## What is a computer vision inference system?
+
+A computer vision inference system turns an image or video frame into a bounded prediction, such as an object box, class, count, or OCR result. The model is only one stage. A production system must accept media safely, apply the same preprocessing used in training, select a versioned model, return or queue a result, and collect trustworthy feedback for the next release.
+
+For this practice problem, design a multi-camera detection platform for **120 live camera streams** plus asynchronous image jobs. It samples **8 frames per second per stream**, returns a live event within **120 ms p95**, and prioritizes correct detection of people and vehicles. The core invariant is: **every prediction and action is reproducible from the input reference, preprocessing version, model release, threshold, and policy that produced it**.
+
+- **Prerequisites:** Review [ML Fundamentals](/ml-systems/ml-fundamentals) for labels, evaluation, and supervised learning, and [Data Pipelines](/ml-systems/data-pipelines) for reliable ingestion and lineage.
+- **First-version boundary:** Detect a fixed object taxonomy from consented camera feeds and uploaded images. Do not make identity decisions, train from unreviewed production predictions, or treat an alert as proof of a real-world event.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Protect the live deadline" eyebrow="Serving" icon="timer" tone="blue" %}
+Validate, decode, preprocess, infer, apply policy, and record the result within one shared latency budget. Training and reporting stay off this path.
+{% /concept-card %}
+{% concept-card title="Keep one feature meaning" eyebrow="Parity" icon="scan-search" tone="violet" %}
+The resize, color conversion, frame sampling, label taxonomy, and confidence threshold must match the release manifest.
+{% /concept-card %}
+{% concept-card title="Fail with a bounded action" eyebrow="Reliability" icon="shield" tone="green" %}
+Under pressure, sample fewer frames or queue non-live work. Never silently bypass validation, policy, or release evidence.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML problem and business context" %}
+
+
+### Define the decision before choosing a detector
+
+Each accepted frame produces a detection set, confidence values, a disposition, and an immutable release-manifest ID. An event policy may use several frames and camera context before creating a human-visible alert. A detection score is evidence, not the final safety or business decision.
+
+### Requirements that change the design
+
+**Functional requirements**
+
+- Accept authenticated camera streams and image uploads, validate media, and deduplicate retrying requests with an idempotency key.
+- Detect people and vehicles; return boxes, classes, confidence, timestamps, and model lineage.
+- Support a live route for incident workflows and a durable batch route for retrospective search or reporting.
+- Preserve sampled frames and predictions under documented retention, deletion, and tenant-access rules.
+- Capture reviewed outcomes and verified events as delayed feedback without treating the model's own output as a label.
+
+**Non-functional requirements**
+
+- Meet a **120 ms p95** deadline for an eligible live frame and return a durable job receipt immediately for batch work.
+- Keep the critical people-and-vehicle recall floor within **2 percentage points** of the approved production release on every required camera slice.
+- Survive one serving-zone loss with explicit capacity shedding and observable fallback use.
+- Encrypt media and feature artifacts, minimize retention, and make every result traceable to the requesting tenant and release manifest.
+
+### Ask the questions that expose hidden constraints
+
+1. **What action follows a detection?** A dashboard annotation can tolerate a delay; an access-control or incident workflow needs a policy owner, human escalation, and stricter false-positive limits.
+2. **Which slices are critical?** Night, rain, camera angle, region, scene density, device type, and class frequency can all hide a regression behind an improved average score.
+3. **Who supplies ground truth?** Verified incidents, sampled human review, and curated labels have different delay, cost, and reliability. Store their source and decision version.
+4. **What may degrade?** Sampling rate, model tier, and batch start time may change. Authentication, input validation, tenant isolation, and release lineage may not.
+
+{% callout variant="tip" %}
+Begin with one camera class, a fixed taxonomy, one approved detector tier, and an explicit alert policy. Adding face recognition, unbounded visual search, or automatic enforcement changes the privacy, error-cost, and governance problem rather than merely increasing model scale.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate data, compute, and serving capacity" %}
+
+
+### Turn cameras into frame demand
+
+The live baseline is **120 streams x 8 sampled FPS = 960 frames/s**. A balanced detector processes about **320 frames/s per replica** under its tested batch and resolution. Capacity is not the raw division of 960 by 320: a production fleet should run near 70% steady utilization so it can absorb retries, bursty scenes, and a zone failure.
+
+{% metric-strip %}
+{% metric value="960/s" label="Live frame demand" detail="120 streams x 8 sampled frames per second." tone="blue" /%}
+{% metric value="120 ms" label="p95 budget" detail="Decode, preprocess, inference, policy, and audit share one deadline." tone="cyan" /%}
+{% metric value="5" label="Balanced replicas" detail="ceil(960 / (320 x 0.70)) supplies the planned headroom." tone="violet" /%}
+{% metric value="2.4 TB/day" label="Sampled raw frames" detail="At 30 KB compressed per frame before replication and retention policy." tone="amber" /%}
+{% /metric-strip %}
+
+### Allocate the live latency budget
+
+1. Authentication, media limits, idempotency, and request routing: **15 ms**.
+2. Decode, resize, color conversion, and normalization: **25 ms**.
+3. Dynamic batching and accelerator inference: **55 ms**.
+4. Post-processing, threshold policy, result write, and response margin: **25 ms**.
+
+These are budget targets, not promises. Measure them at peak demand with one zone unavailable and with inputs from the slowest supported camera class. Queue age and p95 are stronger admission signals than average GPU utilization.
+
+### Test a capacity and quality choice
+
+{% interactive-block id="practice/computer-vision-inference-capacity-quality-lab" /%}
+
+The lab makes the central capacity trade-off visible: a fast model can clear a deadline while missing the quality floor, and an accurate model can improve the proxy score while creating a queue. A real release uses benchmarked throughput and per-slice quality data, not the illustrative proxy alone.
+
+### Store media separately from control state
+
+- **Media objects:** immutable raw or sampled frames belong in encrypted object storage with tenant-scoped keys and a deletion workflow.
+- **Operational records:** request ID, object URI, camera ID, timestamps, status, and retry state fit in a transactional job store.
+- **Prediction evidence:** boxes, confidence, policy outcome, release manifest, and review links belong in an append-friendly prediction store.
+- **Training snapshots:** freeze source object versions, label versions, taxonomy, preprocessing code, and split assignment before training. A mutable folder named `latest` is not a dataset.
+
+{% /accordion-item %}
+
+{% accordion-item id="framing" title="3. Frame the model and define success" %}
+
+
+### Predict an observable unit
+
+For object detection, the prediction unit is a frame and a set of class-labelled bounding boxes. A label says which approved objects appear and where; it does not say whether a person is suspicious, authorized, or responsible for an event. The model objective is to improve detection quality subject to the live latency, cost, and privacy boundaries.
+
+### Establish a baseline before sophistication
+
+Start with a versioned detector that is benchmarked at the deployed resolution, a deterministic preprocessing pipeline, class-specific confidence thresholds, and a simple multi-frame event rule. A larger transformer, tracker, ensemble, or multimodal model earns its complexity only when it improves a measured critical slice without breaking the serving budget.
+
+### Make labels and splits trustworthy
+
+- Use trained annotators and documented class definitions; record labeler disagreement and ambiguous objects rather than forcing false precision.
+- Split by camera, site, and time window so near-identical frames from one video do not leak across train and test.
+- Keep a frozen holdout set plus stress sets for low light, weather, blur, occlusion, crowding, and rare classes.
+- Calibrate confidence scores on recent held-out data. A score of 0.9 should mean roughly the same event likelihood across required slices before policy uses it.
+
+{% callout variant="warn" %}
+Do not train directly on alerts that users ignored. An ignored alert can mean the detector was wrong, the policy was noisy, the operator was busy, or the camera was unavailable. Preserve the review context before turning feedback into a label.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. Design the end-to-end data, training, and serving architecture" %}
+
+
+### Keep the synchronous path short and versioned
+
+{% system-flow title="Computer vision serving and learning path" caption="The live path returns a bounded prediction. Feedback, training, and promotion are asynchronous and use immutable release artifacts." %}
+{% system-node title="Media gateway" eyebrow="Validate" icon="shield" tone="blue" %}
+Authenticate the tenant, enforce media limits, assign an idempotency key, and attach a deadline before decoding bytes.
+{% /system-node %}
+{% system-node title="Preprocess and route" eyebrow="Normalize" icon="scan-search" tone="cyan" %}
+Decode with a pinned library, apply the release transform, sample frames, and choose the live or durable batch route.
+{% /system-node %}
+{% system-node title="Inference fleet" eyebrow="Predict" icon="server" tone="violet" %}
+Batch compatible frames, run the selected model tier, and expose bounded accelerator queues and per-stage latency.
+{% /system-node %}
+{% system-node title="Policy and ledger" eyebrow="Decide" icon="shield-check" tone="amber" %}
+Apply class thresholds and multi-frame rules, write the version tuple once, and return detections or a durable job status.
+{% /system-node %}
+{% system-node title="Feedback and training" eyebrow="Learn" icon="database" tone="green" %}
+Join approved labels and reviews asynchronously, build point-in-time snapshots, evaluate candidates, then shadow and canary them.
+{% /system-node %}
+{% /system-flow %}
+
+### Give each store one responsibility
+
+- **Object storage** holds encrypted frames, crops, and dataset manifests by tenant and retention class.
+- **Job database** owns request state, leases, retries, cancellation, and idempotent stage transitions.
+- **Prediction ledger** keeps the request, input digest, boxes, thresholds, policy result, and release-manifest ID needed for audit and replay.
+- **Event stream** carries detections, review requests, device health, and model telemetry away from the response deadline.
+- **Training warehouse** materializes point-in-time feature and label snapshots; it is not queried synchronously by the detector.
+
+### Promote one immutable release manifest
+
+Bundle the training dataset version, taxonomy, preprocessing container digest, model artifact, runtime configuration, thresholds, calibration map, evaluation report, and rollback target. The serving router resolves a manifest ID, not a loose collection of mutable `latest` pointers. A request records the exact manifest it used.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep dive on preprocessing, model serving, and failure behavior" %}
+
+
+### Preprocessing is part of the model contract
+
+Resize mode, letterboxing, channel order, normalization constants, EXIF handling, frame sampling, and class mapping can change a detector's outputs as much as new weights do. Package them with the model release and include a preprocessing hash in the prediction record. Reject malformed media before reserving accelerator work.
+
+### Bound the inference contract
+
+{% code-block file="/api/content/practice/computer-vision/code/object-detection-request.json" language="json" title="Object detection request" /%}
+
+The gateway should set the request deadline and idempotency key before dispatch. The inference worker receives a bounded object reference and manifest ID, not an arbitrary client URL or a request that can outlive the caller indefinitely.
+
+{% code-block file="/api/content/practice/computer-vision/code/inference-response.json" language="json" title="Versioned inference response" /%}
+
+### Use dynamic batching without hiding overload
+
+- Batch only frames with compatible model, resolution bucket, tenant policy, and remaining deadline.
+- Cap the batching wait; a larger batch that misses the live deadline is not an optimization.
+- Warm a measured minimum replica count for the live route. Send cold or low-priority work to the durable batch path rather than forcing a live caller to wait for a model load.
+- On accelerator saturation, reduce sampling only for policies that explicitly allow it, then queue eligible work. Record the fallback reason and effective sampling rate.
+- On a preprocessing or policy failure, fail the affected request closed or return a retryable job status. Do not emit an unversioned result or reuse a prediction from another tenant.
+
+### Make video results temporal deliberately
+
+Single-frame boxes are noisy. A lightweight tracker or event rule can require persistence across a bounded number of frames before alerting, but that rule needs its own version and evaluation. It should never turn missed frames during an outage into implied negative evidence.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Build evaluation, drift, and release gates" %}
+
+
+### Evaluate the detector, alert policy, and system separately
+
+**Detector quality**
+
+- Report precision, recall, and mAP by class, object size, camera type, location, lighting, weather, motion, and crowd density.
+- Inspect false negatives for critical classes and false positives that would create harmful or expensive operator work.
+- Measure calibration so confidence thresholds have stable meaning across slices.
+
+**Policy and operational quality**
+
+- Measure event precision, review yield, alert volume, operator queue age, and time to acknowledge.
+- Replay production-shaped media through the candidate manifest to verify preprocessing parity, p95 latency, GPU memory, and fallback behavior.
+- Monitor input resolution, color-space, camera mix, score distribution, confidence, missing metadata, and label delay for drift.
+
+### Exercise a release gate
+
+{% interactive-block id="practice/computer-vision-evaluation-release-gate-lab" /%}
+
+An average mAP improvement does not authorize a release. A night-camera recall regression, calibration failure, input-distribution shift, preprocessing mismatch, or p95 violation blocks a customer-facing canary until it is understood. Use shadow traffic to compare predictions safely, then expose a stable small cohort with automatic rollback thresholds.
+
+### Require evidence before every promotion
+
+1. Validate data contracts, source lineage, class taxonomy, and point-in-time split before training.
+2. Beat the production manifest on the frozen holdout and every required slice without crossing hard floors.
+3. Replay captured traffic and verify model, preprocessing, policy, and ledger behavior under a zone-loss test.
+4. Shadow the candidate and investigate disagreement clusters with human reviewers.
+5. Canary by camera cohort, stop automatically on the defined guardrails, and keep the previous manifest warm for rollback.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate, retrain, and recover safely" %}
+
+
+### Monitor the user-visible and model-visible signals
+
+- **Serving health:** accepted frames/s, queue age, batch wait, accelerator memory, p50/p95/p99 by stage, timeout rate, and fallback activation.
+- **Data health:** decode failures, resolution and color-space mix, duplicate frames, missing camera metadata, label arrival, and object-store access failures.
+- **Quality health:** score distributions, class rates, calibration probes, slice recall from reviewed samples, model disagreement, and alert-review disagreement.
+- **Governance health:** tenant-isolation denials, retention deletion completion, manifest mismatch, access-audit coverage, and human-review backlog.
+
+### Retrain through a controlled loop
+
+{% process-flow %}
+{% process-step number="1" title="Mature and review labels" label="Evidence" %}
+Wait for the label window, deduplicate frames, retain reviewer provenance, and quarantine ambiguous or policy-sensitive examples.
+{% /process-step %}
+{% process-step number="2" title="Build a versioned snapshot" label="Data" %}
+Freeze object versions, camera and time splits, taxonomy, preprocessing code, and point-in-time metadata.
+{% /process-step %}
+{% process-step number="3" title="Challenge production" label="Evaluation" %}
+Compare slice quality, calibration, alert load, latency, memory, and fallback compatibility against the approved manifest.
+{% /process-step %}
+{% process-step number="4" title="Shadow, canary, rollback" label="Release" %}
+Observe disagreement first, expose a bounded cohort second, and route back to the warm prior manifest when a stop condition fires.
+{% /process-step %}
+{% /process-flow %}
+
+### Rehearse the degraded modes
+
+When a GPU zone fails, preserve the live deadline by using reserved capacity, lowering an explicitly approved sample rate, or moving non-live work to the durable queue. When preprocessing cannot load, stop the affected release rather than guessing at a transform. When the prediction ledger is unavailable, do not acknowledge a live result that cannot be traced; return a retryable outcome according to the product contract.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Make trade-offs and future improvements explicit" %}
+
+
+### State the trade-offs in the design review
+
+- **Accuracy versus latency:** a larger detector or denser sampling can improve difficult-scene recall, but it increases queue pressure. Put its cost behind a measured alert value or batch route.
+- **Recall versus operator load:** lowering a confidence threshold catches more candidates but creates false alerts and review backlog. Calibrate thresholds per class and policy, then watch the resulting workflow.
+- **Edge versus cloud:** edge inference reduces upload latency and may improve privacy, but complicates model rollout, monitoring, hardware diversity, and evidence collection. A hybrid design still needs one release manifest and audit story.
+- **Retention versus learning:** more media can improve debugging and training, but raises privacy, security, and deletion costs. Retain the smallest consented sample that supports the stated evaluation and investigation needs.
+- **Availability versus reproducibility:** a system may queue or return a bounded fallback during an outage; it must not return a result whose transform, threshold, or model cannot be reconstructed.
+
+### Close the interview
+
+Start with a versioned live pipeline: validate media, apply the pinned preprocessing contract, dynamically batch a balanced detector, apply a separately versioned event policy, and record one immutable manifest for every output. Size capacity from sampled frame demand with zone-loss headroom, use a durable batch route for non-live work, and promote new models only after slice-level evaluation, production replay, shadow comparison, and a guarded canary.
+
+Useful extensions are camera-specific calibration, active learning for hard-night and occlusion cases, privacy-preserving edge tiers, and tracking when multi-frame event quality justifies its added state. Each extension should prove a measurable benefit without weakening the invariant.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/computer-vision/quiz/computer-vision-design-review.json"
+   lessonSlug="practice-computer-vision"
+   title="Computer Vision Design Review" /%}

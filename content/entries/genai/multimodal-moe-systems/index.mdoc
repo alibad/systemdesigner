@@ -1,0 +1,250 @@
+---
+title: "Multimodal MoE Systems"
+section: genai
+level: advanced
+duration: 55 min
+description: "Design multimodal mixture-of-experts systems by tracing token routing, balancing expert capacity, handling overflow, and validating quality, latency, and cost by modality."
+registryId: multimodal-moe-systems
+---
+
+{% section-card tone="intro" %}
+## What is a multimodal mixture-of-experts system?
+
+A **multimodal mixture-of-experts (MoE) system** processes more than one input type, such as text and images, while activating only a small part of a much larger model for each token. A learned router scores a pool of expert networks and sends each token to one or a few experts.
+
+In plain language: text and visual tokens can share one model, but they do not all take the same compute path.
+
+The core invariant is **every admitted token must have a bounded, observable path through the sparse layer**. Sparse activation saves compute only when routing, capacity, communication, and overflow behavior remain controlled. It does not mean the inactive expert weights disappear from memory.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="N experts" label="Stored capacity" detail="All expert weights must be placed or made available to the serving system" tone="blue" /%}
+{% metric value="Top-k" label="Active path" detail="Each token activates only the selected routed experts, plus any shared expert" tone="violet" /%}
+{% metric value="C" label="Per-expert capacity" detail="A bounded number of token assignments may enter each expert for one routing group" tone="amber" /%}
+{% metric value="Slices" label="Quality evidence" detail="Grounding and task quality must be measured by modality, route, and overload state" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Trace the architecture from media to sparse compute
+
+Multimodal MoE is not one fixed blueprint. A system may use separate modality encoders before fusion, or it may place text and image tokens into one early-fusion backbone. The sparse part commonly replaces selected feed-forward sublayers inside a Transformer; attention and other layers can remain dense.
+
+{% system-flow title="One multimodal sparse layer" caption="The router acts on token representations, dispatches bounded token assignments to expert devices, then combines weighted expert outputs back into the original sequence." %}
+{% system-node title="Encode media" eyebrow="Represent" icon="layers" tone="blue" %}
+Tokenize text and convert images, regions, audio, or video into model-compatible token representations.
+{% /system-node %}
+{% system-node title="Fuse the sequence" eyebrow="Align" icon="network" tone="cyan" %}
+Place modalities in a shared representation space while preserving position, modality, and evidence boundaries.
+{% /system-node %}
+{% system-node title="Score and select" eyebrow="Route" icon="route" tone="violet" %}
+Produce expert scores per token, select top-k destinations, and apply gates or balancing bias.
+{% /system-node %}
+{% system-node title="Dispatch with limits" eyebrow="Communicate" icon="workflow" tone="amber" %}
+Group token assignments by destination, enforce expert capacity, and exchange them across expert-parallel devices.
+{% /system-node %}
+{% system-node title="Combine and continue" eyebrow="Restore order" icon="boxes" tone="green" %}
+Weight expert outputs, restore sequence order, add the residual path, and continue through later layers.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep four scopes separate
+
+- **Tokenization scope:** decides how much text, image, audio, or video evidence enters the sequence.
+- **Routing scope:** decides which expert paths process each token at a particular sparse layer.
+- **Capacity scope:** decides how many assignments each expert can accept in one routing group or batch.
+- **Serving scope:** places experts, batches requests, performs dispatch and combine communication, and enforces latency policy.
+
+A request-level model router that chooses one whole model is not the same mechanism as a token-level MoE router inside a model.
+{% /section-card %}
+
+{% section-card %}
+## Choose a routing contract, not just an expert count
+
+{% concept-grid columns="3" %}
+{% concept-card title="Top-1 routed" eyebrow="One sparse destination" icon="route" tone="blue" %}
+Each token takes one selected expert path. Active compute is predictable, but a hot expert has no second expert path unless the implementation defines one.
+{% /concept-card %}
+{% concept-card title="Top-k routed" eyebrow="Several destinations" icon="network" tone="violet" %}
+Each token activates several experts and combines their outputs. This can add representation capacity while increasing dispatches, communication, and expert work.
+{% /concept-card %}
+{% concept-card title="Shared plus routed" eyebrow="Common and specialized" icon="layers" tone="green" %}
+A shared expert processes every token while routed experts add conditional capacity. The shared path can capture common behavior, but it is real compute, not a free fallback.
+{% /concept-card %}
+{% /concept-grid %}
+
+Meta's Llama 4 model card is a current example of early-fusion multimodality with alternating dense and MoE layers. Maverick sends each token to a shared expert and one routed expert. That is one concrete architecture, not a rule that all multimodal MoEs follow.
+
+### The router needs an explicit contract
+
+- State whether selection is top-1, top-k, shared-plus-routed, expert-choice, or another measured policy.
+- Define the routing group over which expert capacity is calculated.
+- Record whether gates are renormalized after selection or fallback.
+- Preserve modality and task labels in traces without feeding private raw content into telemetry.
+- Version the router, expert set, placement plan, capacity factor, and overflow policy together.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Route modalities without hiding token competition
+
+Text and image tokens can share a router, yet their counts and representations differ. A high-resolution image may contribute far more tokens than its short question. Global balance can therefore look healthy while one modality receives poor routes, or one modality can dominate the gradients that shape the router.
+
+LIMoE demonstrated that a shared sparse expert pool can learn image-text representations and that balancing must account for multimodal training behavior. Its entropy-based regularization encourages useful expert participation without requiring experts to be manually labeled as “text” or “vision.” Use the lab to compare routing contracts; the visible expert names describe observed roles, not hard-coded guarantees.
+{% /section-card %}
+
+{% interactive-block id="genai/multimodal-moe-systems-token-routing-lab" dataFile="/api/content/genai/multimodal-moe-systems/data/token-routing-workloads.json" /%}
+
+{% section-card %}
+## Balance specialization against collapse
+
+A useful router must preserve two properties at once:
+
+- **Specialization:** similar tokens can repeatedly find experts that improve the task loss.
+- **Utilization:** the router cannot send nearly everything to a small set of experts while the rest stop learning or sit idle.
+
+Training systems often add an auxiliary load-balancing objective, a router z-loss, balancing bias, capacity controls, or a combination. The exact mechanism is model-specific. A perfectly uniform token count is not automatically ideal because modalities and token types are not interchangeable.
+
+### Inspect more than average expert load
+
+- assignment count and gate mass by expert, layer, modality, task, and sequence position;
+- entropy or concentration of expert use, including underrepresented modalities;
+- routing churn when the router or expert checkpoint changes;
+- task loss and grounding quality under counterfactual or ablated routes;
+- expert-to-device communication volume and the slowest device in each dispatch group.
+{% /section-card %}
+
+{% section-card %}
+## Calculate capacity before deciding overflow behavior
+
+For a token-choice router, a useful planning estimate is:
+
+`capacity per expert = ceil(tokens in routing group x top-k x capacity factor / routed experts)`
+
+The formula counts **assignments**, not original requests. Shared experts and implementation-specific rounding need separate accounting. A capacity factor above `1.0` provides headroom, but it can reserve more memory or compute and cannot correct a systematically bad route.
+
+{% process-flow %}
+{% process-step number="1" title="Score each token" label="Router" %}
+Compute expert logits from the token representation and apply the model's routing rule.
+{% /process-step %}
+{% process-step number="2" title="Select destinations" label="Top-k" %}
+Turn scores into bounded assignments and preserve the gate values needed to combine outputs.
+{% /process-step %}
+{% process-step number="3" title="Enforce capacity" label="Per expert" %}
+Accept assignments up to the expert limit, then classify every overflowed assignment explicitly.
+{% /process-step %}
+{% process-step number="4" title="Conserve the batch" label="Audit" %}
+Verify that direct, fallback, queued, and dropped assignments reconcile to total routed assignments.
+{% /process-step %}
+{% /process-flow %}
+
+This runnable model calculates routed load and reports the busiest expert instead of assuming that top-k creates balanced work.
+
+{% code-block file="/api/content/genai/multimodal-moe-systems/code/token-routing-model.py" language="python" title="Token routing and load report" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat token overflow as a model behavior
+
+When an expert is full or unavailable, the system still needs a defined result. “Drop” in sparse layers usually means skipping that expert transform for an assignment while the residual path continues; it is not necessarily an HTTP error and can silently change answer quality.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Skip the sparse transform" eyebrow="Drop assignment" icon="warning" tone="rose" %}
+Preserves bounded expert work and latency, but removes conditional compute from the affected token. Measure which modalities and evidence tokens are dropped.
+{% /concept-card %}
+{% concept-card title="Try another expert" eyebrow="Second choice" icon="route" tone="amber" %}
+Can preserve sparse processing when spare capacity exists, but changes expert semantics, gate normalization, communication, and load on the fallback destination.
+{% /concept-card %}
+{% concept-card title="Use a shared path" eyebrow="Fallback expert" icon="shield" tone="green" %}
+Provides a known general path when the architecture supports it. It raises active compute and may become a new shared bottleneck during broad failures.
+{% /concept-card %}
+{% /concept-grid %}
+
+Admission rejection, request queueing, and token overflow are different control points. Rejecting before inference protects a service SLO; skipping an internal expert assignment changes model execution after work has already begun.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Inject pressure before choosing a fallback
+
+The same overflow policy behaves differently during a vision-token burst, a failed expert, and a balanced batch. Change the capacity factor and recovery policy, then trace where each overflowed assignment goes. The model conserves assignments so a low cost cannot hide dropped evidence.
+{% /section-card %}
+
+{% interactive-block id="genai/multimodal-moe-systems-capacity-failure-lab" dataFile="/api/content/genai/multimodal-moe-systems/data/capacity-failure-scenarios.json" /%}
+
+{% section-card %}
+## Simulate overflow as a conservation problem
+
+The example below separates direct processing, rerouted processing, shared fallback, and dropped assignments. It also reports a weighted evidence-loss score because dropping a layout token and dropping a low-salience background patch need not have the same product impact.
+
+{% code-block file="/api/content/genai/multimodal-moe-systems/code/capacity-overflow-policy.py" language="python" title="Expert capacity and overflow policies" /%}
+{% /section-card %}
+
+{% section-card %}
+## Place experts around the communication path
+
+Expert parallelism shards experts across accelerator devices. A sparse layer therefore includes dispatch and combine communication, often an all-to-all exchange, in addition to expert computation.
+
+### Plan the physical system
+
+- Co-locate or replicate hot experts only with measured activation traces and memory constraints.
+- Batch enough assignments per destination to use efficient kernels without violating token latency.
+- Track bytes sent, per-peer skew, stragglers, and dispatch/combine time by layer.
+- Keep expert placement compatible with checkpoint loading, failover, and rollback time.
+- Separate prefill and decode traces because their token shapes and latency sensitivity differ.
+
+Fewer active parameters can reduce arithmetic work while total expert weights, routing exchanges, and device imbalance still dominate memory or tail latency. Report active FLOPs, resident bytes, network bytes, and goodput separately.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the route as part of the model
+
+{% metric-strip %}
+{% metric value="Task" label="Answer quality" detail="Compare dense and sparse baselines on the product's actual multimodal tasks" tone="blue" /%}
+{% metric value="Ground" label="Evidence use" detail="Test whether outputs follow the relevant image, region, document, or audio evidence" tone="violet" /%}
+{% metric value="Route" label="Expert health" detail="Measure concentration, modality coverage, overflow, fallback, and routing churn" tone="amber" /%}
+{% metric value="SLO" label="System result" detail="Measure goodput, tail latency, communication, memory, and cost under realistic traffic" tone="green" /%}
+{% /metric-strip %}
+
+### Build evaluation slices that can reveal routing harm
+
+- text-only, image-only, and interleaved text-image requests;
+- image count, resolution, patch count, text length, and total routed assignments;
+- OCR, document layout, spatial reasoning, fine-grained recognition, and conversational tasks;
+- expert ID, sparse layer, gate confidence, capacity state, overflow policy, and failed device;
+- safety category, language, accessibility use case, and user-impact severity.
+
+Compare normal operation with capacity pressure. A model that passes only when no expert is full has not established a production quality contract.
+{% /section-card %}
+
+{% section-card %}
+## Roll out routing changes with bounded exposure
+
+{% process-flow %}
+{% process-step number="1" title="Replay recorded token shapes" label="Offline" %}
+Use privacy-safe traces to reproduce modality mix, sequence length, expert demand, and communication skew.
+{% /process-step %}
+{% process-step number="2" title="Shadow the new route" label="No user effect" %}
+Compare assignments, gates, overflow, latency, and quality evidence without serving the candidate output.
+{% /process-step %}
+{% process-step number="3" title="Canary by route version" label="Bound exposure" %}
+Pin model, router, experts, capacity, placement, and overflow policy so rollback restores one coherent contract.
+{% /process-step %}
+{% process-step number="4" title="Promote on joint evidence" label="Quality and SLO" %}
+Require passing modality slices, capacity drills, communication targets, and cost-per-useful-answer thresholds.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% callout variant="warn" %}
+**Do not optimize the router in isolation.** A lower auxiliary routing loss does not prove better multimodal answers, and a balanced training batch does not prove balanced production traffic. Ship the router, expert checkpoint, placement, capacity, overflow policy, and evaluation evidence as one versioned system.
+{% /callout %}
+
+{% section-card %}
+## Primary sources
+
+- [Switch Transformers](https://www.jmlr.org/papers/v23/21-0998.html) defines a simple top-1 sparse Transformer, expert capacity, token dropping behavior, and load-balancing methods.
+- [V-MoE](https://arxiv.org/abs/2106.05974) applies sparse experts to vision tokens and demonstrates adaptive per-image compute.
+- [LIMoE](https://arxiv.org/abs/2206.02770) studies one sparse expert pool for language and image learning, including multimodal utilization and entropy regularization.
+- [DeepSeekMoE](https://arxiv.org/abs/2401.06066) motivates finer routed experts and shared experts as distinct capacity paths.
+- [Llama 4 Maverick model card](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E) documents a current early-fusion multimodal architecture with a shared expert and routed experts.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/multimodal-moe-systems/quiz/multimodal-moe-systems.json" lessonSlug="multimodal-moe-systems" /%}

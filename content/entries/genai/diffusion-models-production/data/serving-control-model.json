@@ -1,0 +1,160 @@
+{
+  "title": "Keep queue pressure and failure blast radius bounded",
+  "description": "Configure a modeled GPU serving path. Every choice changes the queue, memory fit, safety boundary, retry load, or rollout exposure.",
+  "notice": "Illustrative capacity model. Measure real throughput, memory, quality, and safety on the exact model bundle and hardware before setting production limits.",
+  "defaults": {
+    "workloadId": "interactive",
+    "runtimeId": "base-fp16",
+    "batchId": "compatible-microbatch",
+    "safetyId": "layered-fail-closed",
+    "retryId": "bounded-idempotent",
+    "rolloutPercent": 10
+  },
+  "fleet": {
+    "workers": 8,
+    "gpuMemoryGb": 24,
+    "observationMinutes": 5
+  },
+  "workloads": [
+    {
+      "id": "interactive",
+      "label": "Interactive editor",
+      "detail": "Small jobs with a tight feedback deadline.",
+      "arrivalPerMinute": 180,
+      "latencyBudgetMs": 5000,
+      "qualityFloor": 84,
+      "memoryMultiplier": 1
+    },
+    {
+      "id": "campaign",
+      "label": "Campaign burst",
+      "detail": "A temporary burst of compatible marketing generations.",
+      "arrivalPerMinute": 420,
+      "latencyBudgetMs": 12000,
+      "qualityFloor": 86,
+      "memoryMultiplier": 1
+    },
+    {
+      "id": "export",
+      "label": "Premium export",
+      "detail": "Low-volume, high-resolution jobs with strict publication quality.",
+      "arrivalPerMinute": 72,
+      "latencyBudgetMs": 30000,
+      "qualityFloor": 92,
+      "memoryMultiplier": 1.45
+    }
+  ],
+  "runtimes": [
+    {
+      "id": "base-fp16",
+      "label": "Base model · FP16",
+      "detail": "Measured quality baseline with moderate memory demand.",
+      "jobsPerWorkerMinute": 21,
+      "memoryPerJobGb": 6.2,
+      "qualityScore": 93,
+      "coldStartMs": 3600
+    },
+    {
+      "id": "compiled-fp16",
+      "label": "Compiled base · FP16",
+      "detail": "Higher modeled warm throughput, but a longer warm-up and shape-specific validation burden.",
+      "jobsPerWorkerMinute": 27,
+      "memoryPerJobGb": 6.8,
+      "qualityScore": 93,
+      "coldStartMs": 7800
+    },
+    {
+      "id": "distilled-low-step",
+      "label": "Distilled model · FP16",
+      "detail": "Fewer denoising evaluations; validate quality on each product slice.",
+      "jobsPerWorkerMinute": 48,
+      "memoryPerJobGb": 5.4,
+      "qualityScore": 86,
+      "coldStartMs": 3100
+    },
+    {
+      "id": "quantized-weights",
+      "label": "Quantized weights",
+      "detail": "Lower modeled memory with no assumed speedup; numerical and quality validation remain mandatory.",
+      "jobsPerWorkerMinute": 20,
+      "memoryPerJobGb": 3.8,
+      "qualityScore": 90,
+      "coldStartMs": 4200
+    }
+  ],
+  "batchPolicies": [
+    {
+      "id": "immediate",
+      "label": "Immediate dispatch",
+      "detail": "Batch size one minimizes fill wait but can underuse the accelerator.",
+      "batchSize": 1,
+      "maxWaitMs": 0,
+      "throughputMultiplier": 1
+    },
+    {
+      "id": "compatible-microbatch",
+      "label": "Compatible microbatch",
+      "detail": "Wait briefly for matching model, shape, precision, and policy contracts.",
+      "batchSize": 2,
+      "maxWaitMs": 120,
+      "throughputMultiplier": 1.55
+    },
+    {
+      "id": "throughput-batch",
+      "label": "Throughput-first batch",
+      "detail": "A larger batch raises modeled throughput, memory, and fill delay.",
+      "batchSize": 4,
+      "maxWaitMs": 650,
+      "throughputMultiplier": 2.25
+    }
+  ],
+  "safetyPolicies": [
+    {
+      "id": "layered-fail-closed",
+      "label": "Layered · fail closed",
+      "detail": "Prompt admission, output evaluation, and provenance must all complete before publication.",
+      "latencyMs": 230,
+      "coverageScore": 96,
+      "publishesWhenUnavailable": false
+    },
+    {
+      "id": "output-only",
+      "label": "Output check only",
+      "detail": "Less latency, but no independent prompt admission boundary.",
+      "latencyMs": 110,
+      "coverageScore": 72,
+      "publishesWhenUnavailable": false
+    },
+    {
+      "id": "bypass-on-timeout",
+      "label": "Bypass on timeout",
+      "detail": "Keeps availability by publishing when a mandatory safety dependency is unavailable.",
+      "latencyMs": 45,
+      "coverageScore": 38,
+      "publishesWhenUnavailable": true
+    }
+  ],
+  "retryPolicies": [
+    {
+      "id": "none",
+      "label": "No automatic retry",
+      "detail": "No amplification, but transient failures remain visible to the caller.",
+      "loadMultiplier": 1,
+      "duplicatePublishRisk": false
+    },
+    {
+      "id": "bounded-idempotent",
+      "label": "Bounded + idempotent",
+      "detail": "One reconciled retry shares the original deadline and commits one terminal result.",
+      "loadMultiplier": 1.12,
+      "duplicatePublishRisk": false
+    },
+    {
+      "id": "blind-three",
+      "label": "Blind three attempts",
+      "detail": "Retries unknown completion states without reconciling the first worker.",
+      "loadMultiplier": 1.65,
+      "duplicatePublishRisk": true
+    }
+  ]
+}

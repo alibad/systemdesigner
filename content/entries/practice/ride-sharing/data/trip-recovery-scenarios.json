@@ -1,0 +1,176 @@
+{
+  "defaults": {
+    "scenarioId": "duplicate-accept",
+    "responseId": "atomic-claim"
+  },
+  "scenarios": [
+    {
+      "id": "duplicate-accept",
+      "label": "Two accepts race",
+      "summary": "Two dispatch offers reach the same driver before either caller sees the other result.",
+      "injection": "Driver claim",
+      "recommendedResponseId": "atomic-claim",
+      "trace": [
+        "Trip A and Trip B both read the driver as available.",
+        "The driver accepts both offers from separate retries.",
+        "The trip service must choose one durable owner.",
+        "The losing command receives the committed assignment instead of creating another one."
+      ],
+      "responses": [
+        {
+          "id": "atomic-claim",
+          "label": "Atomic claim with a version check",
+          "detail": "Condition the write on driver availability and the expected version, then emit the assignment through an outbox.",
+          "tripState": "One trip assigned",
+          "invariant": "Preserved",
+          "customerImpact": "One rider gets the driver; the other request resumes candidate search.",
+          "operatorAction": "Track claim conflicts and match retries by city and cell."
+        },
+        {
+          "id": "local-mutex",
+          "label": "Process-local mutex",
+          "detail": "Serialize accepts inside one matcher process without a durable ownership check.",
+          "tripState": "Conflicting assignments possible",
+          "invariant": "Broken across processes",
+          "customerImpact": "Both riders can see the same driver until reconciliation cancels one trip.",
+          "operatorAction": "Reconcile active-trip ownership and replace local coordination with a durable conditional write."
+        },
+        {
+          "id": "last-write-wins",
+          "label": "Last write wins",
+          "detail": "Accept both commands and keep whichever assignment arrives last.",
+          "tripState": "Earlier promise overwritten",
+          "invariant": "Broken",
+          "customerImpact": "A confirmed rider can silently lose the driver.",
+          "operatorAction": "Repair rider and driver state, then audit every downstream notification."
+        }
+      ]
+    },
+    {
+      "id": "stale-location",
+      "label": "Location stream stalls",
+      "summary": "A driver remains in the geo index after the app disconnects and stops sending fresh coordinates.",
+      "injection": "Candidate lookup",
+      "recommendedResponseId": "freshness-lease",
+      "trace": [
+        "The last location update is accepted with a driver sequence number.",
+        "The app disconnects, but the geo point remains queryable.",
+        "Matching reads the candidate and checks its update age.",
+        "Expired availability is removed or ignored before an offer is sent."
+      ],
+      "responses": [
+        {
+          "id": "freshness-lease",
+          "label": "Sequence number plus freshness lease",
+          "detail": "Ignore out-of-order updates and require an unexpired availability lease before offering the trip.",
+          "tripState": "Search continues",
+          "invariant": "Preserved",
+          "customerImpact": "The rider may wait longer, but does not receive a driver known to be stale.",
+          "operatorAction": "Measure stale-candidate rejection rate and location age percentiles."
+        },
+        {
+          "id": "arrival-order",
+          "label": "Trust arrival order",
+          "detail": "Treat the last packet received by the server as the newest location and keep it indefinitely.",
+          "tripState": "Offer sent to stale driver",
+          "invariant": "Availability uncertain",
+          "customerImpact": "The rider waits for a driver who may be offline or far away.",
+          "operatorAction": "Expire the stale point and investigate sequence gaps by connection."
+        },
+        {
+          "id": "global-read",
+          "label": "Confirm through a global database",
+          "detail": "Synchronously read a global source of truth before scoring every nearby driver.",
+          "tripState": "Correct but slow search",
+          "invariant": "Preserved at high latency",
+          "customerImpact": "Matching latency grows with cross-region reads and dependency load.",
+          "operatorAction": "Move bounded freshness into the regional hot path."
+        }
+      ]
+    },
+    {
+      "id": "payment-timeout",
+      "label": "Payment capture times out",
+      "summary": "The trip completes, the payment provider times out, and the client retries without knowing whether capture succeeded.",
+      "injection": "Trip completion",
+      "recommendedResponseId": "idempotent-capture",
+      "trace": [
+        "The trip service commits completed distance, duration, and fare inputs.",
+        "A payment command is published with a stable trip-scoped key.",
+        "The provider response times out after an uncertain result.",
+        "A retry reuses the key and reconciliation records the final ledger state."
+      ],
+      "responses": [
+        {
+          "id": "idempotent-capture",
+          "label": "Stable idempotency key and reconciliation",
+          "detail": "Retry the same capture identity, persist provider references, and reconcile uncertain outcomes asynchronously.",
+          "tripState": "Completed; payment pending",
+          "invariant": "One intended charge",
+          "customerImpact": "The receipt can show payment pending without blocking trip completion.",
+          "operatorAction": "Reconcile pending captures and alert on age, not a single timeout."
+        },
+        {
+          "id": "new-charge",
+          "label": "Create a new charge on every retry",
+          "detail": "Treat each timeout as a fresh payment attempt with a new provider identity.",
+          "tripState": "Completed; duplicate charge risk",
+          "invariant": "Broken",
+          "customerImpact": "The rider can be charged more than once for one trip.",
+          "operatorAction": "Stop retries, refund duplicates, and reconcile by trip ID."
+        },
+        {
+          "id": "rollback-trip",
+          "label": "Roll back trip completion",
+          "detail": "Return the trip to in-progress until the payment provider responds.",
+          "tripState": "Lifecycle regresses",
+          "invariant": "Broken state transition",
+          "customerImpact": "Driver and rider apps disagree about whether the ride ended.",
+          "operatorAction": "Restore completed state and separate trip truth from payment settlement."
+        }
+      ]
+    },
+    {
+      "id": "safety-incident",
+      "label": "Safety report during outage",
+      "summary": "A rider sends an emergency report while ordinary notifications and payment services are degraded.",
+      "injection": "In-trip safety event",
+      "recommendedResponseId": "isolated-safety-path",
+      "trace": [
+        "The client sends the report with trip ID, actor ID, location, and timestamp.",
+        "The edge authenticates and durably acknowledges the safety event.",
+        "A dedicated workflow pages the response team and preserves an audit trail.",
+        "Ordinary trip, notification, and payment recovery continue independently."
+      ],
+      "responses": [
+        {
+          "id": "isolated-safety-path",
+          "label": "Dedicated durable safety workflow",
+          "detail": "Give safety reports separate admission control, durable storage, escalation, access policy, and operational ownership.",
+          "tripState": "Trip flagged; response active",
+          "invariant": "Safety event durably owned",
+          "customerImpact": "The report is acknowledged and routed even while noncritical services are degraded.",
+          "operatorAction": "Verify acknowledgement latency, responder pickup time, and audit-log completeness."
+        },
+        {
+          "id": "notification-queue",
+          "label": "Use the ordinary notification queue",
+          "detail": "Publish the report at the same priority and through the same capacity pool as receipts and promotions.",
+          "tripState": "Report queued behind ordinary work",
+          "invariant": "Response deadline unprotected",
+          "customerImpact": "The rider sees an acknowledgement without a bounded responder handoff.",
+          "operatorAction": "Move safety work to isolated capacity and replay the delayed event."
+        },
+        {
+          "id": "wait-for-payment",
+          "label": "Wait for payment recovery first",
+          "detail": "Block the safety workflow until payment and trip services are fully healthy.",
+          "tripState": "Safety response blocked",
+          "invariant": "Broken priority boundary",
+          "customerImpact": "A financial dependency delays urgent human response.",
+          "operatorAction": "Bypass nonessential dependencies and page the safety owner immediately."
+        }
+      ]
+    }
+  ]
+}

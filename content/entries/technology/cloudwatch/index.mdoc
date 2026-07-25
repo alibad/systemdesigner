@@ -1,0 +1,276 @@
+---
+registryId: cloudwatch
+---
+
+{% section-card tone="intro" %}
+## What is Amazon CloudWatch?
+
+Amazon CloudWatch is AWS's monitoring and observability service. It receives telemetry
+from AWS resources and applications, stores signals such as metrics and logs, helps
+teams investigate them, and can turn an alarm state change into a notification or
+supported automated action.
+
+In plain language, CloudWatch helps answer three questions: **Is the system healthy?
+What changed? What should happen next?** Collecting data alone does not answer them.
+Teams still have to choose stable metric identities, useful log fields, retention,
+alarm rules, owners, and response paths.
+
+The core invariant is: **a signal is operationally useful only when its identity,
+meaning, and response are explicit.** The
+[current CloudWatch overview](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html)
+describes the service's metrics, logs, traces, dashboards, alarms, and application
+observability capabilities.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one signal from workload to response
+
+Start with a user-visible symptom, not a dashboard widget. A checkout service might
+need a fast failure-rate metric, detailed failure logs, and a trace that shows which
+dependency consumed the request time. Those signals answer different questions.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Metric" eyebrow="Trend and threshold" icon="activity" tone="blue" %}
+A numeric time series answers how much, how often, or how long. Its bounded dimensions
+support fast aggregation and alarms.
+{% /concept-card %}
+{% concept-card title="Log" eyebrow="Event evidence" icon="code" tone="amber" %}
+A structured event records what happened with fields such as operation, status, safe
+error category, deployment version, and trace identifier.
+{% /concept-card %}
+{% concept-card title="Trace" eyebrow="Request path" icon="network" tone="violet" %}
+A trace connects work across services so an operator can locate latency, errors, and
+dependency boundaries for one request path.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="From application behavior to an operational response" caption="Each boundary needs an owner and a stable contract. A dashboard is a view of signals, not the source of truth." %}
+{% system-node title="Workload" eyebrow="Instrument" icon="code" tone="blue" %}
+AWS services publish built-in telemetry. Application code, an agent, or OpenTelemetry
+instrumentation can publish the signals the business path needs.
+{% /system-node %}
+{% system-node title="CloudWatch" eyebrow="Store and correlate" icon="database" tone="violet" %}
+Namespaces, metric dimensions, log groups, fields, trace context, and retention decide
+what can be retrieved and compared later.
+{% /system-node %}
+{% system-node title="Evaluate" eyebrow="Query and alarm" icon="activity" tone="amber" %}
+Dashboards and queries support investigation. Alarm rules turn selected evidence into
+`OK`, `ALARM`, or `INSUFFICIENT_DATA`.
+{% /system-node %}
+{% system-node title="Respond" eyebrow="Own the consequence" icon="shield" tone="green" %}
+A state transition can notify through SNS, invoke Lambda, drive supported scaling or
+EC2 actions, create operations work, or emit an EventBridge event.
+{% /system-node %}
+{% /system-flow %}
+
+Do not force every detail into every signal. Metrics stay bounded and aggregatable;
+logs and traces carry request-level evidence. The common keys between them should help
+an operator move from a symptom to the relevant detail.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design metric identity before resolution
+
+A traditional CloudWatch metric is identified by its **namespace, metric name, and
+complete dimension set**. A data point adds a timestamp, value, and optional unit.
+CloudWatch treats every unique dimension combination as a separate metric. For custom
+metrics, it does not automatically aggregate across dimension combinations that were
+never published.
+
+That makes dimension design a multiplication problem. Four services, three
+environments, and eight operations can create `4 x 3 x 8 = 96` time series for one
+metric name. Adding 100,000 request IDs can turn that bounded model into millions of
+series without improving the service-level question.
+
+{% interactive-block id="technology/cloudwatch-cost" dataFile="/api/content/technology/cloudwatch/data/metric-identity-model.json" /%}
+
+Use the lab's totals as a design model, not a price quote. CloudWatch pricing and
+quotas change; the durable lesson is that unique dimension values multiply metric
+identities, while a shorter publication interval multiplies data-point volume.
+
+The official [metrics concepts](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_concepts.html)
+reference defines metric identity, dimensions, statistics, periods, and automatic
+retention rollups. The
+[custom metrics guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/publishingMetrics.html)
+documents standard and high-resolution publication and recommends OpenTelemetry for
+new custom-metric implementations.
+
+### Choose the statistic that matches the question
+
+- Use `Sum` for counts accumulated during a period, such as failed operations.
+- Use `Average` only when averaging the samples preserves the operational meaning.
+- Use percentiles for latency when the raw samples support them and tail experience
+  matters more than the mean.
+- Keep units consistent for one metric identity. A number without a stable unit is
+  easy to graph and hard to trust.
+- Publish zero deliberately when zero and no data mean different things. Silence is a
+  separate state that alarm configuration must interpret.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Keep request detail in logs and traces
+
+Structured logs turn an event into queryable fields. Use stable names and bounded
+categories for service, environment, operation, status, and error class. Put
+high-cardinality investigation keys such as a request or trace ID in logs or traces,
+not in metric dimensions.
+
+CloudWatch Logs keeps log data indefinitely by default unless a log group has a
+retention policy. The
+[log-group guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html)
+documents the current retention behavior. Set retention from debugging, security, and
+compliance needs rather than accepting that default accidentally. Before ingestion,
+remove secrets, session tokens, credentials, raw payment data, and personal data that
+the response workflow does not require.
+
+{% metric-strip %}
+{% metric label="Retention" value="Explicit" detail="Assign an owner and lifecycle to every production log group" tone="amber" /%}
+{% metric label="Structure" value="Stable fields" detail="Keep query keys predictable across releases and services" tone="blue" /%}
+{% metric label="Correlation" value="Trace context" detail="Connect a metric symptom to safe request-level evidence" tone="violet" /%}
+{% metric label="Query scope" value="Narrow first" detail="Select the smallest time range and log groups that answer the question" tone="green" /%}
+{% /metric-strip %}
+
+The example emits one valid embedded metric format (EMF) JSON object. `Service` and
+`Environment` are bounded metric dimensions; detailed context remains in the log
+event. EMF is a supported path for extracting custom metrics from CloudWatch Logs.
+OpenTelemetry is another supported instrumentation path.
+
+{% code-block file="/api/content/technology/cloudwatch/code/emit-checkout-metrics.py" language="python" title="Emit bounded EMF metrics with structured log context" /%}
+
+The [EMF guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format.html)
+specifically warns that high-cardinality dimensions such as `requestId` create a
+custom metric for every unique combination. The
+[Logs Insights guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html)
+also notes that queries are charged by uncompressed log data scanned, so constrain the
+time range and selected log groups before broadening an investigation.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make alarms encode an operational decision
+
+A metric alarm aggregates each period into one data point, compares that point with a
+threshold, and evaluates recent periods. In an M-out-of-N alarm,
+`DatapointsToAlarm` is M and `EvaluationPeriods` is N. Requiring several breaching
+periods can reject a short spike, but a larger window can also delay a response.
+
+Missing data needs an explicit contract:
+
+- `notBreaching` treats missing periods as good. It can fit a sparse metric that emits
+  only when an error occurs.
+- `breaching` treats missing periods as bad. It can fit a continuous heartbeat where
+  silence is a failure.
+- `missing` can produce `INSUFFICIENT_DATA` when all evaluated data is absent.
+- `ignore` retains the current alarm state, which avoids a transition but can leave a
+  stale state in place.
+
+{% interactive-block id="technology/cloudwatch-cost" dataFile="/api/content/technology/cloudwatch/data/alarm-evaluation-model.json" /%}
+
+The lab isolates two decisions: how much breaching evidence is required and what total
+silence means. The real sliding-window evaluator can retrieve additional older points
+and uses configured missing values only when needed. The
+[alarm evaluation guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/alarms-and-missing-data.html)
+documents that wider evaluation range and the four missing-data policies.
+
+### Attach an owned consequence
+
+An alarm without an owner and response is only a colored state. Give each page-worthy
+alarm:
+
+- a user or business symptom it protects;
+- a threshold and M-of-N rule justified by measured behavior;
+- an explicit missing-data policy;
+- an action channel with a tested destination and least-privilege permissions;
+- links to a dashboard, query, or runbook that can confirm the cause;
+- recovery evidence, including the transition back to `OK`.
+
+This CloudFormation example alarms when a sparse `Failures` metric breaches in two of
+five one-minute periods. `notBreaching` is intentional because the example emits that
+metric only for failures. A separate heartbeat or request-count alarm should detect a
+broken telemetry path.
+
+{% code-block file="/api/content/technology/cloudwatch/code/checkout-failure-alarm.json" language="json" title="Define an M-out-of-N alarm with explicit missing-data behavior" /%}
+
+The
+[CloudFormation alarm reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-cloudwatch-alarm.html)
+defines `DatapointsToAlarm`, `EvaluationPeriods`, `TreatMissingData`, and the supported
+alarm properties used by the example.
+
+CloudWatch supports actions on state transitions, including SNS notifications, Lambda
+invocation, and service-specific actions. It also emits state-change events to
+EventBridge. Review the current
+[alarm actions](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/alarm-actions.html)
+matrix because support differs by alarm and action type.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Investigate from symptom to cause
+
+An effective dashboard begins the investigation; it does not finish it. Keep a short
+path from the alarmed symptom to the evidence needed to decide whether to mitigate,
+roll back, scale, or continue observing.
+
+{% process-flow %}
+{% process-step number="1" title="Confirm impact" label="Symptom" %}
+Check the user-visible rate, latency, or availability signal and the exact periods that
+changed the alarm state.
+{% /process-step %}
+{% process-step number="2" title="Correlate the change" label="Scope" %}
+Compare deployment version, Region, service, operation, dependency, and traffic over
+the same time range.
+{% /process-step %}
+{% process-step number="3" title="Inspect evidence" label="Cause" %}
+Query structured logs and traces with the bounded dimensions from the metric, then
+follow safe request identifiers only as far as needed.
+{% /process-step %}
+{% process-step number="4" title="Act and verify" label="Recovery" %}
+Execute the runbook, watch both the protected symptom and telemetry health, and confirm
+the alarm returns to `OK` for the expected reason.
+{% /process-step %}
+{% /process-flow %}
+
+For a global or multi-account system, decide where operators investigate and where
+alarms live. Metrics are regional, and cross-account or cross-Region capabilities have
+different support boundaries. Do not assume that one dashboard automatically gives
+every alarm the same scope.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Review the production monitoring contract
+
+### Instrumentation
+
+- Start with user-facing service indicators, then add resource metrics that explain
+  pressure and saturation.
+- Keep metric dimensions bounded. Store request, customer, and raw error identity in
+  protected logs or traces.
+- Monitor the telemetry path itself: failed EMF extraction, agent health, missing
+  heartbeats, and rejected or throttled publication.
+- Version field names and dashboards with application changes.
+
+### Logs and access
+
+- Set retention explicitly for every production log group and test deletion,
+  archival, and legal requirements.
+- Encrypt and restrict telemetry access by account, workload, and operator role.
+- Redact before ingestion. Query permissions do not undo sensitive data already
+  written to a log.
+- Keep Logs Insights queries narrow, saved, and linked from the relevant alarm or
+  runbook.
+
+### Alarms and operations
+
+- Alarm on conditions that require an action now; use dashboards and reports for
+  conditions that only need observation.
+- Test `OK`, `ALARM`, `INSUFFICIENT_DATA`, action delivery, suppression, and recovery
+  during a controlled exercise.
+- Use composite alarms when a higher-level service condition or suppression rule
+  reduces duplicate notifications without hiding the underlying metric alarms.
+- Review thresholds after traffic, architecture, ownership, or response-time changes.
+- Track notification delivery and action failures separately from the alarm state.
+
+The design is ready when an on-call engineer can name the protected symptom, metric
+identity, alarm evidence, missing-data meaning, investigation path, action owner, and
+proof of recovery.
+{% /section-card %}
+
+{% quiz quizId="cloudwatch" lessonSlug="cloudwatch" title="Amazon CloudWatch Production Design Review" questionsFile="/api/content/technology/cloudwatch/quiz/cloudwatch-production-design.json" /%}

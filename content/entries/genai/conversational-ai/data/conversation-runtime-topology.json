@@ -1,0 +1,135 @@
+{
+  "title": "Follow one conversational turn",
+  "description": "Compare the normal response path with missing memory, a slow tool, and a safety block. Select a component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Conversation client",
+      "eyebrow": "Turn input",
+      "detail": "Sends the current message with a session identity, renders streamed tokens, and preserves cancellation state.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 9,
+      "y": 22
+    },
+    {
+      "id": "gateway",
+      "label": "Conversation gateway",
+      "eyebrow": "Authenticate",
+      "detail": "Applies identity, tenant, quotas, input policy, tracing, and request-level time and cost budgets.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 29,
+      "y": 22
+    },
+    {
+      "id": "orchestrator",
+      "label": "Turn orchestrator",
+      "eyebrow": "Build context",
+      "detail": "Loads bounded history, selects retrieval and tools, assembles the prompt, and owns fallback behavior.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 50,
+      "y": 22
+    },
+    {
+      "id": "model",
+      "label": "Language model",
+      "eyebrow": "Generate",
+      "detail": "Produces text or a structured tool proposal within the remaining request budget.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 72,
+      "y": 22
+    },
+    {
+      "id": "safety",
+      "label": "Output policy",
+      "eyebrow": "Validate",
+      "detail": "Checks policy, privacy, grounding, and tool results before tokens or side effects reach the user.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 91,
+      "y": 22
+    },
+    {
+      "id": "memory",
+      "label": "Session memory",
+      "eyebrow": "Bounded context",
+      "detail": "Stores recent turns or approved summaries under tenant isolation, retention, and provenance rules.",
+      "kind": "database",
+      "tone": "green",
+      "x": 27,
+      "y": 68
+    },
+    {
+      "id": "retrieval",
+      "label": "Retrieval service",
+      "eyebrow": "Evidence",
+      "detail": "Returns permission-filtered evidence with citations and scores; absence of evidence must remain visible.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 51,
+      "y": 68
+    },
+    {
+      "id": "tools",
+      "label": "Tool executor",
+      "eyebrow": "External action",
+      "detail": "Validates and executes approved calls with scoped identity, idempotency, timeouts, and audit events.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 75,
+      "y": 68
+    }
+  ],
+  "edges": [
+    { "id": "client-gateway", "from": "client", "to": "gateway", "label": "message" },
+    { "id": "gateway-orchestrator", "from": "gateway", "to": "orchestrator", "label": "authorized turn" },
+    { "id": "orchestrator-model", "from": "orchestrator", "to": "model", "label": "prompt" },
+    { "id": "model-safety", "from": "model", "to": "safety", "label": "candidate" },
+    { "id": "safety-client", "from": "safety", "to": "client", "label": "stream", "via": { "x": 50, "y": 7 } },
+    { "id": "orchestrator-memory", "from": "orchestrator", "to": "memory", "label": "history" },
+    { "id": "orchestrator-retrieval", "from": "orchestrator", "to": "retrieval", "label": "retrieve" },
+    { "id": "model-tools", "from": "model", "to": "tools", "label": "tool proposal" },
+    { "id": "tools-model", "from": "tools", "to": "model", "label": "result", "via": { "x": 88, "y": 48 } }
+  ],
+  "scenarios": [
+    {
+      "id": "grounded-answer",
+      "label": "Grounded answer",
+      "summary": "The orchestrator combines bounded history with retrieved evidence, then the model generates a policy-checked response.",
+      "activeEdges": ["client-gateway", "gateway-orchestrator", "orchestrator-memory", "orchestrator-retrieval", "orchestrator-model", "model-safety", "safety-client"],
+      "focusNode": "retrieval",
+      "result": "The user receives a streamed answer with evidence; memory and retrieval remain permission-scoped."
+    },
+    {
+      "id": "memory-unavailable",
+      "label": "Memory unavailable",
+      "summary": "Session history cannot be loaded, so the orchestrator uses only the current turn and makes the loss of context explicit.",
+      "activeEdges": ["client-gateway", "gateway-orchestrator", "orchestrator-retrieval", "orchestrator-model", "model-safety", "safety-client"],
+      "failedNodes": ["memory"],
+      "degradedNodes": ["orchestrator"],
+      "focusNode": "memory",
+      "result": "The assistant remains available but does not invent remembered preferences or silently mix another session's state."
+    },
+    {
+      "id": "tool-timeout",
+      "label": "Tool timeout",
+      "summary": "The model proposes a tool call, but the executor reaches its deadline and returns a typed failure instead of an ambiguous partial result.",
+      "activeEdges": ["client-gateway", "gateway-orchestrator", "orchestrator-memory", "orchestrator-model", "model-tools", "tools-model", "model-safety", "safety-client"],
+      "degradedNodes": ["tools", "model"],
+      "focusNode": "tools",
+      "result": "The user gets a bounded explanation or retry choice; the model cannot claim the external action succeeded."
+    },
+    {
+      "id": "safety-block",
+      "label": "Safety block",
+      "summary": "The candidate response violates output policy, so the validator replaces it with a safe refusal and records the reason.",
+      "activeEdges": ["client-gateway", "gateway-orchestrator", "orchestrator-model", "model-safety", "safety-client"],
+      "degradedNodes": ["model"],
+      "focusNode": "safety",
+      "result": "No unsafe content or side effect is delivered; the trace remains available for review and regression testing."
+    }
+  ]
+}

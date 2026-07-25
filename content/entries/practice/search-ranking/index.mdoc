@@ -1,0 +1,237 @@
+---
+registryId: practice-search-ranking
+---
+
+{% section-card tone="intro" %}
+## What is a search ranking system?
+
+A search ranking system chooses the most useful ordered results from a very large set of documents. Retrieval finds a broad set of plausible matches quickly; ranking then spends more compute deciding which few deserve to appear first.
+
+This practice problem designs the **online ranking path**, the feedback loop that improves it, and the guardrails that must still hold when a feature service, cache, or model is unhealthy. The central invariant is simple: **never rank or show a document that the requester is not allowed to see.**
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Recall before precision" eyebrow="Candidate generation" icon="search" tone="blue" %}
+Find hundreds or thousands of eligible candidates cheaply before using an expensive model on a smaller set.
+{% /concept-card %}
+{% concept-card title="One feature meaning" eyebrow="Training-serving parity" icon="database" tone="violet" %}
+The online feature value must mean the same thing, use the same cutoff time, and carry the same version as its training counterpart.
+{% /concept-card %}
+{% concept-card title="Correctness beats a score" eyebrow="Hard constraints" icon="shield" tone="rose" %}
+Access, legal, moderation, inventory, and deduplication checks are eligibility rules, not optional model features.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Business Context" %}
+
+### Define the outcome before choosing a model
+
+For this interview scenario, design web and product search for **200,000 peak queries per second**, a corpus of **10 billion documents**, and a 150 ms p95 result deadline. A result page returns ten items, but the system may inspect many more while deciding their order.
+
+The user-visible outcome is useful, trustworthy results. A practical prediction target is the probability that an eligible query-document pair produces a **satisfied interaction**, such as a long dwell time, successful task completion, or purchase. A click alone is not enough: position, snippet wording, and novelty all influence clicks.
+
+### Ask questions that change the design
+
+1. **Which search surfaces are in scope?** Web, product, local, and enterprise search use different eligibility rules and satisfaction signals.
+2. **How fresh must a result be?** Breaking-news documents may need to appear within 30 seconds; a catalog price or availability change may require an authoritative lookup before display.
+3. **What does personalization mean?** Use a user-controlled cohort or short-lived session context when possible. Do not require an identity profile merely to return useful results.
+4. **Which errors are unacceptable?** A private document leak, blocked item, or unsafe result is worse than a lower relevance score and must be prevented before final release.
+5. **What is the evaluation unit?** Log the query, candidates shown, positions, model and policy versions, outcomes, and timestamps so that offline data can correct for exposure bias.
+
+{% callout variant="warn" %}
+**Do not train on clicks as if they were labels.** A document at position one is seen more often than the same document at position ten. Preserve impressions and positions, then use randomized buckets, propensity weighting, and human judgments to reduce this bias.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Back-of-the-Envelope Data and Compute Estimates" %}
+
+### Convert product scale into work per second
+
+Use replaceable assumptions and show the arithmetic. At 10 billion queries per day, the average is about **116,000 QPS**; design for the explicit 200,000 QPS peak rather than the average. If retrieval returns 1,000 candidates and a first-stage ranker scores all of them, that is **200 million lightweight scores per second**. A richer reranker applied to the best 100 candidates adds **20 million pair scores per second**.
+
+{% metric-strip %}
+{% metric value="200K QPS" label="Peak query load" detail="The capacity target for the online path." tone="blue" /%}
+{% metric value="1,000" label="Retrieved candidates" detail="Broad enough for recall; too many for an expensive cross-encoder." tone="cyan" /%}
+{% metric value="100" label="Reranked candidates" detail="A bounded expensive stage before forming the result page." tone="violet" /%}
+{% metric value="150 ms" label="p95 deadline" detail="Every synchronous stage shares this user-visible budget." tone="amber" /%}
+{% /metric-strip %}
+
+### Allocate a latency budget, not an average
+
+A defensible starting p95 budget is 15 ms for edge routing and authentication, 35 ms for query understanding plus candidate retrieval, 25 ms for lightweight scoring, 40 ms for feature joins plus reranking, 10 ms for policy and diversity, and 25 ms for network and queue headroom. Cancellation matters: do not start a rerank that cannot finish before the remaining deadline.
+
+### Explore what cache health does to the ranking fleet
+
+{% traffic-split dataFile="/api/content/practice/search-ranking/data/query-cache-traffic-split.json" /%}
+
+The cache is only a performance shortcut. A cached result must be keyed by normalized query, locale, safe personalization cohort, policy version, and index generation. Recheck time-sensitive eligibility before display; never let cache availability weaken access or moderation rules.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Formal ML Framing and High-Level Architecture" %}
+
+### State the ranking task precisely
+
+For each query `q`, user context `u`, and eligible document `d`, produce a score that orders documents by expected satisfaction within a page. Train a pairwise or listwise learning-to-rank objective on query impression groups, with debiased behavioral labels and judged relevance data. The baseline is a lexical ranker such as BM25 plus static authority; the learned model must beat it on representative slices without violating latency or safety guards.
+
+Feature snapshots have an **as-of timestamp**. A training row for a search on Tuesday can use only information available before that Tuesday search. Using future clicks, future availability, or a later document quality score creates label leakage and makes offline results look better than production.
+
+{% system-flow title="Multi-stage query path" caption="Cheap stages protect recall and latency. Rich stages improve order only after eligibility filtering has reduced the work." %}
+{% system-node title="Query planner" eyebrow="Understand" icon="braces" tone="blue" %}
+Normalize language, spellings, intent, filters, requester policy, deadline, and experiment assignment.
+{% /system-node %}
+{% system-node title="Hybrid retrieval" eyebrow="Recall" icon="search" tone="cyan" %}
+Search lexical and vector indexes in parallel, union candidates, then remove inaccessible or duplicate documents.
+{% /system-node %}
+{% system-node title="First-stage ranker" eyebrow="Score 1,000" icon="activity" tone="violet" %}
+Use inexpensive precomputed and query-time features to preserve promising candidates under a bounded budget.
+{% /system-node %}
+{% system-node title="Rerank and policy" eyebrow="Choose 100" icon="scale" tone="amber" %}
+Join richer features, rerank a small set, apply freshness, diversity, and final eligibility checks.
+{% /system-node %}
+{% system-node title="Result slate" eyebrow="Release" icon="shield" tone="green" %}
+Return ten explainable, eligible results with trace IDs and model, index, and policy versions.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the asynchronous loop separate
+
+- **Ingestion path:** crawl or receive content, extract fields, run safety and quality checks, build lexical and vector indexes, then publish an immutable index generation.
+- **Interaction path:** emit impressions, clicks, skips, dwell, and task outcomes asynchronously. It must never hold up the result page.
+- **Training path:** join behavior with point-in-time features, correct exposure bias, train and evaluate a candidate, then register an immutable model artifact.
+- **Deployment path:** shadow the model, canary by query slice, and keep a fast rollback to the last known-good model and index generation.
+
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="4. End-to-End Data, Training, and Serving Architecture" %}
+
+### Separate source truth from derived search state
+
+The source document store owns document content, visibility, deletions, and authoritative product state. Search indexes, embeddings, caches, and features are derived copies. Every derived record carries a document version and expiry so a deletion or access revocation can invalidate it quickly.
+
+**Document and feature lifecycle**
+
+1. Validate and normalize a new or changed document, then write an immutable source version.
+2. Extract text, metadata, language, quality signals, and document embeddings.
+3. Publish lexical postings and vector entries together as a versioned index generation.
+4. Materialize slow features such as authority and long-window aggregates offline; compute short-lived query and session features online.
+5. Log only permitted, privacy-reviewed interaction events and build point-in-time training examples.
+6. Train, slice-evaluate, register, shadow, canary, and either promote or roll back the model.
+
+### Design the feature contract
+
+Offline and online code should share feature definitions where possible. When a feature cannot be computed online, use the latest allowed value, record its age, and decide explicitly whether staleness is acceptable. Feature freshness is a model input and an operational metric, not a hidden implementation detail.
+
+{% code-block file="/api/content/practice/search-ranking/code/ranking-feature-contract.json" language="json" title="Versioned ranking feature contract" /%}
+
+{% callout variant="info" %}
+**A feature store is not automatically a source of truth.** It serves a governed feature view. Access, availability, price, and legal policy should still come from the authoritative system at the point where the product requires it.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="model-serving" title="5. Model, Feature, and Ranking-Serving Deep Dive" %}
+
+### Give every stage one job
+
+- **Candidate generation:** combine lexical retrieval for exact terms with vector retrieval for paraphrases. Its target is high recall, not the final order.
+- **First-stage ranker:** use a compact model such as boosted trees or a small neural model with cheap query, document, and interaction features.
+- **Reranker:** compare query-document pairs with richer semantic features for a bounded top set. It is where more accurate models earn their cost.
+- **Post-rank policy:** enforce final eligibility, deduplicate near-identical results, cap repeated domains, and inject controlled diversity. It cannot be folded into a learned score alone.
+
+### Trace failures before they become incidents
+
+{% topology-lab dataFile="/api/content/practice/search-ranking/data/ranking-serving-topology.json" /%}
+
+When personalization is unavailable, fall back to non-personalized relevance while preserving access and policy checks. When reranking is saturated, return first-stage results that passed the same hard filters. When eligibility data is unavailable for a surface that requires it, fail closed or omit affected documents rather than guessing.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Evaluation, QA, and Data Integrity" %}
+
+### Evaluate the system in layers
+
+An end-to-end click metric cannot identify whether retrieval missed a document, a feature was stale, or the reranker ordered it badly. Keep a versioned evaluation set of queries, documents, eligibility decisions, relevance judgments, and expected behavior for zero-result and policy-sensitive queries.
+
+**Offline quality checks**
+
+- **Recall@1,000:** did retrieval include the judged useful document?
+- **NDCG@10 and MRR:** did the ranker put useful documents near the top?
+- **Calibration:** do predicted probabilities match observed outcomes after debiasing?
+- **Freshness and policy precision:** are newly changed, revoked, or region-limited documents handled correctly?
+- **Slice metrics:** inspect language, query intent, new users, tail queries, document type, region, and policy class separately.
+
+**Online release guards**
+
+- Measure satisfied-search rate, reformulation rate, abandonment, long-click rate, and task completion alongside click-through rate.
+- Require p95 and p99 latency, error rate, cache behavior, feature age, and serving cost to remain within thresholds.
+- Hold back enough traffic to distinguish novelty effects from a sustained improvement.
+- Stop a canary on access, moderation, availability, or material fairness regressions even when aggregate NDCG improves.
+
+### Test data integrity explicitly
+
+Run contract tests for feature schema and defaults, replay captured requests against a candidate model, and compare online feature values with the training view. Audit missing-value rate, distribution drift, duplicate events, late events, and exposure logging before trusting a training run.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operations and Retraining Plan" %}
+
+### Operate with a traceable version tuple
+
+Attach the query ID, candidate source, index generation, feature schema version, model version, policy version, experiment bucket, and fallback reason to every response. This makes a bad result diagnosable without storing unrestricted raw user data.
+
+### Monitor the leading indicators
+
+- **Serving health:** stage p95 and p99 latency, timeout rate, queue age, cache hit rate, candidate count, reranker saturation, and fallback rate.
+- **Data health:** index publication lag, document deletion lag, feature age, missingness, distribution drift, and event delivery completeness.
+- **Quality health:** slice-level NDCG probes, satisfaction and abandonment trends, zero-result rate, result diversity, and human-judgment disagreement.
+- **Safety health:** blocked-result attempts, eligibility-check failures, policy-version mismatches, access denials, and stale cache invalidations.
+
+### Retrain and roll back deliberately
+
+Retraining is triggered by a validated data window, meaningful drift, a new product objective, or an index/feature change, not merely by a calendar job. Keep the previous model artifact, feature contract, and evaluation report available for rollback. A deployment is complete only after shadow comparison, a small canary, automated guards, and a named on-call owner.
+
+{% process-flow %}
+{% process-step number="1" title="Protect the deadline" label="Tail latency" %}
+Cancel optional enrichment and bound retries when remaining time cannot produce a valid result.
+{% /process-step %}
+{% process-step number="2" title="Use a cheaper ranker" label="Reranker pressure" %}
+Serve first-stage ordering after the same final policy and deduplication checks.
+{% /process-step %}
+{% process-step number="3" title="Remove unsafe dependencies" label="Feature outage" %}
+Drop personalization or stale soft features; do not bypass authoritative eligibility.
+{% /process-step %}
+{% process-step number="4" title="Roll back known-bad state" label="Bad release" %}
+Pin traffic to the previous model and index generation while preserving evidence for diagnosis.
+{% /process-step %}
+{% /process-flow %}
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Trade-offs and Future Improvements" %}
+
+### Make the trade-offs explicit
+
+- **Recall versus latency:** retrieve broadly enough to contain useful documents, then keep expensive pairwise scoring bounded. A reranker cannot rescue a document retrieval never returned.
+- **Personalization versus privacy:** use consented, minimized, short-lived or cohort signals where possible; provide a useful non-personalized baseline and diversity controls.
+- **Freshness versus stability:** fast incremental index publication reduces staleness but needs versioned rollback and strict invalidation for revocations.
+- **Model quality versus cost:** larger models may improve difficult semantic comparisons, but they consume more capacity and create a larger deadline risk.
+- **Availability versus correctness:** a degraded result page may omit personalization or use a simpler ranker; it must not expose unauthorized or unavailable items.
+
+### Close the interview with the design decision
+
+Start with a hybrid, multi-stage pipeline: retrieve eligible lexical and vector candidates, rank cheaply, rerank a bounded set, and apply final policy plus diversity before returning results. Train from debiased, versioned impressions; evaluate retrieval, ranking, policy, and latency by slice; and make every fallback preserve the eligibility invariant.
+
+Useful extensions are multilingual retrieval and judgment sets, better long-tail query understanding, causal evaluation for ranking policies, and active learning that sends ambiguous query-document pairs to human assessors. Each extension should earn its additional cost with a measurable quality improvement.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/search-ranking/quiz/search-ranking-design-review.json"
+   lessonSlug="practice-search-ranking"
+   title="Search Ranking Design Review" /%}

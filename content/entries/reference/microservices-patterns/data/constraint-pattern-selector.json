@@ -1,0 +1,108 @@
+{
+  "title": "Choose the pattern from the constraint",
+  "description": "Select the requirement that cannot be relaxed. The active route shows the smallest coordination pattern that fits it; select a component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "product-request",
+      "label": "Product request",
+      "eyebrow": "Constraint source",
+      "detail": "A user action or business change supplies the real constraint. Start here instead of deciding that every domain noun needs its own deployable service.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "order-boundary",
+      "label": "Order boundary",
+      "eyebrow": "Business owner",
+      "detail": "Owns order state, the order API, and its private persistence. A boundary becomes a service only when autonomy is worth the added coordination cost.",
+      "kind": "service",
+      "tone": "green",
+      "x": 28,
+      "y": 50
+    },
+    {
+      "id": "sync-contract",
+      "label": "Synchronous contract",
+      "eyebrow": "Immediate answer",
+      "detail": "Carries a bounded request when the caller must know the result before it can complete its own business decision. It needs a deadline and an honest failure response.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 50,
+      "y": 26
+    },
+    {
+      "id": "outbox",
+      "label": "Transactional outbox",
+      "eyebrow": "Durable handoff",
+      "detail": "Stores an event record in the same local transaction as the owning service state, so a later publisher can reliably communicate the committed fact.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 50,
+      "y": 76
+    },
+    {
+      "id": "payment-service",
+      "label": "Payment service",
+      "eyebrow": "Independent owner",
+      "detail": "Owns payment authorization and its records. It exposes a versioned API; no other service writes its tables or treats a timeout as approval.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 77,
+      "y": 26
+    },
+    {
+      "id": "inventory-service",
+      "label": "Inventory service",
+      "eyebrow": "Event consumer",
+      "detail": "Owns stock reservation. It can process a durable order event later, deduplicate delivery, and report a pending or rejected reservation to the workflow owner.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 77,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "request-order", "from": "product-request", "to": "order-boundary", "label": "command" },
+    { "id": "order-sync", "from": "order-boundary", "to": "sync-contract", "label": "needs answer" },
+    { "id": "sync-payment", "from": "sync-contract", "to": "payment-service", "label": "authorize" },
+    { "id": "order-outbox", "from": "order-boundary", "to": "outbox", "label": "commit fact", "mode": "async" },
+    { "id": "outbox-inventory", "from": "outbox", "to": "inventory-service", "label": "order event", "mode": "async" },
+    { "id": "outbox-payment", "from": "outbox", "to": "payment-service", "label": "notify", "mode": "async", "via": { "x": 63, "y": 56 } }
+  ],
+  "scenarios": [
+    {
+      "id": "one-team-one-release",
+      "label": "One team, one release",
+      "summary": "The same team changes orders, payments, and inventory together, and one database transaction is required for the current product. There is no independent scaling or availability need.",
+      "activeEdges": ["request-order"],
+      "focusNode": "order-boundary",
+      "result": "Keep a modular monolith with internal module boundaries. Document ownership now, but do not pay for network calls, duplicated operations, and distributed recovery before a real autonomy constraint exists."
+    },
+    {
+      "id": "immediate-authorization",
+      "label": "Immediate approval",
+      "summary": "Checkout cannot claim success until a payment provider returns an authorization decision. The customer needs a bounded, truthful answer in the request path.",
+      "activeEdges": ["request-order", "order-sync", "sync-payment"],
+      "focusNode": "sync-contract",
+      "result": "Use a synchronous payment API with a deadline, idempotency key, and explicit timeout outcome. Keep payment data private to its owner; a direct database read would hide the contract and couple releases."
+    },
+    {
+      "id": "independent-stock-work",
+      "label": "Independent stock work",
+      "summary": "Inventory has its own scaling and release cadence, and a reservation may be pending after the order is accepted. The product can communicate that pending state honestly.",
+      "activeEdges": ["request-order", "order-outbox", "outbox-inventory"],
+      "focusNode": "outbox",
+      "result": "Commit the order and its outbox event locally, then let inventory reserve stock asynchronously. Use idempotent consumption and a workflow state such as reservation pending instead of a synchronous chain that makes checkout depend on inventory availability."
+    },
+    {
+      "id": "multi-step-business-workflow",
+      "label": "Multi-step workflow",
+      "summary": "Payment, inventory, and fulfillment are independent owners. A later rejection must lead to a defined business action such as cancellation, release, refund, or manual review.",
+      "activeEdges": ["request-order", "order-sync", "sync-payment", "order-outbox", "outbox-inventory", "outbox-payment"],
+      "focusNode": "order-boundary",
+      "result": "Use a saga with a named workflow owner. Orchestration is usually clearer when timeouts and compensations matter; choreography can fit simple reactions. Neither option replaces local ownership, durable events, or idempotent handlers."
+    }
+  ]
+}

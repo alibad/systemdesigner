@@ -1,0 +1,232 @@
+---
+registryId: data-quality-filtering
+---
+
+{% section-card tone="intro" %}
+## What is Data Quality Filtering?
+
+Data quality filtering is a **versioned decision process** that separates records eligible for an ML dataset from records that must be quarantined or excluded. A filter can validate structure and provenance, detect duplicates, apply learned quality or safety models, and route uncertain cases to human review.
+
+It matters because training consumes the distribution the pipeline publishes. A filter can reduce malformed, duplicated, unsafe, or irrelevant content, but an aggressive policy can also erase useful language, source, cultural, or domain coverage.
+
+The core invariant is: **every published or quarantined record must be explainable by the source snapshot, policy version, gate versions, and reason codes that produced the decision**. A single “quality score” is not enough.
+
+This lesson assumes the collection and snapshot concepts from [Web-Scale Data Sources](/ml-systems/pretraining-data-sources).
+{% /section-card %}
+
+{% callout variant="warn" %}
+An automated score is evidence about a policy decision, not a measurement of truth, human worth, or universal quality. Calibrate it against reviewed examples from the intended data population, and preserve an uncertainty path instead of forcing every record into keep or delete.
+{% /callout %}
+
+{% system-flow title="Turn a source snapshot into a reviewable dataset release" caption="Raw inputs stay immutable. Each stage emits a disposition, reason code, component version, and enough lineage to replay the decision." %}
+{% system-node title="Freeze the source snapshot" eyebrow="Identity" icon="database" tone="blue" %}
+Record source URI, retrieval time, license or usage basis, content hash, parser version, and access restrictions.
+{% /system-node %}
+{% system-node title="Apply deterministic gates" eyebrow="Contracts" icon="braces" tone="cyan" %}
+Reject unreadable encodings, invalid schemas, missing required metadata, and exact duplicates with testable rules.
+{% /system-node %}
+{% system-node title="Apply model-backed gates" eyebrow="Evidence" icon="gauge" tone="violet" %}
+Score language, relevance, quality, safety, privacy, or policy signals using versioned models and calibrated thresholds.
+{% /system-node %}
+{% system-node title="Audit slices and uncertainty" eyebrow="Review" icon="shield" tone="amber" %}
+Sample accepted and rejected records, measure both error directions, and send ambiguous or high-impact cases to reviewers.
+{% /system-node %}
+{% system-node title="Publish an immutable release" eyebrow="Lineage" icon="layers" tone="green" %}
+Bind retained shards to the exact policy, code, models, reason counts, slice evidence, known limits, and owners.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Define the release contract before choosing filters
+
+A release contract states what the dataset is for and what “eligible” means in that context. It should name:
+
+- Intended training and evaluation uses, prohibited uses, and downstream owners
+- Allowed sources, licenses or usage bases, privacy rules, deletion obligations, and retention limits
+- Required languages, domains, formats, time ranges, and minimum coverage by important slice
+- Hard exclusions that block release and soft signals that require calibration or review
+- Error budgets for false rejection and policy leakage, including who accepts each risk
+- Minimum audit sample sizes, reviewer guidance, disagreement handling, and escalation paths
+
+{% concept-grid columns="4" %}
+{% concept-card title="Contract gates" eyebrow="Deterministic" icon="braces" tone="cyan" %}
+Check decoding, schema, length bounds, required metadata, source eligibility, and parser success. Failures should be reproducible from the same bytes and policy.
+{% /concept-card %}
+{% concept-card title="Redundancy gates" eyebrow="Similarity" icon="repeat" tone="blue" %}
+Remove exact or near duplicates with a declared unit, normalization, similarity method, cluster policy, and protected exceptions.
+{% /concept-card %}
+{% concept-card title="Learned gates" eyebrow="Calibrated" icon="gauge" tone="violet" %}
+Use model scores for bounded decisions such as relevance, content quality, or safety. Treat thresholds and model versions as release inputs.
+{% /concept-card %}
+{% concept-card title="Human review" eyebrow="Uncertainty" icon="shield" tone="amber" %}
+Review samples and ambiguous cases under written guidance. Track disagreement and adjudication rather than treating one label as ground truth.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="info" %}
+Do not collapse independent requirements into one weighted average. A record with a high language-quality score can still fail license, privacy, or safety policy, and one strong dimension must not cancel a hard exclusion.
+{% /callout %}
+{% /section-card %}
+
+{% interactive-block id="ml-systems/data-quality-filtering-calculator" dataFile="/api/content/ml-systems/data-quality-filtering/data/filter-cascade-fixture.json" /%}
+
+{% section-card %}
+## Order a cascade with measurements
+
+An early-exit cascade avoids expensive work after a record has already failed. For a fixed deterministic policy:
+
+1. Each record enters the first gate.
+2. A failed record is quarantined with the first-failure reason and skips later gates.
+3. A passing record moves to the next gate.
+4. Only records that pass every gate enter the candidate release.
+
+The lab computes two quantities directly:
+
+- Stage CPU = records evaluated at that stage × measured milliseconds per record
+- Total fixture CPU = sum of stage CPU across the cascade
+
+Gate order can change compute and first-failure reason counts when records fail more than one gate. It must not change eligibility if every gate is deterministic, uses the same inputs, and “reject if any gate fails” remains the policy. Stateful models, shared rate limits, or gates that mutate content break that assumption and require a different experiment.
+
+{% code-block file="/api/content/ml-systems/data-quality-filtering/code/run-filter-cascade.py" language="python" title="Emit a versioned disposition and evaluation trace" /%}
+{% /section-card %}
+
+{% section-card %}
+## Calibrate thresholds against both error directions
+
+A model-backed gate needs reviewed examples from the intended population. For a quality threshold that accepts records at or above a score:
+
+- **False rejection** means a human-eligible record was rejected. It measures useful coverage lost.
+- **Policy leakage** means a human-ineligible record was accepted. It measures failures inside the published set.
+- **Uncertain** means the available evidence is insufficient for automatic disposition. It should be routed, not hidden.
+
+Evaluate rates by important slice as well as overall. Language, source type, domain, time period, content length, and demographic context can change score distributions and error costs. A threshold that clears a global average can still fail a smaller slice badly.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/data-quality-filtering-threshold-lab" dataFile="/api/content/ml-systems/data-quality-filtering/data/threshold-audit-slices.json" /%}
+
+{% section-card %}
+## Treat reviewed slices as release evidence
+
+The threshold lab uses a fixed synthetic audit fixture. For each selected slice:
+
+1. Records with scores at or above the threshold are predicted eligible.
+2. Automated decisions are compared with the fixture's human-reviewed eligibility label.
+3. False-rejection rate divides rejected eligible records by all eligible records.
+4. Leakage rate divides accepted ineligible records by all accepted records.
+5. The example release passes only when both declared guardrails hold.
+
+These rates answer different questions and use different denominators. Report the counts with the rates so reviewers can see when a small sample makes a percentage unstable. Production evidence also needs sampling design, reviewer agreement, uncertainty estimates, and documented adjudication.
+
+{% code-block file="/api/content/ml-systems/data-quality-filtering/code/audit-threshold-policy.py" language="python" title="Gate a threshold independently for each reviewed slice" /%}
+{% /section-card %}
+
+{% section-card %}
+## Use toxicity, privacy, and bias signals carefully
+
+Safety and responsibility are policy domains, not interchangeable classifier labels.
+
+### Toxicity and harmful content
+
+- Define the prohibited behavior and intended use before selecting a model or threshold.
+- Measure false positives and false negatives by relevant language and context.
+- Distinguish quoted, counterspeech, educational, clinical, and targeted-abuse contexts where policy requires it.
+- Preserve reviewer escalation for high-impact or ambiguous cases.
+
+### Privacy and sensitive data
+
+- Minimize collection before attempting detection or redaction.
+- Separate access control, legal basis, consent, retention, deletion, and de-identification from content-quality scoring.
+- Test detectors on the actual formats and languages in the source snapshot.
+- Treat unresolved sensitive-data uncertainty as a release blocker where policy requires it.
+
+### Representation and harmful bias
+
+- Measure which sources, languages, communities, and viewpoints are removed at every stage.
+- Audit false rejection and leakage by relevant slices and intersections.
+- Investigate whether deduplication or boilerplate rules disproportionately erase repeated minority-language or community forms.
+- Document residual limitations; “bias removed” is not a defensible release claim.
+{% /section-card %}
+
+{% section-card %}
+## Publish policy, evidence, and lineage together
+
+{% process-flow %}
+{% process-step number="1" title="Version the policy" label="Contract" %}
+Freeze eligibility rules, thresholds, model and parser hashes, review guidance, protected exceptions, and release owners.
+{% /process-step %}
+{% process-step number="2" title="Run and reconcile" label="Execution" %}
+Process an immutable source snapshot, verify counts across every disposition, and keep quarantined records access-controlled.
+{% /process-step %}
+{% process-step number="3" title="Audit decisions" label="Evidence" %}
+Sample accepted, rejected, and uncertain records; report error directions, reviewer agreement, and slice coverage.
+{% /process-step %}
+{% process-step number="4" title="Sign the release" label="Artifact" %}
+Bind shard hashes, manifests, policy identity, reason counts, audit results, known limits, and deletion procedures.
+{% /process-step %}
+{% /process-flow %}
+
+### Minimum release artifacts
+
+- Dataset and shard identifiers with cryptographic hashes
+- Source snapshot identity, collection window, provenance, and usage restrictions
+- Policy version plus parser, deduplication, classifier, and threshold versions
+- Counts and rates by disposition, reason code, source, language, and important slice
+- Human-review sampling plan, guidance, disagreement, adjudication, and findings
+- Known blind spots, intended uses, prohibited uses, owners, retention, and deletion process
+{% /section-card %}
+
+{% section-card %}
+## Monitor decisions, not one quality score
+
+{% metric-strip %}
+{% metric label="Disposition volume" value="Count + rate" detail="Track publish, quarantine, reject, and error separately by reason and source." tone="blue" /%}
+{% metric label="False rejection" value="Coverage loss" detail="Estimate from reviewed rejected records for each important slice." tone="amber" /%}
+{% metric label="Policy leakage" value="Release risk" detail="Estimate from reviewed accepted records and investigate concentrated reasons." tone="rose" /%}
+{% metric label="Mix and schema" value="Drift evidence" detail="Compare versioned source, language, feature, and parser distributions before changing thresholds." tone="violet" /%}
+{% /metric-strip %}
+
+When a metric moves, identify which input changed:
+
+- Source mix, collection window, or upstream parser
+- Policy, threshold, model, feature, or normalization version
+- Reviewer pool, guidance, sampling frame, or adjudication process
+- Infrastructure errors, timeouts, missing features, or silent fallbacks
+
+Pass rate alone cannot distinguish these causes. Keep version dimensions in telemetry and sample the changed decision buckets before modifying policy.
+{% /section-card %}
+
+{% section-card %}
+## Production review checklist
+
+### Before execution
+
+- Freeze the source snapshot and release policy.
+- Verify source eligibility, privacy handling, deletion obligations, and access controls.
+- Benchmark gate cost and quality on representative payloads rather than copying fixture values.
+- Create reviewed audit slices for accepted, rejected, and uncertain decisions.
+
+### Before publication
+
+- Reconcile input, publish, quarantine, error, and dropped counts exactly.
+- Confirm every decision has a reason code and component versions.
+- Require slice-level error budgets and coverage floors, not only corpus-wide averages.
+- Test replay with the same policy and controlled reprocessing with a new policy.
+
+### During operation
+
+- Alert on missing telemetry, parser failures, unexpected source mix, decision-rate shifts, and audit regressions.
+- Keep quarantined data isolated, access-controlled, and subject to retention and deletion policy.
+- Require review before threshold changes and preserve before-and-after evidence.
+- Rehearse dataset withdrawal and downstream notification.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [TensorFlow Data Validation: schema, anomaly, skew, and drift checks](https://www.tensorflow.org/tfx/guide/tfdv)
+- [NIST AI RMF Generative AI Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence)
+- [Data Cards: Purposeful and Transparent Dataset Documentation](https://research.google/pubs/data-cards-purposeful-and-transparent-dataset-documentation-for-responsible-ai/)
+- [Deduplicating Training Data Makes Language Models Better](https://research.google/pubs/deduplicating-training-data-makes-language-models-better/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/data-quality-filtering/quiz/data-quality-filtering.json" lessonSlug="data-quality-filtering" title="Data Quality Filtering Check" /%}

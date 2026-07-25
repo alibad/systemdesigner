@@ -1,0 +1,186 @@
+---
+registryId: reference-design-principles
+---
+
+{% section-card tone="intro" %}
+## What are design principles?
+
+**Design principles are reusable decision rules that protect an important system property while accepting a known cost.** For example, loose coupling protects independent change and fault isolation, but introduces contracts, versioning, and sometimes asynchronous delivery. They are not rules to apply everywhere.
+
+Start with a concrete pressure: a change that repeatedly breaks unrelated code, a dependency failure that blocks users, traffic that exceeds one machine, access that is too broad, or data that cannot be trusted. Then choose the smallest boundary and mechanism that addresses that pressure.
+
+The invariant is: **every principle needs a named benefit, boundary, cost, and observable test.** Without all four, a principle is a slogan rather than an architectural decision.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Select from the constraint, not a favorite principle
+
+The same system can need several principles, but they should solve distinct problems. Start with the pressure that is currently expensive or risky, then make the resulting trade-off explicit.
+
+{% process-flow %}
+{% process-step number="1" title="Name the pressure" label="Observed problem" %}
+Describe the failed deployment, slow request, security exposure, or incorrect record. Avoid starting with a pattern name.
+{% /process-step %}
+{% process-step number="2" title="Choose a boundary" label="Where it belongs" %}
+Decide whether the protection belongs inside a module, between services, at a data store, or at an access boundary.
+{% /process-step %}
+{% process-step number="3" title="State the invariant" label="What must remain true" %}
+Write a testable claim such as "a recommendation outage cannot block checkout" or "a worker can only read its own queue".
+{% /process-step %}
+{% process-step number="4" title="Measure the cost" label="Evidence" %}
+Track the added latency, operational work, coordination, or cognitive load and verify that it buys the intended protection.
+{% /process-step %}
+{% /process-flow %}
+
+{% interactive-block id="reference/design-principles-constraint-selector" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make the principle testable
+
+A principle becomes useful only when it changes a design decision. Write its benefit as an invariant, then identify the evidence that could disprove it.
+
+{% metric-strip %}
+{% metric value="1 owner" label="Responsibility" detail="One reason for a module to change" tone="blue" /%}
+{% metric value="2 paths" label="Degraded mode" detail="Primary path plus a bounded fallback" tone="amber" /%}
+{% metric value="N replicas" label="Scale-out" detail="Capacity grows by adding equivalent workers" tone="green" /%}
+{% metric value="0 excess grants" label="Privilege" detail="Permissions match the caller's actual job" tone="rose" /%}
+{% /metric-strip %}
+
+### A lightweight estimate before adding machinery
+
+Estimate the pressure before proposing an abstraction. If a service receives 4,000 requests per second and one instance handles 800 requests per second at the latency target, the starting capacity is `4,000 / 800 = 5` instances. Add headroom for failures and uneven load before claiming horizontal scaling is complete.
+
+For reliability, turn an availability target into downtime: 99.9% monthly availability permits about 43 minutes of downtime in a 30-day month; 99.99% permits about 4.3 minutes. The tighter target may justify redundancy and graceful degradation, but it also increases coordination and operational cost.
+
+{% callout variant="tip" %}
+Use estimates to decide whether the pressure is real enough to warrant complexity. A rarely changed internal script does not automatically need a plugin architecture; a frequently changed payment rule might.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Place principles at architecture boundaries
+
+The boundary tells you where a principle applies. A well-named boundary makes both ownership and failure behavior easier to inspect.
+
+{% system-flow title="Checkout request with an optional recommendation dependency" caption="Checkout owns the transaction. Recommendations enrich the response but cannot control the purchase path." %}
+{% system-node title="Client" eyebrow="Request" icon="monitor" tone="blue" /%}
+{% system-node title="Checkout API" eyebrow="Critical owner" icon="shopping-cart" tone="green" /%}
+{% system-node title="Order store" eyebrow="Consistency boundary" icon="database" tone="violet" /%}
+{% system-node title="Recommendations" eyebrow="Optional dependency" icon="sparkles" tone="amber" /%}
+{% /system-flow %}
+
+- **Single responsibility:** Checkout owns order validation and persistence; recommendations own suggestions. A request handler that owns both will have unrelated reasons to change.
+- **Loose coupling:** Checkout reads a versioned recommendation contract or continues without it. It does not reach into the recommendation database.
+- **Fail fast and data consistency:** Validate the order at the boundary and commit the authoritative order record before emitting downstream work.
+- **Graceful degradation:** A timeout from recommendations produces an order confirmation without suggestions, not a failed purchase.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Refactor an architecture smell without moving the failure
+
+Refactoring is successful when it improves the named invariant and preserves a safe behavior during the migration. Select a smell, choose a response, and see what failure still reaches the user.
+
+{% interactive-block id="reference/design-principles-smell-refactoring-lab" /%}
+{% /section-card %}
+
+{% section-card %}
+## Use the reference at the decision boundary
+
+These principles commonly appear together, but each should have its own reason and measurement. Open an item only after you can name the pressure it addresses.
+
+{% accordion defaultOpen="single-responsibility" %}
+{% accordion-item id="single-responsibility" title="Single responsibility and open for extension" %}
+
+A module remains understandable because one cohesive responsibility owns one kind of change. Extension points let new variations arrive without repeatedly editing stable behavior.
+
+- **Use it when:** Pricing rules, notification channels, import formats, or policies change independently of the request path that invokes them.
+- **Test the invariant:** Adding a new rule changes the rule implementation and registration, not unrelated checkout, storage, and presentation code.
+- **Cost and limit:** Interfaces and indirection can hide a simple flow. Do not create a plugin system for a variation that is unlikely to exist.
+- **Smell:** A class described with "and," or a growing switch statement that mixes unrelated policy and orchestration.
+
+{% /accordion-item %}
+
+{% accordion-item id="loose-coupling" title="Loose coupling and explicit contracts" %}
+
+Components can change, deploy, and fail with limited knowledge of each other's implementation.
+
+- **Use it when:** Teams, deployment cadence, availability requirements, or data ownership differ across components.
+- **Test the invariant:** A consumer can tolerate a compatible producer version and does not query the producer's private data store.
+- **Cost and limit:** Contracts require versioning, observability, and migration discipline. A network boundary is not automatically a better module boundary.
+- **Smell:** Services share database tables or form an unbounded synchronous request chain.
+
+{% /accordion-item %}
+
+{% accordion-item id="horizontal-scaling" title="Horizontal scaling and stateless workers" %}
+
+Capacity and fault tolerance can grow by adding equivalent workers rather than making one machine larger.
+
+- **Use it when:** Peak load exceeds one instance, maintenance must not stop service, or failure of one worker cannot exhaust the budget.
+- **Test the invariant:** Removing one worker leaves enough healthy capacity to meet the latency target; session and durable state live outside the worker.
+- **Cost and limit:** Load balancing, state coordination, retries, and distributed debugging add operational work. Scale-out does not remove a database bottleneck.
+- **Smell:** Sticky in-process sessions, local-only work queues, or a singleton that all traffic depends on.
+
+{% /accordion-item %}
+
+{% accordion-item id="failure-behavior" title="Fail fast and graceful degradation" %}
+
+Fail fast prevents invalid state from spreading. Graceful degradation keeps a non-critical failure from taking down the critical path. They solve different moments in the same incident.
+
+- **Use fail fast when:** Input, authorization, schema, or an internal invariant is invalid. Return a clear error before any irreversible side effect.
+- **Use graceful degradation when:** A non-critical dependency times out and there is a bounded fallback, cached result, or reduced feature set.
+- **Test the invariant:** Invalid orders never enter storage; a recommendation outage cannot stop a valid order from completing.
+- **Cost and limit:** Fallback data can be stale and retries can amplify load. Define timeout, ownership, and recovery conditions rather than silently hiding errors.
+
+{% /accordion-item %}
+
+{% accordion-item id="security-boundaries" title="Least privilege and defense in depth" %}
+
+A compromised identity or bypassed control has a limited blast radius.
+
+- **Use least privilege when:** A human, service, job, or token needs a clearly bounded task.
+- **Use defense in depth when:** A single missed authorization check, leaked credential, or perimeter control would expose a valuable asset.
+- **Test the invariant:** A queue worker cannot read customer payment data; an authorized request is still validated, logged, and rate-limited.
+- **Cost and limit:** Fine-grained policies require lifecycle management. Multiple controls should be independent rather than duplicate the same weak check.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-consistency" title="Data consistency and deliberate caching" %}
+
+Authoritative records remain correct while performance optimizations do not make users act on unacceptable stale data.
+
+- **Use strong consistency when:** A stale decision would create an incorrect payment, oversell inventory, or violate a legal record.
+- **Use caching when:** A response is expensive, read-heavy, and has a stated freshness budget.
+- **Test the invariant:** The order ledger is authoritative; a cache miss or eviction changes latency, not correctness. Cache age stays within its stated limit.
+- **Cost and limit:** Transactions and coordination reduce availability or throughput; caching introduces invalidation, observability, and stale-read risk.
+
+{% /accordion-item %}
+{% /accordion %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the principle, not just the diagram
+
+Architecture decisions decay when their assumptions are not monitored. Attach an owner, signal, and response to each protected property.
+
+- **Change boundaries:** Track deployment lead time, change failure rate, and the number of callers coupled to an internal implementation.
+- **Dependency isolation:** Measure timeout rate, fallback activation, retry volume, and the percentage of critical requests that complete in degraded mode.
+- **Capacity:** Monitor utilization, queue depth, p95 latency, instance count, and headroom after losing one failure domain.
+- **Security:** Audit grants, token age, denied actions, anomalous access, and the time needed to revoke a compromised credential.
+- **Data:** Record validation failures, freshness age, reconciliation lag, duplicate events, and correction time.
+
+{% callout variant="warn" %}
+Avoid principle theater: an interface with one implementation, a circuit breaker with no fallback behavior, or roles that all grant administrator access do not provide the protection their names imply.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [Performance Optimization](/reference/performance-optimization): Measure capacity and latency before optimizing.
+- [Security Checklist](/reference/security-checklist): Turn access and defense-in-depth decisions into reviewable controls.
+- [Microservices Patterns](/reference/microservices-patterns): Apply ownership and contract boundaries across independently deployed services.
+- [ACID Properties](/fundamentals/acid-properties): Decide where strong consistency belongs in a transaction flow.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/design-principles/quiz/design-principles-decisions.json" title="Design Principles Decision Check" /%}

@@ -1,0 +1,151 @@
+{
+  "title": "Decide whether the evidence earns an answer",
+  "description": "Pack a finite context, enforce freshness and citation policies, isolate untrusted retrieval, and choose a containment action. The gate separates answer quality from permission to serve.",
+  "defaults": {
+    "scenarioId": "healthy-evidence",
+    "contextBudgetTokens": 1800,
+    "maxSourceAgeHours": 168,
+    "citationPolicyId": "claim-links",
+    "evidencePolicyId": "quarantine",
+    "fallbackId": "abstain"
+  },
+  "controls": {
+    "contextBudgetTokens": { "min": 500, "max": 3200, "step": 100 },
+    "maxSourceAgeHours": { "min": 12, "max": 720, "step": 12 }
+  },
+  "gates": {
+    "minGroundedClaimRate": 0.85,
+    "minCitationCoverage": 0.9,
+    "maxP95LatencyMs": 1250,
+    "maxCostUnits": 5.5
+  },
+  "citationPolicies": [
+    {
+      "id": "none",
+      "label": "No citations",
+      "detail": "The answer exposes no claim-to-source path.",
+      "coverageMultiplier": 0,
+      "tokenOverhead": 0,
+      "latencyMs": 0
+    },
+    {
+      "id": "source-list",
+      "label": "Source list",
+      "detail": "Sources are present, but readers cannot tell which claim each supports.",
+      "coverageMultiplier": 0.62,
+      "tokenOverhead": 70,
+      "latencyMs": 18
+    },
+    {
+      "id": "claim-links",
+      "label": "Claim-linked citations",
+      "detail": "Every factual claim must identify its supporting chunk.",
+      "coverageMultiplier": 0.98,
+      "tokenOverhead": 170,
+      "latencyMs": 42
+    }
+  ],
+  "evidencePolicies": [
+    {
+      "id": "pass-through",
+      "label": "Pass through",
+      "detail": "Retrieved text enters the prompt without isolation or quarantine.",
+      "quarantineInjection": false,
+      "latencyMs": 0
+    },
+    {
+      "id": "delimit-only",
+      "label": "Delimit only",
+      "detail": "Evidence is labeled as data, but suspicious chunks still reach the model.",
+      "quarantineInjection": false,
+      "latencyMs": 8
+    },
+    {
+      "id": "quarantine",
+      "label": "Scan, quarantine, delimit",
+      "detail": "Suspicious chunks are removed and remaining evidence stays untrusted data.",
+      "quarantineInjection": true,
+      "latencyMs": 24
+    }
+  ],
+  "fallbacks": [
+    {
+      "id": "best-effort",
+      "label": "Best-effort answer",
+      "detail": "Request an answer even when an evidence gate fails."
+    },
+    {
+      "id": "abstain",
+      "label": "Explain and abstain",
+      "detail": "Return no factual answer and name the missing evidence."
+    },
+    {
+      "id": "review",
+      "label": "Route to review",
+      "detail": "Contain the request in a bounded human or specialist queue."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-evidence",
+      "label": "Current, aligned evidence",
+      "detail": "Authorized sources agree and jointly support five answer claims.",
+      "query": "What is the enterprise refund path?",
+      "totalClaims": 5,
+      "outputTokens": 230,
+      "retrievalLatencyMs": 86,
+      "freshnessSlaHours": 168,
+      "chunks": [
+        { "id": "policy-42-a", "label": "Refund eligibility", "tokens": 610, "ageHours": 18, "score": 0.95, "supports": ["c1", "c2"], "hasInjection": false },
+        { "id": "policy-42-b", "label": "Approval workflow", "tokens": 540, "ageHours": 26, "score": 0.91, "supports": ["c3", "c4"], "hasInjection": false },
+        { "id": "policy-42-c", "label": "Settlement timing", "tokens": 430, "ageHours": 31, "score": 0.87, "supports": ["c5"], "hasInjection": false },
+        { "id": "faq-9", "label": "General FAQ", "tokens": 480, "ageHours": 54, "score": 0.66, "supports": [], "hasInjection": false }
+      ]
+    },
+    {
+      "id": "stale-release-note",
+      "label": "Stale release note",
+      "detail": "Current material covers the basics, but a retired note is the only source for two claims.",
+      "query": "Which limits changed in yesterday's release?",
+      "totalClaims": 4,
+      "outputTokens": 190,
+      "retrievalLatencyMs": 74,
+      "freshnessSlaHours": 24,
+      "chunks": [
+        { "id": "release-81", "label": "Current release summary", "tokens": 520, "ageHours": 8, "score": 0.94, "supports": ["c1", "c2"], "hasInjection": false },
+        { "id": "release-69", "label": "Retired release note", "tokens": 680, "ageHours": 480, "score": 0.9, "supports": ["c3", "c4"], "hasInjection": false },
+        { "id": "roadmap-12", "label": "Unreleased roadmap", "tokens": 440, "ageHours": 36, "score": 0.72, "supports": [], "hasInjection": false }
+      ]
+    },
+    {
+      "id": "indirect-injection",
+      "label": "Retrieved prompt injection",
+      "detail": "A highly ranked imported note contains both useful text and hostile instructions.",
+      "query": "Summarize the credential rotation runbook.",
+      "totalClaims": 4,
+      "outputTokens": 250,
+      "retrievalLatencyMs": 92,
+      "freshnessSlaHours": 96,
+      "chunks": [
+        { "id": "runbook-11-a", "label": "Rotation prerequisites", "tokens": 560, "ageHours": 14, "score": 0.96, "supports": ["c1", "c2"], "hasInjection": false },
+        { "id": "imported-note", "label": "Imported operator note", "tokens": 510, "ageHours": 5, "score": 0.94, "supports": ["c3"], "hasInjection": true },
+        { "id": "runbook-11-b", "label": "Recovery and verification", "tokens": 720, "ageHours": 19, "score": 0.86, "supports": ["c3", "c4"], "hasInjection": false }
+      ]
+    },
+    {
+      "id": "conflicting-policies",
+      "label": "Conflicting policy revisions",
+      "detail": "A current policy and an older high-scoring copy disagree on the approval limit.",
+      "query": "Who can approve a refund above 5,000 dollars?",
+      "totalClaims": 3,
+      "outputTokens": 180,
+      "retrievalLatencyMs": 81,
+      "freshnessSlaHours": 168,
+      "chunks": [
+        { "id": "policy-42-limit", "label": "Current approval limit", "tokens": 590, "ageHours": 22, "score": 0.93, "supports": ["c1", "c2", "c3"], "hasInjection": false, "conflictGroup": "approval-limit" },
+        { "id": "policy-31-limit", "label": "Superseded approval limit", "tokens": 570, "ageHours": 260, "score": 0.91, "supports": ["c1", "c2", "c3"], "hasInjection": false, "conflictGroup": "approval-limit" },
+        { "id": "workflow-8", "label": "Approval workflow", "tokens": 460, "ageHours": 44, "score": 0.82, "supports": ["c2"], "hasInjection": false }
+      ]
+    }
+  ]
+}

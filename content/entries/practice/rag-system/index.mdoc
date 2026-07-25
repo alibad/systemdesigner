@@ -1,0 +1,340 @@
+---
+registryId: practice-rag-system
+---
+
+{% section-card tone="intro" %}
+## What is a RAG system?
+
+A retrieval-augmented generation (RAG) system searches an approved knowledge collection before a language model writes an answer. Retrieval gives the model current, private, or domain-specific evidence that is not reliably available in its training data.
+
+For this interview, design an enterprise assistant over **10 million documents** for **100,000 daily users** and **1 million queries per day**. The answer path should stay under **3 seconds at p95**, retrieval recall should exceed **85%**, and every factual answer must be grounded in evidence the caller is allowed to access.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retrieve before writing" eyebrow="Core mechanism" icon="search" tone="blue" %}
+Use sparse and semantic search to find candidate passages, then rerank the best evidence for the question.
+{% /concept-card %}
+{% concept-card title="Authorization is an invariant" eyebrow="Security boundary" icon="shield" tone="violet" %}
+Filter by tenant and document permissions before retrieved text reaches ranking, prompts, caches, or logs.
+{% /concept-card %}
+{% concept-card title="Abstention is a valid answer" eyebrow="Degraded mode" icon="activity" tone="green" %}
+When evidence is missing, conflicting, private, or unsafe, explain the gap instead of substituting model confidence.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Define the answer contract
+
+The product accepts a natural-language question and returns either a cited answer or an explicit statement that the available evidence is insufficient. The evidence set is constrained by the caller's identity, tenant, role, region, and document permissions.
+
+**Functional requirements**
+
+- Ingest text documents, PDFs, web pages, code, and structured tables.
+- Search by exact terms and semantic meaning across permitted content.
+- Generate concise answers with claim-level source citations.
+- Support multi-turn questions without allowing conversation history to bypass access policy.
+- Reflect approved document changes in search within ten minutes.
+
+**Non-functional requirements**
+
+- Serve 1 million daily queries and design for an explicit **2,000 QPS peak scenario**.
+- Keep end-to-end p95 response latency under three seconds.
+- Achieve Recall@10 above 85% and grounded-answer faithfulness above 90%.
+- Isolate tenants, detect sensitive data, preserve audit trails, and honor data residency.
+- Degrade to search results or abstention when generation or validation is unhealthy.
+
+### Ask questions that change the architecture
+
+1. **Who is the caller?** Employees, customers, and external partners imply different identity and policy systems.
+2. **Which sources are authoritative?** A policy portal may outrank an old wiki even when the wiki is more textually similar.
+3. **What is the cost of a wrong answer?** High-consequence domains require stronger support thresholds and human escalation.
+4. **How fresh must evidence be?** A ten-minute indexing target needs an incremental ingestion path, not nightly rebuilds.
+5. **Which requests are out of scope?** Open-ended creative writing and unsupported advice should not be disguised as grounded lookup.
+
+{% callout variant="warn" %}
+**State the invariant first.** A model must never see or cite a passage the caller cannot access. Post-generation redaction is too late because private evidence has already crossed the model boundary.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Token, Data, and Throughput Math" %}
+
+
+### Turn product numbers into capacity assumptions
+
+Start with replaceable assumptions instead of false precision:
+
+- **Documents:** 10M documents averaging 50 KiB gives roughly **500 GiB** of raw source data.
+- **Chunks:** 12 chunks per document gives **120M searchable chunks**.
+- **Embeddings:** 120M x 1,536 dimensions x 4 bytes is about **737 GB** before index overhead and replicas.
+- **Queries:** 1M per day averages 12 QPS; the 2,000 QPS peak is a deliberate burst and growth scenario that must be validated with the interviewer.
+- **Prompt:** Six chunks at roughly 430 tokens each plus instructions and conversation state produces about **3,200 input tokens**.
+
+{% metric-strip %}
+{% metric value="120M" label="Searchable chunks" detail="Assuming 12 chunks per source document." tone="blue" /%}
+{% metric value="~1.5 TB" label="Vector footprint" detail="Two copies of raw float embeddings before graph overhead." tone="cyan" /%}
+{% metric value="2,000 QPS" label="Peak scenario" detail="A stress target, not the daily average." tone="violet" /%}
+{% metric value="3,000 ms" label="End-to-end p95" detail="Retrieval, generation, and validation share one budget." tone="green" /%}
+{% /metric-strip %}
+
+### Allocate one user-visible latency budget
+
+A defensible starting budget is 150 ms for authentication and routing, 400 ms for retrieval and reranking, 2 seconds for generation, 250 ms for claim checks, and 200 ms of network and queue headroom. Measure p95 by stage; an average below three seconds does not protect slow users.
+
+### Explore retrieval breadth and prompt size
+
+{% interactive-block id="practice/rag-system-retrieval-budget-lab" /%}
+
+The important design move is to retrieve broadly and **send narrowly**. Candidate breadth improves recall; reranking decides which small evidence set deserves expensive prompt tokens.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. High-Level Architecture and Model Tiering" %}
+
+
+### Keep identity attached to the entire path
+
+{% system-flow title="Authorized RAG request path" caption="Authorization filters every retrieval branch before fusion. Ingestion, evaluation, and analytics remain asynchronous." %}
+{% system-node title="API gateway" eyebrow="Authenticate" icon="globe" tone="blue" %}
+Resolve tenant, user, role, region, request deadline, and policy version.
+{% /system-node %}
+{% system-node title="Query planner" eyebrow="Understand" icon="braces" tone="cyan" %}
+Classify intent, rewrite ambiguous terms, and produce permission-aware search filters.
+{% /system-node %}
+{% system-node title="Hybrid retrieval" eyebrow="Find" icon="search" tone="violet" %}
+Run sparse and dense search in parallel, then fuse candidates without crossing ACL boundaries.
+{% /system-node %}
+{% system-node title="Reranker" eyebrow="Select" icon="scale" tone="amber" %}
+Score query-passage pairs and keep only diverse, authoritative, current evidence.
+{% /system-node %}
+{% system-node title="Generator and gate" eyebrow="Answer" icon="shield" tone="green" %}
+Generate from bounded context, verify claims and citations, then answer or abstain.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate online and ingestion responsibilities
+
+**Online answer path**
+
+- Stateless orchestration owns deadlines, cancellation, retries, and trace IDs.
+- Search indexes are sharded by stable ownership and carry document-level authorization metadata.
+- The reranker and generator are independently scalable model services.
+- A policy service versions support thresholds, blocked sources, and escalation behavior.
+
+**Asynchronous ingestion path**
+
+- Object storage retains immutable source versions and parsing artifacts.
+- Format-specific workers extract text, tables, code structure, and page coordinates.
+- Chunking preserves document hierarchy and attaches source, version, tenant, ACL, and expiry metadata.
+- Embedding and sparse indexing publish a new searchable version atomically.
+
+### Route model tiers by consequence
+
+- Use a compact model for query rewriting, intent classification, and simple extraction.
+- Use a cross-encoder only on a bounded candidate set; never rerank the whole corpus.
+- Route generation by answer complexity and risk, not merely prompt length.
+- Skip generation when a direct cited passage answers the question more reliably.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. RAG, Prompting, and Safety Deep Dive" %}
+
+
+### Build chunks for retrieval and citation
+
+Chunk boundaries should preserve a unit a reader can understand and a citation can locate. Use headings and paragraphs for prose, functions and classes for code, clauses for legal text, and rows plus headers for tables.
+
+- Keep the source title and heading path with every chunk.
+- Add a small overlap only where meaning crosses a boundary; overlap is not a substitute for structure.
+- Deduplicate boilerplate so repeated navigation or policy footers do not dominate search.
+- Store source version and page or line coordinates for stable citations.
+- Re-embed only changed chunks, but invalidate every index entry for a revoked source immediately.
+
+{% code-block file="/api/content/practice/rag-system/code/document-processing-pipeline.txt" language="text" title="Document processing pipeline" /%}
+
+### Combine retrievers without losing meaning
+
+Sparse retrieval is strong for product codes, names, and exact phrases. Dense retrieval handles paraphrases and conceptual similarity. Run both over the authorized corpus, normalize their rankings, fuse the candidates, and use a cross-encoder to compare each candidate with the full question.
+
+Do not use a single relevance score as authority. Final selection should consider:
+
+- semantic relevance and exact-term coverage;
+- source authority, freshness, and document status;
+- evidence diversity rather than repeated near-duplicate chunks;
+- permission and residency policy;
+- whether the source supports the specific claim being requested.
+
+### Treat retrieved content as untrusted data
+
+Prompt instructions define the task and evidence rules. Retrieved text belongs in a clearly delimited data channel and cannot change system policy. Require the model to cite evidence identifiers, then verify that each factual claim is entailed by a cited permitted passage.
+
+### Inject failures into the grounding boundary
+
+{% interactive-block id="practice/rag-system-grounding-guardrail-lab" /%}
+
+### Know when RAG is the wrong mechanism
+
+- Use a database query or API for exact balances, permissions, inventory, and other structured facts.
+- Use a deterministic workflow for actions that change state.
+- Use fine-tuning for stable behavior or style, not frequently changing factual memory.
+- Answer directly when the task is creative and does not claim grounding in enterprise sources.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Evaluation and Safety Metrics" %}
+
+
+### Evaluate the pipeline in layers
+
+An end-to-end score cannot tell the team which subsystem failed. Keep a labeled evaluation set with questions, permitted source versions, relevant chunks, acceptable claims, and expected abstentions.
+
+**Retrieval metrics**
+
+- Recall@10: did the candidate set contain the required evidence?
+- NDCG and MRR: did authoritative evidence appear near the top?
+- ACL precision: did any candidate violate the caller's effective permissions?
+- freshness lag: how long until an approved change becomes searchable?
+
+**Answer metrics**
+
+- Claim faithfulness: is each factual claim supported by cited text?
+- Citation precision and completeness: do citations support all material claims?
+- Answer relevance and completeness: does the response solve the stated task?
+- Abstention quality: does the system refuse when evidence is missing or conflicting?
+
+**Operational guardrails**
+
+- p95 and p99 latency by retrieval, reranking, generation, and validation stage;
+- cost per answered query and cost per grounded answer;
+- cross-tenant evidence exposure, prompt-injection success, and sensitive-data leakage;
+- failure rates by tenant size, language, source format, and query complexity.
+
+### Release with staged evidence
+
+1. Run deterministic parser, ACL, citation, and prompt-boundary tests.
+2. Evaluate representative and adversarial query slices offline.
+3. Shadow the candidate against production-shaped traffic without returning its answer.
+4. Canary by tenant with automatic rollback on security, faithfulness, or latency regression.
+5. Expand only when practical quality improves and every hard guardrail passes.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Cost Control and Governance" %}
+
+
+### Optimize cost per grounded answer
+
+Track infrastructure spend against answers that pass support and policy gates. A cheap fluent answer without evidence has no enterprise value.
+
+- Cache permission-safe retrieval results by tenant, policy version, normalized query, and index version.
+- Route simple lookups to extractive answers or smaller models.
+- Batch embeddings during ingestion and reranking within strict queue deadlines.
+- Compress vectors only after measuring recall by domain and language.
+- Cap prompt tokens and output length by query class.
+- Reserve expensive model tiers for cases with enough evidence and user value.
+
+### Make ownership auditable
+
+{% concept-grid columns="3" %}
+{% concept-card title="Knowledge owner" eyebrow="Source truth" icon="database" tone="blue" %}
+Approves source authority, retention, deletion, residency, and document access rules.
+{% /concept-card %}
+{% concept-card title="Retrieval owner" eyebrow="Evidence quality" icon="search" tone="violet" %}
+Owns parsing, chunking, indexes, relevance evaluation, freshness, and rollback.
+{% /concept-card %}
+{% concept-card title="Answer owner" eyebrow="Release policy" icon="shield" tone="rose" %}
+Owns prompts, models, support thresholds, red-team tests, incidents, and abstention behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+An audit event should record request, tenant, policy, source-version, retriever, model, and prompt identifiers without retaining unrestricted raw content. Deletion must remove source objects, chunks, embeddings, caches, and derived training examples.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Scaling and Reliability" %}
+
+
+### Scale each bottleneck independently
+
+- Partition indexes by tenant or stable shard key, then replicate hot read shards.
+- Autoscale retrievers from QPS and tail latency; autoscale model services from queue age and deadline risk.
+- Limit per-tenant concurrency so one bulk client cannot consume the shared answer budget.
+- Keep ingestion queues separate from query traffic and apply backpressure to document updates.
+- Replicate source and index snapshots so a corrupt index can be rebuilt without re-parsing every document.
+
+### Degrade in a deliberate order
+
+{% process-flow %}
+{% process-step number="1" title="Cancel stale work" label="Deadline" %}
+Stop retries and generation when the client disconnects or the remaining budget cannot produce a valid answer.
+{% /process-step %}
+{% process-step number="2" title="Reduce optional work" label="Capacity" %}
+Skip query expansion, use a smaller reranker, or route simple questions to extractive answers.
+{% /process-step %}
+{% process-step number="3" title="Return cited search" label="Generator failure" %}
+Show authorized evidence without a synthesized answer when retrieval remains healthy.
+{% /process-step %}
+{% process-step number="4" title="Abstain clearly" label="Evidence failure" %}
+State that sources are unavailable or insufficient; never answer from model memory as if grounded.
+{% /process-step %}
+{% /process-flow %}
+
+### Plan concrete incidents
+
+- **Vector index unavailable:** fall back to sparse search over the same authorization filter and mark the response as degraded.
+- **Generator saturated:** return ranked cited passages or route eligible low-risk queries to a smaller model.
+- **Policy service unavailable:** fail closed for private corpora; do not reuse a stale allow decision indefinitely.
+- **Bad ingestion release:** pin query traffic to the last known-good index generation while rebuilding changed documents.
+- **Regional outage:** route only when another region satisfies residency and latency constraints; otherwise abstain locally.
+
+Observe index freshness, shard imbalance, candidate recall probes, reranker drift, support-gate failures, citation mismatches, queue age, stage latency, cost, and security events in one traceable request path.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Wrap-Up and Forward-Looking Extensions" %}
+
+
+### Present the design in 90 seconds
+
+1. Authenticate the caller and bind tenant, policy, and deadline to the request.
+2. Search sparse and dense indexes that have already enforced document permissions.
+3. Fuse and rerank a broad candidate set, then send a small authoritative evidence set to generation.
+4. Generate with retrieved text isolated as data and validate claim support and citations before release.
+5. Answer only when evidence and policy gates pass; otherwise return cited search results or abstain.
+6. Evaluate retrieval, grounding, security, latency, and cost separately so regressions have an owner.
+
+### Name the central trade-offs
+
+- **Recall versus latency:** broader retrieval finds more evidence but increases fusion and reranking work.
+- **Context breadth versus precision:** more chunks can cover more facts while distracting the generator with weak evidence.
+- **Freshness versus stability:** frequent index updates reduce staleness but increase churn and rollback complexity.
+- **Model quality versus cost:** larger generators help complex synthesis but cannot repair missing or unauthorized evidence.
+- **Availability versus correctness:** serving an ungrounded answer during dependency failure is not a valid availability strategy.
+
+### Keep unresolved risks visible
+
+- Permission metadata can drift from the source system between index updates.
+- Aggregate quality can hide weak retrieval for a tenant, language, document type, or recent policy version.
+- Prompt injection can enter through documents, metadata, conversation history, or tool output.
+- Citations can be syntactically valid while failing to support the nearby claim.
+- User feedback is biased toward questions the current system already attempts to answer.
+
+### Extend only with explicit contracts
+
+- Add multi-hop retrieval when evaluation shows that one evidence pass cannot answer compound questions.
+- Add tool calls for structured systems through typed, permissioned APIs rather than document scraping.
+- Add multimodal evidence only after defining page-region citations and image-specific safety evaluation.
+- Add human review queues for high-consequence domains with measurable escalation and response targets.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/rag-system/quiz/rag-system-design-review.json"
+   lessonSlug="practice-rag-system"
+   title="RAG System Design Review" /%}

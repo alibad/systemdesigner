@@ -1,0 +1,274 @@
+{
+  "title": "Trace a failure across the biometric trust boundary",
+  "description": "Choose an architecture and inject a failure. The path shows which system sees biometric material, what the relying party can verify, and which recovery action remains available.",
+  "defaults": {
+    "architectureId": "local-passkey",
+    "scenarioId": "rp-breach"
+  },
+  "architectures": [
+    {
+      "id": "local-passkey",
+      "label": "Authenticator-local passkey",
+      "detail": "The authenticator performs biometric user verification and signs an origin-bound assertion.",
+      "biometricBoundary": "Inside the authenticator",
+      "relyingPartyReceives": "Credential ID, public key, and a signed assertion with the user-verification flag",
+      "storedAtRelyingParty": "Public-key credential record; no biometric sample or template",
+      "stages": [
+        {
+          "id": "sensor",
+          "label": "Local sensor",
+          "detail": "Captures a sample inside the authenticator boundary"
+        },
+        {
+          "id": "matcher",
+          "label": "Local matcher",
+          "detail": "Compares locally and sets user-verification state"
+        },
+        {
+          "id": "credential",
+          "label": "Credential key",
+          "detail": "Signs the fresh challenge for the relying party"
+        },
+        {
+          "id": "rp",
+          "label": "Relying party",
+          "detail": "Verifies origin, RP ID, challenge, signature, and UV"
+        }
+      ]
+    },
+    {
+      "id": "central-verification",
+      "label": "Central 1:1 verification",
+      "detail": "A claimed identity selects one protected template for a central biometric comparison.",
+      "biometricBoundary": "Sensor, endpoint, protected channel, and central verifier",
+      "relyingPartyReceives": "A verifier decision plus policy evidence; the verifier handles the biometric sample and template",
+      "storedAtRelyingParty": "Prefer a decision record only; the biometric service stores protected templates and lifecycle metadata",
+      "stages": [
+        {
+          "id": "sensor",
+          "label": "Managed sensor",
+          "detail": "Captures a sample and proves sensor or endpoint integrity"
+        },
+        {
+          "id": "channel",
+          "label": "Protected channel",
+          "detail": "Authenticates the endpoint and protects sample transport"
+        },
+        {
+          "id": "matcher",
+          "label": "Central matcher",
+          "detail": "Compares against the claimed user's protected template"
+        },
+        {
+          "id": "rp",
+          "label": "Policy service",
+          "detail": "Combines the result with another physical authenticator"
+        }
+      ]
+    },
+    {
+      "id": "central-identification",
+      "label": "Central 1:N identification",
+      "detail": "The service searches a gallery to find a likely identity instead of verifying one claim.",
+      "biometricBoundary": "Sensor, endpoint, protected channel, matcher, and searchable gallery",
+      "relyingPartyReceives": "A ranked candidate or no-match result that still needs policy and adjudication",
+      "storedAtRelyingParty": "Avoid copies; the biometric operator holds a searchable template gallery and audit evidence",
+      "stages": [
+        {
+          "id": "sensor",
+          "label": "Capture station",
+          "detail": "Collects a sample under a declared purpose and consent model"
+        },
+        {
+          "id": "channel",
+          "label": "Protected channel",
+          "detail": "Carries the sample to the identification service"
+        },
+        {
+          "id": "gallery",
+          "label": "Template gallery",
+          "detail": "Searches many enrolled identities and returns candidates"
+        },
+        {
+          "id": "adjudication",
+          "label": "Adjudication",
+          "detail": "Applies confidence limits, policy, and human review where required"
+        }
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "rp-breach",
+      "label": "Relying-party breach",
+      "detail": "An attacker reads the application credential database.",
+      "outcomes": {
+        "local-passkey": {
+          "status": "contained",
+          "statusLabel": "Biometric data remains outside the breach",
+          "impact": "The attacker obtains public credential records, not biometric templates or credential private keys. Public keys do not let the attacker create valid assertions.",
+          "affectedStages": ["rp"],
+          "requiredControls": [
+            "Protect account and credential metadata",
+            "Detect credential-record tampering",
+            "Revoke sessions and investigate authorization changes"
+          ],
+          "recovery": "Keep valid authenticators bound unless account evidence shows unauthorized registration or session theft."
+        },
+        "central-verification": {
+          "status": "depends",
+          "statusLabel": "Impact depends on service separation",
+          "impact": "If the relying party stores only decisions, templates remain separated. Shared storage or replicated templates expand the biometric incident.",
+          "affectedStages": ["matcher", "rp"],
+          "requiredControls": [
+            "Separate relying-party and biometric stores",
+            "Encrypt and access-control sensitive personal information",
+            "Audit every template read and administrative action"
+          ],
+          "recovery": "Revoke exposed application sessions; if protected templates were exposed, follow the template-protection renewal and re-enrollment plan."
+        },
+        "central-identification": {
+          "status": "high-impact",
+          "statusLabel": "A copied gallery creates broad privacy impact",
+          "impact": "A searchable gallery can affect many people and future matching uses. Encryption alone does not provide revocation or unlinkability.",
+          "affectedStages": ["gallery", "adjudication"],
+          "requiredControls": [
+            "Keep the gallery outside the application boundary",
+            "Enforce purpose-limited queries and dual-control administration",
+            "Maintain a tested template-compromise response"
+          ],
+          "recovery": "Suspend gallery access, preserve evidence, notify accountable privacy and security owners, and reissue protected templates only if the scheme supports renewal."
+        }
+      }
+    },
+    {
+      "id": "capture-injection",
+      "label": "Capture or injection attack",
+      "detail": "A compromised endpoint submits a replayed or synthetic sample.",
+      "outcomes": {
+        "local-passkey": {
+          "status": "depends",
+          "statusLabel": "Trust moves into the authenticator",
+          "impact": "The relying party verifies the signed UV result, not a raw sample. It still needs an authenticator policy appropriate to the risk and cannot infer sensor quality from the UV flag alone.",
+          "affectedStages": ["sensor", "matcher", "credential"],
+          "requiredControls": [
+            "Use a maintained WebAuthn verifier",
+            "Validate challenge, origin, RP ID, signature, and UV",
+            "Apply authenticator policy or attestation only when justified"
+          ],
+          "recovery": "Deregister a compromised authenticator and bind a new one through a separately authenticated recovery path."
+        },
+        "central-verification": {
+          "status": "high-impact",
+          "statusLabel": "The sample path must prove integrity",
+          "impact": "Presentation attack detection alone does not detect every digital injection. The verifier needs evidence about the sensor, endpoint, and protected channel.",
+          "affectedStages": ["sensor", "channel", "matcher"],
+          "requiredControls": [
+            "Authenticate the sensor or resistant endpoint",
+            "Use an authenticated protected channel",
+            "Test presentation and injection attack defenses separately"
+          ],
+          "recovery": "Quarantine the endpoint, invalidate its trust material, and require another already-bound factor."
+        },
+        "central-identification": {
+          "status": "high-impact",
+          "statusLabel": "Injected samples can search the full gallery",
+          "impact": "A synthetic sample can produce candidate identities at gallery scale. A match score is not proof of capture integrity or lawful purpose.",
+          "affectedStages": ["sensor", "channel", "gallery"],
+          "requiredControls": [
+            "Authenticate capture stations",
+            "Bind every search to purpose, operator, and case",
+            "Separate PAD, injection detection, matching, and adjudication evidence"
+          ],
+          "recovery": "Disable the station, review searches from the affected trust key, and re-adjudicate any decisions that depended on them."
+        }
+      }
+    },
+    {
+      "id": "cannot-present",
+      "label": "User cannot present the biometric",
+      "detail": "Injury, disability, environment, or sensor failure prevents a valid comparison.",
+      "outcomes": {
+        "local-passkey": {
+          "status": "recoverable",
+          "statusLabel": "Use another authenticator activation method",
+          "impact": "The same authenticator may offer a PIN, or the account can use another registered authenticator. The application should not ask for biometric data.",
+          "affectedStages": ["sensor", "matcher"],
+          "requiredControls": [
+            "Offer a non-biometric user-verification method",
+            "Support more than one registered authenticator",
+            "Keep recovery independently authenticated"
+          ],
+          "recovery": "Use PIN or another authenticator, then let the user manage the unavailable authenticator after sign-in."
+        },
+        "central-verification": {
+          "status": "recoverable",
+          "statusLabel": "Fallback must bypass the failed modality",
+          "impact": "Repeatedly recapturing the same unusable modality increases exclusion and retry pressure without adding assurance.",
+          "affectedStages": ["sensor", "matcher", "rp"],
+          "requiredControls": [
+            "Provide another already-bound factor",
+            "Make accessibility support visible before lockout",
+            "Do not weaken identity proofing silently during recovery"
+          ],
+          "recovery": "Switch to the non-biometric factor and schedule re-enrollment only with the subscriber's informed participation."
+        },
+        "central-identification": {
+          "status": "manual-path",
+          "statusLabel": "No-match needs a non-biometric adjudication path",
+          "impact": "A failed search cannot establish that the person is absent from the gallery or lacks an identity. Quality and representation can both affect the result.",
+          "affectedStages": ["sensor", "gallery", "adjudication"],
+          "requiredControls": [
+            "Treat no-match as an inconclusive result",
+            "Provide a documented human or documentary path",
+            "Measure outcome and abandonment by affected group"
+          ],
+          "recovery": "Move to an independent adjudication process without repeatedly collecting unusable samples."
+        }
+      }
+    },
+    {
+      "id": "template-compromise",
+      "label": "Protected-template compromise",
+      "detail": "An attacker copies stored protected templates and lifecycle metadata.",
+      "outcomes": {
+        "local-passkey": {
+          "status": "contained",
+          "statusLabel": "No biometric template exists at the relying party",
+          "impact": "The application can rotate or remove the public-key credential without handling biometric template renewal. Local platform compromise is a separate authenticator incident.",
+          "affectedStages": ["credential", "rp"],
+          "requiredControls": [
+            "Support credential revocation and replacement",
+            "Notify users of authenticator changes",
+            "Require strong proof before binding a replacement"
+          ],
+          "recovery": "Revoke the affected credential record and register a new authenticator through an independent recovery ceremony."
+        },
+        "central-verification": {
+          "status": "high-impact",
+          "statusLabel": "Protection properties determine recoverability",
+          "impact": "Calling data a template or encrypting it does not prove irreversibility, revocability, or unlinkability. The actual scheme and keys determine the response.",
+          "affectedStages": ["matcher"],
+          "requiredControls": [
+            "Document irreversibility, revocability, and unlinkability claims",
+            "Separate template-protection and encryption keys",
+            "Test renewal before an incident"
+          ],
+          "recovery": "Disable matching with the exposed version and issue a new protected representation only if renewal is technically supported."
+        },
+        "central-identification": {
+          "status": "high-impact",
+          "statusLabel": "Gallery compromise affects every enrolled subject",
+          "impact": "Bulk templates and linkable metadata create a population-scale incident. A person cannot replace their biological characteristic like a password.",
+          "affectedStages": ["gallery", "adjudication"],
+          "requiredControls": [
+            "Minimize gallery scope and retention",
+            "Use purpose separation and query auditing",
+            "Exercise population-scale notification and renewal decisions"
+          ],
+          "recovery": "Suspend the gallery version, assess cross-system linkability, and do not claim revocation unless the deployed protection scheme supports it."
+        }
+      }
+    }
+  ]
+}

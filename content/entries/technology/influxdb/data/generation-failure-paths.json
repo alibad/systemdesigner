@@ -1,0 +1,382 @@
+{
+  "note": "The paths are conceptual boundaries derived from current InfluxData documentation, not a promise that every deployment exposes the same process topology. Verify exact behavior against the installed product and version before setting alerts, retries, retention, or recovery procedures.",
+  "generations": [
+    {
+      "id": "v2-oss",
+      "label": "InfluxDB OSS v2",
+      "detail": "Bucket-based TSM storage with Flux as the native v2 query surface and mapped InfluxQL compatibility.",
+      "querySurface": "Flux through the v2 query API; InfluxQL through the v1 compatibility endpoint after database and retention-policy mapping.",
+      "retentionContract": "Bucket retention removes expired shard groups on a periodic enforcement cycle. Older points can remain queryable until their whole shard group is deleted.",
+      "storageContract": "Line protocol writes enter a WAL and memory cache, then flush into compressed TSM files; TSI indexes measurement and tag series.",
+      "stages": [
+        {
+          "id": "v2-source",
+          "label": "Agents and applications",
+          "eyebrow": "Produce points",
+          "detail": "Telegraf or a client batches line protocol with explicit timestamps and precision.",
+          "kind": "source"
+        },
+        {
+          "id": "v2-write",
+          "label": "v2 write endpoint",
+          "eyebrow": "Authenticate and parse",
+          "detail": "The bucket and organization scope, line protocol, schema, and request limits form the admission boundary.",
+          "kind": "endpoint"
+        },
+        {
+          "id": "v2-wal",
+          "label": "WAL and cache",
+          "eyebrow": "Durable ingest edge",
+          "detail": "Accepted points are appended to the WAL and represented in the in-memory cache before TSM flush.",
+          "kind": "ingest"
+        },
+        {
+          "id": "v2-tsm",
+          "label": "TSM and TSI",
+          "eyebrow": "Store and index",
+          "detail": "TSM files hold compressed field data while TSI organizes series keys for indexed discovery.",
+          "kind": "storage"
+        },
+        {
+          "id": "v2-query",
+          "label": "Flux or mapped InfluxQL",
+          "eyebrow": "Read bounded windows",
+          "detail": "Queries combine relevant cache and TSM data, then group, aggregate, and return results.",
+          "kind": "query"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "healthy",
+          "label": "Healthy bounded flow",
+          "detail": "A batched write is accepted, persisted, flushed, and queried over a selective time window.",
+          "activeStageIds": [
+            "v2-source",
+            "v2-write",
+            "v2-wal",
+            "v2-tsm",
+            "v2-query"
+          ],
+          "outcome": "Accepted points become queryable through the cache and persisted TSM path. A bounded query reads only the required time and series.",
+          "response": "Record write errors, WAL or cache pressure, compaction work, series cardinality, query duration, and bucket age so the healthy path has measurable boundaries."
+        },
+        {
+          "id": "write-surge",
+          "label": "Sustained write surge",
+          "detail": "Arrival remains above the storage engine's measured flush and compaction capacity.",
+          "activeStageIds": [
+            "v2-source",
+            "v2-write",
+            "v2-wal",
+            "v2-tsm"
+          ],
+          "degradedStageIds": [
+            "v2-write",
+            "v2-wal",
+            "v2-tsm"
+          ],
+          "outcome": "Queues, WAL or cache pressure, compaction work, disk use, and write latency can grow. Retrying every failure immediately can amplify the incident.",
+          "response": "Batch and compress writes, bound retry queues with jitter, shed noncritical telemetry, compare accepted with attempted points, and restore sustained capacity before replay."
+        },
+        {
+          "id": "field-conflict",
+          "label": "Field type conflict",
+          "detail": "One producer changes a field from its established type inside the relevant shard.",
+          "activeStageIds": [
+            "v2-source",
+            "v2-write"
+          ],
+          "failedStageIds": [
+            "v2-write"
+          ],
+          "outcome": "The affected write is rejected or partially rejected with an explicit error instead of silently coercing the incompatible field value.",
+          "response": "Version the producer schema, parse every write response, quarantine incompatible points, and migrate to a new field or measurement when the type must change."
+        },
+        {
+          "id": "series-cardinality",
+          "label": "Series cardinality pressure",
+          "detail": "Highly variable values such as request IDs are written as indexed tags.",
+          "activeStageIds": [
+            "v2-source",
+            "v2-write",
+            "v2-wal",
+            "v2-tsm",
+            "v2-query"
+          ],
+          "degradedStageIds": [
+            "v2-tsm",
+            "v2-query"
+          ],
+          "outcome": "The number of series keys grows with the tag combinations, increasing v2 index work and making broad series discovery more expensive.",
+          "response": "Keep unique values in fields, retain only dimensions used for indexed filters and groups, measure exact series cardinality, and isolate unbounded producers."
+        },
+        {
+          "id": "retention-boundary",
+          "label": "Retention boundary surprise",
+          "detail": "A reader expects every point older than the bucket duration to disappear at the exact boundary.",
+          "activeStageIds": [
+            "v2-tsm",
+            "v2-query"
+          ],
+          "degradedStageIds": [
+            "v2-tsm"
+          ],
+          "outcome": "Expired points can remain queryable until the periodic retention service removes a shard group whose full time range is beyond retention.",
+          "response": "Design compliance expectations around documented shard-group deletion behavior, choose retention and shard duration deliberately, and test observed age after enforcement cycles."
+        }
+      ]
+    },
+    {
+      "id": "v3-core",
+      "label": "InfluxDB 3 Core",
+      "detail": "Single-server recent-data engine using Parquet, DataFusion SQL, and InfluxQL; Flux is not supported.",
+      "querySurface": "Native SQL or InfluxQL through v3 APIs, the CLI, or Flight-capable clients. Flux queries do not run in InfluxDB 3.",
+      "retentionContract": "Current Core documentation positions queries around recent data and limits a query's time range to approximately 72 hours; confirm current release behavior before choosing it for longer analytical scans.",
+      "storageContract": "Accepted line protocol is recorded in a write-ahead log and persisted as columnar Parquet files that the query engine reads with Apache Arrow and DataFusion.",
+      "stages": [
+        {
+          "id": "core-source",
+          "label": "Agents and applications",
+          "eyebrow": "Produce points",
+          "detail": "Clients batch line protocol and retain stable identities for replay and reconciliation.",
+          "kind": "source"
+        },
+        {
+          "id": "core-write",
+          "label": "v3 write API",
+          "eyebrow": "Parse and authorize",
+          "detail": "The server validates line protocol, database scope, timestamps, and schema compatibility.",
+          "kind": "endpoint"
+        },
+        {
+          "id": "core-ingest",
+          "label": "WAL and ingest buffer",
+          "eyebrow": "Protect recent writes",
+          "detail": "The write path records accepted data and makes the recent ingest edge available to queries.",
+          "kind": "ingest"
+        },
+        {
+          "id": "core-parquet",
+          "label": "Parquet files",
+          "eyebrow": "Columnar persistence",
+          "detail": "Persisted table data is encoded in Parquet and organized for bounded time-series reads.",
+          "kind": "storage"
+        },
+        {
+          "id": "core-query",
+          "label": "DataFusion query",
+          "eyebrow": "SQL or InfluxQL",
+          "detail": "The query engine combines persisted and recent data under the selected language's semantics.",
+          "kind": "query"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "healthy",
+          "label": "Healthy recent-data flow",
+          "detail": "A compatible batch is accepted and queried inside the product's documented window.",
+          "activeStageIds": [
+            "core-source",
+            "core-write",
+            "core-ingest",
+            "core-parquet",
+            "core-query"
+          ],
+          "outcome": "The write path persists compatible points and SQL or InfluxQL returns a bounded recent-data result.",
+          "response": "Pin an explicit Core version, monitor attempted and accepted writes, and exercise both the write and chosen query API in release tests."
+        },
+        {
+          "id": "schema-conflict",
+          "label": "Schema compatibility failure",
+          "detail": "A producer reuses a column name with an incompatible type or tag/field role.",
+          "activeStageIds": [
+            "core-source",
+            "core-write"
+          ],
+          "failedStageIds": [
+            "core-write"
+          ],
+          "outcome": "The incompatible point cannot cross the schema boundary. Treating the response as success creates a silent gap in the application even though the database reported the error.",
+          "response": "Validate producer schemas before deployment, parse write responses, quarantine incompatible batches, and introduce a new column or table for deliberate type changes."
+        },
+        {
+          "id": "wide-schema",
+          "label": "Wide or sparse table",
+          "detail": "One table accumulates many tags and fields that are mostly empty or rarely queried together.",
+          "activeStageIds": [
+            "core-source",
+            "core-write",
+            "core-ingest",
+            "core-parquet",
+            "core-query"
+          ],
+          "degradedStageIds": [
+            "core-parquet",
+            "core-query"
+          ],
+          "outcome": "Persisting, sorting, and selecting a wide schema consumes extra resources. In v3, this is distinct from the older rule that every high-cardinality tag is inherently a database-wide performance failure.",
+          "response": "Keep table schemas homogeneous, limit tags and fields to a coherent workload, split unrelated field families, and put frequently filtered tags first on the initial write."
+        },
+        {
+          "id": "write-pressure",
+          "label": "Sustained ingest pressure",
+          "detail": "Clients continue sending above the measured service capacity and retry without bounds.",
+          "activeStageIds": [
+            "core-source",
+            "core-write",
+            "core-ingest",
+            "core-parquet"
+          ],
+          "degradedStageIds": [
+            "core-write",
+            "core-ingest"
+          ],
+          "outcome": "Write errors, latency, buffered work, and disk pressure can rise while unbounded client retries multiply the arrival rate.",
+          "response": "Use documented batch limits, gzip, bounded exponential backoff, local queue limits, and explicit dropping or sampling policy. Reconcile accepted points before replay."
+        },
+        {
+          "id": "query-window",
+          "label": "Query window exceeds Core scope",
+          "detail": "A dashboard asks one Core query to scan a time span beyond the current documented limit.",
+          "activeStageIds": [
+            "core-parquet",
+            "core-query"
+          ],
+          "failedStageIds": [
+            "core-query"
+          ],
+          "outcome": "The query contract does not fit the current Core time-range boundary even if the SQL itself is syntactically valid.",
+          "response": "Narrow the query, materialize the required rollup, or choose a product tier and architecture whose documented compaction and query scope match the retention requirement."
+        }
+      ]
+    },
+    {
+      "id": "v3-enterprise",
+      "label": "InfluxDB 3 Enterprise",
+      "detail": "Multi-node v3 deployment with SQL and InfluxQL, object-storage persistence, compaction, and configurable retention.",
+      "querySurface": "Native SQL and InfluxQL through v3 APIs, CLI, or Flight-capable clients. Flux remains outside the InfluxDB 3 query contract.",
+      "retentionContract": "Database or table retention is enforced at query time; physical deletion happens later through periodic retention and compaction work.",
+      "storageContract": "Routers validate and distribute writes, ingesters protect recent data with a WAL, and persisted partitions live in object storage for compaction and query.",
+      "stages": [
+        {
+          "id": "enterprise-source",
+          "label": "Agents and applications",
+          "eyebrow": "Produce points",
+          "detail": "Clients batch line protocol and carry enough identity to reconcile ambiguous retries.",
+          "kind": "source"
+        },
+        {
+          "id": "enterprise-router",
+          "label": "Ingest routers",
+          "eyebrow": "Validate and route",
+          "detail": "Routers check schema compatibility, consult catalog state, and route accepted writes to ingesters.",
+          "kind": "endpoint"
+        },
+        {
+          "id": "enterprise-ingester",
+          "label": "Ingesters and WAL",
+          "eyebrow": "Recent durable edge",
+          "detail": "Ingesters retain a short-term WAL, expose recent data to queries, and persist partition files.",
+          "kind": "ingest"
+        },
+        {
+          "id": "enterprise-store",
+          "label": "Object store and compactor",
+          "eyebrow": "Durable columnar data",
+          "detail": "Parquet partitions persist in object storage and compaction rewrites files for efficient reads and lifecycle work.",
+          "kind": "storage"
+        },
+        {
+          "id": "enterprise-query",
+          "label": "Distributed query path",
+          "eyebrow": "SQL or InfluxQL",
+          "detail": "Queriers combine persisted partitions with the recent ingest edge and apply the selected query contract.",
+          "kind": "query"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "healthy",
+          "label": "Healthy clustered flow",
+          "detail": "Routers admit compatible writes, ingesters persist them, and bounded queries combine recent and durable data.",
+          "activeStageIds": [
+            "enterprise-source",
+            "enterprise-router",
+            "enterprise-ingester",
+            "enterprise-store",
+            "enterprise-query"
+          ],
+          "outcome": "The clustered path preserves accepted data through the configured durability boundary and serves both recent and compacted results.",
+          "response": "Observe router rejections, ingester health, WAL growth, object-store errors, catalog health, compaction backlog, query concurrency, and retention work as separate signals."
+        },
+        {
+          "id": "ingester-loss",
+          "label": "Ingester unavailable",
+          "detail": "An ingester fails while the cluster is accepting writes.",
+          "activeStageIds": [
+            "enterprise-source",
+            "enterprise-router",
+            "enterprise-ingester"
+          ],
+          "degradedStageIds": [
+            "enterprise-router"
+          ],
+          "failedStageIds": [
+            "enterprise-ingester"
+          ],
+          "outcome": "Availability depends on the configured cluster topology and whether routers can place the required write copies on healthy ingesters. A running router alone does not prove durability.",
+          "response": "Alert on healthy placement capacity and rejected writes, test failure during load, reconcile client acknowledgements, and restore the failed node without assuming retries are harmless."
+        },
+        {
+          "id": "retention-lag",
+          "label": "Physical retention lags",
+          "detail": "Expired data is hidden from queries before every corresponding object is physically removed.",
+          "activeStageIds": [
+            "enterprise-store",
+            "enterprise-query"
+          ],
+          "degradedStageIds": [
+            "enterprise-store"
+          ],
+          "outcome": "Query-time retention prevents expired rows from appearing, but storage consumption can fall later because deletion waits for scheduled lifecycle and compaction work.",
+          "response": "Separate the query-visibility SLO from the physical-reclamation SLO, monitor retention and compaction jobs, and budget temporary expired bytes in the storage envelope."
+        },
+        {
+          "id": "compaction-pressure",
+          "label": "Compaction falls behind",
+          "detail": "Persisted files accumulate faster than the compactor can reorganize them.",
+          "activeStageIds": [
+            "enterprise-ingester",
+            "enterprise-store",
+            "enterprise-query"
+          ],
+          "degradedStageIds": [
+            "enterprise-store",
+            "enterprise-query"
+          ],
+          "outcome": "File counts and background work can grow, increasing object-store operations and query work even though accepted data remains the correctness source.",
+          "response": "Measure backlog and file shape, reduce avoidable tiny writes, isolate query pressure, and scale or tune only from observed compactor and storage metrics."
+        },
+        {
+          "id": "wide-schema",
+          "label": "Wide schema pressure",
+          "detail": "A table mixes unrelated field families and many tags into one sparse physical shape.",
+          "activeStageIds": [
+            "enterprise-source",
+            "enterprise-router",
+            "enterprise-ingester",
+            "enterprise-store",
+            "enterprise-query"
+          ],
+          "degradedStageIds": [
+            "enterprise-router",
+            "enterprise-store",
+            "enterprise-query"
+          ],
+          "outcome": "Validation, sorting, persistence, and broad selection do more work. High tag-value cardinality alone is not the v2 TSI rule, but schema width and query shape still matter.",
+          "response": "Design homogeneous tables, bound column count, sort important tags by query priority on first write, and verify query plans against representative partitions."
+        }
+      ]
+    }
+  ]
+}

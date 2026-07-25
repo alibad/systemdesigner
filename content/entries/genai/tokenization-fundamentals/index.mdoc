@@ -1,0 +1,228 @@
+---
+registryId: tokenization-fundamentals
+---
+
+{% section-card tone="intro" %}
+## What is tokenization?
+
+**Tokenization** is the versioned process that turns text into a sequence of integer token IDs. A token can represent a word, part of a word, punctuation, whitespace, a byte sequence, or a control marker.
+
+In plain language, a model cannot read a string directly. Its tokenizer converts the string into IDs, and each ID selects one learned vector from the model's embedding table. The order of those vectors becomes the model's input sequence.
+
+### The invariant to remember
+
+**A tokenizer and a model checkpoint form one contract.** Normalization rules, vocabulary entries, token IDs, special tokens, and templates must match what the model saw during training. A valid ID from a different vocabulary can select the wrong embedding without producing an obvious error.
+
+If embeddings and next-token prediction are new, begin with [What is a Large Language Model?](/genai/llm-intro).
+
+{% metric-strip %}
+{% metric value="Text" label="User representation" detail="Unicode characters, whitespace, code, and formatting carry meaning." tone="blue" /%}
+{% metric value="IDs" label="Model interface" detail="A fixed vocabulary assigns one integer to every available token." tone="violet" /%}
+{% metric value="Offsets" label="Alignment contract" detail="Spans connect tokens back to source text for labels, highlighting, and debugging." tone="green" /%}
+{% metric value="Version" label="Release boundary" detail="Checkpoint, tokenizer files, template, and special-token map ship together." tone="amber" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card %}
+## Follow text through the tokenizer pipeline
+
+A **tokenizer pipeline** is an ordered set of transformations. Production libraries may combine or rename stages, but the responsibilities remain useful for reasoning and debugging.
+
+{% process-flow %}
+{% process-step number="1" title="Normalize text" label="Unicode policy" %}
+Preserve the input or apply a declared transformation such as NFC, NFKC, case folding, or accent handling. This step can change code points and offsets.
+{% /process-step %}
+{% process-step number="2" title="Expose boundaries" label="Pre-tokenize" %}
+Mark candidate regions such as whitespace, punctuation, digits, or raw bytes. These are candidates, not necessarily final tokens.
+{% /process-step %}
+{% process-step number="3" title="Choose vocabulary pieces" label="Segment" %}
+Apply learned BPE merge ranks, WordPiece rules, or unigram scores to select pieces that exist in the fixed vocabulary.
+{% /process-step %}
+{% process-step number="4" title="Insert model structure" label="Post-process" %}
+Add trusted beginning, ending, separator, role, or padding IDs and produce masks, type IDs, and offsets expected by the model.
+{% /process-step %}
+{% /process-flow %}
+
+The final IDs index an embedding matrix. If the vocabulary has `V` entries and each embedding has width `d`, the lookup table has shape `V x d`. Token ID `i` selects row `E[i]`; the model never receives the token spelling as a separate hint.
+
+{% callout variant="warn" %}
+Decoding IDs back into readable text is useful for inspection, but it does not prove that encode-decode preserves the original string. Normalization may intentionally remove distinctions before segmentation.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## See normalization, bytes, pieces, and offsets together
+
+**Normalization** chooses which Unicode distinctions survive before vocabulary lookup. The same visible text can have different code-point sequences: for example, `é` can be one precomposed code point or `e` followed by a combining accent. UTF-8 then represents those code points as bytes.
+
+The lab uses fixed outputs from two small teaching vocabularies. They illustrate BPE-like merge ordering and unigram-style piece selection, but they do **not** reproduce Hugging Face, SentencePiece, tiktoken, or any vendor tokenizer.
+{% /section-card %}
+
+{% interactive-block id="genai/tokenization-fundamentals-segmentation-lab" dataFile="/api/content/genai/tokenization-fundamentals/data/segmentation-pipeline.json" /%}
+
+{% section-card %}
+## Distinguish vocabulary learning from runtime segmentation
+
+A **vocabulary** is the finite map from token spellings or byte sequences to IDs. The training algorithm decides what enters that map; the runtime algorithm decides how one input is covered by those entries.
+
+{% concept-grid columns="2" %}
+{% concept-card title="BPE-style merging" eyebrow="Build frequent pairs" icon="repeat" tone="blue" %}
+Begin with small symbols, often characters or bytes, then learn ranked merges for adjacent pairs that occur frequently. At runtime, applicable merges combine symbols according to the saved rules. A larger merge vocabulary often shortens common sequences but spends capacity on the training corpus's frequent patterns.
+{% /concept-card %}
+{% concept-card title="Unigram segmentation" eyebrow="Prune a candidate vocabulary" icon="route" tone="violet" %}
+Begin with many candidate pieces, assign probabilities, and remove pieces while preserving likely segmentations. At runtime, dynamic programming finds a high-scoring path through possible pieces. Multiple valid paths can exist, which also enables subword sampling during training.
+{% /concept-card %}
+{% concept-card title="WordPiece behavior" eyebrow="Score useful additions" icon="layers" tone="green" %}
+WordPiece also builds subword units but uses its own training and continuation-marker conventions. Similar-looking token strings do not imply identical IDs, normalization, unknown-token handling, or segmentation.
+{% /concept-card %}
+{% concept-card title="Byte or unknown fallback" eyebrow="Cover rare input" icon="braces" tone="amber" %}
+Byte-backed vocabularies can represent arbitrary UTF-8 input without one global unknown token, though rare scripts may expand into many tokens. Other tokenizers may emit an unknown token when no allowed piece covers a span.
+{% /concept-card %}
+{% /concept-grid %}
+
+Vocabulary size trades embedding rows against sequence length and coverage. It does not have one universally optimal value: adding pieces can help one language or code pattern while consuming capacity that could serve another.
+
+For the full BPE training loop, continue to [BPE Algorithm Deep Dive](/genai/bpe-algorithm).
+{% /section-card %}
+
+{% section-card %}
+## Treat special tokens and boundaries as typed data
+
+A **special token** is an ID with model-level meaning, such as beginning of sequence, end of sequence, padding, masking, separators, or chat roles. It is not merely decorative text.
+
+- Insert role and control IDs through a trusted template or tokenizer API, not by concatenating user-provided strings into a serialized prompt.
+- Encode untrusted text as ordinary content. A literal string such as `<|system|>` must not gain system authority merely because it resembles a control marker.
+- Configure whether special-looking strings are allowed, rejected, or treated as ordinary text. Library defaults differ.
+- Apply an attention mask so padding IDs do not behave like content, and verify the padding side expected by the model and serving path.
+- Reserve structural tokens when checking context limits; wrappers, tool schemas, and separators consume space too.
+
+Prompt injection can still be expressed in ordinary language, so safe token handling is only one boundary. The application must also separate trusted instructions from untrusted content, restrict tools, validate arguments, and enforce authorization outside the model.
+
+### Offsets need a named unit
+
+An **offset** identifies the source span associated with a token. APIs may count UTF-8 bytes, Unicode code points, UTF-16 code units, characters in normalized text, or positions in original text. These units diverge for multibyte characters, combining marks, and emoji.
+
+Record the offset unit and whether spans refer to original or normalized text. This is essential for named-entity labels, redaction, citations, syntax highlighting, and reconstructing failures. Never compare offsets from two libraries until their units and normalization stages are aligned.
+{% /section-card %}
+
+{% section-card %}
+## Measure multilingual text and code separately
+
+A **tokenization slice** is a meaningful subset of traffic measured on its own. An average dominated by English prose can hide severe expansion for another script, source code, identifiers, or unusual whitespace.
+
+- **Multilingual text:** vocabulary allocation follows training data. Low-resource scripts may fall back to smaller pieces or bytes, increasing sequence length even when the human-visible text is short.
+- **Languages without spaces:** whitespace pre-tokenization is not a universal word boundary. Raw-sentence tokenizers can learn pieces without assuming spaces separate every semantic unit.
+- **Combining marks and compatibility characters:** normalization can improve consistency, but NFKC or case folding can erase distinctions that matter to identifiers, passwords, legal text, or code.
+- **Source code:** indentation, newlines, casing, underscores, operators, and long identifiers carry structure. A tokenizer trained mostly on prose may split them inefficiently or obscure useful boundaries.
+- **Numbers and structured text:** dates, decimals, UUIDs, JSON escapes, and log syntax need dedicated tests because tiny formatting changes can sharply change token count.
+
+Do not use a universal "four characters per token" rule for admission control. Count with the exact production tokenizer and report distributions by language and content type.
+{% /section-card %}
+
+{% section-card %}
+## Turn token count into a context and cost decision
+
+A **context window** is the maximum sequence the model can process for one request under a particular serving contract. The budget includes every input token plus the generated output allowance:
+
+`system + tools + history + retrieved evidence + user input + output reserve <= context window`
+
+The next lab uses fixture token counts and an illustrative price card. It is a planning model, not a provider quote. Change the vocabulary profile, context size, output reserve, and overflow strategy to see different operational consequences.
+{% /section-card %}
+
+{% interactive-block id="genai/tokenization-fundamentals-context-budget-lab" dataFile="/api/content/genai/tokenization-fundamentals/data/context-budget-model.json" /%}
+
+{% section-card %}
+## Choose truncation or chunking deliberately
+
+**Truncation** drops tokens to satisfy a hard limit. **Chunking** creates multiple bounded sequences. Both are information-selection policies, not neutral formatting operations.
+
+### When truncating
+
+- Protect trusted instructions, the current task, and the output reserve before optional history.
+- Decide whether removal occurs on the left, right, or by semantic priority. Right truncation can lose a conclusion; left truncation can lose initial constraints.
+- Return metadata that states what was removed. Silent truncation makes missing evidence look like model failure.
+- Test the complete post-template sequence because special tokens and tool schemas can push an apparently valid input over the limit.
+
+### When chunking
+
+- Split on document structure first, then enforce token limits with the production tokenizer.
+- Use overlap only when cross-boundary evidence needs it; overlap is duplicated input and therefore duplicated latency and cost.
+- Keep stable source offsets and document IDs so results can be traced and deduplicated.
+- Reserve space for the query, instructions, metadata, and output in every chunk request.
+- Prefer retrieval or hierarchical summarization when processing every chunk would be wasteful or would destroy global structure.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Keep tokenizer and model releases compatible
+
+**Tokenizer compatibility** means the same logical input produces the IDs, structure, masks, and boundaries the checkpoint expects. Loading successfully is not enough.
+
+Ship one immutable bundle containing:
+
+- model checkpoint and architecture revision;
+- tokenizer model or JSON, vocabulary, merge ranks or unigram scores;
+- normalizer and pre-tokenizer configuration;
+- special-token strings and exact IDs;
+- chat template, tool serialization, padding side, truncation side, and maximum length;
+- library and Unicode versions plus cryptographic hashes of every artifact.
+
+Changing an existing token's ID corrupts the meaning of its embedding row. Adding vocabulary entries requires resizing the model's embedding and output layers and training the new rows; otherwise the new IDs have untrained representations. A chat-template change can also alter token counts and role boundaries without changing the base vocabulary.
+
+### Defend the control-token boundary
+
+- Add special tokens only from trusted application state.
+- Configure tokenization so untrusted text cannot opt into special-token parsing.
+- Escape or structurally separate retrieved documents, tool output, and user content.
+- Test literal control-looking strings, malformed Unicode, bidirectional text, empty content, repeated separators, and maximum-length inputs.
+- Authorize tools from server-side identity and policy, never from a generated or user-supplied role marker.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate and version the complete contract
+
+A **tokenizer evaluation** compares a pinned candidate against a pinned baseline on representative and adversarial fixtures. Quality includes semantic coverage, alignment, sequence length, compatibility, and safe structure.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Correctness fixtures" eyebrow="Exact behavior" icon="check" tone="green" %}
+Assert token IDs, decode behavior, special-token masks, attention masks, offset units, normalization outcomes, and template fingerprints for golden inputs.
+{% /concept-card %}
+{% concept-card title="Coverage slices" eyebrow="Who pays the tokens" icon="globe" tone="blue" %}
+Track token count, bytes per token, unknown or byte-fallback rate, and truncation rate by language, script, domain, code language, and document type.
+{% /concept-card %}
+{% concept-card title="Task regressions" eyebrow="Model consequence" icon="activity" tone="violet" %}
+Run downstream quality and safety evaluations. A tokenizer can reduce sequence length while damaging labels, code completion, retrieval spans, or generation behavior.
+{% /concept-card %}
+{% concept-card title="Release evidence" eyebrow="Comparable change" icon="workflow" tone="amber" %}
+Record corpus version, tokenizer artifacts, library version, hashes, metrics, approval, and rollback target. Compare candidates on the same frozen evaluation set.
+{% /concept-card %}
+{% /concept-grid %}
+
+Review medians and tails, not only one average. A practical gate can fail a release when any protected slice exceeds its token-expansion budget, offsets stop aligning, special-token fingerprints change unexpectedly, truncation rises, or downstream task quality regresses.
+
+{% code-block file="/api/content/genai/tokenization-fundamentals/code/inspect-tokenizer-contract.py" language="python" title="Inspect IDs, special masks, and offsets from a pinned tokenizer" /%}
+{% code-block file="/api/content/genai/tokenization-fundamentals/code/compare-tokenizer-release.py" language="python" title="Gate a tokenizer candidate on protected evaluation slices" /%}
+{% /section-card %}
+
+{% section-card %}
+## Keep these mental models
+
+- Models consume token IDs because IDs index learned embedding rows; token spellings are not the model interface.
+- Normalization, byte encoding, segmentation, and special-token insertion are separate stages with separate failure modes.
+- BPE merges and unigram scores are learned from a corpus; neither produces universal linguistic boundaries.
+- Token count depends on the exact tokenizer, language, code pattern, template, and library version.
+- Truncation chooses what information disappears, while chunking duplicates boundaries and work.
+- The checkpoint, tokenizer artifacts, special-token map, and template must be tested and released as one bundle.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and official libraries
+
+- [Unicode Standard Annex #15: Unicode Normalization Forms](https://www.unicode.org/reports/tr15/) defines NFC, NFD, NFKC, and NFKD and their stability requirements.
+- [Sennrich, Haddow, and Birch: Neural Machine Translation of Rare Words with Subword Units](https://aclanthology.org/P16-1162/) introduces the influential subword BPE approach for neural machine translation.
+- [Kudo: Subword Regularization](https://aclanthology.org/P18-1007/) presents unigram language-model segmentation and sampling from multiple segmentations.
+- [Kudo and Richardson: SentencePiece](https://aclanthology.org/D18-2012/) describes language-independent training from raw sentences.
+- [Hugging Face Tokenizers documentation](https://huggingface.co/docs/tokenizers/) documents normalization, models, post-processing, IDs, and offset alignment in the official library.
+- [OpenAI tiktoken repository](https://github.com/openai/tiktoken) documents its byte-pair encoding implementation and model-specific encoding lookup.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/tokenization-fundamentals/quiz/tokenization-fundamentals-review.json" lessonSlug="tokenization-fundamentals" title="Tokenization Fundamentals Check" /%}

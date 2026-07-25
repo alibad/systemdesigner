@@ -1,0 +1,312 @@
+---
+registryId: federated-learning
+---
+
+{% section-card tone="intro" %}
+## What is federated learning?
+
+Federated learning is a way to **train a shared model across many data owners without first copying their raw examples into one training store**. A coordinator distributes a model and a round contract, selected clients train locally, and the coordinator combines bounded updates into the next global model.
+
+It matters when data is sensitive, costly to move, governed by different organizations, or created on intermittently connected devices. The design changes where computation happens, but it does not remove the coordinator, communication, evaluation, or security work.
+
+**Core invariant: raw examples remain at their source, while every update, aggregate, metric, and released model is still treated as sensitive data.** Review [data distribution shifts](/ml-systems/data-distribution-shifts) and [MLOps monitoring](/ml-systems/mlops-monitoring) if population drift and production model evidence are unfamiliar.
+
+{% callout variant="warn" %}
+Federated learning is a data-placement architecture, not a privacy guarantee. Individual updates may leak information, repeated aggregates compose privacy loss, and malicious clients can poison training.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## One training round has four owners
+
+The system advances through rounds. Each stage needs a durable identity, deadline, policy version, and observable outcome so a retry cannot silently apply an update twice or release an unevaluated model.
+
+{% process-flow %}
+{% process-step number="1" title="Select an eligible cohort" label="Coordinator" %}
+Filter by consent, software and model version, power and network policy, geography, availability, rate limits, and sampling goals.
+{% /process-step %}
+{% process-step number="2" title="Train within a client contract" label="Client" %}
+Verify the model and task, load local examples, run bounded work, clip the contribution, and report only approved metrics and update material.
+{% /process-step %}
+{% process-step number="3" title="Recover a valid aggregate" label="Aggregator" %}
+Authenticate participants, reject incompatible schemas, tolerate bounded dropout, and unmask only after the secure-aggregation survivor threshold is met.
+{% /process-step %}
+{% process-step number="4" title="Evaluate before release" label="Model owner" %}
+Check global and cohort quality, privacy accounting, integrity canaries, fairness, rollback criteria, and artifact lineage before canary deployment.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Choose cross-device or cross-silo federation deliberately
+
+Both modes move training toward data, but their identity, reliability, governance, and scale assumptions are different.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Cross-device federation" eyebrow="Many intermittent clients" icon="users" tone="cyan" %}
+Phones, browsers, vehicles, or edge devices participate briefly. The design emphasizes anonymous or pseudonymous sampling, energy and network policy, high dropout, small per-client weight, and large secure-aggregation cohorts.
+{% /concept-card %}
+{% concept-card title="Cross-silo federation" eyebrow="Few known organizations" icon="database" tone="violet" %}
+Hospitals, banks, regions, or business units train on managed infrastructure. The design emphasizes identity, contracts, schema alignment, organization-level weighting, governance, and auditable site-specific quality.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Write the federation contract before choosing an optimizer
+
+- **Unit of contribution:** one person, device, account, organization, or bounded window of records
+- **Eligibility:** consent, jurisdiction, model version, data freshness, device health, and participation frequency
+- **Round completion:** deadline, minimum survivors, maximum retries, late-update handling, and idempotency key
+- **Release unit:** per-round update, periodic checkpoint, personalized model, or site-specific artifact
+- **Ownership:** who approves client code, privacy parameters, model promotion, incident response, and deletion requests
+{% /section-card %}
+
+{% section-card %}
+## Size the round around survivors, not invitations
+
+Inviting 500 devices does not mean 500 updates will be aggregated. Some are offline, some reject the task, some fail local training, and some disappear during cryptographic unmasking.
+
+{% interactive-block id="ml-systems/federated-learning-calculator" /%}
+
+### Keep four quantities separate
+
+- `accepted = invitations x observed availability`
+- `expected survivors = accepted x (1 - dropout rate)`
+- `quorum margin = expected survivors - required survivors`
+- `round transfer = accepted downloads + survivor uploads`
+
+The lab models a compressed update as 35% of model size and uses simple link assumptions. In production, estimate distributions rather than averages: p50, p95, and deadline miss rates by device class, region, software version, and network type.
+
+{% callout variant="tip" %}
+More invitations improve the chance of clearing quorum, but they also increase transfer, energy use, selection bias, and privacy exposure. Oversampling is not a free reliability control.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Client selection determines whose objective is optimized
+
+Availability is rarely random. Devices that are charging on fast networks at night, organizations with larger clusters, or clients that tolerate repeated participation can dominate the training population.
+
+### Measure selection as a funnel
+
+1. Count eligible clients by relevant cohort before sampling.
+2. Record invitations, acceptances, successful downloads, completed local jobs, survivors, and accepted updates.
+3. Compare each stage with the target population, not only with the previous stage.
+4. Limit repeated participation so a small reliable subset cannot silently become the training distribution.
+5. Reweight only from documented inclusion probabilities; do not invent weights to force a preferred outcome.
+
+### Treat these as release risks
+
+- A language, region, device tier, hospital, or customer segment is rarely eligible.
+- High-value but resource-constrained clients time out more often than the average.
+- One organization supplies most examples or claims an unbounded sample count.
+- Participation incentives change behavior or encourage fabricated clients.
+- Consent withdrawal and deletion requirements cannot be traced to release lineage.
+{% /section-card %}
+
+{% section-card %}
+## Aggregation is an optimization and trust decision
+
+Federated averaging weights bounded client updates and applies their aggregate to the global model. Its behavior depends on heterogeneous data, unequal local work, stale clients, clipping, and the trustworthiness of reported weights.
+
+{% concept-grid %}
+{% concept-card title="FedAvg" eyebrow="Baseline" icon="scale" tone="blue" %}
+Average client deltas, commonly by bounded local sample count. It is simple and communication-efficient, but local objectives can drift apart on non-IID data.
+{% /concept-card %}
+{% concept-card title="FedProx" eyebrow="Heterogeneous work" icon="lock" tone="violet" %}
+Add a proximal term to each local objective so a client is penalized for moving too far from the current global model.
+{% /concept-card %}
+{% concept-card title="SCAFFOLD" eyebrow="Drift correction" icon="repeat" tone="green" %}
+Maintain control variates that correct client and server update directions. This can reduce drift but adds client state and communication.
+{% /concept-card %}
+{% concept-card title="Personalized federation" eyebrow="Different optima" icon="users" tone="amber" %}
+Share a representation or initialization while retaining local heads, adapters, normalization, or fine-tuning when one global optimum is not appropriate.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Bound influence before averaging
+
+- Validate model schema, tensor shape, finite values, round ID, and base-model version.
+- Clip each contribution to a declared norm or coordinate bound before aggregation.
+- Cap sample-count weights or derive them from trusted metadata instead of client claims.
+- Reject late and duplicate updates with round-scoped idempotency keys.
+- Record clipping and rejection rates by cohort; a rising rate can indicate drift, bugs, or attack traffic.
+
+{% code-block file="/api/content/ml-systems/federated-learning/code/aggregate-clipped-updates.py" language="python" title="Clip, bound, and aggregate one federated round" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Build privacy from a specific threat model
+
+The phrase “data stays local” says nothing about who can observe an update, how many releases an attacker sees, whether a client is malicious, or what happens when participants disappear. Choose controls for an explicit attacker and release path.
+
+{% interactive-block id="ml-systems/federated-learning-privacy-lab" dataFile="/api/content/ml-systems/federated-learning/data/privacy-threat-model.json" /%}
+
+### Define the protected unit
+
+- **Example-level privacy:** neighboring datasets differ by one record.
+- **User-level privacy:** neighboring datasets differ by all records from one person or device.
+- **Organization-level privacy:** neighboring datasets differ by one participating institution.
+- **Round or release scope:** state whether accounting applies to one aggregate, a model checkpoint, all training rounds, or the full product lifetime.
+
+User-level and organization-level guarantees usually require stronger clipping and more noise than example-level guarantees. Publish the adjacency definition with the accountant output; epsilon without that context is incomplete.
+{% /section-card %}
+
+{% section-card %}
+## Layer controls because they protect different boundaries
+
+{% concept-grid %}
+{% concept-card title="Authenticated transport" eyebrow="Network boundary" icon="lock" tone="blue" %}
+Encrypt and authenticate client-coordinator traffic, bind messages to a round and model version, rotate credentials, and prevent replay. Transport alone does not hide updates from the coordinator.
+{% /concept-card %}
+{% concept-card title="Secure aggregation" eyebrow="Coordinator visibility" icon="shield" tone="violet" %}
+Recover only a threshold aggregate while masking individual surviving updates. Define setup, dropout recovery, abort, and transcript-retention behavior.
+{% /concept-card %}
+{% concept-card title="Differential privacy" eyebrow="Released information" icon="chart" tone="green" %}
+Clip contributions, add calibrated noise, and compose privacy loss with a trusted accountant. It bounds leakage; it does not authenticate clients or stop poisoning.
+{% /concept-card %}
+{% concept-card title="Integrity controls" eyebrow="Malicious participation" icon="target" tone="amber" %}
+Use eligibility, identity or attestation, rate limits, bounded influence, aggregate anomaly checks, poisoning canaries, staged release, and rollback.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Resolve control interactions before launch
+
+- Secure aggregation hides individual updates, which can conflict with server-side anomaly inspection.
+- Differential privacy noise may reduce sensitivity to small regressions and minority-slice failures.
+- A high survivor threshold improves the anonymity set but increases abort risk under dropout.
+- Robust aggregation assumptions can fail when honest updates are naturally diverse.
+- Trusted execution and attestation introduce new hardware, key-management, and supply-chain dependencies.
+{% /section-card %}
+
+{% section-card %}
+## Design the coordinator as a recoverable state machine
+
+Do not represent a round as one long request. Persist transitions so coordinator restarts, duplicate messages, and late clients have deterministic outcomes.
+
+{% system-flow title="A releaseable round has durable evidence" caption="Only a validated aggregate advances to canary release; failed rounds close without reusing ambiguous material." %}
+{% system-node title="Round manifest" eyebrow="Frozen contract" icon="database" tone="blue" %}
+Stores model hash, client-code version, eligibility and sampling policy, deadlines, clipping, quorum, privacy, and metric contracts.
+{% /system-node %}
+{% system-node title="Threshold aggregate" eyebrow="Bounded input" icon="layers" tone="violet" %}
+Accepts one valid contribution per participant and either produces an aggregate after quorum or records a typed abort.
+{% /system-node %}
+{% system-node title="Evaluation bundle" eyebrow="Independent gates" icon="shield" tone="amber" %}
+Joins global and cohort quality, integrity probes, privacy-accountant output, participation health, lineage, and policy checks.
+{% /system-node %}
+{% system-node title="Canary model" eyebrow="Reversible release" icon="check" tone="green" %}
+Promotes an immutable artifact through shadow and canary stages with rollback triggers and no mutation of prior evidence.
+{% /system-node %}
+{% /system-flow %}
+
+### Make every retry idempotent
+
+- Give the round, participant lease, update, aggregate, evaluation bundle, and release unique stable IDs.
+- Bind updates to the exact base-model hash and reject stale or future versions.
+- Keep accepted, rejected, duplicate, late, dropped, and unmasked states distinct.
+- Never carry masked material or privacy-accountant state into a replacement round without protocol approval.
+- Record whether a failed release consumed privacy budget; the answer depends on what was exposed, not whether promotion succeeded.
+{% /section-card %}
+
+{% section-card %}
+## Expect failure at the tails
+
+### Client failures
+
+- Insufficient storage, memory, battery, accelerator support, or local examples
+- Interrupted download, training, checkpoint, or upload
+- Corrupt local state, incompatible schema, non-finite update, or wrong model version
+- Clock skew, duplicated work, expired lease, or update after deadline
+
+### Coordinator and protocol failures
+
+- Too few survivors to unmask a secure aggregate
+- Key setup or dropout-recovery failure
+- Aggregator restart after accepting some contributions
+- Evaluation service unavailable after a privacy-consuming release
+- Model registry accepts an artifact before every gate is durable
+
+### Recovery rules
+
+1. Close the failed round with a typed terminal reason.
+2. Preserve immutable evidence needed for audit and incident analysis.
+3. Start a new round ID and resample clients under the current eligibility policy.
+4. Reuse no client update unless the protocol, consent, and privacy accounting explicitly permit it.
+5. Alert on repeated aborts by cohort because reliability failure can create selection bias.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the model, fleet, privacy, and integrity together
+
+One global validation score cannot prove that a federated release is useful or safe.
+
+{% concept-grid %}
+{% concept-card title="Model quality" eyebrow="Does it learn?" icon="chart" tone="blue" %}
+Track task metrics, calibration, convergence, update norms, and comparison with centralized, local-only, and previous-global baselines.
+{% /concept-card %}
+{% concept-card title="Population quality" eyebrow="Who benefits?" icon="users" tone="cyan" %}
+Measure worst-slice and per-site quality, participation funnel, selection weights, personalization gains, and regressions for underrepresented cohorts.
+{% /concept-card %}
+{% concept-card title="Privacy evidence" eyebrow="What leaked?" icon="lock" tone="violet" %}
+Record clipping distribution, noise parameters, sampling assumptions, adjacency, delta, cumulative accountant output, and empirical inference tests.
+{% /concept-card %}
+{% concept-card title="Integrity evidence" eyebrow="Can it be manipulated?" icon="shield" tone="amber" %}
+Run poisoning and backdoor canaries, contribution-bound checks, Sybil simulations, aggregate anomaly tests, and rollback exercises.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/ml-systems/federated-learning/code/gate-federated-release.py" language="python" title="Block release when independent federated gates fail" /%}
+
+{% callout variant="warn" %}
+The release-gate example consumes privacy-accountant output; it does not calculate epsilon. Use a reviewed accountant that matches the actual sampling and mechanism instead of a hand-written approximation.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate federation as a long-lived product boundary
+
+### Before each round
+
+- Freeze and sign the model, client code, manifest, eligibility policy, privacy parameters, and evaluation contract.
+- Confirm remaining privacy budget, minimum cohort size, regional capacity, rollback target, and on-call ownership.
+- Test key distribution, secure-aggregation dropout recovery, duplicate handling, and coordinator failover.
+
+### During each round
+
+- Monitor the participation funnel, deadline distribution, survivor margin, bytes transferred, energy policy, and abort reasons.
+- Track update schema failures, clipping, bounded weight, aggregate direction, and integrity canaries without exposing prohibited individual data.
+- Apply backpressure to invitations and aggregation rather than allowing unbounded in-flight rounds.
+
+### Before release
+
+- Require immutable global and cohort evaluation, privacy accounting, integrity probes, lineage, and policy approval.
+- Compare with the previous global model and local-only baselines under the same evaluation protocol.
+- Use shadow and canary rollout with client-version compatibility checks and explicit abort signals.
+
+### After release
+
+- Monitor serving quality and participation drift by cohort, not only aggregate traffic.
+- Retain only protocol-approved artifacts for the declared period and test deletion workflows.
+- Rehearse rollback, key compromise, poisoned-round investigation, accountant correction, and coordinator-region loss.
+{% /section-card %}
+
+{% section-card %}
+## Use federation only when its boundary solves the real constraint
+
+Federation adds orchestration, cryptography, unreliable participants, biased sampling, privacy accounting, and distributed evaluation. Prefer a simpler design when data can be governed and moved safely or when the client population is too small to support the intended guarantee.
+
+### Strong fit
+
+- Raw data cannot or should not leave devices or organizations, but a shared objective is legitimate.
+- Enough eligible participants can clear quorum without excluding important populations.
+- Client compute, networking, consent, and software update channels can support repeated rounds.
+- The organization can operate privacy, security, evaluation, and incident-response controls for the system lifetime.
+
+### Weak fit
+
+- A centralized de-identified dataset already satisfies policy and produces better auditability.
+- Participants have incompatible labels, schemas, objectives, or legal authority to collaborate.
+- The global model harms important sites that actually need local or multi-task models.
+- The privacy claim depends only on raw data staying local.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/federated-learning/quiz/federated-learning.json" lessonSlug="federated-learning" title="Federated Learning Systems Review" /%}

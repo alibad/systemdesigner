@@ -1,0 +1,123 @@
+{
+  "title": "Trace the query path under pressure",
+  "description": "Select a production scenario, follow the active path, and inspect each component. The result separates failures that need more capacity from failures that need a safer fallback or fresher data.",
+  "nodes": [
+    {
+      "id": "gateway",
+      "label": "Search gateway",
+      "eyebrow": "Deadline owner",
+      "detail": "Authenticates the request, assigns one end-to-end deadline, and records the query, treatment, locale, filters, and trace identifier.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "understanding",
+      "label": "Query understanding",
+      "eyebrow": "Intent and filters",
+      "detail": "Normalizes text, extracts entities and hard filters, chooses retrieval routes, and preserves the original query for observability.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 28,
+      "y": 50
+    },
+    {
+      "id": "lexical",
+      "label": "Lexical index",
+      "eyebrow": "Exact evidence",
+      "detail": "Uses terms, fields, phrase matches, and filters to retrieve exact names, identifiers, and rare words with explainable scores.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 50,
+      "y": 20
+    },
+    {
+      "id": "semantic",
+      "label": "Vector index",
+      "eyebrow": "Semantic evidence",
+      "detail": "Uses approximate nearest-neighbor search to find conceptually related items. Recall depends on the embedding, index parameters, filters, and candidate depth.",
+      "kind": "database",
+      "tone": "green",
+      "x": 50,
+      "y": 80
+    },
+    {
+      "id": "fusion",
+      "label": "Fusion service",
+      "eyebrow": "Candidate contract",
+      "detail": "Deduplicates lexical and semantic candidates, combines rank evidence, and emits a bounded set with source ranks and feature versions attached.",
+      "kind": "allocator",
+      "tone": "amber",
+      "x": 70,
+      "y": 50
+    },
+    {
+      "id": "reranker",
+      "label": "Learned reranker",
+      "eyebrow": "Expensive precision",
+      "detail": "Scores only the bounded candidate set with richer query-document features. It must honor a strict timeout and return a deterministic fallback order.",
+      "kind": "analytics",
+      "tone": "rose",
+      "x": 87,
+      "y": 24
+    },
+    {
+      "id": "assembler",
+      "label": "Result assembler",
+      "eyebrow": "Policy and response",
+      "detail": "Applies permissions, availability, diversity, and deduplication; creates snippets; logs exposures; and returns the final page before the deadline.",
+      "kind": "service",
+      "tone": "neutral",
+      "x": 88,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "gateway-understanding", "from": "gateway", "to": "understanding", "label": "query + deadline" },
+    { "id": "understanding-lexical", "from": "understanding", "to": "lexical", "label": "terms + filters" },
+    { "id": "understanding-semantic", "from": "understanding", "to": "semantic", "label": "embedding + filters" },
+    { "id": "lexical-fusion", "from": "lexical", "to": "fusion", "label": "ranked candidates" },
+    { "id": "semantic-fusion", "from": "semantic", "to": "fusion", "label": "nearest neighbors" },
+    { "id": "fusion-reranker", "from": "fusion", "to": "reranker", "label": "bounded feature set" },
+    { "id": "reranker-assembler", "from": "reranker", "to": "assembler", "label": "final scores" },
+    { "id": "fusion-assembler", "from": "fusion", "to": "assembler", "label": "fallback order", "via": { "x": 77, "y": 72 } }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-hybrid",
+      "label": "Healthy hybrid",
+      "summary": "Lexical and semantic retrieval finish inside their child deadlines, fusion preserves evidence from both, and the reranker returns before the response budget expires.",
+      "activeEdges": ["gateway-understanding", "understanding-lexical", "understanding-semantic", "lexical-fusion", "semantic-fusion", "fusion-reranker", "reranker-assembler"],
+      "focusNode": "fusion",
+      "result": "Return the reranked page and log source ranks, model versions, timing, and exposure. This trace is the baseline for quality and latency comparisons."
+    },
+    {
+      "id": "ann-degraded",
+      "label": "ANN degraded",
+      "summary": "The vector index exceeds its child deadline during a memory-pressure event. Lexical retrieval remains healthy and still provides exact-match candidates.",
+      "activeEdges": ["gateway-understanding", "understanding-lexical", "understanding-semantic", "lexical-fusion", "fusion-reranker", "reranker-assembler"],
+      "degradedNodes": ["semantic"],
+      "focusNode": "semantic",
+      "result": "Stop waiting at the vector deadline, mark semantic retrieval as missing, and continue with lexical candidates. Alert on semantic timeout rate and measure quality by query slice before restoring traffic."
+    },
+    {
+      "id": "reranker-timeout",
+      "label": "Reranker timeout",
+      "summary": "Both retrievers return useful candidates, but the learned reranker is slow after a model deployment and cannot finish inside its assigned budget.",
+      "activeEdges": ["gateway-understanding", "understanding-lexical", "understanding-semantic", "lexical-fusion", "semantic-fusion", "fusion-reranker", "fusion-assembler"],
+      "failedNodes": ["reranker"],
+      "focusNode": "reranker",
+      "result": "Return the deterministic fused order instead of an error or an empty page. Roll back or shed reranker traffic using model-version latency and timeout evidence."
+    },
+    {
+      "id": "indexing-lag",
+      "label": "Indexing lag",
+      "summary": "Serving is fast, but the lexical and vector indexes contain different document versions after an ingestion backlog. Available items can disappear and deleted items can reappear.",
+      "activeEdges": ["gateway-understanding", "understanding-lexical", "understanding-semantic", "lexical-fusion", "semantic-fusion", "fusion-reranker", "reranker-assembler"],
+      "degradedNodes": ["lexical", "semantic", "fusion"],
+      "focusNode": "fusion",
+      "result": "Fail closed on permissions and deletion state, expose index-version skew and freshness lag, and repair or replay the ingestion pipeline. Query replicas do not solve stale indexes."
+    }
+  ]
+}

@@ -1,0 +1,269 @@
+---
+registryId: pgvector
+---
+
+{% section-card tone="intro" %}
+## What is pgvector?
+
+pgvector is an open-source PostgreSQL extension that adds vector data types, distance
+operators, exact nearest-neighbor search, and HNSW or IVFFlat approximate indexes. It
+lets an application store embeddings beside relational identifiers, tenant ownership,
+permissions, timestamps, source versions, and ordinary searchable columns.
+
+An embedding is a numeric representation produced by a specific model and preprocessing
+contract. Nearby vectors may represent semantically similar inputs, but distance is not
+a universal meaning: the model, normalization, distance function, data distribution,
+and evaluation set determine whether a neighbor is useful.
+
+The core invariant is: **compare only compatible embeddings and measure approximate
+results against exact search**. PostgreSQL transactions and recovery protect stored
+rows; they do not make mixed embedding models comparable or guarantee that an
+approximate, filtered query returns enough relevant results.
+{% /section-card %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Vector value" eyebrow="Representation" icon="braces" tone="blue" %}
+`vector` stores single-precision values, while `halfvec`, `bit`, and `sparsevec` support
+other size and similarity trade-offs in current pgvector releases.
+{% /concept-card %}
+{% concept-card title="Distance operator" eyebrow="Ranking" icon="route" tone="cyan" %}
+Use the operator class that matches L2, inner product, cosine, L1, Hamming, or Jaccard
+semantics and the stored representation.
+{% /concept-card %}
+{% concept-card title="Approximate index" eyebrow="Candidate retrieval" icon="layers" tone="violet" %}
+HNSW and IVFFlat reduce search work by examining a candidate subset, trading recall,
+memory, build cost, and write maintenance for speed.
+{% /concept-card %}
+{% concept-card title="Relational predicate" eyebrow="Business scope" icon="filter" tone="green" %}
+Tenant, authorization, category, freshness, model version, and lifecycle filters remain
+ordinary PostgreSQL data contracts around the vector search.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="blue" %}
+## Build one versioned search row
+
+Do not store a vector without the evidence needed to decide whether it is searchable.
+At minimum, retain the source object's stable identity, tenant or policy scope,
+embedding version, content version, timestamps, and the original or reconstructable
+text reference.
+
+{% system-flow title="One embedding publication" caption="The vector becomes searchable only after source identity, model compatibility, policy scope, and database commit agree." %}
+{% system-node title="Source object" eyebrow="Business truth" icon="file" tone="blue" %}
+Identify the document, chunk, image, product, or event and the exact source version that
+produced the representation.
+{% /system-node %}
+{% system-node title="Embedding contract" eyebrow="Model truth" icon="cpu" tone="violet" %}
+Record model, preprocessing, dimensions, normalization, tokenizer or chunker, and
+generation timestamp.
+{% /system-node %}
+{% system-node title="PostgreSQL row" eyebrow="Transactional state" icon="database" tone="cyan" %}
+Write relational metadata and vector under one transaction or an explicit staged
+publication protocol.
+{% /system-node %}
+{% system-node title="Search policy" eyebrow="Read boundary" icon="shield" tone="green" %}
+Filter by tenant, authorization, lifecycle, freshness, and compatible embedding version
+before treating neighbors as candidates.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep model rollouts reversible
+
+- Add a new embedding version beside the old one or in a separately addressable table
+  or partition.
+- Backfill from stable source versions and track coverage, failures, and stale sources.
+- Evaluate old and new versions on the same labeled and production-sampled queries.
+- Switch read policy only after quality, latency, coverage, and rollback gates pass.
+- Remove old embeddings only after every reader and recovery path stops referencing
+  them.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Start with exact search as the correctness baseline
+
+Without an approximate index, PostgreSQL can order compatible rows by distance and
+return exact nearest neighbors. Exact search is often sufficient for small or strongly
+filtered sets and remains the reference used to measure ANN recall.
+
+{% concept-grid columns="3" %}
+{% concept-card title="L2 distance" eyebrow="<->" icon="move" tone="blue" %}
+Use Euclidean distance when the model and evaluation contract interpret geometric
+distance directly.
+{% /concept-card %}
+{% concept-card title="Cosine distance" eyebrow="<=>" icon="circle" tone="cyan" %}
+Use cosine distance for directional similarity. Zero vectors are not indexed for cosine
+distance and normalization choices must stay consistent.
+{% /concept-card %}
+{% concept-card title="Negative inner product" eyebrow="<#>" icon="minus" tone="violet" %}
+Use inner product when the embedding model supports it. For unit-normalized vectors,
+the pgvector guide notes inner product can be fastest for exact search.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Make the planner-visible query shape canonical
+
+- Include `ORDER BY` on the raw distance operator and `LIMIT`; wrapping the expression
+  in a different sort expression can prevent the intended index path.
+- Run `EXPLAIN (ANALYZE, BUFFERS)` with representative parameters, cache states, tenant
+  sizes, and result counts.
+- Keep a controlled exact-search path by disabling index scans inside a transaction for
+  offline recall evaluation.
+- Measure relevance, result count, latency, rows visited, buffers, temporary I/O, and
+  plan changes together.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose HNSW or IVFFlat from measured trade-offs
+
+HNSW builds a multilayer graph. It generally offers a stronger speed-recall trade-off
+than IVFFlat, but uses more memory and has slower builds and inserts. IVFFlat clusters
+vectors into lists and probes selected lists; it builds faster and uses less memory but
+needs representative data for training and careful list/probe tuning.
+
+{% concept-grid columns="3" %}
+{% concept-card title="HNSW" eyebrow="Graph search" icon="share" tone="violet" %}
+Tune `m` and `ef_construction` for build shape, then `hnsw.ef_search` for query candidate
+breadth. Higher values can improve recall while increasing work.
+{% /concept-card %}
+{% concept-card title="IVFFlat" eyebrow="Clustered lists" icon="grid" tone="cyan" %}
+Build after the table has representative data. Tune list count during index creation
+and probe count per query; too many lists on too little data can harm results.
+{% /concept-card %}
+{% concept-card title="Exact scan" eyebrow="Ground truth" icon="check" tone="blue" %}
+Keep no ANN index for bounded datasets or selective predicates, and use exact results to
+measure the quality of every approximate release.
+{% /concept-card %}
+{% /concept-grid %}
+
+The lab exposes exact vector payload arithmetic and makes index size and recall explicit
+benchmark assumptions. Filter selectivity is modeled separately because pgvector ANN
+filters are applied after the index produces candidates.
+
+{% interactive-block id="technology/pgvector-performance" dataFile="/api/content/technology/pgvector/data/index-planner.json" /%}
+
+{% code-block file="/api/content/technology/pgvector/code/estimate-vector-footprint.py" language="python" title="Estimate vector payload and filtered candidate demand" /%}
+
+The current [pgvector project guide](https://github.com/pgvector/pgvector#readme)
+documents index parameters, supported types, dimension limits, iterative scans, build
+progress, and tuning recommendations for the deployed release.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design filtered nearest-neighbor queries deliberately
+
+With an approximate index, PostgreSQL scans vector candidates and then applies ordinary
+filters. If a tenant or category matches 5% of rows and the initial scan visits 40
+candidates, only about two matching rows are expected before iterative expansion.
+
+{% process-flow %}
+{% process-step number="1" title="Apply exact predicates" label="Business scope" %}
+Filter tenant, authorization, model version, lifecycle, and other mandatory conditions
+inside the search query.
+{% /process-step %}
+{% process-step number="2" title="Retrieve candidates" label="ANN budget" %}
+Use HNSW `ef_search` or IVFFlat probes to control initial work. The two parameters have
+different meanings and need separate benchmarks.
+{% /process-step %}
+{% process-step number="3" title="Expand if underfilled" label="Iterative scan" %}
+Enable strict or relaxed iterative scans and set bounded scan limits when post-filtering
+does not produce enough rows.
+{% /process-step %}
+{% process-step number="4" title="Rerank and gate" label="Final decision" %}
+Optionally rerank a bounded candidate set with full vectors, lexical features, or a
+cross-encoder, then apply thresholds and policy before returning results.
+{% /process-step %}
+{% /process-flow %}
+
+### Match relational indexing to selectivity
+
+- Add B-tree, GIN, GiST, BRIN, hash, or multicolumn indexes for exact predicates when
+  they improve the complete plan.
+- Use a partial vector index for a few stable values with enough data per index.
+- Consider table partitioning when many stable values need independent placement and
+  lifecycle, but include partition count and cross-partition search cost.
+- Measure underfilled result sets as a correctness failure, not only a latency metric.
+- Bound iterative scan tuples, probes, memory, total statement time, and result count.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Observe model, replica, and filtered-search failure
+
+pgvector inherits PostgreSQL WAL, replication, backup, point-in-time recovery, MVCC,
+roles, and row-level policy. That is useful operational leverage, but a lagging replica
+can still serve an older search universe and a mixed-model table can still rank
+incompatible vectors.
+
+{% interactive-block id="technology/pgvector-correctness-lab" dataFile="/api/content/technology/pgvector/data/correctness-incidents.json" /%}
+
+{% code-block file="/api/content/technology/pgvector/code/production-search.sql" language="sql" title="Create a versioned HNSW search path with bounded iterative scans" /%}
+
+### Rehearse the complete failure path
+
+- Query while a new embedding version is partially backfilled and verify version
+  predicates prevent mixed-space ranking.
+- Pause replica replay, write new and deleted content, and verify freshness-sensitive
+  search routes or rejects according to the lag budget.
+- Add a selective tenant/category filter and confirm iterative scan returns enough rows
+  without violating statement-time or scan limits.
+- Kill an index build, cancel a concurrent rebuild, and observe locks, WAL, disk,
+  maintenance memory, and the old index's availability.
+- Restore PostgreSQL to a point in time and verify vectors, relational metadata, source
+  versions, and application caches agree.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Load, build, and maintain indexes as PostgreSQL state
+
+Vector columns and indexes participate in ordinary database storage, WAL, vacuum,
+replication, and planner behavior. Large ANN indexes can increase memory pressure, index
+build time, WAL volume, replica lag, backups, and maintenance windows.
+
+{% metric-strip %}
+{% metric label="Payload" value="rows x (bytes/dimension + header)" detail="vector uses 4 bytes/dimension; halfvec uses 2" tone="blue" /%}
+{% metric label="Index" value="measured graph or list bytes" detail="Record build parameters and data version" tone="violet" /%}
+{% metric label="Build" value="time + memory + WAL + locks" detail="Use concurrent builds where write availability requires them" tone="amber" /%}
+{% metric label="Query" value="latency + recall + rows + buffers" detail="Slice by filter, tenant, model version, and cache state" tone="cyan" /%}
+{% /metric-strip %}
+
+### Keep ingestion and maintenance bounded
+
+- Use binary `COPY` or measured bulk inserts for initial loads and build ANN indexes
+  after representative data is present.
+- Create production replacement indexes concurrently and preserve enough disk, WAL,
+  memory, and time for both old and new copies.
+- Size `maintenance_work_mem` from host and concurrent maintenance capacity; HNSW build
+  speed changes when the graph no longer fits.
+- Track dead tuples, autovacuum, analyze, table and index bloat, checkpoints, WAL,
+  replica lag, and index usage.
+- Reindex and vacuum HNSW according to measured maintenance behavior and the deployed
+  pgvector/PostgreSQL versions.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Secure and operate search as a relational data product
+
+Keeping vectors beside relational policy enables one transactional and authorization
+boundary, but only if every query includes that boundary and database roles cannot
+bypass it unintentionally.
+
+### Production review checklist
+
+- Enforce tenant and authorization filters in reviewed SQL, views, row-level security,
+  or a tested combination that applies before results leave PostgreSQL.
+- Do not expose raw embeddings, source text, distances, or neighbor identities across
+  tenant boundaries through logs, traces, caches, or debugging endpoints.
+- Version extension, PostgreSQL, client, embedding model, schema, index parameters, and
+  query policy together.
+- Monitor p50/p95/p99 latency, statement timeout, rows visited, buffers, index usage,
+  exact-vs-ANN recall, underfilled queries, empty queries, and relevance feedback.
+- Track insert/update/delete rate, backfill coverage, stale embeddings, index growth,
+  WAL, backup duration, replica lag, vacuum, and rebuild progress.
+- Load-test primary and replica failure, failover, cache cold start, index rebuild,
+  selective filters, hot tenants, and model rollback.
+
+The design question is not “Can PostgreSQL store embeddings?” It is “Can one database
+preserve model compatibility, relational policy, recoverability, and measured search
+quality as the vector working set and query mix change?”
+{% /section-card %}
+
+{% quiz quizId="pgvector" lessonSlug="pgvector" title="pgvector Production Design Review" questionsFile="/api/content/technology/pgvector/quiz/pgvector-production-design.json" /%}

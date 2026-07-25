@@ -1,0 +1,314 @@
+---
+registryId: practice-text-to-video
+---
+
+{% section-card tone="intro" %}
+## What is a text-to-video generation system?
+
+A text-to-video system converts a prompt and optional reference media into a playable sequence of frames. Unlike text-to-image generation, it must preserve the same subjects, scene state, camera intent, and safety decision as time advances.
+
+The core invariant is **timeline coherence**: each shot may change because the prompt asks it to, but it must not drift accidentally. This lesson designs a production service for 5-60 second clips, from request admission through generation, validation, and delivery.
+
+- **Prerequisite:** Review [text-to-image generation](/practice/text-to-image) if diffusion, latent representations, or conditioning are unfamiliar.
+- **Design target:** Serve 10,000 jobs per day, deliver an initial preview quickly, and protect quality and safety even when accelerators are saturated.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Plan before rendering" eyebrow="Control" icon="clapperboard" tone="blue" %}
+Turn the prompt into shots, entities, motion, and camera constraints before spending most of the compute budget.
+{% /concept-card %}
+{% concept-card title="Anchor across time" eyebrow="Coherence" icon="link" tone="violet" %}
+Carry identity and scene state through overlapping temporal windows instead of generating unrelated frames.
+{% /concept-card %}
+{% concept-card title="Validate the sequence" eyebrow="Release" icon="shield-check" tone="green" %}
+Inspect motion, prompt adherence, identity, and policy across transitions before publishing the encoded asset.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Define the first product narrowly
+
+Start with creator-generated clips rather than a complete video editor. A request contains a prompt, an aspect ratio, a duration, and optional reference images. The service returns a low-resolution preview followed by a final encoded clip after the user approves the direction.
+
+**Functional requirements**
+
+- Generate 5-60 second clips from text prompts.
+- Accept reference images for subject identity and visual style.
+- Expose bounded controls for aspect ratio, camera motion, seed, and shot duration.
+- Let users cancel, retry, or approve a preview for final rendering.
+- Preserve job history and downloadable assets for a defined retention period.
+
+**Non-functional requirements**
+
+- Keep preview queue time below 30 seconds at p95 for paid users.
+- Finish a 10-second 720p preview within 90 seconds at p95.
+- Keep accepted final jobs durable across worker loss and regional failover.
+- Isolate uploaded references and generated assets by tenant.
+- Fail closed when a prompt, frame, transition, or identity policy is uncertain.
+
+### State the exclusions
+
+- No frame-level timeline editor in the first release.
+- No photorealistic public-figure generation or unverified face cloning.
+- No promise that a 60-second clip is one uninterrupted generative pass.
+- No synchronous wait on the API connection; generation is an asynchronous job.
+
+### Ask questions that change the design
+
+1. **Is the clip one shot or several?** Multi-shot narratives require a storyboard and shared entity memory.
+2. **How exact must motion be?** Cinematic presets are cheaper to validate than arbitrary trajectories.
+3. **Which references are permitted?** Identity use, copyright, retention, and deletion policies affect every storage boundary.
+4. **What is the failure contract?** The system should retry a bounded temporal window, not silently restart a paid job or publish a partial asset.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Size Media, Compute, and Queue Capacity" %}
+
+
+### Convert video demand into accelerator work
+
+Capacity planning starts with generated seconds, not request count. A 60-second 1080p job can consume much more compute and storage than a 5-second 480p job.
+
+Use an interview baseline:
+
+- 10,000 submitted jobs per day with a 2.5x peak-hour factor.
+- 18 seconds average requested duration.
+- 60% of previews are approved for final rendering.
+- One accelerator handles one generation job at a time.
+- Keep 25% capacity headroom for retries, fragmentation, and worker loss.
+
+{% metric-strip %}
+{% metric value="10K/day" label="Submitted jobs" detail="Admission and priority queues smooth a bursty workload." tone="blue" /%}
+{% metric value="60%" label="Preview approval" detail="Do not pay final-render cost for abandoned directions." tone="violet" /%}
+{% metric value="270 GB/day" label="Baseline output" detail="For the stated 18-second, 720p, 60%-approval baseline." tone="cyan" /%}
+{% metric value="25%" label="Capacity headroom" detail="Reserved for retries, failures, and placement gaps." tone="green" /%}
+{% /metric-strip %}
+
+### Explore the capacity decision
+
+{% interactive-block id="practice/text-to-video-capacity-lab" /%}
+
+The important design move is to separate cheap direction-finding from expensive final rendering. Preview-first saves compute only when a meaningful fraction of previews are rejected; it also creates a durable approval boundary that protects users from paying for the wrong result.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the Generation Architecture and Model Tiers" %}
+
+
+### Keep orchestration outside the model server
+
+{% system-flow title="Text-to-video job path" caption="The job controller owns durable state. Accelerator workers perform bounded, repeatable stages." %}
+{% system-node title="Admission and policy" eyebrow="Protect" icon="shield" tone="rose" %}
+Authenticate, scan the prompt and references, estimate cost, and reject unsupported requests before allocation.
+{% /system-node %}
+{% system-node title="Storyboard planner" eyebrow="Plan" icon="list-tree" tone="blue" %}
+Extract shots, entities, motion, camera intent, and continuity constraints into a versioned plan.
+{% /system-node %}
+{% system-node title="Generation workers" eyebrow="Render" icon="cpu" tone="violet" %}
+Create keyframes and overlapping latent windows with checkpoints written after each accepted segment.
+{% /system-node %}
+{% system-node title="Validation and delivery" eyebrow="Release" icon="film" tone="green" %}
+Score the full sequence, block policy failures, encode variants, and publish through object storage and a CDN.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate model tiers by responsibility
+
+- **Planning tier**
+    - Parses the prompt into a shot graph and stable entity descriptors.
+    - Runs before expensive generation and can ask for clarification when constraints conflict.
+- **Preview tier**
+    - Uses fewer denoising steps and lower spatial resolution.
+    - Optimizes fast feedback, not final texture quality.
+- **Final tier**
+    - Reuses the approved plan, seed, references, and keyframes.
+    - Adds temporal refinement, super-resolution, and higher-quality encoding.
+- **Validation tier**
+    - Measures identity, motion, prompt adherence, artifacts, and sequence-level safety.
+    - Produces release evidence rather than another creative output.
+
+### Make job state durable
+
+Store the request, policy result, cost reservation, plan version, checkpoint list, model versions, and final disposition in a transactional job record. Large references, latent checkpoints, and videos belong in object storage, addressed by immutable IDs. A queue message carries a job ID and stage, not the video itself.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive on Temporal Coherence and Safety" %}
+
+
+### Generate windows, not independent frames
+
+Independent frame generation can match the prompt while changing a face, object, light source, or background every frame. Production systems carry state through time using:
+
+- Stable entity embeddings derived from approved references and keyframes.
+- Temporal attention across neighboring frames.
+- Overlapping latent windows that share boundary context.
+- Optical-flow or motion constraints that discourage impossible jumps.
+- Storyboard anchors that restate identity, scene, and camera intent at shot boundaries.
+
+Short anchor spacing lowers drift but increases planning constraints and regeneration work. Long spacing gives the model freedom but lets small errors compound. The right cadence depends on scene complexity and the chosen temporal strategy.
+
+### Inject a timeline incident
+
+{% interactive-block id="practice/text-to-video-continuity-lab" /%}
+
+### Treat safety as a temporal property
+
+A prompt can be harmless while a generated transition is not. Check policy at four boundaries:
+
+1. **Before planning:** reject prohibited prompts, references, identities, and rights claims.
+2. **After storyboarding:** inspect implied actions and scene transitions before GPU allocation.
+3. **During generation:** sample windows so a clear violation can stop further spend.
+4. **Before publication:** evaluate the entire decoded sequence and audio track using the release policy version.
+
+Never publish the safe prefix of a failed clip as if the job succeeded. Keep the asset quarantined, retain minimal auditable evidence, and return a policy-safe failure reason.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Evaluation and Release Gates" %}
+
+
+### Measure quality across space and time
+
+No single score represents video quality. Build a release decision from independent signals:
+
+- **Prompt adherence:** Do subjects, actions, style, and camera instructions match the request?
+- **Identity consistency:** Does the same entity retain defining features across shots and occlusion?
+- **Temporal quality:** Are motion, lighting, geometry, and transitions stable without flicker?
+- **Visual quality:** Are individual frames sharp, plausible, and free of severe artifacts?
+- **Safety:** Do prompt, references, frames, transitions, identity use, and audio pass policy?
+
+FVD and embedding-based metrics are useful diagnostics, but human preference tests remain necessary because reference videos are not unique answers to a prompt.
+
+### Gate on the weakest critical dimension
+
+1. Evaluate fixed prompts, seeds, and adversarial suites offline.
+2. Slice results by duration, motion, camera movement, skin tone, language, and reference use.
+3. Shadow the candidate on production-shaped jobs without delivering its assets.
+4. Canary by stable users and model version with an automatic rollback path.
+5. Expand only when preference improves and every safety, identity, latency, and cost guardrail passes.
+
+> **Release rule:** Better average aesthetics never compensate for a sequence-level safety regression or systematic identity drift in one slice.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Control Cost, Rights, and Data Governance" %}
+
+
+### Price the accepted outcome
+
+Track **cost per submitted job**, **cost per approved preview**, and **cost per delivered second**. Request-level averages hide waste from abandoned previews, repeated full renders, and long clips that fail only at final validation.
+
+- Reserve estimated spend at admission and reconcile it after completion.
+- Generate a cheap preview before the final tier when rejection savings exceed preview overhead.
+- Batch compatible windows only within priority and queue-age limits.
+- Use interruptible capacity for recoverable stages with recent checkpoints.
+- Expire unused latent checkpoints before customer-visible final assets.
+
+### Assign explicit governance owners
+
+{% concept-grid columns="3" %}
+{% concept-card title="Data and rights owner" eyebrow="Permission" icon="database" tone="blue" %}
+Defines allowed training sources, reference-media consent, residency, retention, deletion, and provenance evidence.
+{% /concept-card %}
+{% concept-card title="Model owner" eyebrow="Behavior" icon="brain" tone="violet" %}
+Owns artifact lineage, evaluation slices, quality regressions, checkpoint compatibility, and rollback.
+{% /concept-card %}
+{% concept-card title="Policy owner" eyebrow="Release" icon="shield" tone="rose" %}
+Sets identity, safety, copyright, and disclosure rules plus incident and appeal procedures.
+{% /concept-card %}
+{% /concept-grid %}
+
+Audit records should identify the request, tenant, consent evidence, model and policy versions, plan version, output hashes, and final disposition without retaining unnecessary raw media in logs.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Plan Scaling, Reliability, and Operations" %}
+
+
+### Schedule heterogeneous accelerator work
+
+Use separate priority queues for preview, final render, validation, and background re-encoding. Schedule from queue age, deadline risk, estimated GPU memory, duration, and checkpoint locality rather than request arrival alone.
+
+**Control backpressure**
+
+- Reject or defer free-tier work before paid deadlines are threatened.
+- Cap per-tenant concurrency so one campaign cannot occupy the cluster.
+- Stop admitting long 1080p jobs when the predicted queue age exceeds their SLA.
+- Preserve accepted jobs and their checkpoints even when new requests are shed.
+
+### Recover the smallest safe unit
+
+{% process-flow %}
+{% process-step number="1" title="Resume a window" label="Worker loss" %}
+Lease each stage, write checkpoints atomically, and retry only the last incomplete temporal window.
+{% /process-step %}
+{% process-step number="2" title="Regenerate a shot" label="Quality drift" %}
+Reuse approved anchors while replacing the bounded shot and its transition overlap.
+{% /process-step %}
+{% process-step number="3" title="Quarantine the asset" label="Policy" %}
+Stop publication and preserve evidence when any temporal safety gate fails.
+{% /process-step %}
+{% process-step number="4" title="Degrade admission" label="Overload" %}
+Offer shorter duration or lower resolution before relaxing quality or safety validation.
+{% /process-step %}
+{% /process-flow %}
+
+### Observe the complete job lifecycle
+
+- **Queues:** age by tier, admission drops, estimated work, fairness, and deadline misses.
+- **Accelerators:** utilization, memory pressure, batch fill, preemption, thermal throttling, and failed leases.
+- **Quality:** drift by model, prompt slice, duration, camera motion, and temporal window.
+- **Economics:** GPU minutes, preview rejection savings, retries, storage, delivery, and margin per delivered second.
+- **Safety:** blocks by stage and policy version, reviewer disagreement, appeals, and quarantine age.
+
+Deploy planner, generator, validator, and policy bundles independently, but pin their compatible versions in each job. A rollback must resume old jobs with the artifacts that created their checkpoints.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Summarize Trade-offs, Risks, and Extensions" %}
+
+
+### Present the design in 90 seconds
+
+1. Admission validates policy and reserves estimated cost before expensive work begins.
+2. A planner converts the prompt into shots, stable entities, motion, and camera constraints.
+3. Preview workers generate a cheap direction check; approval unlocks final temporal generation.
+4. Durable checkpoints bound retries to a window or shot instead of the whole clip.
+5. Sequence-level quality and safety gates decide whether encoded variants can be published.
+
+### Name the central trade-offs
+
+- **Freedom versus coherence:** Strong anchors preserve identity but constrain creative motion.
+- **Preview speed versus fidelity:** A cheap preview accelerates iteration but can mispredict final texture and motion.
+- **Window size versus recovery cost:** Longer context improves continuity while expanding memory and retry blast radius.
+- **Utilization versus queue latency:** Larger batches increase throughput but can miss paid deadlines.
+- **Retention versus editability:** Keeping checkpoints enables revisions but raises storage, privacy, and deletion obligations.
+
+### Keep unresolved risks visible
+
+- Long-range narrative consistency remains harder than coherence inside one shot.
+- Automated metrics may miss physically implausible motion or subtle identity changes.
+- Reference media can introduce consent, copyright, and impersonation risk.
+- Feedback favors clips users choose to render and may underrepresent failed creative directions.
+- New model versions may not be compatible with old latent checkpoints.
+
+### Extend only after the core loop is measured
+
+- Add audio generation with its own timing, rights, and safety gates.
+- Add frame-level editing after checkpoint lineage can support deterministic local regeneration.
+- Add multi-character narratives when entity memory works across occlusion and shot changes.
+- Add longer productions by composing validated shots, not by stretching one generation pass indefinitely.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/text-to-video/quiz/text-to-video-design-review.json"
+   lessonSlug="practice-text-to-video"
+   title="Text-to-Video System Design Review" /%}

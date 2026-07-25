@@ -1,0 +1,350 @@
+---
+registryId: http2-http3
+---
+
+{% section-card tone="intro" %}
+## What are HTTP/2 and HTTP/3?
+
+**HTTP/2 and HTTP/3 are different wire expressions of the same HTTP semantics.**
+Requests still have methods, target URIs, fields, content, status codes, caching rules,
+and authorization boundaries. What changes is how one connection frames, compresses,
+orders, protects, and transports those messages.
+
+HTTP/2 multiplexes binary-framed request streams over one TCP connection and compresses
+field sections with HPACK. HTTP/3 maps HTTP onto QUIC over UDP, uses TLS 1.3 as part of
+QUIC, and compresses field sections with QPACK. QUIC can recover lost data per stream
+and can validate a new network path when a client address changes.
+
+{% callout variant="info" %}
+The core invariant is **an HTTP version changes delivery mechanics, not business
+meaning**. A `POST` is not idempotent because it crossed QUIC, a cache entry is not
+fresh because it arrived over HTTP/2, and a retry still needs an application-safe
+contract.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="HTTP semantics" eyebrow="Meaning" icon="file" tone="blue" %}
+Methods, status codes, fields, content, caching, authentication, and origin authority
+remain the application contract.
+{% /concept-card %}
+{% concept-card title="HTTP expression" eyebrow="Framing" icon="layers" tone="violet" %}
+HTTP/1.1 uses textual message framing, HTTP/2 uses binary frames and HPACK, and HTTP/3
+uses QUIC streams plus QPACK.
+{% /concept-card %}
+{% concept-card title="Transport behavior" eyebrow="Delivery" icon="network" tone="cyan" %}
+TCP gives HTTP/2 one ordered byte stream. QUIC gives HTTP/3 multiple ordered streams
+inside one encrypted, congestion-controlled connection.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Compare the connection models before choosing a version
+
+{% concept-grid columns="3" %}
+{% concept-card title="HTTP/1.1" eyebrow="Connection pool" icon="server" tone="amber" %}
+One connection normally has one active response at a time. Clients use several TCP
+connections for concurrency, repeating fields as text and paying separate connection
+and congestion-control costs.
+{% /concept-card %}
+{% concept-card title="HTTP/2" eyebrow="Multiplexed over TCP" icon="layers" tone="blue" %}
+Frames from many streams interleave on one connection. HPACK removes repeated field
+bytes, but every stream still shares TCP's ordered delivery and congestion control.
+{% /concept-card %}
+{% concept-card title="HTTP/3" eyebrow="Multiplexed over QUIC" icon="radio" tone="green" %}
+Each request uses a QUIC stream. Loss recovery is stream-aware, QPACK handles
+out-of-order delivery, and TLS 1.3 protection is integrated into the transport.
+{% /concept-card %}
+{% /concept-grid %}
+
+These versions can coexist for one origin. A browser might use HTTP/3 to an edge, while
+that edge uses HTTP/2 or HTTP/1.1 to an upstream. Record the protocol on every hop
+instead of assuming the browser's negotiated version describes the entire request
+path.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Follow one HTTP/2 message through frames and streams
+
+HTTP/2 divides messages into typed binary frames. A request or response belongs to one
+stream, while the connection carries frames from many streams:
+
+{% process-flow %}
+{% process-step number="1" title="Open a stream" label="Identity" %}
+The initiating peer assigns a stream identifier. The stream has an explicit lifecycle
+from idle through open or half-closed to closed.
+{% /process-step %}
+{% process-step number="2" title="Send the field section" label="HEADERS" %}
+Pseudo-fields such as `:method`, `:scheme`, `:authority`, and `:path` carry request
+control data. HPACK indexes repeated fields within the connection.
+{% /process-step %}
+{% process-step number="3" title="Interleave content" label="DATA" %}
+DATA frames from other streams can appear between this stream's frames, so one slow
+application response does not monopolize the connection.
+{% /process-step %}
+{% process-step number="4" title="Close independently" label="END_STREAM" %}
+Each direction closes separately. A stream error can reset one exchange, while a
+connection error affects every stream on that connection.
+{% /process-step %}
+{% /process-flow %}
+
+### Bound concurrency and flow control
+
+- `SETTINGS_MAX_CONCURRENT_STREAMS` limits how many peer-initiated streams may be open.
+  New work waits or uses another connection when the peer's limit is reached.
+- HTTP/2 applies flow control to DATA at both the stream and connection level.
+  `WINDOW_UPDATE` grants more credit after the receiver consumes buffered bytes.
+- Flow control is not a request scheduler and does not replace application
+  backpressure. Oversized windows can increase memory; undersized windows can idle a
+  fast path.
+- Field-list, frame-size, connection-age, request-count, and idle limits protect the
+  server from one long-lived connection consuming unbounded state.
+
+### TCP still owns delivery order
+
+HTTP/2 streams are logically independent, but TCP exposes one ordered byte stream. If
+a TCP segment is missing, later bytes cannot be delivered to the HTTP/2 parser until
+that gap is repaired. Frames for unrelated streams can therefore wait behind one
+transport loss even when their bytes reached the receiver.
+
+{% interactive-block id="technology/http2-http3-loss-concurrency-lab" dataFile="/api/content/technology/http2-http3/data/loss-concurrency-model.json" /%}
+
+The lab's RTT-sized recovery pause is intentionally illustrative. Real completion time
+also depends on congestion control, packetization, retransmission timing, response
+sizes, server scheduling, connection reuse, and the shape of the loss.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Compress fields without hiding dependency risk
+
+{% concept-grid columns="2" %}
+{% concept-card title="HPACK in HTTP/2" eyebrow="Ordered connection" icon="archive" tone="blue" %}
+The encoder and decoder share static and dynamic tables. Because HTTP/2 receives the
+connection's bytes in order, dynamic-table updates and field sections share TCP's
+delivery order.
+{% /concept-card %}
+{% concept-card title="QPACK in HTTP/3" eyebrow="Out-of-order streams" icon="shuffle" tone="cyan" %}
+QPACK separates encoder and decoder instructions onto unidirectional streams. Static
+references never depend on dynamic state; dynamic references can block a field section
+until the needed insert arrives.
+{% /concept-card %}
+{% /concept-grid %}
+
+QPACK reduces the field-compression head-of-line problem that HPACK would create over
+independently delivered QUIC streams; it does not promise that decoding can never
+block. Bound dynamic-table capacity, accepted field sizes, and
+`SETTINGS_QPACK_BLOCKED_STREAMS`. Treat decompression failures and control-stream loss
+as connection-level operational signals.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Retire two outdated HTTP/2 assumptions
+
+### Do not design around the original priority tree
+
+RFC 9113 deprecated HTTP/2's original dependency-and-weight priority scheme. RFC 9218
+defines an extensible replacement with:
+
+- An end-to-end `Priority` field and hop-by-hop `PRIORITY_UPDATE` frames
+- An urgency value from `0` through `7`, where a smaller number means higher precedence
+- An `incremental` flag for responses that provide useful output as chunks arrive
+- Explicit settings for endpoints that ignore the RFC 7540 priority signals
+
+Priority is a scheduling hint, not proof that a server, intermediary, or CDN applied a
+particular order. Test the actual stack and monitor critical-resource completion.
+
+### Treat server push as an optional legacy capability
+
+RFC 9113 still specifies HTTP/2 server push, and a client can disable it. It is not a
+reliable browser performance strategy: Chromium disabled HTTP/2 push by default
+starting with Chrome 106, and current NGINX documentation marks its push directives
+obsolete. Optimize cacheability and request discovery instead of requiring push for
+correctness or acceptable latency.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Understand what QUIC changes for HTTP/3
+
+QUIC provides reliable streams over UDP and integrates TLS 1.3. HTTP/3 then maps HTTP
+control data, request streams, and push streams onto QUIC. The main consequences are:
+
+- **Independent request-stream loss recovery:** missing bytes on one request stream do
+  not prevent delivery of bytes on unrelated request streams.
+- **Connection-wide pressure still exists:** congestion control, anti-amplification
+  limits, connection flow control, and path capacity affect the whole connection.
+- **TLS is not optional:** QUIC uses TLS 1.3 or a compatible newer version; the HTTP/3
+  ALPN identifier is `h3`.
+- **Control streams matter:** each peer has one HTTP control stream, and QPACK uses
+  dedicated encoder and decoder streams. Closing a critical stream is a connection
+  error.
+- **Connection IDs support migration:** a client can change IP address or port without
+  naming a new HTTP origin. The peer validates the new path, and the load balancer must
+  route packets for active connection IDs to the right QUIC endpoint.
+
+Migration is not guaranteed continuity. A server can disable active migration, a new
+path can fail validation, NAT state can expire, and an implementation can still need a
+new connection. Test Wi-Fi-to-cellular transitions and edge reloads with real clients.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Negotiate HTTP/3 and preserve fallback
+
+For HTTPS, HTTP/2 is selected with the `h2` ALPN identifier during TLS over TCP.
+HTTP/3 uses `h3` during the TLS handshake carried by QUIC. A client first needs a way
+to discover that the origin has an equivalent HTTP/3 endpoint.
+
+{% process-flow %}
+{% process-step number="1" title="Reach the origin" label="Baseline path" %}
+An unprimed client can establish HTTP/1.1 or HTTP/2 over TCP. ALPN chooses the version
+supported by both peers.
+{% /process-step %}
+{% process-step number="2" title="Discover HTTP/3" label="Advertisement" %}
+The origin can send `Alt-Svc: h3=":443"` or publish an HTTPS DNS record understood by
+the client. A cached advertisement can affect later connections.
+{% /process-step %}
+{% process-step number="3" title="Attempt QUIC" label="UDP + h3" %}
+The client opens QUIC to the advertised authority, validates the certificate and
+origin, and negotiates `h3`.
+{% /process-step %}
+{% process-step number="4" title="Race or fall back" label="Compatibility" %}
+If UDP, the edge, or the QUIC handshake fails, the client needs a working HTTP/2 or
+HTTP/1.1 path over TCP.
+{% /process-step %}
+{% /process-flow %}
+
+{% interactive-block id="technology/http2-http3-negotiation-rollout-lab" dataFile="/api/content/technology/http2-http3/data/negotiation-rollout-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Restrict 0-RTT to operations that tolerate replay
+
+On a resumed QUIC connection, an eligible client can send early application data
+before the new handshake is confirmed. That removes waiting from the request path, but
+TLS early data does not have the same replay protection as normal application data. An
+attacker can capture and replay it.
+
+- Default 0-RTT to off while the HTTP/3 path is being introduced.
+- Classify the application operation, not only the method name. A nominal `GET` that
+  changes state is already a broken safe-method contract.
+- Reject unsafe early data with `425 Too Early` and let the client retry after
+  handshake confirmation.
+- If a write must be retried, use a stable idempotency key and a durable destination
+  record that returns the original result.
+- Measure early-data offered, accepted, rejected, replay-protected, and retried
+  requests separately from ordinary handshake success.
+
+{% code-block file="/api/content/technology/http2-http3/code/reject-unsafe-early-data.ts" language="typescript" title="Reject an unsafe request received as early data" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Roll out from an observable, reversible edge
+
+Start where HTTP terminates. The CDN, reverse proxy, or load balancer must listen on
+TCP and UDP, route QUIC connection IDs correctly, present the same origin identity,
+and expose protocol-specific evidence.
+
+{% code-block file="/api/content/technology/http2-http3/code/nginx-http3-canary.conf" language="nginx" title="HTTP/3 canary with HTTP/2 fallback and a short Alt-Svc lifetime" /%}
+
+The example uses current NGINX `http2 on`, `listen ... quic`, and `h3` syntax. The
+current open-source NGINX documentation still labels `ngx_http_v3_module`
+experimental, so verify the deployed version, TLS library, module build, support
+policy, and migration behavior instead of copying a configuration blindly.
+
+### Use a controlled migration sequence
+
+1. Establish a protocol baseline for real client networks, regions, devices, routes,
+   and connection reuse before advertising HTTP/3.
+2. Prove UDP reachability, certificates, ALPN, QUIC routing, address validation,
+   connection draining, and HTTP/2 fallback at the edge.
+3. Advertise `h3` to a small cohort with a short `Alt-Svc` lifetime. Keep application
+   semantics and cache policy unchanged.
+4. Compare error rate and user latency distributions by protocol and cohort. Track
+   QUIC handshake failures, fallback, connection migration, retransmission, CPU,
+   packets per second, and memory per connection.
+5. Expand only after the canary remains healthy across lossy and UDP-restricted
+   networks.
+6. Roll back by stopping new advertisement, sending `Alt-Svc: clear` where appropriate,
+   preserving TCP service, and allowing or deliberately draining established QUIC
+   connections.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Observe negotiation, not just page duration
+
+Browser `PerformanceResourceTiming.nextHopProtocol` reports the negotiated ALPN
+identifier such as `h2` or `h3`. It can be empty for a cross-origin resource that does
+not expose timing with `Timing-Allow-Origin`, and a proxy can change what the value
+represents. Treat it as one client-hop signal.
+
+{% code-block file="/api/content/technology/http2-http3/code/observe-negotiated-protocol.ts" language="typescript" title="Collect resource timing by negotiated protocol" /%}
+
+### Correlate four evidence layers
+
+- **Client:** protocol, route, connection reuse, navigation and resource timing,
+  network changes, device class, and user-visible errors
+- **Edge:** ALPN result, QUIC version, handshake outcome, fallback reason, connection
+  age, migration, loss, congestion, stream resets, GOAWAY, and drain outcome
+- **Application:** route, status, request duration, cancellation, retry, idempotency
+  result, cache status, and response size
+- **Capacity:** CPU per request and byte, packets per second, encryption cost, memory
+  per connection and stream, UDP drops, load-balancer state, and bandwidth
+
+Do not infer server push from `transferSize === 0`; cached and cross-origin timing
+behavior can produce values that need separate interpretation. Compare distributions,
+not one synthetic average, and keep the HTTP/2 control cohort during expansion.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Test the failures that protocol diagrams omit
+
+- Block UDP while leaving TCP open; verify fallback succeeds within the product's
+  latency and error budget.
+- Drop packets on one request stream; compare unrelated-stream completion under
+  HTTP/2 and HTTP/3 without claiming QUIC removes congestion.
+- Change the client address during an active connection; verify path validation,
+  connection-ID routing, authorization continuity, and a bounded reconnect fallback.
+- Restart or drain the QUIC terminator; verify connection close, GOAWAY behavior,
+  retry safety, and cache correctness.
+- Saturate CPU and packet processing separately from bandwidth; encrypted UDP packet
+  work can move the bottleneck even when application throughput looks unchanged.
+- Reject or replay early data in a controlled environment; prove unsafe operations
+  wait for confirmation or deduplicate durably.
+- Exercise large field sections, constrained HPACK and QPACK tables, blocked QPACK
+  streams, stream limits, slow readers, and connection-level flow-control exhaustion.
+
+{% callout variant="tip" %}
+A successful migration does not mean every request uses HTTP/3. It means eligible
+clients gain a measured HTTP/3 path while HTTP semantics, retry safety, fallback,
+capacity, and rollback remain explicit.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Primary standards and operating references
+
+- [RFC 9113: HTTP/2](https://www.rfc-editor.org/rfc/rfc9113.html) defines framing,
+  streams, flow control, HPACK use, ALPN, and the deprecation of the original priority
+  scheme.
+- [RFC 9114: HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html) maps HTTP semantics
+  onto QUIC and defines `h3`, control streams, discovery, and HTTP/3 errors.
+- [RFC 9000: QUIC](https://www.rfc-editor.org/rfc/rfc9000.html) defines streams,
+  connection IDs, path validation, migration, flow control, and transport behavior.
+- [RFC 9001: Using TLS to Secure QUIC](https://www.rfc-editor.org/rfc/rfc9001.html)
+  defines QUIC's TLS 1.3 integration, resumption, and 0-RTT.
+- [RFC 9204: QPACK](https://www.rfc-editor.org/rfc/rfc9204.html) defines HTTP/3 field
+  compression and its blocked-stream controls.
+- [RFC 9218: Extensible HTTP Priorities](https://www.rfc-editor.org/rfc/rfc9218.html)
+  defines urgency, incremental delivery, the `Priority` field, and priority updates.
+- [RFC 8470: Using Early Data in HTTP](https://www.rfc-editor.org/rfc/rfc8470.html)
+  defines replay considerations, `Early-Data`, and `425 Too Early`.
+- [Chrome's HTTP/2 push removal](https://developer.chrome.com/blog/removing-push) and
+  [current NGINX HTTP/2 documentation](https://nginx.org/en/docs/http/ngx_http_v2_module.html)
+  document why push is not a current browser deployment default.
+- [NGINX QUIC guidance](https://nginx.org/en/docs/quic.html) and
+  [HTTP/3 module reference](https://nginx.org/en/docs/http/ngx_http_v3_module.html)
+  document current build, listener, logging, and migration controls.
+- [PerformanceResourceTiming.nextHopProtocol](https://developer.mozilla.org/en-US/docs/Web/API/PerformanceResourceTiming/nextHopProtocol)
+  documents client-side ALPN observation and cross-origin limitations.
+{% /section-card %}
+
+{% quiz quizId="http2-http3" lessonSlug="http2-http3" title="HTTP/2 and HTTP/3 Production Review" questionsFile="/api/content/technology/http2-http3/quiz/http2-http3-production.json" /%}

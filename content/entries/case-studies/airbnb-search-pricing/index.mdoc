@@ -1,0 +1,305 @@
+---
+registryId: case-study-airbnb-search-pricing
+---
+
+{% section-card tone="intro" %}
+## What is an Airbnb-style search and pricing engine?
+
+An Airbnb-style search and pricing engine is the marketplace path that turns a guest's destination, dates, party size, filters, and preferences into an ordered set of homes with current availability and prices. Search retrieves nearby candidates and ranks them; pricing predicts useful host rates and produces the guest-visible quote.
+
+In plain language, it must answer two questions quickly: **Which homes are a good match?** and **What can this guest actually book for these dates and this total?** The first answer may use cached and predicted data. The second must come from authoritative inventory and pricing services.
+
+The core invariant is that ranking may be approximate, but a bookable result cannot invent availability or price. Search projections can be stale; the inventory authority must still approve the dates, and the pricing authority must issue a current, versioned quote.
+
+{% callout variant="info" %}
+This design exercise uses an assumed workload of 100 million searches per day and 7 million active listings. The numbers are inputs for architecture practice, not claims about current production traffic. The goal is to connect scale, geographic recall, freshness, personalization, and pricing consistency to user-visible behavior.
+{% /callout %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the marketplace contract" %}
+
+## Define what search can promise
+
+A marketplace serves guests, hosts, and the platform at once. Before choosing a database or model, state which decisions must be exact and which may be approximate. That boundary determines where caching, eventual consistency, and degraded modes are safe.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Guest actions" eyebrow="Functional" icon="search" tone="blue" %}
+- Search by destination, viewport, dates, guests, and filters.
+- Pan or zoom a map without losing a stable result contract.
+- Inspect a ranked listing with available dates and a price total.
+- Refresh or continue when availability or price changes.
+{% /concept-card %}
+
+{% concept-card title="Host actions" eyebrow="Supply and pricing" icon="home" tone="green" %}
+- Open or block nights and define stay constraints.
+- Set a manual price or accept a recommendation policy.
+- Apply minimums, maximums, discounts, and event rules.
+- Observe demand signals without exposing another host's private data.
+{% /concept-card %}
+
+{% concept-card title="Service promises" eyebrow="Non-functional" icon="gauge" tone="violet" %}
+- Keep regional search P95 below 200 ms for the exercise.
+- Preserve useful geographic recall during ordinary peaks.
+- Degrade personalization before availability or price correctness.
+- Isolate a hot city, event, or failed region from the global marketplace.
+{% /concept-card %}
+
+{% concept-card title="First-version boundary" eyebrow="Out of scope" icon="boxes" tone="neutral" %}
+- No full booking, payment, refund, or fraud workflow.
+- No claim of a globally optimal ranking for every stakeholder.
+- No synchronous model training in the search request.
+- No use of a ranking estimate as an authoritative checkout quote.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Four decisions shape the system
+
+- **Geographic semantics:** support a destination, radius, or visible map bounds; define whether moving the map automatically reruns search.
+- **Availability semantics:** retrieval may use a bounded-stale projection, but final result assembly and booking revalidate sellable nights.
+- **Personalization semantics:** guest features improve order; a deterministic non-personalized fallback must still return valid results.
+- **Price semantics:** recommendation models advise host rates, while the pricing authority owns host rules, fees, taxes, discounts, currency, and quote version.
+
+{% callout variant="tip" %}
+Treat **ranking score**, **availability decision**, and **price quote** as three different data types. Combining them into one cached object makes it too easy for an approximate model output to cross an authority boundary.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Estimate search, scoring, and pricing pressure" %}
+
+## Turn daily volume into a regional peak
+
+Start with transparent arithmetic. At 100 million searches per day, average traffic is `100,000,000 / 86,400 = 1,157` searches per second. A 5x global peak is about 5,800 searches per second. Regional skew matters more than the global average because a concert, holiday, or weather event can concentrate demand in one city.
+
+If retrieval sends 800 candidates to the ranker, a 6,000 searches/s peak creates `6,000 x 800 = 4.8 million` candidate scores per second. Candidate breadth is therefore both a relevance control and a capacity control.
+
+{% metric-strip %}
+{% metric value="1.16K/s" label="Average search rate" detail="100M searches divided by 86,400 seconds." tone="blue" /%}
+{% metric value="5.8K/s" label="5x peak estimate" detail="Before adding hot-city or failover skew." tone="violet" /%}
+{% metric value="4.8M/s" label="Candidate scores" detail="6K searches/s with 800 candidates each." tone="green" /%}
+{% metric value="486/s" label="Price refresh average" detail="7M listing recommendations refreshed every four hours." tone="amber" /%}
+{% /metric-strip %}
+
+### Explore the latency and freshness boundary
+
+The lab models one regional search path. Broader candidate sets improve the chance of finding a good home, but they increase ranking work. A longer availability snapshot TTL absorbs authority reads, but a sold night can remain in retrieval for longer. Change each control until the visible consequence crosses the latency, capacity, or freshness boundary.
+
+{% interactive-block id="case-studies/airbnb-search-pricing-search-capacity-lab" dataFile="/api/content/case-studies/airbnb-search-pricing/data/search-capacity-model.json" /%}
+
+### Capacity conclusions
+
+1. Plan ranker capacity from `peak searches x candidates`, not search requests alone.
+2. Reserve headroom below the measured worker ceiling so a hot city or worker loss does not immediately create a queue.
+3. Measure availability projection age and authority fallback load together; a high cache hit rate can hide unacceptable staleness.
+4. Reduce optional features or candidate breadth under pressure before skipping inventory or price validation.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate retrieval, ranking, and authority" %}
+
+## Keep broad recall cheap and final decisions explicit
+
+The online path should narrow work in stages. Geographic retrieval finds plausible nearby listings, an availability projection removes obvious date conflicts, and a ranker spends expensive features only on the remaining set. The final assembler asks inventory and pricing authorities for the state that may cross the user interface.
+
+{% system-flow title="Regional search request path" caption="Fast projections create a candidate slate; explicit authorities decide what can be shown as sellable and current." %}
+{% system-node title="Normalize intent" eyebrow="Search API" icon="sliders-horizontal" tone="blue" %}
+Resolve destination, map bounds, dates, guests, filters, locale, currency, and a request deadline.
+{% /system-node %}
+{% system-node title="Retrieve local supply" eyebrow="Recall" icon="map-pin" tone="green" %}
+Map the query to spatial cells, fetch nearby listing IDs, and apply coarse policy and date-availability projections.
+{% /system-node %}
+{% system-node title="Personalize the slate" eyebrow="Ranking" icon="sparkles" tone="violet" %}
+Join freshness-tagged guest, listing, and market features; score candidates; then apply diversity and policy constraints.
+{% /system-node %}
+{% system-node title="Revalidate and quote" eyebrow="Authority" icon="shield-check" tone="amber" %}
+Confirm sellable dates and attach a current versioned total before returning the result to the guest.
+{% /system-node %}
+{% /system-flow %}
+
+### Control plane and data plane
+
+- **Online data plane:** regional search API, spatial index, bounded-stale availability projection, feature cache, ranker, and result assembler.
+- **Inventory authority:** owns date-level sellability, stay constraints, holds, and booking transitions.
+- **Pricing authority:** owns host rate rules, fees, taxes, discounts, currency conversion policy, and quote expiry.
+- **Offline data plane:** consumes searches, impressions, clicks, saves, bookings, cancellations, and host changes for features, evaluation, and model training.
+- **Experiment control plane:** assigns model and policy versions, records exposure, enforces guardrails, and supports immediate rollback.
+
+The system does not need one globally consistent transaction for search. It does need explicit versions and deadlines so each result can prove which inventory decision, price quote, feature set, and model produced it.
+
+{% /accordion-item %}
+
+{% accordion-item id="storage" title="4. Model geographic, inventory, feature, and quote data" %}
+
+## Store each record by its access pattern and authority
+
+A listing document is not enough. Geographic retrieval, calendar reads, feature joins, and price quoting have different keys, update rates, and consistency requirements. Separating them prevents a high-volume search index from becoming the booking database.
+
+| Record | Primary key or partition | Read path | Consistency role |
+| --- | --- | --- | --- |
+| Listing search document | Spatial cell plus listing ID | Retrieve by viewport, radius, and coarse filters | Eventually consistent discovery projection |
+| Availability calendar | Listing ID plus date range | Filter candidates and revalidate selected dates | Projection for retrieval; authority for sellability |
+| Ranking feature snapshot | Entity ID plus feature name and event time | Batch join for candidate scoring | Freshness-tagged hint, never transaction truth |
+| Price quote | Listing, stay, guest context, currency, and quote version | Attach total to selected results and booking | Expiring authoritative commercial decision |
+
+### Events keep projections repairable
+
+- `ListingChanged` updates text, amenities, location policy, quality state, and spatial-index fields.
+- `InventoryChanged` carries listing ID, affected dates, inventory version, and event time.
+- `HostPriceRuleChanged` invalidates affected recommendation and quote caches by version.
+- `SearchImpression`, `ListingClicked`, and `BookingCompleted` preserve request, model, position, and experiment context for evaluation.
+- Reconciliation compares each projection's applied version with its authority and repairs gaps instead of assuming event delivery is perfect.
+
+### Keep approximate fields from becoming truth
+
+The result assembler below accepts an ordered candidate, an inventory decision, and a price quote as separate inputs. The ranker's estimated price remains useful for ordering, but only a current quote can be displayed as the transaction total.
+
+{% code-block file="/api/content/case-studies/airbnb-search-pricing/code/authoritative-search-result.ts" language="typescript" title="Assemble a result across explicit authority boundaries" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Build geographic recall, personalization, and price recommendations" %}
+
+## Geographic search narrows the catalog without deciding rank
+
+A destination name first resolves to a point, polygon, or set of spatial cells. H3, S2, geohash, or a search engine's geo index can all support this step; the important contract is that cell resolution and neighboring-cell expansion match the viewport and density.
+
+{% process-flow %}
+{% process-step number="1" title="Resolve geography" label="Intent" %}
+Convert destination text or map bounds into a polygon and spatial cells, preserving locale and map movement semantics.
+{% /process-step %}
+{% process-step number="2" title="Retrieve broad supply" label="Recall" %}
+Fetch nearby listing IDs from intersecting cells and apply coarse property, capacity, and policy filters.
+{% /process-step %}
+{% process-step number="3" title="Check date eligibility" label="Freshness" %}
+Use compact availability projections to remove obvious conflicts, while retaining version and age for later revalidation.
+{% /process-step %}
+{% process-step number="4" title="Score and constrain" label="Precision" %}
+Predict utility, then apply diversity, host exposure, safety, and business constraints before authority checks.
+{% /process-step %}
+{% /process-flow %}
+
+### Personalization changes order, not eligibility
+
+A practical ranker can combine several signals:
+
+- **Query-listing fit:** distance, capacity, property type, amenities, accessibility, and date compatibility.
+- **Guest context:** past bookings, saved listings, filter behavior, party composition, locale, and current-session intent.
+- **Listing quality:** review quality, host responsiveness, cancellation risk, content completeness, and predicted satisfaction.
+- **Marketplace context:** local demand, seasonality, event pressure, supply scarcity, and price competitiveness.
+- **Guardrails:** policy eligibility, diversity, cold-start exploration, exposure limits, and protected-marketplace constraints.
+
+A simplified objective might be `utility = bookingProbability x expectedSatisfaction`, followed by constraints. Do not train only on clicks: click-heavy optimization can reward attractive photos or low teaser prices while reducing completed bookings and trust.
+
+### Pricing has two different outputs
+
+{% concept-grid columns="2" %}
+{% concept-card title="Host recommendation" eyebrow="Decision support" icon="chart-no-axes-combined" tone="green" %}
+The model predicts demand and suggests a nightly rate or policy within host-defined minimums and maximums. A host may accept, override, or disable the recommendation.
+{% /concept-card %}
+
+{% concept-card title="Guest quote" eyebrow="Commercial authority" icon="badge-dollar-sign" tone="rose" %}
+The pricing service combines accepted host rates with stay length, fees, taxes, discounts, currency, and quote expiry. This versioned total is the value the product may present as current.
+{% /concept-card %}
+{% /concept-grid %}
+
+Prediction errors and quote inconsistency are different failures. A weak recommendation can reduce host revenue or occupancy; an incorrect quote breaks guest trust and may become a financial or legal issue. They need different owners, metrics, and rollback paths.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Trace freshness, consistency, and dependency failures" %}
+
+## Preserve authority and degrade relevance first
+
+Search is allowed to return fewer or less personalized results during a failure. It is not allowed to silently convert stale inventory or a ranking estimate into a confirmed booking state or checkout price. Select each scenario to see which path remains valid and what the guest should observe.
+
+{% topology-lab dataFile="/api/content/case-studies/airbnb-search-pricing/data/search-pricing-authority-topology.json" /%}
+
+### Failure policy
+
+1. Keep inventory and price versions attached through result assembly, logs, experiments, and booking handoff.
+2. If personalization fails, use a deterministic rank based on geography, eligibility, listing quality, and market priors.
+3. If an inventory projection lags, revalidate the selected slate and remove sold nights; show that results changed instead of false availability.
+4. If pricing authority cannot answer, do not substitute an unlabeled stale total. Omit, retry, or mark a non-bookable estimate according to explicit product policy.
+5. If one city or spatial partition becomes hot, cap candidate breadth, isolate its queue, and preserve other regions.
+6. If event consumption falls behind, alert on event-time age and reconcile versions before declaring recovery.
+
+{% callout variant="warn" %}
+Never make a ranking feature store the emergency price authority. It is optimized for fast model input, may be stale by design, and usually lacks the complete fee, tax, currency, host-rule, and quote-expiry context.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make user-visible trade-offs explicit" %}
+
+## Optimize a marketplace, not one metric
+
+- **Candidate breadth versus latency**
+    - More candidates can improve geographic recall and help niche preferences.
+    - Every additional candidate consumes availability, feature, and ranking capacity.
+    - Adapt the budget by region density and deadline instead of using one global count.
+- **Fresh projections versus authority load**
+    - Short TTLs and rapid events reduce sold-night surprises.
+    - They increase cache churn and reads against inventory services.
+    - Revalidate only the selected slate, but measure how often it changes the result.
+- **Personalization versus predictability**
+    - Rich guest features improve relevance for returning users.
+    - Cold-start, privacy choices, and feature outages require a strong generic rank.
+    - Explainable filters and stable map behavior should remain effective without a profile.
+- **Revenue versus occupancy**
+    - Higher nightly rates may increase revenue per booked night while reducing booking probability.
+    - Lower rates may improve occupancy while reducing host revenue or attracting mismatched demand.
+    - Evaluate revenue, occupancy, cancellations, guest value, and host overrides together.
+- **Global learning versus local markets**
+    - Shared models transfer useful patterns to lower-data regions.
+    - Local events, regulation, seasonality, language, and supply can make global averages wrong.
+    - Use market-aware features and guardrails, then compare performance by region and cohort.
+- **Model quality versus operational simplicity**
+    - A larger model can improve offline ranking metrics.
+    - It also raises tail latency, serving cost, failure surface, and rollback time.
+    - Promote it only when online marketplace gains clear latency, freshness, and fairness guardrails.
+
+The strongest design does not hide these tensions inside a single booking-conversion score. It names the stakeholders, keeps hard invariants outside model optimization, and exposes degraded states honestly.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Operate freshness, relevance, and authority separately" %}
+
+## Measure the path from query to trustworthy result
+
+An overall search-latency chart cannot reveal whether the system is fast because it returned stale inventory, whether conversion fell because personalization failed, or whether current quotes are timing out. Operate each boundary with its own service levels and reconciliation evidence.
+
+### Operational scorecard
+
+- **Search experience:** request P50/P95/P99, empty-result rate, partial-result rate, map-refresh stability, timeout rate, and result-change notices.
+- **Geographic retrieval:** candidates per cell, hot-cell skew, cell expansion depth, retrieval recall samples, and per-region index lag.
+- **Inventory freshness:** event-time age, projection version lag, authority fallback load, stale-candidate removal rate, and booking revalidation conflicts.
+- **Ranking:** feature age, feature-miss rate, model latency, fallback-rank rate, score drift, click-through, booking conversion, satisfaction, and cancellation guardrails.
+- **Pricing:** recommendation age, host acceptance and override rate, quote latency, quote expiry, quote-version conflicts, and displayed-to-booked total mismatch.
+- **Marketplace health:** guest value, host revenue, occupancy, supply exposure, regional fairness, repeat booking, and support contacts about changed prices or unavailable homes.
+
+### Incident sequence
+
+1. Identify whether the failing plane is geographic retrieval, inventory projection, feature serving, ranking, inventory authority, or pricing authority.
+2. Segment by region, spatial cell, model version, experiment, client, and quote version before changing global behavior.
+3. Preserve authority checks, then disable expensive features, reduce candidate breadth, or switch to the generic rank.
+4. Drain or rebuild projections from durable events and compare applied versions with the source of truth.
+5. Verify search latency, event-time freshness, fallback rate, stale-result removals, and quote consistency before restoring full personalization.
+6. Roll out models and pricing policies by bounded region or cohort with automatic rollback on both user and system guardrails.
+
+### Risks and extensions
+
+- Add multi-region failover without routing a guest to an inventory replica that cannot honor the required freshness contract.
+- Support flexible-date and map searches whose candidate explosion needs separate budgets.
+- Add fairness and supply-exposure constraints without making ranking impossible to debug.
+- Evaluate privacy-preserving personalization and a useful profile-free experience.
+- Extend pricing to long stays, promotions, taxes, and currency while retaining one versioned quote contract.
+
+The durable lesson is that marketplace search is not one model call. It is a staged system: geographic recall finds plausible supply, projections make the path fast, personalization improves order, and explicit inventory and pricing authorities keep the result honest.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/airbnb-search-pricing/quiz/airbnb-search-pricing.json" lessonSlug="airbnb-search-pricing" title="Review the search and pricing design" /%}

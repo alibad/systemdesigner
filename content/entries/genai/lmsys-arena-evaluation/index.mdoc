@@ -1,0 +1,257 @@
+---
+registryId: lmsys-arena-evaluation
+---
+
+{% section-card tone="intro" %}
+## What is LMSYS Arena evaluation?
+
+LMSYS Arena evaluation is a human-evaluation method in which a person sees two anonymous model responses to the same prompt and chooses A, B, a tie, or neither. Many pairwise votes are aggregated into estimates of which models people prefer.
+
+In plain language: an arena asks, **"Which response would this voter rather receive for this prompt?"** It does not ask whether a model is universally correct, safe, fast, or suitable for your product.
+
+### The core invariant
+
+An arena result is **relative and conditional**. It is evidence about a model compared with particular opponents, under a particular prompt mix, voter population, interface, policy, and time window.
+
+- Keep model identities hidden until after the vote.
+- Show both models the same prompt under comparable generation settings.
+- Randomize left and right placement.
+- Report uncertainty and important traffic slices with the aggregate score.
+
+If pairwise benchmarks and evaluation suites are new, review [Comprehensive Evaluation Benchmarks](/genai/evaluation-benchmarks-comprehensive) first.
+{% /section-card %}
+
+{% section-card %}
+## What does an arena result measure?
+
+An arena result measures **observed human preference**, not absolute model quality. A response can win because it is clearer, more useful, better styled, or more aligned with the voter even when another response is more factual on a hidden detail.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Relative" eyebrow="Compared with opponents" icon="arrow-left-right" tone="cyan" %}
+A score changes when the opponent pool changes. Beating weak opponents is not the same evidence as beating strong ones.
+{% /concept-card %}
+{% concept-card title="Conditional" eyebrow="Bound to sampled traffic" icon="filter" tone="violet" %}
+The prompt languages, domains, difficulty, voter population, and interface define the population to which the result applies.
+{% /concept-card %}
+{% concept-card title="Probabilistic" eyebrow="Estimated from samples" icon="chart-no-axes-column-increasing" tone="amber" %}
+A rating is an estimate with sampling uncertainty. Nearby ranks may be statistically indistinguishable.
+{% /concept-card %}
+{% /concept-grid %}
+
+### What it does not establish
+
+- **Factual correctness:** A persuasive wrong answer can win a preference vote.
+- **Safety compliance:** Rare severe harms can disappear inside an average preference score.
+- **Product fit:** Public prompts and voters may not represent your users or policies.
+- **Operational fitness:** Preference does not measure latency, availability, or cost.
+- **Absolute quality:** Elo-like points have meaning only within the modeled comparison pool and analysis choices.
+
+Use arena evidence alongside task-specific correctness checks, safety suites, latency and cost measurements, and product-representative human review.
+{% /section-card %}
+
+{% section-card %}
+## How does a blinded battle become data?
+
+A **battle** is one prompt, two comparable model runs, one randomized presentation, and one recorded judgment. The pipeline must preserve that contract before aggregation can be trusted.
+
+{% process-flow %}
+{% process-step number="1" title="Sample a prompt and pair" label="Design" %}
+Choose a prompt slice and two eligible models. Track pair coverage so popular or frequently available models do not dominate by accident.
+{% /process-step %}
+{% process-step number="2" title="Generate comparably" label="Serve" %}
+Use the same prompt and disclose material differences in system instructions, tools, temperature, token limits, and latency policy.
+{% /process-step %}
+{% process-step number="3" title="Randomize and collect" label="Vote" %}
+Hide identity, swap left and right placement, permit ties or both-bad outcomes, and retain the assignment metadata.
+{% /process-step %}
+{% process-step number="4" title="Filter and estimate" label="Analyze" %}
+Remove invalid events with auditable rules, aggregate pairwise outcomes, bootstrap or model uncertainty, and publish slice-level diagnostics.
+{% /process-step %}
+{% /process-flow %}
+
+### A useful vote event
+
+Each immutable event should include:
+
+- Battle ID, prompt ID, prompt slice, and event time.
+- Anonymous model IDs and left/right assignment.
+- Generation configuration and model version for both responses.
+- Vote outcome: A, B, tie, both bad, or skipped.
+- Quality signals such as session integrity, response completion, and filter reason.
+
+Keep raw votes append-only. Corrections and exclusions should be separate, versioned decisions so an analysis can be reproduced later.
+{% /section-card %}
+
+{% section-card %}
+## How are pairwise votes aggregated?
+
+**Pairwise aggregation** converts many A-versus-B outcomes into a preference estimate. A simple score gives a win one point, a loss zero, and a split tie half a point. Opponent-aware systems such as Bradley-Terry or Elo-like models extend this idea across a graph of model matchups.
+
+For one pair, Candidate A's split-tie score is `(A wins + 0.5 x ties) / total votes`. A score above 50% favors A, but the interval determines whether the observed lead is distinguishable from sampling noise.
+
+{% interactive-block id="genai/lmsys-arena-evaluation-preference-lab" /%}
+
+### Interpret the output, not only the rank
+
+- **Preference score:** Estimates how often A earns the point under the selected tie rule.
+- **Confidence interval:** Describes sampling uncertainty under the model assumptions; it does not include all sources of bias.
+- **Elo-like gap:** Transforms a pairwise probability into rating points. It is easier to rank, but no more absolute than the underlying comparisons.
+- **Tie sensitivity:** Reveals whether the conclusion depends on counting ambiguous outcomes in a particular way.
+
+When the interval crosses 50%, report the matchup as unresolved. Do not force a strict rank merely because a sorting function requires one.
+{% /section-card %}
+
+{% section-card %}
+## How much traffic and infrastructure does an arena need?
+
+Arena capacity is driven by **battles**, but every battle requires two generations before it can produce at most one usable vote. Invalid, skipped, or filtered battles still consume serving capacity.
+
+Suppose an internal arena evaluates 10 models and records 20,000 battles per day. If each response averages 800 output tokens, the serving path emits about 32 million output tokens per day before retries. Ten models also create 45 unique unordered pairs, so perfectly even scheduling would average only about 444 battles per pair before language, domain, and difficulty slices divide the evidence further.
+
+{% metric-strip %}
+{% metric value="20,000" label="Battles per day" detail="One prompt and one attempted judgment each" tone="cyan" /%}
+{% metric value="40,000" label="Model responses" detail="Two generations for every battle" tone="violet" /%}
+{% metric value="32M" label="Output tokens per day" detail="At 800 tokens per response, before retries" tone="amber" /%}
+{% metric value="45" label="Unique model pairs" detail="For 10 active models" tone="neutral" /%}
+{% /metric-strip %}
+
+{% system-flow title="Arena evaluation data path" caption="Keep the online battle path small; move filtering, fitting, bootstrapping, and slice reporting to reproducible offline jobs." %}
+{% system-node title="Prompt sampler" eyebrow="Representative traffic" icon="list-filter" tone="cyan" %}
+Assign a documented slice and eligibility rules.
+{% /system-node %}
+{% system-node title="Pair scheduler" eyebrow="Coverage" icon="shuffle" tone="violet" %}
+Balance exposure across models and opponents.
+{% /system-node %}
+{% system-node title="Generation gateway" eyebrow="Two comparable runs" icon="route" tone="blue" %}
+Capture versions, settings, errors, latency, and cost.
+{% /system-node %}
+{% system-node title="Blind voting UI" eyebrow="Randomized positions" icon="columns-2" tone="amber" %}
+Collect a choice without revealing model identity.
+{% /system-node %}
+{% system-node title="Immutable event log" eyebrow="Audit trail" icon="database" tone="neutral" %}
+Store assignment, outcome, and quality metadata.
+{% /system-node %}
+{% system-node title="Analysis pipeline" eyebrow="Ratings and intervals" icon="chart-spline" tone="green" %}
+Filter, aggregate, bootstrap, slice, and publish.
+{% /system-node %}
+{% /system-flow %}
+
+The scheduler is part of the statistical design. Uniform random pairing is simple, but it can waste votes on obvious mismatches. Adaptive pairing concentrates evidence near uncertain boundaries, but its changing selection probabilities must be logged and handled in analysis.
+{% /section-card %}
+
+{% section-card %}
+## Why can a confident arena result still be wrong?
+
+**Sampling uncertainty** is variation caused by seeing only a finite number of votes. **Systematic bias** is a repeatable shift caused by the evaluation design. More votes reduce sampling uncertainty; they do not automatically remove systematic bias.
+
+Position bias is one example. If voters prefer the response shown on the left and Candidate A appears there more often, the estimate is shifted toward A. A very large sample can produce a narrow interval around that biased value.
+
+{% interactive-block id="genai/lmsys-arena-evaluation-bias-lab" /%}
+
+### Failure modes to test deliberately
+
+- **Position and presentation bias**
+  - Randomize placement independently for each valid battle.
+  - Compare left-versus-right win rates and alert on persistent asymmetry.
+- **Prompt-selection bias**
+  - Track language, domain, difficulty, safety, and intent slices.
+  - Publish both the traffic-weighted result and important slice results.
+- **Voter-selection bias**
+  - State who voted and how they were recruited.
+  - Do not generalize a public volunteer sample to a specialized workforce without validation.
+- **Pairing and availability bias**
+  - Monitor pair coverage and model error rates.
+  - Separate model quality from a scheduler that exposes some models to easier opponents.
+- **Style over substance**
+  - Add correctness and citation checks where facts matter.
+  - Inspect verbosity, formatting, refusal, and self-identification leakage.
+- **Abuse and correlated votes**
+  - Rate-limit suspicious sessions and detect repeated coordinated patterns.
+  - Version filters and report how exclusions change the estimate.
+{% /section-card %}
+
+{% section-card %}
+## Which aggregation and sampling choices are defensible?
+
+Every analysis choice encodes a trade-off. Declare the choice before reading the final leaderboard, then run sensitivity checks to show whether the conclusion depends on it.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Elo-style online ratings" eyebrow="Fast updates" icon="gauge" tone="cyan" %}
+Useful for a live display, but order-sensitive unless recomputed and easy to overinterpret as absolute quality.
+{% /concept-card %}
+{% concept-card title="Bradley-Terry fit" eyebrow="Global pair model" icon="network" tone="violet" %}
+Estimates latent strengths from the matchup graph, but assumes the chosen model form represents preferences well enough.
+{% /concept-card %}
+{% concept-card title="Direct pairwise rates" eyebrow="Transparent slices" icon="percent" tone="amber" %}
+Easy to explain for a release matchup, but does not create one globally comparable scale across many uneven opponents.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Decisions to document
+
+- Whether ties are split, excluded, or modeled as a separate outcome.
+- Whether results are traffic-weighted, balanced across slices, or both.
+- How pair scheduling probabilities affect the estimator.
+- Which interval method and resampling unit are used.
+- How model updates create new identities or time windows.
+- What minimum coverage is required before a result is published.
+
+Bootstrap by an independent unit that matches the dependence in the data. If one person casts many related votes, resampling individual votes can understate uncertainty; resample by voter or session when that is the relevant cluster.
+{% /section-card %}
+
+{% section-card %}
+## How should teams operate and interpret arena evidence?
+
+Operational interpretation means turning a conditional preference result into a bounded decision. A leaderboard is an input to investigation, not a release gate by itself.
+
+### Monitor the evaluation system
+
+- Vote funnel: attempted battles, completed generations, votes, skips, invalid events, and filter reasons.
+- Assignment health: left/right balance, pair coverage, prompt-slice coverage, and model availability.
+- Estimate health: interval width, rank stability, bootstrap movement, and tie-rate changes.
+- Population drift: voter mix, prompt languages, domains, difficulty, and policy-sensitive traffic.
+- Integrity: duplicate sessions, coordinated voting, model identity leakage, and filter sensitivity.
+- Cost and latency: tokens per usable vote, generation failures, queue time, and daily spend.
+
+### Use an operational decision rule
+
+1. Confirm that assignment and quality-control diagnostics are healthy.
+2. Check whether the preference interval clears a predeclared practical threshold, not merely 50%.
+3. Verify that important prompt and user slices agree or explain the disagreement.
+4. Require separate correctness, safety, latency, cost, and policy gates.
+5. If all gates pass, begin a bounded canary with rollback thresholds.
+6. Record the data window, model versions, estimator, filters, and decision owner.
+
+{% callout variant="warn" %}
+**A narrow interval is not complete confidence.**
+
+A confidence interval quantifies uncertainty inside a statistical model. It does not cover unmeasured voter bias, prompt mismatch, compromised votes, incorrect filters, or hidden differences in generation settings.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## How can you implement an auditable pairwise report?
+
+An auditable report preserves raw outcomes, makes tie handling explicit, computes an interval, and checks position and slice sensitivity. The example below uses standard-library Python and deliberately avoids presenting the transformed rating as an absolute quality score.
+
+{% code-block file="/api/content/genai/lmsys-arena-evaluation/code/arena_evaluation.py" language="python" title="Pairwise aggregation with confidence and bias diagnostics" /%}
+
+Before production use, add durable event storage, identity and abuse controls, clustered resampling, versioned filters, reproducible model fitting, and monitoring for assignment imbalance.
+{% /section-card %}
+
+{% section-card %}
+## Final interpretation checklist
+
+Before acting on an arena result, be able to answer all of these questions:
+
+- What population of prompts and voters does the estimate represent?
+- Were model identity, response position, and generation settings controlled?
+- Are pair and slice coverage sufficient for the decision?
+- Does the interval support a practically meaningful preference difference?
+- Do correctness, safety, latency, cost, and policy gates also pass?
+- Would the conclusion survive a different tie rule, filter version, or weighting scheme?
+
+If any answer is unknown, the correct output is not a stronger rank. It is a narrower claim and a plan to collect better evidence.
+{% /section-card %}
+
+{% quiz title="Arena Evaluation Decision Check" questionsFile="/api/content/genai/lmsys-arena-evaluation/quiz/lmsys-arena-evaluation.json" lessonSlug="lmsys-arena-evaluation" /%}

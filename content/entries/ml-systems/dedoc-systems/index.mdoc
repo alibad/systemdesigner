@@ -1,0 +1,222 @@
+---
+registryId: dedoc-systems
+---
+
+{% section-card tone="intro" %}
+## What is Dedoc?
+
+Dedoc is an open-source system that converts documents from different formats into a
+unified structured representation. It can extract textual lines in reading order,
+format annotations, hierarchy, tables, attachments, and metadata. It can run as a
+Python library, an API service, or a container.
+
+It matters because downstream search, review, analytics, and retrieval systems need
+more than a blob of text. They need to know which text is a heading, which cells form a
+table, which attachment belongs to the source, and how every output fragment can be
+traced back to the input.
+
+{% callout variant="info" %}
+The parser route must match the document's actual representation and the downstream
+output contract. OCR, table analysis, attachment recursion, and
+hierarchy extraction are explicit quality and capacity decisions, not universal
+defaults.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Content" eyebrow="Reading order" icon="document" tone="blue" %}
+Textual lines and annotations preserve what was read and enough formatting context to
+render or inspect it.
+{% /concept-card %}
+{% concept-card title="Structure" eyebrow="Hierarchy" icon="layers" tone="violet" %}
+Line types and hierarchy levels are constructed into a tree or a linear output,
+depending on the requested representation.
+{% /concept-card %}
+{% concept-card title="Objects" eyebrow="Beyond text" icon="table" tone="green" %}
+Tables, attachments, and metadata remain separate objects so downstream code does not
+have to reconstruct them from flattened prose.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow the documented parsing pipeline
+
+Dedoc separates format handling from structure construction. That separation is useful
+in production because a conversion failure, reader failure, structure error, and output
+contract violation need different retries and ownership.
+
+{% process-flow %}
+{% process-step number="1" title="Convert when needed" label="Converter" %}
+Normalize formats that can be converted to a supported representation, such as older
+office documents to their newer container formats.
+{% /process-step %}
+{% process-step number="2" title="Read the document" label="Reader" %}
+Produce an intermediate document with lines, annotations, tables, attachments, and
+metadata. PDF routing may use native text, image recognition, or page-level detection.
+{% /process-step %}
+{% process-step number="3" title="Extract structure" label="Classifier and rules" %}
+Assign line types and hierarchy levels using a domain-specific extractor or the default
+structure path.
+{% /process-step %}
+{% process-step number="4" title="Construct output" label="Contract" %}
+Build a tree or linear representation, serialize it in the requested format, and retain
+source lineage for review.
+{% /process-step %}
+{% /process-flow %}
+
+The [official workflow documentation](https://dedoc.readthedocs.io/en/stable/)
+describes converters, readers, structure extractors, and structure constructors as
+separate stages.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size the worker fleet from page work, not file count
+
+Two documents of equal byte size can have very different service times. A born-digital
+PDF can reuse its text layer, while a scan may require page rendering, orientation,
+recognition, and table analysis. Averages hide the malformed and OCR-heavy tail that
+sets queue age and memory pressure.
+
+The capacity lab exposes five independent demand drivers:
+
+- documents arriving in the target processing window;
+- pages per document;
+- the share of pages that require OCR;
+- the share requiring table analysis;
+- concurrent workers and their per-process memory envelope.
+
+{% interactive-block id="ml-systems/dedoc-systems-calculator" /%}
+
+Use the result to design a benchmark matrix, not as a throughput guarantee. Measure
+native PDF, scanned PDF, mixed-page PDF, office files, tables, attachments, malformed
+inputs, and the largest allowed document separately. Track p50, p95, and p99 service
+time as well as peak resident memory.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Route each format to the correct reader and parameters
+
+Reader selection changes both quality and cost. Dedoc's PDF parameters distinguish
+native textual layers from image-only pages, support automatic or page-level detection,
+and can enable expensive table analysis only when the output contract requires it.
+
+{% interactive-block id="ml-systems/dedoc-systems-routing-lab" /%}
+
+### Important routing decisions
+
+- Use `pdf_with_text_layer=auto_tabby` when the system should detect the PDF path and
+  reuse a trustworthy text layer when present.
+- Enable `each_page_textual_layer_detection=true` for mixed binders where the first
+  pages do not represent the whole document.
+- Force the image path only when the input contract says the PDF is scanned or the
+  native encoding is unusable; OCR adds latency and recognition error.
+- Disable table analysis only when losing row and cell relationships is acceptable.
+- Use native office readers when they can preserve paragraphs, tables, annotations,
+  metadata, and attachments without rendering pages.
+
+The current [API parameter reference](https://dedoc.readthedocs.io/en/stable/dedoc_api_usage/api.html)
+documents PDF text-layer detection, table analysis, page slices, orientation,
+attachments, structure types, and return formats.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Define the parsed output as a versioned contract
+
+A parser returning HTTP 200 does not prove the output is usable. Validate the fields
+the downstream consumer needs and attach quality evidence to each parsed artifact.
+
+{% metric-strip %}
+{% metric label="Coverage" value="Text / pages / objects" detail="What proportion of expected content was recovered?" tone="cyan" /%}
+{% metric label="Structure" value="Types / levels / order" detail="Do headings, lists, and reading order preserve the document meaning?" tone="violet" /%}
+{% metric label="Tables" value="Rows / cells / spans" detail="Are table relationships intact enough for the consumer?" tone="green" /%}
+{% metric label="Lineage" value="Source / page / route" detail="Can a reviewer trace every important output to its input and parser configuration?" tone="amber" /%}
+{% /metric-strip %}
+
+### Route from an inspected input contract
+
+{% code-block file="/api/content/ml-systems/dedoc-systems/code/route_document.py" language="python" title="Choose explicit Dedoc parameters" /%}
+
+The routing function keeps policy outside the HTTP client. In a real service, detect
+the media type from content, constrain the allowed formats, and record the selected
+reader and parameters with the result.
+
+### Validate before publishing downstream
+
+{% code-block file="/api/content/ml-systems/dedoc-systems/code/validate_output_contract.py" language="python" title="Check the required parsed-output shape" /%}
+
+Expand the validator with page coverage, table expectations, attachment inventory,
+confidence thresholds, and a schema version. Send uncertain documents to review or a
+fallback parser instead of silently publishing partial structure.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Wrap the parser in a bounded production service
+
+Dedoc supplies parsing behavior; the surrounding system must supply isolation,
+admission control, lifecycle state, storage, retries, and observability.
+
+{% system-flow title="Production document processing path" caption="Keep untrusted bytes, parser work, validation, and published output in separate operational stages." %}
+{% system-node title="Quarantine input" eyebrow="Ingress" icon="shield" tone="rose" %}
+Verify media type, size, page and attachment limits, malware policy, tenant identity,
+and an idempotency key before parsing.
+{% /system-node %}
+{% system-node title="Route and enqueue" eyebrow="Control plane" icon="route" tone="blue" %}
+Inspect the document profile, select parameters, assign a deadline and retry budget,
+then place the job on a bounded queue.
+{% /system-node %}
+{% system-node title="Parse in isolation" eyebrow="Worker" icon="processor" tone="violet" %}
+Run converters, native readers, OCR, and table analysis with CPU, memory, filesystem,
+network, and execution-time limits.
+{% /system-node %}
+{% system-node title="Validate and publish" eyebrow="Output gate" icon="check" tone="green" %}
+Check coverage and schema, store immutable input and output references, then publish a
+versioned result or a review task.
+{% /system-node %}
+{% /system-flow %}
+
+### Model job state explicitly
+
+1. `accepted`: input passed admission checks and has an immutable source reference;
+2. `queued`: a route, deadline, and retry budget are recorded;
+3. `running`: one worker lease owns the attempt;
+4. `review_required`: output exists but misses a quality or confidence gate;
+5. `succeeded`: the versioned output contract is published exactly once;
+6. `failed`: the final reason is classified as input, conversion, reader, resource, or
+   contract failure.
+
+Retries should create new attempts under the same job identity. Publishing must be
+idempotent because a worker can finish after its lease or client connection is lost.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Secure and operate untrusted document processing
+
+### Contain the input
+
+- cap bytes, pages, archive depth, attachment count, extracted size, and total work;
+- isolate converters and OCR processes with no ambient cloud credentials;
+- disable unnecessary network access and use short-lived, least-privilege object URLs;
+- reject path traversal, archive expansion, unsupported media, and recursive attachment
+  patterns before they consume the fleet;
+- encrypt source and result objects and apply tenant-scoped retention and deletion.
+
+### Observe the contract
+
+- queue depth and oldest-job age by tenant, format, and route;
+- parser latency, timeout, retry, memory, and worker-recycle rates;
+- native-versus-OCR routing, page-level fallback, and table-analysis share;
+- coverage, structure, table, and review rates by document population;
+- failures by converter, reader, parameter set, and release version.
+
+### Release deliberately
+
+- maintain a versioned golden corpus with native, scanned, mixed, rotated, table-heavy,
+  attachment-heavy, malformed, and adversarial files;
+- compare structural output, not only extracted character count;
+- canary parser, OCR, model, and parameter changes by document population;
+- keep the prior route and output schema available until downstream consumers verify
+  compatibility;
+- replay stored inputs into a shadow pipeline before changing the default route.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/dedoc-systems/quiz/dedoc-systems.json" lessonSlug="dedoc-systems" title="Dedoc Production Design Review" /%}

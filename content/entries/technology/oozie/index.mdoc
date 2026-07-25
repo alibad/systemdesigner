@@ -1,0 +1,322 @@
+---
+registryId: oozie
+---
+
+{% section-card tone="intro" %}
+## What is Apache Oozie?
+
+**Apache Oozie is a server-based orchestrator for Hadoop workflows.** A workflow
+defines one acyclic graph of actions. A coordinator creates workflow runs from nominal
+times and declared data availability. A bundle groups related coordinators for common
+operational control.
+
+Oozie owns orchestration state; Hadoop services execute the heavy work. The core
+invariant is therefore **replayable control, not exactly-once side effects**. Every
+action needs a deterministic transition, every scheduled run needs an explicit data
+contract, and every retryable external write needs an idempotency or reconciliation
+boundary.
+
+{% callout variant="warn" %}
+Apache Oozie retired in February 2025, and its move to the Apache Attic completed in
+April 2025. The archived 5.2.1 documentation remains useful for operating existing
+estates, but there is no active Apache Oozie project producing future releases. Treat
+continued operation as an explicit maintenance decision, not as the default for a new
+platform.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate definitions from running instances
+
+Oozie's three application types solve different orchestration problems. Confusing them
+usually produces hidden timing assumptions or an unnecessarily large recovery blast
+radius.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Workflow" eyebrow="One execution graph" icon="network" tone="blue" %}
+Connect action nodes with start, end, decision, fork, join, and kill control nodes.
+Every action has an `ok` transition and an `error` transition.
+{% /concept-card %}
+{% concept-card title="Coordinator" eyebrow="Time + data instances" icon="calendar" tone="violet" %}
+Materialize workflow jobs for nominal slots only after the declared input dataset
+instances are available or a timeout policy resolves the wait.
+{% /concept-card %}
+{% concept-card title="Bundle" eyebrow="Operational grouping" icon="boxes" tone="green" %}
+Submit and operate a set of coordinator applications together. A bundle does not
+replace the dependency and data contracts inside those coordinators.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="From schedule definition to committed output" caption="The Oozie server advances control state while Hadoop services and destination systems perform the work." %}
+{% system-node title="Coordinator slot" eyebrow="Materialize" icon="calendar" tone="violet" %}
+Resolve the nominal time, expected dataset URI, timeout, concurrency, and execution
+strategy.
+{% /system-node %}
+{% system-node title="Workflow graph" eyebrow="Transition" icon="network" tone="blue" %}
+Follow explicit action and control-node transitions through one DAG instance.
+{% /system-node %}
+{% system-node title="Hadoop action" eyebrow="Execute" icon="server" tone="cyan" %}
+Launch Hive, MapReduce, Pig, shell, Java, or other supported work through the target
+cluster service.
+{% /system-node %}
+{% system-node title="Published output" eyebrow="Commit" icon="database" tone="green" %}
+Expose a versioned partition or external effect only after validation establishes that
+the run is complete.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% interactive-block
+   id="technology/oozie-materialization-lab"
+   dataFile="/api/content/technology/oozie/data/materialization-model.json" /%}
+
+{% section-card accent="violet" %}
+## Make time and data availability explicit
+
+A coordinator's **nominal time** identifies the logical dataset slot. Its **actual
+time** is when materialization or execution really occurs. Late publishers, service
+outages, and concurrency limits can move actual time without changing the interval
+that the run owns.
+
+### Define a producer-owned readiness signal
+
+- An omitted `done-flag` expects `_SUCCESS`.
+- An empty `done-flag` treats directory existence as availability.
+- A non-empty `done-flag` waits for that named file.
+- HCatalog-backed dependencies can use partition notifications, but their sharelib and
+  metastore compatibility remain deployment dependencies.
+
+Directory existence is safe only when the producer publishes atomically. If files
+arrive incrementally, require a marker written after all data and checks complete.
+
+### Bound catch-up behavior
+
+- **Timeout** limits how long a `WAITING` action can wait for its data predicate.
+- **Concurrency** limits simultaneously running coordinator actions.
+- **FIFO** and **LIFO** change which ready action goes first without discarding slots.
+- **LAST_ONLY** skips older waiting or ready slots when only the newest result matters.
+- **NONE** skips work that falls outside the configured nominal-time tolerance.
+
+Use UTC unless a business boundary requires another timezone. Day-based schedules
+should use Oozie's day functions rather than assuming every local day has 24 hours.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build deterministic workflow and configuration boundaries
+
+A workflow is a strict DAG. Control nodes decide where execution goes; action nodes
+launch work. A cycle is invalid, and a missing error transition turns recovery policy
+into guesswork.
+
+{% process-flow %}
+{% process-step number="1" title="Resolve parameters" label="Submission" %}
+Validate required formal parameters and load environment-specific values from the
+submitted job configuration.
+{% /process-step %}
+{% process-step number="2" title="Materialize one run" label="Coordinator" %}
+Pass nominal-time inputs and outputs into the workflow through the coordinator
+action's `configuration`.
+{% /process-step %}
+{% process-step number="3" title="Apply action config" label="Workflow" %}
+Inherit global settings, then let the action's explicit configuration override only
+the properties it owns.
+{% /process-step %}
+{% process-step number="4" title="Follow one transition" label="State" %}
+Route success to the next reviewed node and failure to a recovery branch or a kill
+node with a useful error message.
+{% /process-step %}
+{% /process-flow %}
+
+### Understand the configuration layers
+
+1. Formal application parameters define required names and optional defaults.
+2. `job.properties` or Hadoop XML supplies submission-time values.
+3. A coordinator's workflow configuration supplies run-scoped values such as the
+   resolved input URI and nominal partition.
+4. Workflow global configuration reduces repeated defaults across actions.
+5. Action-local configuration wins for the action properties it explicitly sets.
+6. Rerun input configuration overrides existing workflow configuration; it can replace
+   a value but cannot remove an existing property.
+
+Oozie also loads server-managed action-type configuration and `job-xml` resources. The
+documented load order is significant, so inspect the effective action configuration in
+the deployed version rather than inferring it from one file.
+
+{% code-block file="/api/content/technology/oozie/code/workflow.xml" language="xml" title="Workflow with credentials, staging, validation, and a kill path" /%}
+
+{% code-block file="/api/content/technology/oozie/code/coordinator.xml" language="xml" title="Daily coordinator with data and catch-up controls" /%}
+
+{% code-block file="/api/content/technology/oozie/code/bundle.xml" language="xml" title="Bundle that groups related coordinators" /%}
+
+{% code-block file="/api/content/technology/oozie/code/job.properties" language="properties" title="Environment-specific submission configuration" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat libraries, credentials, and HA as dependency boundaries
+
+Oozie can centralize action libraries and obtain delegation credentials, but those
+features do not remove version, trust, or availability dependencies.
+
+### Control the classpath
+
+- The system sharelib supplies common jars for action types such as Hive, Pig, Sqoop,
+  HCatalog, and MapReduce streaming.
+- A workflow application can carry its own `lib/` dependencies; action-local
+  dependencies are closer still.
+- The documented dependency priority favors the action jar, then user workflow
+  libraries, action libraries, and finally the system library.
+- Updating sharelib changes future launch classpaths. Inventory jar names, validate
+  against a non-production workflow, and keep the previous timestamped sharelib
+  available for rollback.
+
+### Delegate credentials without embedding secrets
+
+- Define supported credential types in the workflow `credentials` section.
+- Attach a named credential to only the actions that need its delegation token.
+- Keep service principals, JDBC endpoints, and ACL policy in reviewed configuration.
+- Use Kerberos and job ACLs consistently across Oozie, HDFS, YARN, Hive, and the
+  services launched by actions.
+- Treat `oozie.credentials.skip` as a compatibility switch, not as a production
+  security shortcut. Action, job, and server layers have documented precedence.
+
+### Know what Oozie HA does not protect
+
+Multiple Oozie servers can share one database and coordinate through ZooKeeper behind
+a load balancer. That protects the Oozie service only when the database, ZooKeeper
+ensemble, routing tier, and server configuration are also available and consistent.
+HDFS, YARN, Hive, external APIs, sharelib, and centralized logs keep their own failure
+domains. Oozie documentation also notes that logs tied to an unavailable server may be
+temporarily incomplete.
+{% /section-card %}
+
+{% interactive-block
+   id="technology/oozie-recovery-rerun-lab"
+   dataFile="/api/content/technology/oozie/data/recovery-rerun-model.json" /%}
+
+{% section-card accent="rose" %}
+## Diagnose before retrying or rerunning
+
+A configured automatic retry or a manual-retry resume continues a narrow action
+failure boundary. These mechanisms apply to classified action start or end errors;
+they do not blindly rerun failed business computation. A workflow rerun creates a new
+workflow instance with the same ID and can skip successful nodes. A coordinator rerun
+returns selected terminal actions to `WAITING`; `-refresh` re-evaluates dependencies,
+while cleanup flags determine what happens to output-event directories.
+
+Before changing job state:
+
+1. Capture the workflow, coordinator, or bundle definition and submitted properties.
+2. Save action, server, audit, YARN, and destination logs under the job and action IDs.
+3. Classify the outcome as definitely uncommitted, definitely committed, or ambiguous.
+4. Patch deterministic defects and validate the XML before a rerun.
+5. Select the smallest replay scope that repairs the failed state.
+6. Decide whether coordinator output cleanup is safe; `-nocleanup` preserves output
+   but can collide with partial or already committed data.
+7. Reconcile every external side effect and use stable operation IDs before replay.
+
+{% code-block file="/api/content/technology/oozie/code/diagnose-and-rerun.sh" language="bash" title="Evidence-first diagnosis and reviewed rerun commands" /%}
+
+{% callout variant="warn" %}
+Retries and reruns can repeat action code. Neither Oozie HA nor a successful state
+transition proves that a remote write happened exactly once.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate from job outcomes, not process health alone
+
+Oozie exposes workflow, coordinator, bundle, action, and SLA state through its CLI,
+REST API, UI, logs, metrics, notifications, and metadata database. A healthy server can
+still have stalled materialization, late data, exhausted launcher capacity, or
+repeatedly failing actions.
+
+Monitor at least:
+
+- coordinator actions by `WAITING`, `READY`, `TIMEDOUT`, `SKIPPED`, error, and terminal
+  state;
+- nominal-to-actual start delay and backlog depth by coordinator;
+- workflow and action duration, retry count, error code, and last error node;
+- launcher and YARN queue delay, callback failures, and sharelib/classpath errors;
+- database latency, command queue depth, JVM saturation, and server availability;
+- SLA `START`, `END`, and `DURATION` met or miss events;
+- destination freshness, row or object counts, and publication-marker age.
+
+Oozie can emit SLA events through JMS and expose summaries through REST. Its legacy
+instrumentation counters can reset with the process, so export durable time series and
+alerts outside the Oozie JVM.
+
+For each alert, preserve the nominal slot, coordinator action ID, workflow ID, action
+attempts, input URIs, effective configuration, application version, sharelib version,
+and destination operation IDs. Those fields turn a generic failure into a replay
+decision.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Decide whether to retain or migrate
+
+Oozie retirement changes the platform decision: existing workflows may remain useful,
+but the operating team now owns maintenance, dependency compatibility, vulnerability
+response, and eventual replacement.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retain temporarily" eyebrow="Controlled legacy estate" icon="shield" tone="amber" %}
+Keep a bounded estate when its Hadoop integrations are stable, operators understand its
+failure modes, dependencies are supportable, and a funded exit plan exists.
+{% /concept-card %}
+{% concept-card title="Migrate deliberately" eyebrow="Active orchestrator" icon="route" tone="blue" %}
+Choose Airflow, a managed workflow service, or another orchestrator from interval,
+event, isolation, security, backfill, and operations requirements rather than name
+recognition.
+{% /concept-card %}
+{% concept-card title="Avoid literal translation" eyebrow="Preserve semantics" icon="git-compare" tone="violet" %}
+Map nominal slots, data predicates, cleanup, retries, kill paths, credentials, and SLA
+behavior explicitly. XML nodes and provider operators are not one-to-one contracts.
+{% /concept-card %}
+{% /concept-grid %}
+
+Airflow, for example, models scheduled runs with data intervals and provides explicit
+backfill and reprocessing controls. It is not a drop-in Oozie runtime: coordinator data
+availability, bundle operations, sharelib behavior, and rerun cleanup need new designs.
+
+### Roll out a migration without double-writing
+
+{% process-flow %}
+{% process-step number="1" title="Inventory semantics" label="Discover" %}
+Record every nominal interval, dependency marker, parameter source, credential,
+side effect, SLA, and operator runbook.
+{% /process-step %}
+{% process-step number="2" title="Build contract tests" label="Prove" %}
+Replay representative late data, retry, backfill, and ambiguous-commit cases against
+versioned fixtures.
+{% /process-step %}
+{% process-step number="3" title="Shadow isolated output" label="Compare" %}
+Run the replacement against a separate namespace. Compare partitions, counts,
+checksums, timing, and failure behavior without publishing twice.
+{% /process-step %}
+{% process-step number="4" title="Cut over by interval" label="Control" %}
+Assign one scheduler as owner for each nominal slot, ramp concurrency gradually, and
+keep a tested rollback path until the observation window closes.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Verify against primary documentation
+
+- [Apache Attic: Oozie project status](https://attic.apache.org/projects/oozie.html)
+- [Oozie 5.2.1 documentation index](https://oozie.apache.org/docs/5.2.1/index.html)
+- [Workflow functional specification](https://oozie.apache.org/docs/5.2.1/WorkflowFunctionalSpec.html)
+- [Coordinator functional specification](https://oozie.apache.org/docs/5.2.1/CoordinatorFunctionalSpec.html)
+- [Bundle functional specification](https://oozie.apache.org/docs/5.2.1/BundleFunctionalSpec.html)
+- [Action configuration and dependency precedence](https://oozie.apache.org/docs/5.2.1/AG_ActionConfiguration.html)
+- [Action authentication and credentials](https://oozie.apache.org/docs/5.2.1/DG_ActionAuthentication.html)
+- [Workflow rerun behavior](https://oozie.apache.org/docs/5.2.1/DG_WorkflowReRun.html)
+- [Server installation, security, sharelib, and HA](https://oozie.apache.org/docs/5.2.1/AG_Install.html)
+- [SLA monitoring](https://oozie.apache.org/docs/5.2.1/DG_SLAMonitoring.html)
+- [Airflow scheduling and backfill concepts](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/backfill.html)
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/oozie/quiz/oozie-production-operations.json"
+   lessonSlug="oozie"
+   title="Oozie Scheduling, Recovery, and Migration Review" /%}

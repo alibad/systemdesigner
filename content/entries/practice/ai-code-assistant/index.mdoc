@@ -1,0 +1,286 @@
+---
+registryId: practice-ai-code-assistant
+---
+
+{% section-card tone="intro" %}
+## What is an AI code assistant?
+
+An AI code assistant proposes code, explanations, tests, and edits inside a developer's existing workflow. It combines a code-aware language model with repository context, but the model is only one part of the system: the product must select relevant context, answer quickly, isolate tenants, filter secrets, and let the developer decide whether any suggestion becomes real code.
+
+For this interview, design an assistant for **10 million daily developers** and a peak of **50,000 requests per second**. Optimize inline completion for **100 ms p95**. Longer explanations and multi-file edits may use an asynchronous path, but generated code must never execute or merge automatically.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Suggest, never act" eyebrow="Product invariant" icon="shield" tone="blue" %}
+The assistant may propose a patch. A developer or an existing trusted workflow must approve every durable change.
+{% /concept-card %}
+{% concept-card title="Retrieve within one tenant" eyebrow="Privacy invariant" icon="lock" tone="violet" %}
+Repository context, indexes, caches, logs, and feedback remain scoped to the authenticated tenant and repository.
+{% /concept-card %}
+{% concept-card title="Silence is a valid result" eyebrow="Degraded mode" icon="activity" tone="green" %}
+When context, policy, or latency is uncertain, return less context, a smaller model, or no suggestion.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Separate the product modes
+
+The phrase "code assistant" hides workloads with different deadlines and risks:
+
+- **Inline completion** returns a short continuation while the developer is typing.
+- **Explanation and chat** answer questions about selected code and repository behavior.
+- **Refactoring and test generation** produce a reviewable patch, possibly across several files.
+- **Debugging assistance** interprets diagnostics but does not run commands without explicit permission.
+
+### Ask questions that change the architecture
+
+1. **Which repositories are allowed?** Public code, private enterprise code, and air-gapped code require different deployment and retention boundaries.
+2. **Which tools may the assistant call?** Read-only search is safer than a shell, package installer, or deployment API.
+3. **What is the user-visible deadline?** Inline completion needs a hard latency budget; a repository-wide edit can become a cancellable job.
+4. **What is retained?** Raw code should not enter logs or training by default. Feedback needs consent, minimization, and deletion behavior.
+
+### State the exclusions
+
+- No automatic commits, merges, command execution, or production changes.
+- No cross-tenant retrieval, even when two repositories contain similar code.
+- No unbounded repository dump into the prompt.
+- No claim that syntactically valid code is secure or correct.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Requests, Tokens, and the Latency Budget" %}
+
+
+### Make the traffic assumptions explicit
+
+Assume 10 million daily developers, 100 inference requests per active developer per day, and a 4x peak factor:
+
+1. Daily requests = 10M x 100 = **1 billion requests/day**.
+2. Average rate = 1B / 86,400 = **about 11,600 requests/s**.
+3. Peak rate = 11,600 x 4 = **about 46,400 requests/s**, rounded to **50,000 requests/s**.
+4. At 1,500 input tokens and 20 output tokens per request, peak token traffic is roughly **76 million tokens/s** before caching and client suppression.
+
+{% metric-strip %}
+{% metric value="50K/s" label="Peak requests" detail="Provision by region, task, language, and model tier." tone="blue" /%}
+{% metric value="100 ms" label="Completion p95" detail="Network, retrieval, inference, validation, and rendering share one deadline." tone="cyan" /%}
+{% metric value="1.5K" label="Typical input tokens" detail="A bounded working set, not the whole repository." tone="violet" /%}
+{% metric value="0" label="Required fallback output" detail="No suggestion is healthier than a late or unsafe one." tone="green" /%}
+{% /metric-strip %}
+
+### Size serving from measurements
+
+Benchmark each model tier with realistic input lengths and output sizes. If one completion replica sustains 250 requests/s at the target p95, the global peak requires **200 replicas before regional, failure, and deployment headroom**. Do not estimate accelerator count from parameter count alone.
+
+### Allocate context without breaking the deadline
+
+{% interactive-block id="practice/ai-code-assistant-context-budget-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the Online Architecture and Model Tiers" %}
+
+
+### Keep the completion path narrow
+
+{% system-flow title="AI code suggestion path" caption="Only user-visible work remains synchronous. Indexing, evaluation, analytics, and training stay off the request path." %}
+{% system-node title="IDE extension" eyebrow="Capture" icon="code" tone="blue" %}
+Debounce requests, send a bounded cursor window, attach repository identity, and cancel stale work.
+{% /system-node %}
+{% system-node title="Policy gateway" eyebrow="Protect" icon="shield" tone="cyan" %}
+Authenticate, enforce tenant policy, remove secrets, rate-limit, and select the nearest healthy region.
+{% /system-node %}
+{% system-node title="Context service" eyebrow="Retrieve" icon="search" tone="amber" %}
+Fetch allowed symbols, imports, tests, and documentation from a repository-scoped index.
+{% /system-node %}
+{% system-node title="Model router" eyebrow="Generate" icon="sparkles" tone="violet" %}
+Choose a compact completion model or a richer asynchronous model based on task and deadline.
+{% /system-node %}
+{% system-node title="Output gate" eyebrow="Validate" icon="check-circle" tone="green" %}
+Apply policy, syntax, provenance, duplication, freshness, and latency checks before display.
+{% /system-node %}
+{% /system-flow %}
+
+### Give each model tier one job
+
+- **Local or cached tier**
+    - Handles common, low-risk completions with minimal context.
+    - Protects responsiveness during network or regional degradation.
+- **Compact online model**
+    - Serves the default inline path with quantized weights and bounded output.
+    - Optimizes accepted characters per second rather than maximum reasoning depth.
+- **Quality model**
+    - Handles explanations, reviews, and multi-file edits on a longer deadline.
+    - Returns a patch artifact that is inspected before application.
+
+### Reject stale responses at the client
+
+Every request carries a document version, cursor position, and request ID. The IDE discards a response when the document changed, a newer request exists, or the display deadline passed. This prevents an otherwise valid completion from appearing in the wrong code state.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive on Context, Retrieval, and Trust Boundaries" %}
+
+
+### Build context by priority
+
+1. **Cursor context:** preserve the current function, surrounding types, and exact prefix.
+2. **File context:** add imports, nearby declarations, and diagnostics when they fit the budget.
+3. **Repository context:** retrieve symbol definitions, interfaces, tests, and documentation by repository-scoped search.
+4. **Conversation context:** include only the turns needed for the current task and label generated text separately from source code.
+
+Retrieval is not always necessary. A short local completion may need only the cursor window. Repository retrieval earns its latency and privacy cost when the task depends on project-specific APIs, conventions, or behavior elsewhere in the codebase.
+
+### Treat repository text as untrusted input
+
+Comments, documentation, issue text, and generated files can contain prompt injection. Retrieval must preserve source labels and permissions; instructions found inside retrieved code never override system policy or tool permissions.
+
+### Place controls at multiple boundaries
+
+- **Before retrieval:** authenticate repository access and bind every query to tenant and repository IDs.
+- **Before generation:** detect secrets, minimize context, and separate trusted instructions from untrusted repository text.
+- **Before display or tool use:** scan the candidate, enforce tool allowlists, and require confirmation for side effects.
+- **After response:** log identifiers and policy outcomes without retaining raw source by default.
+
+### Inject failures into the trust path
+
+{% interactive-block id="practice/ai-code-assistant-trust-boundary-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Quality, Safety, and Launch Gates" %}
+
+
+### Measure the developer outcome
+
+**Offline evaluation**
+
+- Exact-match and edit-similarity metrics diagnose completion behavior but do not prove usefulness.
+- Compile and test pass rates catch structural errors on executable benchmark repositories.
+- Security suites measure vulnerable patterns, secret reproduction, and unsafe tool suggestions.
+- Repository tasks test whether retrieval finds the correct symbol without crossing access boundaries.
+
+**Online evaluation**
+
+- Accepted characters per active hour measures useful assistance better than raw impressions.
+- Acceptance, immediate deletion, revert rate, and time-to-completion explain developer trust.
+- p95 latency, stale-response rate, and no-suggestion rate expose serving behavior.
+- Segment every result by language, IDE, task, repository size, tenant policy, and model version.
+
+### Use hard launch gates
+
+A quality lift cannot compensate for a critical privacy or security failure. A candidate advances from offline evaluation to shadow traffic, then a small canary, only when:
+
+- no cross-tenant retrieval is observed;
+- critical secret and unsafe-action tests pass;
+- p95 latency meets the task deadline;
+- useful acceptance improves without raising revert or incident rates.
+
+{% callout variant="warn" %}
+**Do not optimize acceptance alone.**
+
+A model can raise acceptance by producing plausible but risky code. Pair usefulness metrics with compile, test, security, provenance, and post-acceptance revert signals.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Control Cost and Govern Code Data" %}
+
+
+### Price successful assistance
+
+Track **cost per accepted character** for completion and **cost per accepted patch** for larger tasks. These metrics expose waste from stale requests, weak retrieval, low-confidence generations, and oversized models.
+
+- Suppress duplicate and stale requests in the IDE before spending inference capacity.
+- Cache only when the key includes model, policy, language, repository scope, and context fingerprint.
+- Batch within the latency deadline; queue throughput is not a saving when the suggestion arrives late.
+- Route simple tasks to compact models and reserve larger models for work that benefits from them.
+
+### Assign governance ownership
+
+{% concept-grid columns="3" %}
+{% concept-card title="Data owner" eyebrow="Permission" icon="database" tone="blue" %}
+Owns source eligibility, tenant isolation, residency, retention, deletion, and feedback consent.
+{% /concept-card %}
+{% concept-card title="Model owner" eyebrow="Behavior" icon="brain" tone="violet" %}
+Owns training lineage, benchmark slices, model cards, artifact signatures, and rollback readiness.
+{% /concept-card %}
+{% concept-card title="Policy owner" eyebrow="Release" icon="shield" tone="rose" %}
+Owns safety thresholds, tool permissions, exceptions, incidents, and audit evidence.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not train on private requests by default. An opt-in feedback program must preserve repository and tenant scope, remove secrets, record provenance, support deletion, and prevent one customer from influencing another customer's model without an explicit agreement.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Plan Scaling, Reliability, and Continuous Improvement" %}
+
+
+### Scale by task and deadline
+
+- Partition capacity by region, task, model tier, and enterprise isolation requirement.
+- Autoscale from queue age and deadline risk, not accelerator utilization alone.
+- Reserve capacity for inline completion so long-running reviews cannot starve typing traffic.
+- Shed optional repository context before shedding authentication, tenant isolation, or safety controls.
+
+### Define dependency fallbacks
+
+{% process-flow %}
+{% process-step number="1" title="Cancel stale work" label="Client" %}
+Drop superseded requests before they consume retrieval or inference capacity.
+{% /process-step %}
+{% process-step number="2" title="Reduce context" label="Retrieval" %}
+Use cursor and file context when repository search is slow or unavailable.
+{% /process-step %}
+{% process-step number="3" title="Route smaller" label="Inference" %}
+Move eligible completion traffic to a compact or local tier with bounded output.
+{% /process-step %}
+{% process-step number="4" title="Return nothing" label="Output" %}
+Suppress late, unsafe, stale, or uncertain suggestions without unbounded retries.
+{% /process-step %}
+{% /process-flow %}
+
+### Close the feedback loop cautiously
+
+Collect accepted, edited, rejected, and reverted outcomes as governed events. Retraining is asynchronous and versioned. Every candidate repeats slice evaluation, security testing, shadow traffic, and canary gates before promotion. Keep the previous model and policy artifacts ready for independent rollback.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Compare Trade-offs and Extend the Design" %}
+
+
+### Make the main trade-offs explicit
+
+- **More context vs lower latency:** repository retrieval improves project awareness but adds tokens, dependencies, and a larger privacy surface.
+- **One large model vs task-specific tiers:** one model simplifies routing, while tiers isolate deadlines, cost, and failure behavior.
+- **Cloud quality vs local privacy:** cloud models can be stronger; local models support offline and air-gapped environments with tighter resource limits.
+- **Aggressive display vs developer trust:** more suggestions create more opportunities, but weak or unsafe output increases distraction and reverts.
+
+### State the recommended design
+
+Use a deadline-aware router with a compact completion model, an asynchronous quality tier, and a repository-scoped context service. Put policy controls before retrieval, before generation, and before any side effect. Degrade by reducing context or returning no suggestion, never by bypassing tenant or safety checks.
+
+### Discuss extensions after the core path works
+
+- On-device adapters for private style and low-connectivity completion.
+- Enterprise self-hosting with signed model and index artifacts.
+- Multi-file planning with a reviewable dependency graph and patch set.
+- Permissioned tool use with dry runs, sandboxing, and explicit confirmation.
+- Provenance views that show which repository sources influenced a suggestion.
+
+### Close the interview with risks
+
+Name the next experiment and the largest unresolved risk: benchmark the compact tier with realistic repository contexts, red-team trust boundaries, and verify that accepted suggestions reduce task time without increasing security findings or reverts.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/ai-code-assistant/quiz/ai-code-assistant-design-review.json"
+   lessonSlug="practice-ai-code-assistant"
+   title="AI Code Assistant Design Review" /%}

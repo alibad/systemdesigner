@@ -1,0 +1,282 @@
+---
+registryId: openai-tech
+---
+
+{% section-card tone="intro" %}
+## What is the OpenAI platform?
+
+**The OpenAI platform is a hosted API surface for sending inputs to AI models and receiving typed outputs, streamed events, embeddings, or requests to use tools.** An application chooses a model, supplies instructions and context, validates the result, and decides whether any requested action is allowed.
+
+In plain language: the model is one dependency inside your system. The platform can generate or classify content, reason over supplied evidence, and propose tool calls, but your application still owns identity, permissions, data boundaries, deadlines, retries, safety policy, and the final user-visible action.
+
+The core production invariant is **no model output crosses a trust boundary without an application-owned check**. Text needs policy and quality checks, structured data needs schema and semantic validation, and tool calls need authorization plus idempotent execution.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Input" label="Bound the request" detail="Instructions, user content, retrieved evidence, and tool definitions consume context" tone="blue" /%}
+{% metric value="Output" label="Define the contract" detail="Text, JSON, tool calls, and stream events need different validation" tone="violet" /%}
+{% metric value="Action" label="Keep authority in code" detail="A tool call is a proposal; trusted application code decides whether it runs" tone="amber" /%}
+{% metric value="Evidence" label="Prove every release" detail="Evals, traces, canaries, and rollback criteria turn model changes into controlled deployments" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Start with the API boundary
+
+An **API boundary** is the point where your application turns trusted state and untrusted user input into a model request, then turns a probabilistic response back into application behavior. OpenAI recommends the [Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses) for new projects; it represents messages, tool calls, tool results, and other model actions as typed items.
+
+Keep API keys on a server. A browser or mobile client should call your backend, where you can authenticate the user, apply tenant policy, redact sensitive fields, cap work, and record an audit event before contacting OpenAI.
+
+{% system-flow title="A production Responses API request" caption="The model is inside a controlled path. Validation, authorization, and fallback logic remain application responsibilities." %}
+{% system-node title="Client" eyebrow="Intent" icon="users" tone="blue" %}
+Sends the user request and receives progress or a final result. It never receives the OpenAI API key.
+{% /system-node %}
+{% system-node title="Application gateway" eyebrow="Trust boundary" icon="shield" tone="amber" %}
+Authenticates the user, checks policy, assigns a request ID and deadline, and enforces request and token budgets.
+{% /system-node %}
+{% system-node title="Context builder" eyebrow="Evidence" icon="search" tone="cyan" %}
+Selects instructions, conversation state, retrieved sources, and only the tools allowed for this request.
+{% /system-node %}
+{% system-node title="Responses API" eyebrow="Inference" icon="sparkles" tone="violet" %}
+Runs the configured model and returns typed output items or streaming events.
+{% /system-node %}
+{% system-node title="Validator and executor" eyebrow="Control" icon="check" tone="green" %}
+Validates output, authorizes tool arguments against trusted state, executes idempotently, and chooses retry, fallback, or refusal.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Select a model from task evidence
+
+**Model selection is an evaluation problem, not a naming problem.** Start with a capable model that meets the task's quality target, build a representative eval set, and then test whether a smaller or faster model keeps that quality while improving latency and cost. The current [model selection guide](https://developers.openai.com/api/docs/guides/model-selection) describes this quality-first sequence.
+
+Choose by workload shape:
+
+- Use a smaller general-purpose model for bounded classification, extraction, routing, and rewriting after it passes the task eval.
+- Use a stronger general-purpose model when instructions, ambiguity, or multimodal evidence require more capability.
+- Use a reasoning model when the task needs multi-step analysis and the extra latency and output budget fit the service objective.
+- Use embedding models for similarity and retrieval. Embeddings are not generated answers and should be evaluated with retrieval metrics.
+- Use specialized image, audio, or realtime models only when the input and interaction mode require them.
+
+Keep the model ID in server configuration. Pin a model snapshot when behavioral stability matters, and require evals before changing it because model behavior can change between snapshots even when the API remains compatible.
+{% /section-card %}
+
+{% interactive-block id="technology/openai-request-envelope-lab" dataFile="/api/content/technology/openai/data/request-envelope.json" /%}
+
+{% section-card accent="violet" %}
+## Separate output shape from tool authority
+
+**Structured Outputs constrain the shape of model-generated data; function tools let the model request application behavior.** These are related contracts, but they answer different questions.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Structured response" eyebrow="Return typed data" icon="code" tone="blue" %}
+Use a strict JSON Schema when the model should return data your code will render or process. Schema adherence removes parsing ambiguity, but your code must still validate business rules such as valid account ownership or acceptable totals.
+{% /concept-card %}
+{% concept-card title="Function tool" eyebrow="Request an action" icon="wrench" tone="violet" %}
+Define a narrow function with a strict schema when the model may ask your application to read data or perform work. Treat the call as untrusted input until authorization succeeds.
+{% /concept-card %}
+{% concept-card title="Executor" eyebrow="Own the side effect" icon="shield" tone="amber" %}
+Derive tenant and resource identity from the authenticated session, enforce policy, use an idempotency key, record the result, and return a bounded tool output to the model.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) distinguishes schema-constrained responses from function calling. The [function calling guide](https://developers.openai.com/api/docs/guides/function-calling) documents the multi-step loop: send tools, receive a call, execute in application code, return the call output, and continue until a final result or a configured limit.
+
+### Tool rules that prevent authority leaks
+
+- Expose only tools needed for the current route and authenticated user.
+- Keep trusted identifiers out of model-generated arguments when code already knows them.
+- Set `additionalProperties: false` and use strict schemas where supported.
+- Validate ranges, state transitions, and resource ownership after schema validation.
+- Require confirmation for destructive or high-impact actions.
+- Make retried side effects idempotent using a stable operation key.
+- Cap tool-call count, wall-clock time, and total output returned to the model.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build context as a bounded evidence set
+
+**Context is all input the model can use for one response: instructions, user content, conversation state, retrieved evidence, and tool definitions.** A larger context is not automatically better. Irrelevant or unauthorized text adds cost, latency, and opportunities for conflicting instructions.
+
+For retrieval-augmented requests, keep two evaluations separate:
+
+1. **Retrieval quality:** Did the system find the eligible source chunks needed to answer the question?
+2. **Answer quality:** Did the model use those chunks faithfully, cite them, and abstain when evidence was insufficient?
+
+Apply structured eligibility filters before semantic ranking when region, tenant, product version, or effective date determines which documents are allowed. Record source identity, version, score, and the chunks actually sent to the model. The [file search guide](https://developers.openai.com/api/docs/guides/tools-file-search) notes that retrieving fewer results can reduce token use and latency but can also reduce answer quality.
+
+### A practical context budget
+
+- Reserve space for system instructions and tool schemas.
+- Bound user input and conversation history before retrieval.
+- Retrieve enough candidates to protect recall, then rerank or filter before synthesis.
+- Set an explicit maximum output budget instead of spending every remaining token.
+- Prefer stable, repeated instructions at the beginning of requests so eligible workloads can benefit from [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Stream for perception, not correctness
+
+**Streaming delivers response events as work completes so the user can see progress before the final response exists.** It can improve perceived latency, but it does not reduce the time required to finish the same generation.
+
+Use the typed event stream documented in the [streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses). Accumulate only the event types your client understands, handle refusal and error events explicitly, and finalize persistence only after terminal completion.
+
+Streaming changes the safety boundary:
+
+- Partial text can reach a user before whole-output checks run.
+- Client disconnects should cancel upstream work when possible.
+- A stalled stream needs an inactivity timeout as well as an overall deadline.
+- Tool calls and structured objects should be executed only after the complete item validates.
+- High-risk experiences may need buffered output or a post-generation review instead of immediate token display.
+
+The official guide warns that partial completions are harder to moderate. Choose streaming only after the product has defined what may be shown before final validation.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Control latency, cost, and rate pressure together
+
+**A request budget is a set of limits on tokens, time, attempts, and downstream work.** Optimizing one number in isolation can move pressure elsewhere: more retrieved chunks increase input cost, long outputs occupy capacity, and aggressive retries consume rate-limit headroom.
+
+{% process-flow %}
+{% process-step number="1" title="Reject unnecessary work" label="Route" %}
+Use deterministic code, a cache, or a search index when the task does not need generation. Route simple tasks to the least expensive model that passes the eval floor.
+{% /process-step %}
+{% process-step number="2" title="Bound each request" label="Budget" %}
+Limit input, retrieval count, output tokens, tool calls, per-tool time, and total wall-clock time.
+{% /process-step %}
+{% process-step number="3" title="Protect shared capacity" label="Admit" %}
+Apply per-tenant quotas and concurrency limits. Shed optional work before queues violate the user-facing deadline.
+{% /process-step %}
+{% process-step number="4" title="Retry selectively" label="Recover" %}
+Retry transient failures with exponential backoff and jitter, honor server guidance, cap attempts, and never retry a side effect without idempotency.
+{% /process-step %}
+{% process-step number="5" title="Degrade deliberately" label="Contain" %}
+Fall back to cached evidence, a smaller bounded response, a non-generative path, or a clear retry-later state instead of cascading failure.
+{% /process-step %}
+{% /process-flow %}
+
+OpenAI exposes request- and token-based limits that vary by model and usage tier. Read the live response headers and the current [rate-limit guide](https://developers.openai.com/api/docs/guides/rate-limits); do not encode a documentation example as permanent capacity. Unsuccessful requests also consume limit budget, which is why unbounded immediate retries make overload worse.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make safety a layered control system
+
+**Safety is the set of controls that keeps inputs, outputs, retrieved data, and actions within product policy and user authorization.** No single prompt or classifier covers every failure mode.
+
+- **Before inference:** authenticate, classify the use case, enforce age and tenant policy, scan uploads, and remove secrets or unnecessary personal data.
+- **During context assembly:** isolate untrusted retrieved text from system instructions, filter by access policy, and expose only permitted tools.
+- **After generation:** moderate where appropriate, validate factual or policy-critical claims, scan generated code or URLs, and require human review in high-stakes workflows.
+- **At action time:** authorize against trusted application state, apply amount and frequency limits, request confirmation, and retain an audit record.
+- **After release:** monitor policy slices, refusals, overrides, appeals, and incident reports; feed reviewed failures back into evals.
+
+OpenAI's current [safety best practices](https://developers.openai.com/api/docs/guides/safety-best-practices) recommend moderation and human oversight, especially in high-stakes domains. Review the [data controls documentation](https://developers.openai.com/api/docs/guides/your-data) for the exact endpoint, storage, and retention behavior your organization uses rather than assuming every API mode has the same data lifecycle.
+{% /section-card %}
+
+{% section-card %}
+## Observe the whole request, not prompt text alone
+
+**Observability links one user operation to its model requests, retrieval decisions, tool executions, retries, and final outcome.** Logs should make a failure diagnosable without collecting more sensitive content than the incident process requires.
+
+Record at least:
+
+- your trace ID, user-safe tenant identifier, route, release version, and model configuration;
+- OpenAI's server request ID and your unique `X-Client-Request-Id` when supplied;
+- input and output token usage, cache usage, latency stages, finish status, and retry count;
+- retrieval source IDs and versions, not only the final prompt;
+- tool name, authorization result, idempotency key, duration, and bounded result status;
+- schema validation, safety checks, fallback path, and user-visible outcome;
+- sampled content only under a documented access, redaction, and retention policy.
+
+The [API debugging reference](https://developers.openai.com/api/reference/overview#debugging-requests) recommends logging request IDs in production. Pair those identifiers with metrics for p50, p95, and p99 latency; error and rate-limit rates; token cost per successful task; eval scores by slice; and tool-side-effect failures.
+{% /section-card %}
+
+{% interactive-block id="technology/openai-release-control-lab" dataFile="/api/content/technology/openai/data/release-controls.json" /%}
+
+{% section-card accent="blue" %}
+## Implement contracts that run without credentials
+
+These examples default to offline behavior so their request shape, validation, and release logic can run in CI. Only the first example has an optional `--live` mode; it reads the API key and model ID from environment variables instead of embedding either in source.
+
+{% tabs %}
+{% tab title="Responses request" %}
+Build a bounded Responses API payload with a strict structured-output schema. The default command validates and prints the request; `--live` sends it only when credentials and an explicit model are configured.
+
+{% code-block file="/api/content/technology/openai/code/responses-request.py" language="python" title="Build and optionally send a Responses API request" /%}
+{% /tab %}
+{% tab title="Safe tool execution" %}
+Process a simulated function call through argument validation, trusted-session authorization, and an idempotent executor. Running the same call twice demonstrates that a retry does not duplicate the side effect.
+
+{% code-block file="/api/content/technology/openai/code/safe-tool-loop.py" language="python" title="Authorize and deduplicate a tool call" /%}
+{% /tab %}
+{% tab title="Release gates" %}
+Evaluate an external fixture across quality, safety, schema, latency, and cost gates. Add `--inject-regression` to prove that one high-risk failure blocks promotion.
+
+{% code-block file="/api/content/technology/openai/code/release-gates.py" language="python" title="Run an offline OpenAI integration release gate" /%}
+
+Fixture: [evaluation-cases.json](/api/content/technology/openai/data/evaluation-cases.json)
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Migrate through measured compatibility stages
+
+**A migration changes an API, model, prompt, tool schema, retrieval policy, or safety control while preserving a tested user contract.** Treat each change as a release candidate, not a transparent dependency update.
+
+{% process-flow %}
+{% process-step number="1" title="Inventory the contract" label="Baseline" %}
+Capture endpoints, model snapshots, prompts, schemas, tools, storage behavior, event types, retries, and production eval cases.
+{% /process-step %}
+{% process-step number="2" title="Add an adapter" label="Isolate" %}
+Translate provider items into application-owned request, result, usage, refusal, and error types so business logic does not depend on raw SDK objects.
+{% /process-step %}
+{% process-step number="3" title="Replay and compare" label="Offline" %}
+Run both paths over fixed and reviewed production-derived cases. Compare task, safety, tool, schema, latency, and cost results by slice.
+{% /process-step %}
+{% process-step number="4" title="Shadow or canary" label="Online" %}
+Start with no side effects, then a small isolated traffic slice. Keep tool execution disabled or idempotent until equivalence is proven.
+{% /process-step %}
+{% process-step number="5" title="Promote with rollback" label="Decision" %}
+Advance only while every gate passes. Keep the prior configuration warm and define who can stop the rollout.
+{% /process-step %}
+{% /process-flow %}
+
+For new work, use the Responses API rather than starting on the Assistants API. OpenAI's [Assistants migration guide](https://developers.openai.com/api/docs/assistants/migration) documents the current deprecation and sunset schedule. For any model change, consult the [model catalog](https://developers.openai.com/api/docs/models) and [deprecations page](https://developers.openai.com/api/docs/deprecations) at release time instead of relying on a lesson's model list.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Define release gates before rollout
+
+A **release gate** is a measurable condition that must pass before more users depend on a candidate. The threshold belongs to the product risk, not to a generic AI benchmark.
+
+Required gates for a production OpenAI integration include:
+
+- Representative task evals meet the baseline overall and on critical slices.
+- Structured outputs validate, and semantic invariants reject impossible values.
+- Tool calls stay inside user authorization, confirmation, idempotency, and call-count limits.
+- Safety tests cover normal use, abuse, prompt injection, retrieval poisoning, and high-risk escalation paths.
+- Load tests meet end-to-end latency, rate-limit, error, token, and cost budgets under expected concurrency.
+- Traces connect client operations to provider request IDs, retrieval, tools, retries, and fallbacks.
+- A bounded canary uses an independent kill switch and a warm rollback configuration.
+- Migration tests cover refused, incomplete, timed-out, rate-limited, malformed, and newly added event types.
+
+Use OpenAI's [evals guide](https://developers.openai.com/api/docs/guides/evals) for the current platform workflow, but keep release authority in your deployment system. A dashboard is evidence; it is not the decision policy.
+{% /section-card %}
+
+{% section-card %}
+## Primary OpenAI documentation
+
+These interfaces and policies change. Check the primary documentation against the SDK and model snapshot you plan to release:
+
+- [Responses API migration](https://developers.openai.com/api/docs/guides/migrate-to-responses) and [Responses API reference](https://developers.openai.com/api/reference/resources/responses)
+- [Model selection](https://developers.openai.com/api/docs/guides/model-selection), [model catalog](https://developers.openai.com/api/docs/models), and [deprecations](https://developers.openai.com/api/docs/deprecations)
+- [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs) and [function calling](https://developers.openai.com/api/docs/guides/function-calling)
+- [File search](https://developers.openai.com/api/docs/guides/tools-file-search), [retrieval](https://developers.openai.com/api/docs/guides/retrieval), and [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+- [Streaming](https://developers.openai.com/api/docs/guides/streaming-responses), [latency optimization](https://developers.openai.com/api/docs/guides/latency-optimization), and [rate limits](https://developers.openai.com/api/docs/guides/rate-limits)
+- [Safety best practices](https://developers.openai.com/api/docs/guides/safety-best-practices), [moderation](https://developers.openai.com/api/docs/guides/moderation), and [data controls](https://developers.openai.com/api/docs/guides/your-data)
+- [Evals](https://developers.openai.com/api/docs/guides/evals), [production best practices](https://developers.openai.com/api/docs/guides/production-best-practices), and [API request debugging](https://developers.openai.com/api/reference/overview#debugging-requests)
+
+Model names, prices, limits, supported schema features, event types, storage behavior, and deprecation dates are intentionally linked rather than copied into permanent architecture assumptions.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/openai/quiz/openai-production-design.json" lessonSlug="openai" title="OpenAI Production Design Review" /%}

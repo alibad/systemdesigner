@@ -1,0 +1,334 @@
+---
+registryId: case-study-gmail-smart-compose
+---
+
+{% section-card tone="intro" %}
+## What is Gmail Smart Compose?
+
+Gmail Smart Compose is an inline writing assistant that predicts a short continuation while someone types an email. At an eligible typing boundary, it turns a small amount of permitted context into candidate tokens, rejects late or unsafe candidates, and displays a suggestion that the writer can accept or ignore.
+
+In plain language: the system tries to finish the next few words, not write or send the email by itself. A useful suggestion must arrive before it interrupts typing, fit the current message, respect private context, and remain completely optional.
+
+The core invariant is simple: **a suggestion may disappear, but latency, privacy, safety, and user control may not be bypassed to make one appear.**
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Read the case through four design targets
+
+The figures below are teaching assumptions for one peak operating scenario, not claims about Gmail's current production fleet. They turn a vague "real-time AI" requirement into capacity and release decisions that can be checked.
+
+{% metric-strip %}
+{% metric value="100 ms" label="Modeled p95 deadline" detail="Late output is suppressed" tone="cyan" /%}
+{% metric value="80K/s" label="Eligible peak requests" detail="After a client-side trigger gate" tone="blue" /%}
+{% metric value="3-8" label="Output tokens" detail="A short continuation, not an essay" tone="violet" /%}
+{% metric value="0" label="Required suggestions" detail="No suggestion is a valid result" tone="green" /%}
+{% /metric-strip %}
+
+{% callout variant="info" %}
+### One decision, two systems
+
+The **online serving system** owns the current keystroke, deadline, candidate, and display decision. The **offline learning system** owns datasets, evaluation, training, rollout, aggregate feedback, and rollback. Keeping those paths separate prevents training or analytics work from consuming the typing-time budget.
+{% /callout %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the product contract and guardrails" %}
+
+## Define completion before choosing a model
+
+Smart Compose is successful when it offers a relevant continuation without taking control away from the writer. The system should optimize helpful opportunities, not maximize how often text appears.
+
+### Functional behavior
+
+- Detect a stable, eligible typing boundary before requesting inference.
+- Generate a short continuation from the permitted draft context and locale.
+- Let the writer accept, keep typing, or ignore the suggestion without blocking input.
+- Discard a response when the draft has changed since its request was issued.
+- Emit a versioned outcome event only after the display decision is known.
+
+### Non-functional guardrails
+
+- **Responsiveness:** meet a 100 ms modeled p95 end-to-end deadline, including network, context preparation, inference, filtering, and rendering.
+- **Safety:** allow the output gate to abstain when confidence, policy, or sensitive-context checks fail.
+- **Privacy:** send only the context fields approved for this purpose and retain them only as long as the documented policy allows.
+- **Reliability:** degrade to a faster model, a deterministic phrase, or no suggestion without affecting normal email composition.
+- **User control:** never auto-send, silently replace typed text, or treat an ignored suggestion as consent.
+
+### Scope boundaries
+
+This design covers inline body-text suggestions during active composition. It does not cover autonomous message generation, inbox ranking, spam classification, or automatic sending. Those products have different risk, context, and evaluation contracts.
+
+{% callout variant="tip" %}
+### Success is a balanced scorecard
+
+Track eligible-request rate, display coverage, acceptance when shown, edit-after-accept behavior, p50/p95 latency, abstention reasons, unsafe-output rate, and slice-level regressions. A higher acceptance rate cannot compensate for a safety or privacy failure.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="scale" title="2. Convert keystrokes into capacity and a latency budget" %}
+
+## Gate locally before paying for inference
+
+Assume 2 million people are actively composing at peak and each produces 4 keystrokes per second. Sending every keystroke would create 8 million requests per second. If a lightweight client trigger marks only 1% of boundaries as eligible, the inference tier receives:
+
+`2,000,000 writers x 4 keystrokes/s x 1% eligible = 80,000 requests/s`
+
+That trigger can wait for useful boundaries such as whitespace, punctuation, or enough new context. It should also cancel superseded work so old drafts do not continue consuming model capacity.
+
+### Add headroom before counting replicas
+
+At 70% target utilization, the modeled tiers in the lab need very different fleets for 80,000 eligible requests per second:
+
+- **Local fallback:** `9,200 x 70% = 6,440 requests/s` of usable replica capacity, so the estimate needs 13 replicas.
+- **Compact transformer:** `2,400 x 70% = 1,680 requests/s` of usable replica capacity, so the estimate needs 48 replicas.
+- **Quality transformer:** `760 x 70% = 532 requests/s` of usable replica capacity, so the estimate needs 151 replicas.
+
+Headroom absorbs queue variation, uneven placement, deploys, and a failed replica. It is not unused waste.
+
+### Spend one deadline across the whole path
+
+A representative compact route with regional networking and 768 context tokens uses roughly 28 ms for the network, 10 ms for context preparation, 33 ms for inference, 13 ms for safety, and 7 ms for client rendering. The total is about 91 ms, leaving little room for queueing.
+
+Change the tier, network, context, and safety mode below. Watch p95 latency, replica capacity, quality, cost, and the final serve-or-suppress decision move together.
+
+{% interactive-block id="practice/gmail-smart-compose-latency-lab" /%}
+
+{% callout variant="warn" %}
+The safety switch demonstrates latency cost; it is not permission to remove required checks. If mandatory filtering makes the route late, route to a faster tier or return no suggestion.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the online serving path and model tiers" %}
+
+## Keep the synchronous path short and cancelable
+
+The online path begins only after local eligibility succeeds. Every request carries a draft version and a deadline so any stage can stop work that the user has already made obsolete.
+
+{% system-flow title="Deadline-bound suggestion path" caption="Only the current suggestion decision belongs on this path. Training, aggregate analysis, and model promotion remain asynchronous." %}
+{% system-node title="Composer trigger" eyebrow="Client" icon="braces" tone="blue" %}
+
+Check eligibility, select permitted context, stamp the draft version, and cancel the previous request.
+
+{% /system-node %}
+{% system-node title="Context gateway" eyebrow="Minimize" icon="shield" tone="cyan" %}
+
+Authenticate, enforce purpose and field policy, tokenize the bounded context, and reject expired work.
+
+{% /system-node %}
+{% system-node title="Inference router" eyebrow="Generate" icon="speed" tone="violet" %}
+
+Choose a tier from deadline headroom, language support, queue pressure, and context complexity.
+
+{% /system-node %}
+{% system-node title="Output gate" eyebrow="Decide" icon="check" tone="green" %}
+
+Apply confidence, safety, privacy, and freshness checks before returning a candidate or an abstention.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Give each model tier a bounded role
+
+- **Deterministic or local fallback**
+  - Handles common low-risk phrases when the network or primary tier is unavailable.
+  - Trades personalization and linguistic range for predictable latency and high capacity.
+- **Compact transformer**
+  - Serves the default interactive path with quantized weights, short decoding, and language-specific capacity pools.
+  - Balances relevance, cost, and deadline headroom for ordinary traffic.
+- **Quality transformer**
+  - Runs only when the remaining budget and policy allow richer context.
+  - Must not become the default simply because its offline score is higher; its lower capacity and longer tail latency remain product costs.
+
+The router should use a single absolute deadline rather than giving every dependency an independent timeout. That prevents individually "healthy" stages from combining into a late result.
+{% /accordion-item %}
+
+{% accordion-item id="mechanics" title="4. Trace one suggestion from draft to feedback" %}
+
+## Treat generation as a versioned, abstaining lifecycle
+
+The writer can type again while inference runs. The suggestion lifecycle therefore needs explicit state, not just a model endpoint.
+
+{% process-flow %}
+{% process-step number="1" title="Open an eligible window" label="Trigger" %}
+
+Wait for a useful boundary, capture a bounded context window, and assign both a request ID and draft version.
+
+{% /process-step %}
+{% process-step number="2" title="Decode a short candidate" label="Generate" %}
+
+Reuse tokenizer and attention state when valid, cap output length, and stop early at punctuation or a low-confidence branch.
+
+{% /process-step %}
+{% process-step number="3" title="Gate and reconcile" label="Protect" %}
+
+Filter the text, verify the request is current, and suppress output that is unsafe, stale, empty, or over deadline.
+
+{% /process-step %}
+{% process-step number="4" title="Render and observe" label="Feedback" %}
+
+Display without taking focus, then record whether it was shown, accepted, edited, ignored, or superseded.
+
+{% /process-step %}
+{% /process-flow %}
+
+### Bound context before tokenization
+
+Useful context can include the nearby draft span, subject, locale, and a policy-approved representation of the thread. More context is not automatically better:
+
+- Longer windows add tokenization, transfer, attention, and cache costs.
+- Old quoted text can distract the model from the current sentence.
+- Recipients, signatures, and message history may carry sensitive data with no value for the next few words.
+- A summarized or redacted feature can sometimes provide enough intent with less exposure.
+
+### Make failure behavior part of the protocol
+
+- If the draft version changes, discard the response even when the candidate itself looks good.
+- If the deadline expires, cancel downstream work and render nothing.
+- If tokenization, routing, or inference fails, try only a policy-approved faster fallback with enough remaining budget.
+- If the output gate is unavailable, fail closed for generated text; normal typing must continue.
+- If the client cannot reconcile the candidate with its cursor and composition state, do not insert or display it.
+
+This lifecycle makes abstention observable. Operators can distinguish "no eligible request," "model declined," "safety blocked," "late response," and "stale response" instead of collapsing all of them into a generic miss.
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Turn quality, feedback, and safety into release gates" %}
+
+## Separate per-suggestion gates from model-release gates
+
+The online output gate decides whether one candidate may be shown. The release system decides whether a candidate model may receive any user traffic. Both can abstain, but they use different evidence.
+
+### Gate each online suggestion
+
+1. Verify the response still matches the current draft version and cursor state.
+2. Reject prohibited, sensitive, or policy-uncertain text.
+3. Require enough calibrated confidence for the active language and context slice.
+4. Check the absolute deadline before returning the text.
+5. Emit an explicit abstention reason when any gate fails.
+
+### Gate each model release
+
+- **Product value:** acceptance when shown, characters saved, edit distance after acceptance, and opt-out behavior.
+- **Language quality:** relevance, grammar, repetition, tone fit, and performance by language and context type.
+- **Safety:** unsafe suggestions per million displayed, red-team failures, sensitive-domain behavior, and subgroup analysis.
+- **Serving health:** p50/p95/p99 latency, timeout and cancellation rate, queue depth, fallback share, and cost per eligible request.
+
+Use the simulator to change the model candidate, evaluation slice, display threshold, and adversarial pressure. The visible gates produce a launch, shadow, or hold decision; average acceptance never overrides a failed safety gate.
+
+{% interactive-block id="practice/gmail-smart-compose-evaluation-lab" /%}
+
+### Interpret feedback without turning it directly into labels
+
+- An **accept** is evidence that the suggestion was useful in that moment, but it may still be edited immediately afterward.
+- An **ignore** may mean the user kept typing before seeing the suggestion, not that the text was wrong.
+- A **dismissal or opt-out** is a strong product signal and should not be hidden by aggregate acceptance.
+- A **blocked candidate** is safety evidence even though the user never saw it.
+- A **no-display event** needs a reason code so the team can separate policy, confidence, latency, and stale-request causes.
+
+Training examples should come from a documented, privacy-reviewed aggregation and labeling process. Raw interaction events are neither clean ground truth nor automatic permission to reuse message content.
+{% /accordion-item %}
+
+{% accordion-item id="privacy" title="6. Minimize private context and govern the learning data" %}
+
+## Privacy is an architecture constraint, not a training cleanup step
+
+Email context can reveal relationships, finances, health information, legal matters, and account identifiers. The system should prove why each field is needed before it enters serving logs or a learning dataset.
+
+### Apply controls at every boundary
+
+- **Client selection:** collect only the bounded draft span and approved metadata needed for the suggestion decision.
+- **Gateway enforcement:** authenticate the account, verify purpose, redact disallowed fields, and attach a retention class.
+- **Serving telemetry:** prefer counters, latency histograms, gate reasons, and model versions over raw text.
+- **Evaluation datasets:** sample under documented access, de-identification, retention, and reviewer controls.
+- **Learning pipeline:** aggregate or protect feedback before it becomes a candidate training source, then evaluate the resulting model independently.
+
+### Record the trade-offs explicitly
+
+- **More conversation context** may improve relevance but increases latency, data exposure, and the chance of copying stale or sensitive text.
+- **On-device inference** can reduce network exposure and improve degraded behavior, but device diversity limits model size and makes rollout compatibility harder.
+- **Federated learning** can keep raw examples on devices, but updates still require secure aggregation, contribution limits, poisoning defenses, privacy accounting, and user controls.
+- **Longer retention** may help rare-issue diagnosis, but it also increases breach impact and the chance that data outlives its original purpose.
+
+{% callout variant="warn" %}
+Removing names from a message does not automatically make the remaining text anonymous. Unusual phrases, organizations, dates, and relationships can still identify people or events.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="7. Operate degraded modes, canaries, and rollback" %}
+
+## Preserve email composition when the AI path is unhealthy
+
+Smart Compose is an optional enhancement. Its outages should reduce suggestion coverage, not make the editor slow or unavailable.
+
+### Map each failure to a bounded consequence
+
+- **Queue pressure or accelerator loss**
+  - Shed expired work, reduce rich-tier routing, and cap concurrency before queues consume the entire deadline.
+  - Prefer a compact fallback or no suggestion over a late quality-tier response.
+- **Safety service timeout**
+  - Fail closed for generated output while allowing the writer to continue normally.
+  - Alert on the abstention reason and avoid silently switching to an unchecked path.
+- **Feature or tokenizer mismatch**
+  - Reject incompatible requests by schema and model version.
+  - Keep the last-known-good bundle of model, tokenizer, context schema, and policy together.
+- **Regional failure**
+  - Route only when another region can still meet data-residency and latency policy.
+  - Otherwise use a permitted local fallback or suppress suggestions.
+- **Quality or safety regression**
+  - Freeze cohort expansion, restore the previous compatible bundle, and preserve evidence for diagnosis.
+  - Do not wait for fleet-wide acceptance to fall when a hard slice guardrail has already failed.
+
+### Release with a reversible sequence
+
+1. Validate offline quality, privacy, safety, latency, and compatibility against the current production bundle.
+2. Shadow the candidate on production-shaped requests without displaying its text.
+3. Canary to a small, representative user cohort with automatic stop thresholds.
+4. Expand in stages only while every hard gate and slice remains healthy.
+5. Roll back the complete versioned bundle when a gate breaches; do not mix a previous model with a new tokenizer or policy schema.
+
+Monitor deadline consumption by stage, queue age, cancellation effectiveness, fallback share, abstention reasons, model and policy version, language slice, safety incidents, and edit-after-accept behavior. These signals must identify the smallest failing component and cohort quickly enough to choose mitigation rather than guess.
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Close the learning loop without weakening the contract" %}
+
+## Let production evidence improve the next candidate
+
+The learning loop begins after serving has made a safe decision. It should produce a better release candidate without putting raw message content or unreviewed feedback directly back into training.
+
+{% process-flow %}
+{% process-step number="1" title="Observe bounded outcomes" label="Measure" %}
+
+Aggregate latency, gate reason, acceptance, edit, opt-out, and safety signals under the approved privacy policy.
+
+{% /process-step %}
+{% process-step number="2" title="Diagnose a slice" label="Explain" %}
+
+Separate network, language, model, threshold, safety, and context failures instead of optimizing one fleet-wide average.
+
+{% /process-step %}
+{% process-step number="3" title="Build and challenge" label="Learn" %}
+
+Curate permitted data, train a versioned candidate, red-team it, and compare every release gate with the current bundle.
+
+{% /process-step %}
+{% process-step number="4" title="Canary or roll back" label="Control" %}
+
+Promote gradually while guardrails hold, or restore the last-known-good bundle and feed the incident evidence into the next iteration.
+
+{% /process-step %}
+{% /process-flow %}
+
+### The complete design in five decisions
+
+1. Trigger sparingly on the client so keystrokes do not become uncontrolled inference load.
+2. Route by remaining deadline, model capability, language support, and live capacity rather than offline quality alone.
+3. Treat no suggestion as a normal, observable state at every online gate.
+4. Separate serving telemetry from privacy-reviewed learning data and evaluate by meaningful slices.
+5. Deploy model, tokenizer, context schema, and policy as one rollback-compatible bundle.
+
+The durable lesson is that Smart Compose is not only a language model. It is a deadline-bound decision system whose optional output must survive freshness, quality, privacy, safety, and operational gates before it reaches the writer.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/gmail-smart-compose/quiz/gmail-smart-compose.json" lessonSlug="gmail-smart-compose" title="Review the Smart Compose design" /%}

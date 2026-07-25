@@ -1,0 +1,268 @@
+---
+registryId: case-study-tesla-autopilot
+---
+
+{% section-card tone="intro" %}
+## What is an autonomous-driving perception and planning system?
+
+An autonomous-driving perception and planning system is the on-vehicle control loop that turns sensor observations into a bounded driving action. It synchronizes sensors, estimates the road and other actors over time, predicts possible motion, proposes a trajectory, and checks that trajectory against independent safety constraints before control executes.
+
+In plain language: it must see enough of the current scene, decide before that evidence becomes too old, and choose a conservative response when it cannot support a normal maneuver. This matters because a low-latency prediction can still be unsafe when visibility, confidence, timing, or vehicle-control limits no longer support it.
+
+The core invariant is: **do not continue an automated maneuver when the available evidence and end-to-end timing cannot support a safe envelope; slow, hold, or transfer control according to the operating design.**
+
+This is a reference architecture, not a disclosure of Tesla's private implementation. Tesla has publicly described a camera-first vision approach and neural-network development, but exact sensor configuration, model latency, fleet scale, safety thresholds, and fallback behavior change over time and are not assumed here. Review [Computer Vision Systems](/ml-systems/computer-vision-systems) if perception models are unfamiliar.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the safety contract and scope" %}
+
+## Define what the driving loop must prove before acting
+
+The real-time loop is not a cloud request. It starts with a sensor observation and ends with a vehicle command, a constrained hold, or a minimal-risk response. Training systems may use cloud infrastructure, but the path that makes a driving decision must remain available locally within its bounded timing budget.
+
+### Functional scope
+
+- Synchronize camera and vehicle-state observations with a monotonic timestamp.
+- Build a temporal scene estimate for lanes, free space, road edges, traffic controls, actors, and their likely motion.
+- Generate feasible trajectories that respect vehicle dynamics and road constraints.
+- Select or reject a trajectory using confidence, uncertainty, timing, and independent safety checks.
+- Execute a bounded command, monitor the new state, and replan continuously.
+- Record privacy-bounded evidence for debugging, evaluation, and a governed training loop.
+
+### Safety properties for this reference design
+
+- **Evidence freshness:** a plan cannot rely on an observation beyond its allowed age.
+- **Timing:** the complete sensing-to-command path must fit its deadline with planned headroom.
+- **Uncertainty:** low confidence narrows the action set; it does not silently preserve the prior maneuver.
+- **Authority:** a learned prediction may propose motion, but deterministic limits retain the right to reject it.
+- **Degradation:** a missing input, stale temporal state, or compute fault has an explicit response and operator signal.
+
+### Deliberate exclusions
+
+- This lesson does not assess any product's capabilities, legal operating domain, crash rate, or safety performance.
+- It does not infer Tesla's current hardware, sensor count, model architecture, data retention, or release criteria.
+- It treats driver monitoring, regulatory requirements, map inputs, and vehicle controls as integration boundaries rather than claiming their product-specific design.
+
+{% callout variant="warn" %}
+Autonomous-driving terminology is easy to overread. A capable perception model is not by itself a guarantee of safe automation: the operating domain, supervision model, vehicle controls, and fallback contract are part of the system claim.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="timing" title="2. Budget sensor, compute, and safety-envelope time" %}
+
+## Treat a frame deadline as a safety input, not a benchmark
+
+Raw sensor volume, frame cadence, model latency, and vehicle speed interact. More pixels or cameras can improve scene evidence, yet they also increase ingress and processing work. At speed, every additional millisecond moves the vehicle before the next usable command.
+
+The lab is an illustrative planning model. It uses an uncompressed ingress estimate so the dependency is visible; production pipelines may compress, crop, encode, or process streams differently. It does not represent Tesla telemetry or hardware.
+
+{% metric-strip %}
+{% metric value="1 / fps" label="Frame interval" detail="The time between new observations." tone="blue" /%}
+{% metric value="latency / budget" label="Compute pressure" detail="Pressure rises as planned headroom shrinks." tone="amber" /%}
+{% metric value="speed x delay" label="Reaction distance" detail="Distance travelled before a modeled response begins." tone="violet" /%}
+{% metric value="confidence + timing" label="Envelope gate" detail="Both must support the intended maneuver." tone="green" /%}
+{% /metric-strip %}
+
+### Pressure-test the control budget
+
+Increase resolution and frame rate, then reduce compute headroom or raise speed. The safety envelope should move from supported to constrained before a nominal frame is necessarily dropped. That distinction matters: a system can still emit outputs while no longer having reserve for jitter, synchronization, or an adverse scene.
+
+{% interactive-block id="case-studies/tesla-autopilot-perception-safety-margin-lab" dataFile="/api/content/case-studies/tesla-autopilot/data/perception-safety-margin-model.json" /%}
+
+### Interpret the model
+
+1. **Data rate is not the only capacity number.** The ingest path must also preserve calibration, synchronization, and enough temporal history for the model.
+2. **Frame budget is not all available to a model.** Reserve absorbs scheduling variance, downstream checks, and degraded-but-still-valid behavior.
+3. **Reaction distance converts latency into a physical consequence.** It grows linearly with speed and end-to-end delay.
+4. **Confidence and timing fail differently.** Extra compute cannot restore missing visual evidence; a confident estimate that arrives too late cannot justify the same action.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate perception, prediction, planning, and safety authority" %}
+
+## One on-vehicle decision path, several independent responsibilities
+
+Separating responsibilities prevents one model output from becoming an unreviewed control command. The perception stack produces a probabilistic scene estimate. Prediction and planning evaluate possible futures. A safety supervisor constrains what can be sent to vehicle control and records why an action was limited or rejected.
+
+{% system-flow title="Reference on-vehicle decision loop" caption="Cloud systems improve future versions; this loop must make the current decision locally." %}
+{% system-node title="Synchronized sensors" eyebrow="Observe" icon="activity" tone="blue" %}
+
+Capture calibrated camera streams, inertial data, wheel state, and timestamps. Reject missing, desynchronized, or implausible inputs before they become scene evidence.
+
+{% /system-node %}
+{% system-node title="Temporal scene model" eyebrow="Understand" icon="layers" tone="cyan" %}
+
+Estimate occupancy, lanes, free space, road boundaries, actors, and uncertainty across recent observations rather than trusting one frame in isolation.
+
+{% /system-node %}
+{% system-node title="Prediction and planner" eyebrow="Choose" icon="route" tone="violet" %}
+
+Predict plausible actor motion, score feasible trajectories, and keep alternatives that remain within vehicle, legal, comfort, and progress constraints.
+
+{% /system-node %}
+{% system-node title="Safety supervisor" eyebrow="Constrain" icon="shield" tone="green" %}
+
+Check freshness, timing, confidence, collision margins, and actuator limits; then allow, limit, reject, or request a minimal-risk response.
+
+{% /system-node %}
+{% /system-flow %}
+
+### State that must cross the boundaries
+
+- **Observation contract:** sensor ID, calibration revision, capture time, sequence number, health, and vehicle pose estimate.
+- **Scene contract:** occupancy or free-space representation, actor tracks, lane hypotheses, uncertainty, temporal age, and model revision.
+- **Plan contract:** trajectory candidates, expected duration, maneuver intent, required confidence, collision margin, and expiry.
+- **Control contract:** accepted plan ID, actuator envelope, reason codes, watchdog state, and command timestamp.
+
+The last two contracts are especially important in incident analysis. An operator should be able to tell whether the planner proposed an unsafe maneuver, the evidence expired, or the supervisor correctly rejected a valid-looking but stale plan.
+
+{% /accordion-item %}
+
+{% accordion-item id="implementation" title="4. Build temporal perception and constrained planning" %}
+
+## A scene is a time-indexed hypothesis, not a list of detections
+
+Single-frame detection can miss an actor behind an occluder, confuse glare with an edge, or make a stationary item look mobile as the car moves. Temporal fusion aligns observations using estimated motion, carries uncertainty forward, and explicitly ages evidence when new observations do not confirm it.
+
+{% process-flow %}
+{% process-step number="1" title="Validate inputs" label="Before inference" %}
+Check timestamps, calibration, sensor health, exposure anomalies, and vehicle-state plausibility. Mark missing evidence rather than filling it with a confident default.
+{% /process-step %}
+{% process-step number="2" title="Estimate the scene" label="Across time" %}
+Fuse recent observations into occupancy, lane, object, and motion hypotheses with confidence and age on each relevant estimate.
+{% /process-step %}
+{% process-step number="3" title="Predict and propose" label="Bounded futures" %}
+Generate trajectories against predicted actor motion, road geometry, rules, ride quality, and a short planning horizon.
+{% /process-step %}
+{% process-step number="4" title="Gate and execute" label="Independent limits" %}
+Reject expired or low-margin plans, enforce actuator limits, execute only the allowed command, and begin the next cycle from the observed result.
+{% /process-step %}
+{% /process-flow %}
+
+### An executable plan gate
+
+The sketch deliberately keeps learned confidence separate from deterministic checks. In a production system, the checks would include richer vehicle dynamics, redundant monitoring, diagnostics, and product-specific fallback rules.
+
+{% code-block file="/api/content/case-studies/tesla-autopilot/code/trajectory-safety-gate.py" language="python" title="Illustrative trajectory admission gate" /%}
+
+{% callout variant="info" %}
+Occupancy is a representation of whether space may be occupied, usually with uncertainty. It is not the same thing as a perfectly identified object list, which is why planners should retain distance and uncertainty margins even when labels are uncertain.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="failures" title="5. Make uncertain scenes change the maneuver" %}
+
+## A fallback is an action policy tied to evidence, not an error message
+
+The correct response to a degraded scene depends on what failed and how far the uncertainty can propagate. For example, an occluded actor can affect one path, while a compute degradation can affect every new plan. Select a scenario and a policy to see how confidence, path, maneuver, evidence, and blast radius must move together.
+
+{% interactive-block id="case-studies/tesla-autopilot-scenario-fallback-lab" dataFile="/api/content/case-studies/tesla-autopilot/data/scenario-fallback-states.json" /%}
+
+### Failure rules worth making explicit
+
+- **Occlusion or glare:** reduce the action set and re-acquire evidence. Do not treat the last clear frame as current visibility.
+- **Cut-in risk:** preserve a reachable buffer and prefer a controlled longitudinal response over a late aggressive lateral correction.
+- **Lane ambiguity:** maintain a conservative lane hypothesis or avoid a lane-changing maneuver until the boundary is re-established.
+- **Stale temporal state:** invalidate the dependent plan; historical continuity is not fresh evidence.
+- **Compute degradation:** lower model complexity only when the remaining path still meets its safety contract. Otherwise constrain or stop automated maneuvering according to the operating design.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-loop" title="6. Govern the fleet-learning loop without putting cloud in control" %}
+
+## Turn rare failure evidence into a release decision
+
+Field data is valuable because it exposes conditions that simulation and curated datasets may underrepresent. It is also sensitive and incomplete. The learning loop should select governed examples, preserve provenance, evaluate changes by scenario slice, and release only when the on-vehicle safety contract remains intact.
+
+{% process-flow %}
+{% process-step number="1" title="Select evidence" label="Privacy and relevance" %}
+Trigger privacy-reviewed collection or local summaries around rare, uncertain, or safety-relevant conditions. Record model, calibration, and operating-context versions.
+{% /process-step %}
+{% process-step number="2" title="Curate and label" label="Ground truth limits" %}
+Audit label quality, disagreement, coverage, and provenance. Preserve the uncertainty where ground truth is ambiguous instead of forcing a false binary label.
+{% /process-step %}
+{% process-step number="3" title="Evaluate by slice" label="Not one average" %}
+Compare candidate and baseline across weather, lighting, road geometry, vulnerable-road-user, occlusion, and timing-degradation slices with predefined safety metrics.
+{% /process-step %}
+{% process-step number="4" title="Release and observe" label="Bounded exposure" %}
+Use simulation, controlled validation, shadow evaluation where appropriate, staged activation, rollback readiness, and post-release monitoring before broader exposure.
+{% /process-step %}
+{% /process-flow %}
+
+### Evidence and release controls
+
+- Version the data selection rule, labels, calibration, model, planner, supervisor policy, and evaluation harness together.
+- Separate offline quality metrics from online safety monitors; an aggregate improvement can hide a degraded rare scenario.
+- Keep a signed, compatible rollback artifact and a decision record for every release gate.
+- Limit raw-data access and retention. Reproducibility does not require unrestricted collection.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate the system as a chain of contracts" %}
+
+## Monitor leading evidence, not only incidents
+
+Operations needs to distinguish a normal hard scene from a systemic regression. A rising fallback rate may be acceptable in a localized weather event, while the same rise after a release can indicate a model, calibration, timing, or sensor-health problem.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Evidence health" eyebrow="Inputs" icon="activity" tone="blue" %}
+Track sensor availability, synchronization skew, calibration mismatch, exposure anomalies, scene-age distribution, and confidence by operating slice.
+{% /concept-card %}
+{% concept-card title="Decision health" eyebrow="Plan and gate" icon="route" tone="violet" %}
+Track inference and end-to-end latency, missed deadlines, rejected plans, fallback reason codes, collision-margin distributions, and actuator-limit interventions.
+{% /concept-card %}
+{% concept-card title="Release health" eyebrow="Change control" icon="shield" tone="green" %}
+Track model and policy revision, rollout cohort, scenario-slice regressions, rollback events, and evidence completeness for every alert.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Incident triage sequence
+
+1. Freeze the relevant model, planner, calibration, and policy versions in the investigation record.
+2. Determine whether the issue begins at input health, temporal state, inference timing, planning, safety gating, control execution, or monitoring.
+3. Compare the affected operating slice with the same slice before the release, not only with fleet-wide averages.
+4. Bound exposure first through a rollback, rollout pause, tighter operating envelope, or conservative fallback policy; root-cause analysis follows the safety action.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="8. Make architecture trade-offs explicit" %}
+
+## Every additional capability changes a safety and operations cost
+
+The useful case-study lesson is not a specific vendor stack. It is how design choices redistribute uncertainty, compute, data collection, and release risk.
+
+{% concept-grid columns="2" %}
+{% concept-card title="More sensor evidence" eyebrow="Coverage" icon="activity" tone="blue" %}
+More viewpoints or resolution can improve recall and redundancy, but increase synchronization work, bandwidth, compute, calibration surface, and failure combinations.
+{% /concept-card %}
+{% concept-card title="Larger temporal model" eyebrow="Continuity" icon="layers" tone="violet" %}
+Longer history can stabilize motion and occlusion reasoning, but consumes memory and can turn stale state into a broader error unless evidence age is explicit.
+{% /concept-card %}
+{% concept-card title="More learned planning" eyebrow="Adaptation" icon="route" tone="amber" %}
+Learning can represent complex interactions, but it needs constrained action spaces, scenario evaluation, interpretable reason codes, and an independent safety supervisor.
+{% /concept-card %}
+{% concept-card title="More fleet evidence" eyebrow="Coverage" icon="database" tone="green" %}
+Broader field evidence can reveal rare conditions, but increases privacy, governance, labeling, distribution-shift, and release-management obligations.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Decision guide
+
+- Add perception capacity when a measured evidence gap is the limiting factor and the resulting end-to-end budget still has reserve.
+- Add temporal context when it improves a known ambiguity, while enforcing strict age and reset semantics.
+- Narrow the operating envelope when the system cannot make its evidence and timing contract true for a condition.
+- Prefer a bounded fallback over a confident-looking continuation when diagnosis is uncertain.
+
+{% callout variant="tip" %}
+The strongest design artifact is a traceable decision: which evidence was available, how old it was, which plan was proposed, which constraint accepted or rejected it, and which fallback was chosen.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/tesla-autopilot/quiz/tesla-autopilot.json" lessonSlug="tesla-autopilot" title="Review the Autonomy Safety Loop" /%}

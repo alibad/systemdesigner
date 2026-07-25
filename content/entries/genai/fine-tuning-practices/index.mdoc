@@ -1,0 +1,272 @@
+---
+registryId: fine-tuning-practices
+---
+
+{% section-card tone="intro" %}
+## What is production fine-tuning?
+
+**Fine-tuning** updates some or all parameters of a pretrained model so it performs a defined task more consistently. In supervised fine-tuning (SFT), each training record demonstrates the input the application will send and the output the model should produce.
+
+In plain language: prompting tells a model what to do in one request; retrieval gives it current evidence; fine-tuning lets it practice a stable behavior across many examples. Those mechanisms solve different problems and can be combined.
+
+The production invariant is: **a fine-tuned artifact ships only with a versioned task contract, representative held-out evidence, exact model-format lineage, and a tested rollback target**.
+{% /section-card %}
+
+{% section-card %}
+## Start with the failure, not the training method
+
+{% concept-grid columns="4" %}
+{% concept-card title="Prompting" eyebrow="Instructions" icon="file" tone="blue" %}
+Use clearer instructions, schemas, examples, and validators when the base model can already perform the task.
+{% /concept-card %}
+{% concept-card title="Retrieval" eyebrow="Current knowledge" icon="search" tone="cyan" %}
+Fetch approved context when answers depend on private, changing, or attributable facts.
+{% /concept-card %}
+{% concept-card title="PEFT or LoRA" eyebrow="Stable behavior" icon="layers" tone="green" %}
+Train a small adapter when a measured behavior gap remains and a reversible task artifact is valuable.
+{% /concept-card %}
+{% concept-card title="Full fine-tuning" eyebrow="Broad update" icon="cpu" tone="violet" %}
+Update all parameters only when the evaluation evidence justifies the larger compute, storage, and release surface.
+{% /concept-card %}
+{% /concept-grid %}
+
+Fine-tuning is not a reliable knowledge database. Facts in weights are difficult to update, cite, delete, or scope by authorization. Use [RAG systems](/genai/rag-systems) for current evidence and [LoRA fine-tuning](/genai/lora-fine-tuning) for a deeper treatment of adapter mechanics.
+{% /section-card %}
+
+{% section-card %}
+## Choose the smallest intervention that can pass the eval
+
+Select a workload, the evidence the team has already collected, and the dominant deployment priority. The lab ranks the next experiment and exposes missing prerequisites.
+
+{% interactive-block id="genai/fine-tuning-practices-adaptation-strategy-lab" dataFile="/api/content/genai/fine-tuning-practices/data/adaptation-strategy-model.json" /%}
+
+The fit score is a transparent planning model, not a prediction of quality, time, memory, or cost. Actual capability comes from controlled evaluation on the selected base model, data, and serving path.
+{% /section-card %}
+
+{% section-card %}
+## Freeze task and release contracts before data collection
+
+### Task contract
+
+- **Input boundary:** accepted languages, modalities, length distribution, roles, tool schemas, and required context.
+- **Output boundary:** schema, style, abstention or escalation behavior, forbidden claims, and validation rules.
+- **Quality rubric:** task success, exactness, citation or grounding, safety, and human-review criteria.
+- **Scope:** intended users and use cases plus explicit exclusions and high-risk handoffs.
+
+### Release contract
+
+- Name the prompt-only, retrieval, base-model, and current-production baselines.
+- Declare aggregate and slice gates before training; do not choose thresholds after seeing the candidate.
+- Include latency, throughput, memory, token use, and operational failure budgets where the product needs them.
+- Define canary exposure, stop conditions, owners, and the immutable rollback manifest.
+
+If the task cannot be graded consistently, more training data creates a more expensive ambiguity.
+{% /section-card %}
+
+{% section-card %}
+## Construct SFT data as an auditable dataset
+
+{% process-flow %}
+{% process-step number="1" title="Collect representative failures" label="Observe" %}
+Sample real task shapes and edge cases. Preserve source, permission, language, tenant, time, and difficulty metadata.
+{% /process-step %}
+{% process-step number="2" title="Write canonical responses" label="Label" %}
+Use the production output contract. Review factual support, policy behavior, tool arguments, and ambiguous cases.
+{% /process-step %}
+{% process-step number="3" title="Deduplicate and group" label="Isolate" %}
+Cluster exact and near duplicates before splitting. Keep the same user, source document, conversation, or incident in one split group.
+{% /process-step %}
+{% process-step number="4" title="Freeze train, validation, and test" label="Version" %}
+Use validation for checkpoint and hyperparameter choices. Keep the final test set untouched until the release candidate is selected.
+{% /process-step %}
+{% /process-flow %}
+
+Random record-level splits are unsafe when records share a source or are paraphrases. They can place near-identical content on both sides of the evaluation boundary and make memorization look like generalization.
+
+{% code-block file="/api/content/genai/fine-tuning-practices/code/build-sft-record.py" language="python" title="Build an SFT record with split and rights metadata" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Treat data rights and privacy as release gates
+
+- Record the license, consent or other legal basis, source owner, retention rule, geography, and allowed model uses.
+- Remove secrets and unnecessary personal data before records reach training storage or logs.
+- Keep deletion and incident-response paths for the dataset, checkpoints, adapters, caches, and hosted copies.
+- Probe for memorization and sensitive-string reproduction on high-risk or repeated examples.
+- Document synthetic-data generation, reviewer provenance, known bias, and intended-use limits in the dataset card.
+
+Publicly reachable text is not automatically licensed, consented, accurate, or appropriate for training. Obtain legal and privacy review for the actual jurisdiction and data source.
+{% /section-card %}
+
+{% section-card %}
+## Keep formatting, tokenization, and loss masking identical
+
+{% system-flow title="One formatting contract spans training and serving" caption="A visually similar conversation can become a different token sequence when any boundary changes." %}
+{% system-node title="Structured messages" eyebrow="Record" icon="file" tone="blue" %}
+Store roles, content, tool calls, and metadata without pre-rendered mystery strings.
+{% /system-node %}
+{% system-node title="Chat template" eyebrow="Render" icon="layers" tone="cyan" %}
+Apply the model family's role markers, turn separators, generation prompt, and special tokens.
+{% /system-node %}
+{% system-node title="Tokenizer and mask" eyebrow="Train" icon="cpu" tone="violet" %}
+Pin vocabulary, truncation direction, maximum length, padding, and which tokens contribute to loss.
+{% /system-node %}
+{% system-node title="Serving request" eyebrow="Replay" icon="server" tone="green" %}
+Use the same base, tokenizer, template, tool schema, and stop behavior in the deployed runtime.
+{% /system-node %}
+{% /system-flow %}
+
+Before training:
+
+- Count examples and tokens lost to truncation, including assistant outputs.
+- Verify beginning-of-sequence and end-of-sequence tokens are not inserted twice.
+- Inspect decoded tokenized records from every task and language slice.
+- Test whether loss applies to the completion, assistant turns, or the full sequence as intended.
+- Version added tokens and resized embeddings with the checkpoint that owns them.
+
+A LoRA adapter trained against one base checkpoint or chat template is not a portable behavior file for arbitrary models.
+{% /section-card %}
+
+{% section-card %}
+## Choose full SFT, LoRA, or QLoRA by evidence
+
+{% tabs %}
+{% tab title="LoRA or PEFT" %}
+Freeze the base model and train small low-rank updates.
+
+- Reduces trainable parameters, optimizer state, and per-task artifact storage.
+- Supports separate adapters and fast rollback when the runtime preserves exact lineage.
+- Requires target-module, rank, scaling, dropout, base, tokenizer, and template metadata.
+- Does not guarantee the same quality as full SFT for every task, model, rank, or data regime.
+{% /tab %}
+{% tab title="QLoRA" %}
+Keep a quantized frozen base and train LoRA adapters through it.
+
+- Reduces training-memory pressure for compatible model and kernel stacks.
+- Adds quantization, compute-dtype, device-map, and merge/serving compatibility to the test matrix.
+- Paper results are workload-specific evidence, not a universal memory or quality guarantee.
+- Measure the final artifact in the precision and runtime that will serve it.
+{% /tab %}
+{% tab title="Full-parameter SFT" %}
+Update the complete model checkpoint.
+
+- Offers the broadest update surface when adapter capacity is a measured limitation.
+- Multiplies optimizer memory, checkpoint size, distributed-training complexity, and rollback cost.
+- Can increase catastrophic forgetting and unrelated behavior regression.
+- Needs a controlled PEFT or prompting comparison to justify the added operational surface.
+{% /tab %}
+{% /tabs %}
+
+Start with the least expensive method that can falsify the hypothesis. A PEFT win does not prove full SFT is unnecessary forever; a full-SFT win on one benchmark does not justify its production cost automatically.
+{% /section-card %}
+
+{% section-card %}
+## Tune optimization with held-out curves
+
+### Learning rate
+
+- Sweep a small log-scale range instead of treating one library default as universal.
+- Watch for loss spikes, unstable gradients, rapid safety regressions, and degraded base capabilities.
+- PEFT and full SFT often need different ranges because they update different parameter surfaces.
+
+### Effective batch size
+
+Report `microbatch x gradient accumulation x data-parallel workers`. Increasing it changes gradient noise and the number of optimizer updates per epoch; it is not only a memory workaround.
+
+### Epochs and checkpoints
+
+- Evaluate multiple checkpoints on the same frozen slices.
+- Stop when validation loss, rare-slice quality, safety, or base capabilities diverge even if training loss improves.
+- Compare more data, better labels, lower learning rate, regularization, and fewer epochs as separate hypotheses.
+- Run more than one seed when the decision is consequential and the dataset is small.
+
+Training loss confirms that optimization is fitting the objective. It does not prove production task success, safety, calibration, or generalization.
+{% /section-card %}
+
+{% section-card %}
+## Select checkpoints with independent release gates
+
+Change the training run, epoch, serving runtime, and policy. A candidate releases only when quality, rare slices, safety, regression, lineage, artifact support, and rollback all pass.
+
+{% interactive-block id="genai/fine-tuning-practices-release-gate-lab" dataFile="/api/content/genai/fine-tuning-practices/data/release-gate-model.json" /%}
+
+The fixture percentages are illustrative. Real gates need confidence intervals or repeated measurements where sampling noise could change the decision.
+
+{% code-block file="/api/content/genai/fine-tuning-practices/code/evaluate-release.py" language="python" title="Keep critical release gates independent" /%}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the candidate against useful baselines
+
+At minimum, compare the same held-out cases across:
+
+- the base model with the current production prompt;
+- the strongest prompt-only candidate;
+- the retrieval baseline when answers need external evidence;
+- the current production model and configuration;
+- the proposed fine-tuned checkpoint at production decoding settings.
+
+Report aggregate quality and slices for rare intents, long inputs, languages, user groups, tool paths, refusals, adversarial cases, and high-severity failures. Keep safety and base-capability regressions separate so aggregate improvement cannot hide them.
+
+Human review remains necessary when the rubric is subjective or harm is difficult to automate. Model-based graders need their own validation, calibration, and versioning.
+{% /section-card %}
+
+{% section-card %}
+## Release the complete lineage, not a weight file
+
+An immutable manifest should identify:
+
+- base checkpoint and license;
+- tokenizer, vocabulary additions, chat template, special tokens, and maximum length;
+- adapter method, target modules, rank, scaling, dropout, and merge state;
+- dataset, split groups, formatting code, seed, optimizer, scheduler, effective batch, and checkpoint step;
+- evaluation suite, rubric, graders, thresholds, slice results, and reviewers;
+- inference dtype, quantization, runtime, decoding, prompt, tool schemas, and safety controls;
+- canary policy, monitoring dashboards, previous stable alias, and rollback owner.
+
+{% code-block file="/api/content/genai/fine-tuning-practices/code/release-manifest.yaml" language="yaml" title="Version model, format, evaluation, serving, and rollback together" /%}
+
+Merging a LoRA adapter can simplify some runtimes, but it produces a new full checkpoint. Re-run serialization, generation parity, latency, memory, safety, and rollback checks on the merged artifact.
+{% /section-card %}
+
+{% section-card %}
+## Operate and roll back the behavior
+
+### Monitor
+
+- Task success and critical slices from delayed labels or bounded human review.
+- Safety events, refusal and escalation rates, schema failures, tool errors, and unsupported claims.
+- Input length, truncation, language, intent, and source drift.
+- Latency, throughput, memory, token use, fallback, and cost per successful outcome.
+- Base, adapter, prompt, retriever, tokenizer, and runtime versions on every trace.
+
+### Roll out
+
+- Start with offline replay, then shadow or canary traffic appropriate to the data policy.
+- Compare against the stable release on the same traffic distribution.
+- Stop exposure automatically on critical safety, correctness, latency, or compatibility failures.
+
+### Roll back
+
+- Move a versioned alias to the previous complete manifest.
+- Restore the matching base, tokenizer, template, prompt, safety policy, and runtime.
+- Preserve bounded evidence for incident analysis without retaining unnecessary sensitive text.
+
+Retraining should follow a measured failure cluster or distribution change, not a calendar alone.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and scope
+
+- The [LoRA paper](https://arxiv.org/abs/2106.09685) introduces frozen base weights with trainable low-rank updates and reports method-specific parameter and memory results.
+- The peer-reviewed [QLoRA paper](https://papers.neurips.cc/paper_files/paper/2023/file/1feb87871436031bdc0f2beaa62a049b-Paper-Conference.pdf) studies 4-bit quantized bases with LoRA adapters; reproduce its claims on the actual model and runtime.
+- Hugging Face documents the current [TRL SFTTrainer](https://huggingface.co/docs/trl/en/sft_trainer), [chat templates](https://huggingface.co/docs/trl/chat_templates), and [PEFT checkpoint format](https://huggingface.co/docs/peft/main/developer_guides/checkpoint).
+- The [Transformers chat-template guide](https://huggingface.co/docs/transformers/en/chat_templating_writing) describes role rendering and special-token ownership.
+- The [deduplication study](https://arxiv.org/abs/2107.06499) measures train-test overlap and memorization effects in language-model data.
+- The USENIX paper on [extracting training data](https://www.usenix.org/conference/usenixsecurity21/presentation/carlini-extracting) demonstrates why sensitive or repeated records require explicit privacy controls.
+- OpenAI's current [model-optimization workflow](https://developers.openai.com/api/docs/guides/model-optimization) and [SFT guide](https://developers.openai.com/api/docs/guides/supervised-fine-tuning) emphasize representative evals, holdouts, checkpoints, and provider-specific availability.
+
+No paper, framework, or provider guarantees that a dataset size, rank, epoch count, learning rate, or hardware budget will reach a target quality. Treat published numbers as evidence for their reported setup and benchmark every production claim locally.
+{% /section-card %}
+
+{% quiz title="Fine-Tuning Production Decisions" questionsFile="/api/content/genai/fine-tuning-practices/quiz/fine-tuning-production-decisions.json" lessonSlug="fine-tuning-practices" /%}

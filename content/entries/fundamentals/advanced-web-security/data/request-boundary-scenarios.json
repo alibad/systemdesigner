@@ -1,0 +1,112 @@
+{
+  "title": "Trace authority to the exact operation",
+  "description": "Choose an attack path and an enforcement posture. The trace shows which boundary must reject the request before untrusted input reaches data or a side effect.",
+  "defaultScenarioId": "cross-tenant-invoice",
+  "defaultPostureId": "route-guard",
+  "stages": [
+    {
+      "id": "identity",
+      "label": "Session",
+      "eyebrow": "Who is calling?",
+      "detail": "Validate the session, token issuer, audience, expiry, and revocation state.",
+      "controlIds": ["session-validation"]
+    },
+    {
+      "id": "route",
+      "label": "Route policy",
+      "eyebrow": "May this role call the operation?",
+      "detail": "Apply deny-by-default permission checks before expensive work.",
+      "controlIds": ["route-authorization"]
+    },
+    {
+      "id": "resource",
+      "label": "Object policy",
+      "eyebrow": "May this caller access this record?",
+      "detail": "Bind tenant, owner, relationship, and business-state checks to the loaded object.",
+      "controlIds": ["object-authorization"]
+    },
+    {
+      "id": "interpreter",
+      "label": "Interpreter boundary",
+      "eyebrow": "Is input still data?",
+      "detail": "Use parameter binding for commands and contextual encoding for output.",
+      "controlIds": ["query-parameterization", "contextual-output-encoding"]
+    },
+    {
+      "id": "intent",
+      "label": "State change",
+      "eyebrow": "Did the user intend this effect?",
+      "detail": "Verify CSRF evidence, current authorization, limits, and idempotency before committing.",
+      "controlIds": ["csrf-intent"]
+    }
+  ],
+  "postures": [
+    {
+      "id": "session-only",
+      "label": "Session only",
+      "detail": "The application trusts any request carrying a valid session.",
+      "controls": ["session-validation"]
+    },
+    {
+      "id": "route-guard",
+      "label": "Generic route guard",
+      "detail": "Authentication and coarse role checks run, but resource and interpreter boundaries are implicit.",
+      "controls": ["session-validation", "route-authorization"]
+    },
+    {
+      "id": "operation-scoped",
+      "label": "Operation-scoped enforcement",
+      "detail": "Identity, route, object, interpreter, and intent checks are explicit at the point of use.",
+      "controls": [
+        "session-validation",
+        "route-authorization",
+        "object-authorization",
+        "query-parameterization",
+        "contextual-output-encoding",
+        "csrf-intent"
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "cross-tenant-invoice",
+      "label": "Change an invoice ID",
+      "brief": "A signed-in user requests an invoice owned by another tenant.",
+      "request": "GET /api/invoices/inv_other_tenant",
+      "attackGoal": "Read another customer's billing record",
+      "requiredControls": ["session-validation", "route-authorization", "object-authorization"],
+      "safeResult": "Return 404 or 403 without revealing whether the foreign invoice exists.",
+      "unsafeResult": "The valid session becomes authority for every invoice identifier."
+    },
+    {
+      "id": "report-filter-injection",
+      "label": "Inject a report filter",
+      "brief": "A filter value tries to change the structure of a database query.",
+      "request": "GET /api/reports?region=' OR 1=1 --",
+      "attackGoal": "Turn a bounded report into an unrestricted query",
+      "requiredControls": ["query-parameterization"],
+      "safeResult": "The driver treats the entire filter as a value and the query structure stays fixed.",
+      "unsafeResult": "String concatenation lets input become executable query syntax."
+    },
+    {
+      "id": "stored-profile-script",
+      "label": "Render a stored script",
+      "brief": "A profile field contains markup that executes when another user opens the page.",
+      "request": "PATCH /profile { displayName: '<img onerror=...>' }",
+      "attackGoal": "Execute script in another user's trusted origin",
+      "requiredControls": ["contextual-output-encoding"],
+      "safeResult": "The template encodes the value for its HTML context, so the browser renders text.",
+      "unsafeResult": "Stored data becomes executable markup in every viewer's session."
+    },
+    {
+      "id": "cross-site-payout",
+      "label": "Forge a payout request",
+      "brief": "A malicious site submits a state-changing request while the victim is signed in.",
+      "request": "POST /api/payouts { destination: 'attacker' }",
+      "attackGoal": "Reuse ambient session cookies for an unintended transfer",
+      "requiredControls": ["session-validation", "route-authorization", "object-authorization", "csrf-intent"],
+      "safeResult": "The server rejects missing or mismatched intent evidence before creating a payout.",
+      "unsafeResult": "A valid cookie is mistaken for proof that the user initiated this transfer."
+    }
+  ]
+}

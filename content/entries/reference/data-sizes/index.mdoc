@@ -1,0 +1,183 @@
+---
+registryId: data-sizes
+---
+
+{% section-card tone="intro" %}
+## What is data-size estimation?
+
+Data-size estimation is the practice of turning a product's objects, event rate, and retention policy into storage, network, time, and cost numbers. It is a planning model, not a promise that every record has the same size.
+
+It matters because a seemingly small object becomes a large operational commitment when it is written millions of times, retained for months, indexed, copied, backed up, and moved between regions. The invariant is simple: **every capacity result must expose units, cardinality, retention, copies, and overhead.** Without all five, a result can look precise while hiding the multiplier that dominates the decision.
+
+Start with a representative object, state the assumptions beside the arithmetic, then test the result against a peak rate and a failure or recovery path. For storage fundamentals, review [Database Fundamentals](/fundamentals/database-fundamentals); for latency and transfer context, review [Latency Numbers](/reference/latencies).
+{% /section-card %}
+
+{% section-card %}
+## Build every estimate from explicit units
+
+A byte count only becomes useful after it is connected to a count and a time period. Use decimal units for provider bills and network rates unless the contract says otherwise; use binary units when discussing operating-system and memory capacities. Do not silently mix them.
+
+{% metric-strip %}
+{% metric value="8 bits" label="1 byte" detail="The smallest practical payload unit for most storage estimates." tone="blue" /%}
+{% metric value="1,000 B" label="1 KB" detail="Decimal unit commonly used in network and storage billing." tone="cyan" /%}
+{% metric value="1,024 KiB" label="1 MiB" detail="Binary unit commonly used for memory and filesystem capacity." tone="violet" /%}
+{% metric value="1,000 GB" label="1 TB" detail="A useful decimal scale for storage pricing and transfer plans." tone="green" /%}
+{% /metric-strip %}
+
+### Keep the dimensions visible
+
+1. **Object size:** `bytes per item`, including fields that the chosen representation stores.
+2. **Cardinality:** initial objects plus new objects per second, day, or month.
+3. **Retention:** how long that data remains queryable, recoverable, or legally required.
+4. **Copies:** replicas, regional copies, snapshots, and exports that each hold data.
+5. **Overhead:** indexes, metadata, encoding, write amplification, free-space reserve, and growth headroom.
+
+{% callout variant="tip" %}
+Write the unit on every intermediate value. For example, `500 events/s x 1,200 bytes/event = 600,000 bytes/s`, not just "600,000." The unit catches many 1,000x and 86,400x mistakes.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Learn the sizes that drive first-pass decisions
+
+Representative values are anchors for a design conversation, not universal constants. A UTF-8 character can use one to four bytes, JSON repeats field names, a database row has engine overhead, and a media format embeds its own compression choices. Measure production samples before committing capacity.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Small record" eyebrow="100 B to 2 KB" icon="braces" tone="cyan" %}
+
+Examples include cache entries, flags, compact events, and ordinary relational rows. At high request rates, metadata and indexes can exceed the business fields.
+
+{% /concept-card %}
+{% concept-card title="Document or response" eyebrow="10 KB to 5 MB" icon="file-text" tone="blue" %}
+
+Examples include JSON documents, HTML responses, reports, and images. Compression may help text; it rarely helps already-compressed JPEG, MP3, or video data much.
+
+{% /concept-card %}
+{% concept-card title="Media object" eyebrow="5 MB to GBs" icon="image" tone="violet" %}
+
+Photos, audio, video, model artifacts, and archives dominate object storage and transfer time. A thumbnail, preview, transcoded rendition, and original are separate retained objects.
+
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose a representative size deliberately
+
+- Sample the median and p95 payload size, then size the storage plan with a stated percentile or distribution.
+- Include serialized fields, primary keys, timestamps, checksums, and per-object storage metadata.
+- Separate primary payloads from derivatives such as image renditions, search documents, vectors, audit logs, and exports.
+- Record whether the number is compressed on the wire, compressed at rest, or uncompressed in memory. Those are different quantities.
+{% /section-card %}
+
+{% section-card %}
+## Turn a data model into a volume and bandwidth budget
+
+Raw volume answers how much original payload arrives and remains retained. Write throughput answers how fast the ingestion path must accept bytes. A scan or export is a third question: it needs enough sustained transfer bandwidth to finish inside its window.
+
+The lab keeps all inputs in its model visible. Pick an object type, adjust bytes per item, initial inventory, arrival rate, retention, and the transfer window. It computes retained raw size, ingest throughput, time to move the retained dataset over the modeled link, and the minimum link rate needed for the requested window.
+
+{% interactive-block id="reference/data-sizes-volume-bandwidth-lab" dataFile="/api/content/reference/data-sizes/data/volume-bandwidth-model.json" /%}
+
+The displayed transfer time assumes an uninterrupted, fully usable link. In a real migration or restore, reduce available bandwidth for protocol overhead, other traffic, retries, throttling, and the read speed of the source system.
+{% /section-card %}
+
+{% section-card %}
+## Add indexes and metadata before calling it storage
+
+**Raw size** is the payload arithmetic: `bytes per item x retained items`. **Stored size** is what the selected engine reserves to serve and protect that payload. The difference is often material.
+
+{% process-flow %}
+{% process-step number="1" title="Encode the object" label="Payload" %}
+
+Serialization, field names, nulls, compression blocks, object headers, and alignment determine the logical stored bytes.
+
+{% /process-step %}
+{% process-step number="2" title="Make it queryable" label="Indexes" %}
+
+Primary, secondary, full-text, and vector indexes trade more write and storage work for faster reads. Index only the access paths the product needs.
+
+{% /process-step %}
+{% process-step number="3" title="Keep it operable" label="Headroom" %}
+
+Metadata, compaction, free space, partition skew, temporary files, and growth reserve prevent a healthy-looking plan from failing during routine operations.
+
+{% /process-step %}
+{% /process-flow %}
+
+### Questions to ask of a storage engine
+
+- Which fields are duplicated in every index, and are variable-length values stored inline or by reference?
+- Does the engine keep multiple row versions, write-ahead logs, compaction files, or temporary spill files?
+- What fraction of the active working set must fit in memory to meet the read-latency objective?
+- Are partitions evenly distributed, or can a popular tenant or key create a larger-than-average shard?
+
+Use observed storage metrics from a representative environment to replace rules of thumb. A 30% index allowance may be reasonable for one workload and badly wrong for a text or vector index.
+{% /section-card %}
+
+{% section-card %}
+## Separate availability copies from recovery copies
+
+Replication makes another serving copy available; it can improve availability and read scale. A backup preserves a historical recovery point; it helps recover from deletion, corruption, or an operator mistake that replication can faithfully copy.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Replica" eyebrow="Serve through a fault" icon="copy" tone="green" %}
+
+Usually near-current data for failover or reads. It increases steady-state storage and may add replication traffic or consistency lag.
+
+{% /concept-card %}
+{% concept-card title="Backup" eyebrow="Recover older truth" icon="archive" tone="amber" %}
+
+Usually a point-in-time or versioned copy. It needs a tested restore path, retention policy, and a realistic estimate of restore bandwidth and time.
+
+{% /concept-card %}
+{% concept-card title="Region" eyebrow="Change the failure domain" icon="globe" tone="violet" %}
+
+An additional region may reduce regional-outage risk, but it also requires routing, quotas, data ownership, failover decisions, and recovery exercises.
+
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+Two replicas in one region do not replace an independent backup. Two regions do not prove recovery unless you have tested promotion, credentials, dependencies, quotas, data correctness, and the time required to rebuild capacity.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## See the footprint and cost consequences of protection choices
+
+Compression reduces the data portion that must be stored and moved, while indexes and metadata add serving overhead. Replicas and regions multiply durable serving copies. Backups add a different kind of copy with a different recovery benefit and restore cost.
+
+This second lab starts from a stated daily ingest rate. Change compression, index overhead, replicas, backups, regions, and retention. Compare the resulting durable footprint, one-region working set, modeled monthly storage cost, and the failure or recovery consequence. Its rates are planning assumptions, not a provider quote.
+
+{% interactive-block id="reference/data-sizes-footprint-cost-lab" dataFile="/api/content/reference/data-sizes/data/footprint-cost-model.json" /%}
+
+### Use the output to make a decision, not to finish the estimate
+
+- **Compression:** validate compression ratio and CPU cost with representative production data; incompressible media should be modeled near 0% reduction.
+- **Indexes:** measure the exact index design and write amplification before accepting a hot working-set target.
+- **Replicas and regions:** test the surviving capacity, replication lag, promotion path, and data-consistency promise under failure.
+- **Backups:** time a restore at realistic scale and verify application-level invariants, not only that files copied successfully.
+- **Cost:** include storage class, reads, writes, transfer, API operations, reserved capacity, support, and engineering effort in the final budget.
+{% /section-card %}
+
+{% section-card %}
+## Carry uncertainty into the design review
+
+An estimate should show a range and name what would move it. Start with a baseline, then calculate a plausible high case rather than hiding uncertainty in an unexplained multiplier.
+
+{% code-block file="/api/content/reference/data-sizes/code/capacity-estimate.ts" language="ts" title="Traceable capacity estimate" /%}
+
+### A review-ready estimate answers
+
+1. What object size and percentile did we use, and how was it sampled?
+2. What peak and average arrival rates are assumed, and what growth horizon is covered?
+3. How long is each class of data retained, and which policy or customer requirement sets that period?
+4. Which serving copies, backup copies, regions, indexes, and reserve factors are included?
+5. What transfer path must complete within a time limit, and what sustained throughput does it require?
+6. Which measurement or load test will retire the largest uncertainty before launch?
+
+{% callout variant="info" %}
+The best early estimate is not the one with the most decimal places. It is the one that makes assumptions easy to challenge, replace with measurements, and recompute after a product change.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/data-sizes/quiz/data-sizes-estimation.json" title="Check your data-size estimates" /%}

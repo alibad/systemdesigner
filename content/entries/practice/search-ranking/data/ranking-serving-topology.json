@@ -1,0 +1,153 @@
+{
+  "title": "Trace the search-serving path under pressure",
+  "description": "Choose a scenario to see which dependencies are on the request path, what degrades, and which hard filters still protect the final result set. Select a component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "user",
+      "label": "Searcher",
+      "eyebrow": "Query + context",
+      "detail": "Sends a query, locale, safe session context, and request deadline. The client never decides eligibility.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 20
+    },
+    {
+      "id": "gateway",
+      "label": "Query gateway",
+      "eyebrow": "Route + authenticate",
+      "detail": "Normalizes the query, resolves requester policy and experiment assignment, and carries the deadline through every synchronous call.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 25,
+      "y": 20
+    },
+    {
+      "id": "cache",
+      "label": "Result cache",
+      "eyebrow": "Versioned shortcut",
+      "detail": "Serves a cacheable result only when its query, cohort, policy, and index keys match. Time-sensitive eligibility still runs before display.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 43,
+      "y": 20
+    },
+    {
+      "id": "retrieval",
+      "label": "Hybrid retrieval",
+      "eyebrow": "Recall",
+      "detail": "Runs lexical and vector retrieval over the authorized corpus and returns a broad candidate set with document versions.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 61,
+      "y": 20
+    },
+    {
+      "id": "ranker",
+      "label": "Ranking service",
+      "eyebrow": "Score + rerank",
+      "detail": "Uses a cheap first stage for many candidates and a richer reranker for a bounded top set. It obeys the remaining request budget.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 79,
+      "y": 20
+    },
+    {
+      "id": "policy",
+      "label": "Eligibility gate",
+      "eyebrow": "Hard constraint",
+      "detail": "Applies access, legal, moderation, availability, deduplication, and diversity rules before the result page is released.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 91,
+      "y": 42
+    },
+    {
+      "id": "features",
+      "label": "Online features",
+      "eyebrow": "Fresh context",
+      "detail": "Serves bounded query, session, and document features with schema and freshness metadata. It is not the authority for access or inventory.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 69,
+      "y": 54
+    },
+    {
+      "id": "events",
+      "label": "Interaction stream",
+      "eyebrow": "Async feedback",
+      "detail": "Records impressions, positions, clicks, and satisfaction outcomes outside the response path for evaluation and training.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 47,
+      "y": 78
+    },
+    {
+      "id": "trainer",
+      "label": "Training pipeline",
+      "eyebrow": "Point-in-time data",
+      "detail": "Builds debiased, versioned examples and evaluates candidate models before they can reach serving.",
+      "kind": "analytics",
+      "tone": "green",
+      "x": 72,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "user-gateway", "from": "user", "to": "gateway", "label": "search" },
+    { "id": "gateway-cache", "from": "gateway", "to": "cache", "label": "cache lookup" },
+    { "id": "cache-policy", "from": "cache", "to": "policy", "label": "validate", "via": { "x": 68, "y": 8 } },
+    { "id": "gateway-retrieval", "from": "gateway", "to": "retrieval", "label": "eligible recall", "via": { "x": 42, "y": 38 } },
+    { "id": "retrieval-ranker", "from": "retrieval", "to": "ranker", "label": "candidates" },
+    { "id": "ranker-features", "from": "ranker", "to": "features", "label": "feature join" },
+    { "id": "features-ranker", "from": "features", "to": "ranker", "label": "versioned values" },
+    { "id": "ranker-policy", "from": "ranker", "to": "policy", "label": "ranked set" },
+    { "id": "policy-events", "from": "policy", "to": "events", "label": "impression", "mode": "async", "via": { "x": 84, "y": 70 } },
+    { "id": "events-trainer", "from": "events", "to": "trainer", "label": "outcomes", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "cache-hit",
+      "label": "Cache hit",
+      "summary": "A version-matched cached result can skip retrieval and scoring, but it still reaches the eligibility gate before display and emits an impression asynchronously.",
+      "activeEdges": ["user-gateway", "gateway-cache", "cache-policy", "policy-events", "events-trainer"],
+      "focusNode": "cache",
+      "result": "The shortest path preserves correctness: cache speed does not grant permission to serve a stale or unauthorized result."
+    },
+    {
+      "id": "normal-miss",
+      "label": "Normal cache miss",
+      "summary": "The service retrieves broad candidates, joins fresh features for the bounded rerank, applies final eligibility, and logs the displayed positions outside the deadline.",
+      "activeEdges": ["user-gateway", "gateway-retrieval", "retrieval-ranker", "ranker-features", "features-ranker", "ranker-policy", "policy-events", "events-trainer"],
+      "focusNode": "ranker",
+      "result": "A multi-stage pipeline spends expensive compute only after retrieval has narrowed the corpus and hard constraints remain in force."
+    },
+    {
+      "id": "feature-outage",
+      "label": "Feature outage",
+      "summary": "Online personalization features are unavailable. The ranking service uses a preapproved non-personalized feature subset and preserves final policy checks.",
+      "activeEdges": ["user-gateway", "gateway-retrieval", "retrieval-ranker", "ranker-policy", "policy-events", "events-trainer"],
+      "degradedNodes": ["ranker", "features"],
+      "focusNode": "features",
+      "result": "Relevance may fall, but the service remains available with an observable fallback. It does not invent personal features or bypass eligibility."
+    },
+    {
+      "id": "reranker-pressure",
+      "label": "Reranker pressure",
+      "summary": "Tail latency or saturation makes the rich reranker unsafe to call. The service returns first-stage ordering after policy and diversity checks.",
+      "activeEdges": ["user-gateway", "gateway-retrieval", "retrieval-ranker", "ranker-policy", "policy-events", "events-trainer"],
+      "degradedNodes": ["ranker"],
+      "focusNode": "ranker",
+      "result": "Skipping optional work protects the deadline. The fallback is deliberately less precise, not less safe."
+    },
+    {
+      "id": "policy-unavailable",
+      "label": "Eligibility failure",
+      "summary": "The policy dependency cannot confirm access or required product constraints for this surface, so the affected result set must not be released.",
+      "activeEdges": ["user-gateway", "gateway-retrieval", "retrieval-ranker", "ranker-policy"],
+      "failedNodes": ["policy"],
+      "focusNode": "policy",
+      "result": "Fail closed or omit the affected results. A response that is fast but violates an eligibility constraint is not a valid fallback."
+    }
+  ]
+}

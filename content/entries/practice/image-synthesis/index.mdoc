@@ -1,0 +1,295 @@
+---
+registryId: practice-image-synthesis
+---
+
+{% section-card tone="intro" %}
+## What is an image synthesis system?
+
+An image synthesis system creates or edits an image from a prompt, a reference image, a mask, or a structured control such as a pose. A diffusion model makes pixels, but the product is the system around it: it must validate the request, schedule scarce accelerator time, preserve intended edit boundaries, inspect the result, and record why a result was allowed to leave the service.
+
+For this design exercise, build a commercial image studio that serves **100 million generations per month**, offers **512 px previews and 1024 px final renders**, and targets **25 seconds p95** for the standard interactive route. These numbers are planning assumptions for the interview, not claims about a specific vendor.
+
+The release invariant is: **every delivered image has passed input and output policy, retains the requested edit boundary, and has traceable model and policy provenance.** A faster output that fails any part of that invariant is not a valid result.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Treat rendering as a job" eyebrow="Critical path" icon="layers" tone="violet" %}
+Durable jobs, quotas, and explicit deadlines prevent accelerator saturation from becoming a lost or duplicated generation.
+{% /concept-card %}
+{% concept-card title="Preserve the user’s control" eyebrow="Correctness" icon="scale" tone="blue" %}
+Text, reference, mask, seed, and model version must be attached to one immutable generation record so edits do not silently drift.
+{% /concept-card %}
+{% concept-card title="Degrade quality before safety" eyebrow="Failure mode" icon="activity" tone="green" %}
+Under pressure, offer a preview, queue the final, or reduce optional refinement. Never skip safety, rights, or provenance gates.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Start with the user-visible contract
+
+Before discussing model weights, ask which creation modes matter. They share infrastructure but have different correctness rules.
+
+- **Text-to-image:** a user supplies a prompt, aspect ratio, style category, seed, and output count.
+- **Reference-guided generation:** a user supplies an image plus a permitted transformation; the system must state whether it preserves composition, subject, or only broad style.
+- **Inpainting and outpainting:** a mask defines what can change. Pixels outside a protected region are an edit-boundary constraint, not a preference.
+- **Controlled generation:** pose, depth, edge, or layout guidance makes the desired structure explicit and changes the model-routing decision.
+
+### Define functional requirements
+
+- Accept prompts, references, masks, and controls; return a durable job ID, status, result URLs, and generation metadata.
+- Offer a fast preview and a higher-quality final render. Users can cancel before work starts and can create a refinement from a prior immutable version.
+- Keep a short history of inputs, selected model version, seed, parameters, policy outcome, and output hashes so support and enterprise audit workflows can explain a result.
+- Let a user report an output or request deletion. Deletion must remove the result and its accessible derivatives according to retention policy.
+
+### Make the boundaries explicit
+
+**Hard guardrails**
+
+- Block prohibited prompts before allocating expensive GPU work; inspect every output because models can produce unsafe material from an apparently acceptable prompt.
+- Apply real-person, trademark, copyrighted-reference, and age-sensitive policies separately from broad visual-safety classification.
+- Do not claim ownership clearance from a similarity score. Rights policy should distinguish allowed uploads, licensed asset libraries, and requests that require review.
+- Attach provenance to every release: model and adapter version, generation time, policy version, input and output hashes, and any applicable watermark status.
+
+**Out of scope for the first version**
+
+- Real-time collaborative canvas editing, unbounded video generation, medical or legal advice imagery, and automatic public publishing.
+- A guarantee that every request produces an image. A visible review, rejection, or retryable queue state is safer than an unexplained output.
+
+{% callout variant="info" %}
+If readers need more foundation on prompts and conditioning before this exercise, link them to the [prompt engineering lesson](/genai/prompt-engineering) and the [text-to-image practice](/practice/text-to-image). This page focuses on the system-design decisions around a multi-mode image studio.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Throughput, Capacity, and Cost" %}
+
+
+### Turn volume into a peak workload
+
+The daily average hides the operational problem. At 100 million generations per 30-day month, the average is about **38.6 images/s**. A 4x evening and campaign peak is about **154 images/s**. With 25% regional and deployment headroom, capacity planning begins around **193 images/s**, before retry and review traffic.
+
+{% metric-strip %}
+{% metric value="100M/month" label="Generation requests" detail="Planning input across preview and final routes." tone="blue" /%}
+{% metric value="154/s" label="Peak demand" detail="4x the 38.6 images/s monthly average." tone="cyan" /%}
+{% metric value="25 s" label="Standard p95" detail="Includes queueing, render, inspections, storage, and response." tone="violet" /%}
+{% metric value="25%" label="Headroom" detail="Covers failures, deployments, and demand estimation error." tone="green" /%}
+{% /metric-strip %}
+
+### Separate the cost drivers
+
+Accelerator time dominates, but it is not the only bill. The unit cost must include generation attempts that are blocked after rendering or routed to review.
+
+- **Compute:** resolution, denoising steps, batch size, model tier, optional upscaling, and regional idle capacity.
+- **Storage and delivery:** original uploads, intermediate previews, retained final images, thumbnails, and CDN egress. Use lifecycle policies rather than keeping every intermediate forever.
+- **Trust operations:** input and output classifiers, perceptual matching, provenance signing, human review, abuse investigations, and red-team evaluation.
+- **Control plane:** API servers, durable queues, job status, audit events, quota accounting, and observability.
+
+### Make the capacity and cost decision
+
+{% interactive-block id="practice/text-to-image-capacity-lab" /%}
+
+Change the render tier, demand shape, batch, and provisioned fleet. The important consequence is coupled: a larger batch can lower cost per image but push a high-quality render past the latency target; an undersized fleet builds a visible five-minute backlog. The correct response is to select an approved preview or queue path, not to bypass release checks.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the High-Level Architecture and Model Tiers" %}
+
+
+### Keep the release authority outside the generator
+
+{% system-flow title="Image synthesis request path" caption="The model proposes an image; independent policy and provenance services decide whether that image may be delivered." %}
+{% system-node title="Creation API" eyebrow="Accept + bound" icon="key" tone="blue" %}
+Authenticates the caller, validates file size and mask geometry, reserves quota, and records one immutable generation specification.
+{% /system-node %}
+{% system-node title="Policy router" eyebrow="Inspect input" icon="shield" tone="rose" %}
+Classifies prompt and references, applies product and tenant policy, and sends uncertain requests to review before GPU scheduling.
+{% /system-node %}
+{% system-node title="Job queue + scheduler" eyebrow="Admit + route" icon="route" tone="violet" %}
+Stores an idempotent job, carries a deadline, selects a healthy region, and assigns a model tier without duplicating paid work.
+{% /system-node %}
+{% system-node title="Generation workers" eyebrow="Render" icon="speed" tone="cyan" %}
+Run the selected diffusion pipeline with bounded controls, then emit encrypted output references and execution telemetry.
+{% /system-node %}
+{% system-node title="Release gate" eyebrow="Inspect + deliver" icon="check" tone="green" %}
+Runs output safety and rights checks, signs provenance, stores approved assets, and returns a short-lived delivery URL.
+{% /system-node %}
+{% /system-flow %}
+
+### Route by consequence, not only by prompt length
+
+- **Preview tier:** 512 px, fewer denoising steps, small or batched model. It helps users test composition quickly and is the preferred overload fallback.
+- **Standard tier:** 1024 px default for approved consumer and business work. It is the primary benchmark route for the 25-second p95 target.
+- **Quality tier:** more steps, optional refiner, and stricter admission. It should be asynchronous or show an ETA when it cannot meet the interactive budget.
+- **Specialist route:** inpainting, reference-guided work, or structured controls. It has its own validation because mask fidelity and reference policy are part of correctness.
+
+### Keep synchronous work narrow
+
+The user-facing path needs input policy, job acceptance, generation, output policy, provenance, storage, and result delivery. Dataset curation, product analytics, model-quality sampling, feedback triage, and billing reconciliation consume events asynchronously. They must never extend a generation deadline.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive: Conditioning, Safety, and Provenance" %}
+
+
+### Define what the model is allowed to change
+
+Diffusion denoises a latent representation over many steps. Conditioning tells the denoiser what image to make; it does not prove the output follows the request. Treat every conditioning input as data with a policy and a validation rule.
+
+{% process-flow %}
+{% process-step number="1" title="Normalize inputs" label="Controls" %}
+Canonicalize prompt text, reference orientation, mask dimensions, and structured controls. Store hashes and reject malformed or oversized media.
+{% /process-step %}
+{% process-step number="2" title="Build the conditioning bundle" label="Intent" %}
+Bind prompt embeddings, reference features, mask, seed, control strength, model version, and permitted edit region to one job version.
+{% /process-step %}
+{% process-step number="3" title="Render within a budget" label="Generation" %}
+Schedule the selected model and adapter with a fixed deadline, bounded retry policy, and no silent change to the requested model or controls.
+{% /process-step %}
+{% process-step number="4" title="Inspect before release" label="Decision" %}
+Classify output risk, evaluate edit-boundary adherence where applicable, attach provenance, and release, review, or quarantine the result.
+{% /process-step %}
+{% /process-flow %}
+
+### Use layered controls with distinct jobs
+
+- **Prompt and upload gates:** normalize obfuscation, reject disallowed text or references, enforce tenant permissions, and save GPU time for clear violations.
+- **Generation-time controls:** restrict models and adapters by product tier; use safety guidance only as one defense, because it can fail or overblock.
+- **Output gates:** independently classify the rendered image, inspect detected real-person or trademark policy where required, and quarantine unsafe results.
+- **Provenance ledger:** write a tamper-evident generation record before delivery. Store the minimal retained data required by product policy and honor deletion requests.
+
+### Decide a release under changing policy
+
+{% interactive-block id="practice/text-to-image-safety-gate-lab" /%}
+
+Inject a request, choose a product policy, and remove provenance. The visible path demonstrates why a passing prompt score cannot authorize delivery: output risk, identity risk, and missing provenance each lead to a different release decision. A review queue is a product state, not an error path hidden from the user.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Evaluation and Safety Metrics" %}
+
+
+### Measure whether the image follows the request
+
+Image quality is not one score. Evaluate a versioned, consented test set across prompt types, languages, reference modes, masks, styles, and safety-sensitive slices.
+
+- **Prompt alignment:** blinded raters and calibrated image-text similarity judge whether the requested subject, composition, and constraints are present.
+- **Control fidelity:** masked edits preserve pixels outside the allowed region; pose, depth, and layout controls meet a measurable structural tolerance.
+- **Aesthetic and technical quality:** separate human preference from artifacts, unreadable text, failed faces or hands, and resolution defects.
+- **Safety and rights:** measure false negatives and false positives for disallowed visual content, identity abuse, perceptual similarity alerts, and provenance coverage.
+
+### Set release gates before the experiment
+
+**Offline gates**
+
+- Candidate model must not regress prompt alignment or edit-boundary fidelity beyond a predefined margin for any protected or high-value slice.
+- Output-policy recall must meet the risk target on red-team and adversarial sets; rights and identity coverage need their own test suites.
+- Every output mode must produce the required generation record and policy version.
+
+**Online gates**
+
+- Track generation completion, cancellation, regeneration, user report, acceptance, and review rates by tier and request type.
+- Track p50, p95, and p99 queue time and render time separately. A good model cannot hide behind an average when the queue is saturated.
+- Compare safety blocks, appeal outcomes, and delete requests by language, region, modality, and tenant policy without exposing raw user media in dashboards.
+
+{% callout variant="warn" %}
+Do not release a model because a single aesthetic score improves. A better-looking model that crosses a mask boundary, weakens safety recall, or loses provenance has regressed the product.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="governance" title="6. Control Cost and Governance" %}
+
+
+### Spend accelerator time deliberately
+
+Use a tenant-aware admission controller before the scheduler. It checks quota, concurrency, requested tier, regional health, and remaining deadline. The scheduler can then place an accepted job exactly once and report an ETA based on measured queue depth.
+
+- Reserve the quality tier for explicit user intent, approved enterprise workflows, or asynchronous production runs.
+- Batch compatible requests only when their deadline and policy path are compatible. Do not batch together jobs that require isolated tenant handling.
+- Reuse a prior output only when the generation specification, tenant permissions, and retention policy permit it. A semantic cache is not safe for arbitrary creative requests.
+- Apply storage lifecycle rules to previews, intermediates, and rejected artifacts; preserve audit metadata for the documented retention period, not indefinitely.
+
+### Make governance operational
+
+- Version prompts, model weights, adapters, safety classifiers, policy rules, and evaluation sets. A release record must identify the exact versions used.
+- Require a change review for new model routes, safety threshold changes, and retention policy changes. Separate the person who approves a model from the person who can change a production policy threshold.
+- Keep raw uploads and outputs access-controlled, encrypted, region-aware, and absent from routine logs. Support legal hold and deletion through a documented process.
+- Charge internal product teams for attempted and released generations separately so safety rejects and retry storms are visible cost centers.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="7. Scale Safely and Plan Failures" %}
+
+
+### Fail in ways a creator can understand
+
+The job record is the recovery boundary. It contains the generation specification, idempotency key, state transitions, selected model tier, retry count, and final release decision. Workers may retry only when the job has not produced a terminal output; output delivery is idempotent through an immutable result version.
+
+{% concept-grid columns="3" %}
+{% concept-card title="GPU saturation" icon="server" tone="amber" %}
+Stop admitting nonessential quality jobs, offer a preview or ETA, and cap retries. Do not turn a long queue into an unbounded retry storm.
+{% /concept-card %}
+{% concept-card title="Model or region outage" icon="cloud" tone="rose" %}
+Route only to a preapproved compatible model in another healthy region. Otherwise preserve the job and report delay; do not silently change the requested edit semantics.
+{% /concept-card %}
+{% concept-card title="Output safety outage" icon="warning" tone="blue" %}
+Hold affected results or fail closed according to product policy. A finished GPU job is not permission to deliver uninspected media.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Separate retryable from terminal states
+
+- **Retryable:** worker loss before output commit, temporary accelerator allocation failure, or a retryable storage write. Use bounded exponential backoff and a dead-letter state with operator visibility.
+- **Terminal success:** approved output and provenance record are committed, then a delivery URL is issued.
+- **Terminal hold:** output is quarantined, under review, or missing a required provenance record. Preserve enough evidence for appeal without exposing it broadly.
+- **Terminal rejection:** prompt, reference, or policy violation is explained with a safe product message and does not consume more accelerator time.
+
+### Observe the queue and the gates
+
+Alert on queue age, admission rejects, per-tier GPU utilization, worker failures, job retries, duplicate-job suppression, output-policy latency, release versus review versus quarantine rate, provenance coverage, and deletion completion. Break each metric down by region, model version, modality, tenant tier, and policy version. Use error-budget burn for the interactive path; a single GPU failure is not an incident if the queue and release invariant remain healthy.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Trade-offs, Risks, and Extensions" %}
+
+
+### Explain the core trade-offs
+
+{% concept-grid columns="2" %}
+{% concept-card title="One general model vs specialist routes" icon="workflow" tone="blue" %}
+A shared model simplifies serving and evaluation. Specialist routes improve inpainting or control fidelity but multiply benchmark, routing, and rollback obligations.
+{% /concept-card %}
+{% concept-card title="Interactive quality vs predictable latency" icon="gauge" tone="violet" %}
+More steps and refiners can improve preference scores but consume capacity. Make quality an explicit tier with an ETA, not a hidden source of tail latency.
+{% /concept-card %}
+{% concept-card title="Automatic policy vs human review" icon="users" tone="amber" %}
+Automation scales clear decisions. Review handles ambiguity but adds cost and latency, so queues need service levels, appeal paths, and measurable agreement.
+{% /concept-card %}
+{% concept-card title="Retention vs auditability" icon="storage" tone="green" %}
+Longer retention helps disputes and reproducibility but increases privacy and storage exposure. Keep minimum necessary artifacts with clear deletion and legal-hold rules.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Close the interview answer
+
+A strong design is not "deploy a diffusion model behind an API." It is a job-based, policy-first pipeline that binds controls to an immutable generation record; routes work by deadline and consequence; releases only inspected, provenance-bearing outputs; and degrades quality or waits before it compromises safety.
+
+**Next extensions**
+
+- Add a governed asset library with license metadata and tenant-specific style adapters.
+- Support collaborative projects by versioning edits as a directed history rather than mutating one shared image record.
+- Add a browser or device preview path only after measuring quality, privacy, battery, and model-version parity against the cloud route.
+- Run recurring red-team campaigns for prompt obfuscation, reference-image abuse, identity impersonation, and policy-version regressions.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/image-synthesis/quiz/image-synthesis-design-review.json"
+   lessonSlug="practice-image-synthesis"
+   title="Image Synthesis Design Review" /%}

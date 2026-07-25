@@ -1,0 +1,234 @@
+---
+registryId: mysql
+---
+
+{% section-card tone="intro" %}
+## What is MySQL?
+
+**MySQL is a relational database server.** It stores structured data in tables, lets
+applications read and change that data with SQL, and enforces rules such as unique
+keys, relationships, and transactions.
+
+Relational databases matter when the application has facts that must stay correct
+together: an order and its line items, an account and its permissions, or inventory
+and its reservations. MySQL is a practical choice for these workloads because it has
+a mature ecosystem, broad tooling support, and a transactional default engine called
+**InnoDB**.
+
+{% callout variant="info" %}
+The database is only one part of the system. Schema design, indexes, access patterns,
+connection management, replication, backups, and operational discipline determine
+whether a MySQL deployment remains fast and recoverable.
+{% /callout %}
+{% /section-card %}
+
+{% interactive-block id="technology/mysql-performance" /%}
+
+{% section-card accent="blue" %}
+## How a MySQL write becomes durable
+
+Start with the request path. A query is parsed and optimized, InnoDB changes pages in
+memory, and the transaction log records enough information to recover committed work.
+Dirty pages can be flushed to data files later, so every commit does not need to
+rewrite each affected table page immediately.
+
+{% system-flow title="Simplified InnoDB write path" caption="The exact timing depends on durability settings and hardware. The key distinction is between committing the transaction log and later flushing changed data pages." %}
+{% system-node title="Application" eyebrow="Client" icon="code" tone="blue" %}
+Sends SQL through a bounded connection pool.
+{% /system-node %}
+{% system-node title="Parser + optimizer" eyebrow="Plan" icon="search" tone="violet" %}
+Validates SQL and chooses an access plan.
+{% /system-node %}
+{% system-node title="Buffer pool" eyebrow="Memory" icon="cache" tone="green" %}
+Reads and changes cached InnoDB pages.
+{% /system-node %}
+{% system-node title="Redo log" eyebrow="Commit" icon="repeat" tone="amber" %}
+Makes committed changes recoverable after a crash.
+{% /system-node %}
+{% system-node title="Data files" eyebrow="Storage" icon="storage" tone="cyan" %}
+Receive changed pages during background flushing.
+{% /system-node %}
+{% /system-flow %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Transactions protect invariants" icon="shield" tone="green" %}
+Use a transaction when several statements must succeed or fail as one unit. Keep
+transactions short so locks and old row versions do not accumulate.
+{% /concept-card %}
+{% concept-card title="Indexes trade writes for reads" icon="search" tone="blue" %}
+An index can avoid scanning rows, but every additional index consumes storage and must
+be maintained during writes. Design indexes from real query shapes.
+{% /concept-card %}
+{% concept-card title="The buffer pool is the hot path" icon="cache" tone="violet" %}
+Frequently used table and index pages should fit in memory. Disk latency becomes much
+more visible when the working set repeatedly misses the buffer pool.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Storage engines: default to InnoDB
+
+A storage engine controls how each MySQL table stores data, handles concurrent access,
+and recovers after failure. Use InnoDB for modern application tables unless a measured,
+specialized requirement makes one of the narrower alternatives a better fit.
+
+{% concept-grid columns="4" %}
+{% concept-card title="InnoDB" eyebrow="Default" icon="database" tone="blue" %}
+Use for almost every new application table. It provides transactions, row-level
+locking, foreign keys, crash recovery, and clustered primary-key storage.
+{% /concept-card %}
+{% concept-card title="MyISAM" eyebrow="Legacy" icon="storage" tone="amber" %}
+Useful mainly when maintaining an existing MyISAM workload. It lacks transactions and
+crash-safe recovery, and table-level locks make concurrent writes difficult.
+{% /concept-card %}
+{% concept-card title="MEMORY" eyebrow="Ephemeral" icon="speed" tone="violet" %}
+Stores table rows in memory and loses them on restart. Consider it only for bounded,
+reconstructable data after comparing it with application or distributed caches.
+{% /concept-card %}
+{% concept-card title="ARCHIVE" eyebrow="Specialized" icon="boxes" tone="green" %}
+Provides compressed, append-oriented storage with limited access patterns. Object
+storage or an analytical system is usually a better fit for modern archives.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="tip" %}
+Default to InnoDB unless a measured requirement demands another engine. Storage-engine
+choice is not a substitute for choosing the right database category for the workload.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Replication improves availability; backups enable recovery
+
+Replication copies committed changes to other MySQL servers for read scaling and
+faster failover. Because it also copies accidental deletes and bad application writes,
+it cannot restore lost history. Pair replication with independent backups and regular
+restore tests.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Primary + replicas" eyebrow="Common default" icon="repeat" tone="blue" %}
+One primary owns writes; replicas serve suitable reads and provide failover candidates.
+Asynchronous replication keeps write latency low but allows lag and possible data loss
+during an unplanned promotion.
+{% /concept-card %}
+{% concept-card title="Semi-synchronous replication" eyebrow="Durability" icon="shield" tone="green" %}
+The primary waits for at least one replica to acknowledge receipt of the transaction.
+This reduces the loss window, but adds network latency and still requires a failover
+orchestrator.
+{% /concept-card %}
+{% concept-card title="Group Replication" eyebrow="Coordinated cluster" icon="network" tone="violet" %}
+Members coordinate transaction certification and membership. MySQL InnoDB Cluster can
+build on it for managed failover, at the cost of stricter networking and operational
+requirements.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% tabs %}
+{% tab title="Primary + replicas" %}
+### Best for a clear write owner
+
+Route writes to the primary. Send only lag-tolerant reads to replicas, and keep
+read-after-write traffic on the primary when the user must immediately observe a
+change.
+
+{% code-block file="/api/content/technology/mysql/code/primary-replica-architecture.txt" language="text" title="Primary-replica topology" /%}
+{% /tab %}
+
+{% tab title="Multiple writers" %}
+### Treat write conflicts as a correctness problem
+
+Classic bidirectional replication can create duplicate keys, ordering conflicts, and
+surprising failover behavior. Prefer a single writer per data partition unless the
+application has a tested conflict model.
+
+{% code-block file="/api/content/technology/mysql/code/primary-primary-architecture.txt" language="text" title="Why dual-writer topology needs care" /%}
+{% /tab %}
+
+{% tab title="Failover" %}
+### Promotion is only one step
+
+A safe failover verifies replica freshness, prevents the old primary from accepting
+writes, promotes one candidate, redirects clients, and rebuilds redundancy. Automate
+the workflow and exercise it under load before relying on it.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Where MySQL fits in a system
+
+Use workload shape and correctness needs instead of popularity as the selection rule.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Transactional core" icon="check" tone="green" %}
+Orders, billing records, identity, permissions, and other normalized data with clear
+integrity rules are strong fits.
+{% /concept-card %}
+{% concept-card title="Service-owned metadata" icon="layers" tone="blue" %}
+A service can own a focused schema and evolve it through versioned migrations without
+sharing write access with unrelated services.
+{% /concept-card %}
+{% concept-card title="Tenant-partitioned SaaS" icon="users" tone="violet" %}
+Partition by a stable tenant key when one cluster no longer meets capacity or isolation
+needs. Keep routing and resharding explicit.
+{% /concept-card %}
+{% concept-card title="Not every access pattern" icon="warning" tone="rose" %}
+Large analytical scans, high-cardinality telemetry, vector similarity, and blob
+storage usually belong in systems designed for those workloads.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Optimize with an evidence loop
+
+Performance work should start with a user-visible symptom and end with a measured
+result. Tuning random server variables before understanding the query plan often moves
+the bottleneck instead of removing it.
+
+{% process-flow %}
+{% process-step number="1" title="Observe the symptom" label="Measure" %}
+Use latency percentiles, throughput, error rate, lock waits, connection pressure, and
+the slow query log to isolate the affected workload.
+{% /process-step %}
+{% process-step number="2" title="Inspect the plan" label="Explain" %}
+Run `EXPLAIN ANALYZE` on a representative query. Check rows examined, chosen indexes,
+join order, temporary tables, and sorting work.
+{% /process-step %}
+{% process-step number="3" title="Fix the access pattern" label="Change" %}
+Reduce returned columns and rows, add the narrowest useful index, batch round trips, or
+change a query that defeats an existing index.
+{% /process-step %}
+{% process-step number="4" title="Protect concurrency" label="Load" %}
+Bound connection pools, shorten transactions, avoid hot rows, and test with realistic
+contention rather than isolated single-query benchmarks.
+{% /process-step %}
+{% process-step number="5" title="Tune the server" label="Configure" %}
+Size the InnoDB buffer pool from the working set and host role. Review redo capacity,
+I/O behavior, and connection limits with memory headroom.
+{% /process-step %}
+{% process-step number="6" title="Verify and watch" label="Prove" %}
+Compare before and after plans and latency under production-like load. Add a regression
+signal so the same issue is detected early next time.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/mysql/code/explain-index-workflow.sql" language="sql" title="Measure an index change instead of guessing" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Production readiness checklist
+
+Verify the operating habits that protect correctness and recovery, then confirm the
+failure-prone shortcuts have been removed from the deployment.
+
+{% interactive-checklist
+   checklistId="mysql-production-readiness"
+   dataFile="/api/content/technology/mysql/data/production-checklist.json" /%}
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/mysql/quiz/mysql.json"
+   lessonSlug="mysql"
+   title="MySQL Production Decision Check" /%}

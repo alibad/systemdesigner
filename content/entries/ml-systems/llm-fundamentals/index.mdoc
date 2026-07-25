@@ -1,0 +1,157 @@
+---
+registryId: llm-fundamentals
+---
+
+{% section-card tone="intro" %}
+## What is a large language model?
+
+A large language model (LLM) is a neural network that assigns probabilities to the next token in a sequence. It turns a prompt into tokens, uses the tokens that fit in its context window, scores possible continuations, and decodes one token at a time into a response.
+
+LLMs matter because this simple prediction loop can power search assistants, code tools, classifiers, and conversational systems. It also creates a critical limit: **a high-probability token is the model's best continuation under its available context, not proof that the token is true.** Reliable systems must keep useful evidence in context and verify consequential claims outside the model.
+
+This lesson assumes [model evaluation](/ml-systems/model-evaluation). Continue to [transformers](/genai/transformers) for the attention architecture that makes long-context language modeling practical.
+{% /section-card %}
+
+{% section-card %}
+## Follow one prediction from prompt to response
+
+An LLM does not retrieve a stored sentence and paste it into an answer. Each output token becomes part of the next input, so an early decoding choice can send the response down a different path.
+
+{% process-flow %}
+{% process-step number="1" title="Encode the request" label="Tokens" %}
+Tokenization maps text to vocabulary IDs. The model can only operate on the resulting IDs and the text preserved in its context window.
+{% /process-step %}
+{% process-step number="2" title="Build a context-conditioned score" label="Logits" %}
+Transformer layers combine the retained tokens into a score, called a logit, for every possible next token.
+{% /process-step %}
+{% process-step number="3" title="Form a candidate distribution" label="Probabilities" %}
+Softmax converts scores into probabilities. Temperature changes how concentrated that distribution is; it does not add evidence.
+{% /process-step %}
+{% process-step number="4" title="Decode and repeat" label="Output" %}
+Greedy decoding takes the highest-probability token. Sampling draws from an allowed set, then repeats the cycle with the chosen token appended.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep the invariant visible
+
+- A token probability is conditional on the prompt, retained context, model parameters, and decoding settings.
+- A context window is finite. Text outside it cannot directly affect that next-token calculation.
+- Decoding policy determines which supported continuation is emitted; it cannot turn an unsupported answer into a verified one.
+{% /section-card %}
+
+## Explore context, candidates, and decoding
+
+Change the evidence package, how much of it survives the window, and the decoding policy. The lab recomputes the candidate distribution after temperature and top-p filtering, then makes the first output token and continuation visible. Its numbers are deliberately small teaching values, not a measurement of a production model.
+
+{% interactive-block id="ml-systems/llm-fundamentals-next-token-context-explorer" dataFile="/api/content/ml-systems/llm-fundamentals/data/next-token-context-explorer.json" /%}
+
+{% section-card %}
+## Design the evidence path before prompt wording
+
+For a factual or high-impact answer, the system surrounding the model is as important as the model's distribution.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retrieve" eyebrow="Evidence selection" icon="search" tone="blue" %}
+Fetch current, permissioned sources and rank them for the request. Retrieval quality sets an upper bound on what the model can ground in.
+{% /concept-card %}
+{% concept-card title="Fit" eyebrow="Context budget" icon="panel-top" tone="violet" %}
+Reserve tokens for instructions, source excerpts, tool output, and the answer. Summaries and truncation can discard the decisive detail.
+{% /concept-card %}
+{% concept-card title="Verify" eyebrow="Release decision" icon="badge-check" tone="green" %}
+Check citations, execute authoritative tools, or route uncertain cases to review. The right verifier depends on the consequence of being wrong.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Treat confidence as a routing signal, not a truth score
+
+- **High confidence can be wrong:** the model may continue a frequent pattern, repeat a misleading source, or lack a needed fact.
+- **Low confidence can be useful:** it can trigger retrieval, a calculator, structured validation, or a human review path.
+- **Evidence must be attributable:** retain source identity, freshness, permissions, and the excerpt used for the response so a reviewer can inspect the claim.
+- **Abstention needs product support:** let the system say it lacks evidence, ask a focused follow-up, or provide a cited alternative instead of forcing completion.
+{% /section-card %}
+
+{% section-card %}
+## Train behavior in stages, then measure the result
+
+Training creates the model's general tendencies; it does not remove the need for a runtime evidence and safety system.
+
+{% process-flow %}
+{% process-step number="1" title="Pre-train" label="Language prior" %}
+Predict the next token across broad data. This teaches patterns in language and code, but it does not guarantee that a particular answer is current or correct.
+{% /process-step %}
+{% process-step number="2" title="Post-train" label="Task behavior" %}
+Use demonstrations, preference data, or task examples to improve instruction following, format control, and desired response behavior.
+{% /process-step %}
+{% process-step number="3" title="Evaluate" label="Evidence" %}
+Measure task quality, calibration, safety, factuality, and failure slices with held-out data and human review where needed.
+{% /process-step %}
+{% process-step number="4" title="Operate" label="Guardrails" %}
+Version prompts and models, observe retrieval and tool traces, and make rollback possible when quality, cost, or safety regresses.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/ml-systems/llm-fundamentals/code/next-token-decoding.py" language="python" title="Apply temperature, top-p filtering, and a decoding choice" /%}
+{% /section-card %}
+
+{% section-card %}
+## Separate stored capacity from active compute
+
+Parameter count is useful planning information, but it hides important distinctions. Dense models generally activate their full parameter path for every token. A mixture-of-experts (MoE) model stores many expert weights but routes each token through a subset, reducing active parameter compute while retaining a large total capacity.
+
+The invariant is: **sparse activation can reduce compute per token, but it does not make the inactive weights free to store, move, or operate.** Routing, expert balance, memory placement, and communication can become the new bottlenecks.
+{% /section-card %}
+
+## Test the scaling and serving pressure
+
+Set a model shape and serving load below. The lab distinguishes stored from active parameters, estimates weight plus KV-cache memory, and shows why long sequences and concurrent requests can dominate even when parameter compute is sparse. Capacity estimates assume one 80 GB worker and are planning prompts, not hardware guarantees.
+
+{% interactive-block id="ml-systems/llm-fundamentals-architecture-compute-scaling-lab" dataFile="/api/content/ml-systems/llm-fundamentals/data/architecture-compute-scaling-lab.json" /%}
+
+{% section-card %}
+## Make architecture choices against the actual constraint
+
+### Dense models are simpler to reason about
+
+- Every token follows the same parameter path, which simplifies batching, profiling, and quality attribution.
+- Weight memory and active compute grow together with model size.
+- A dense model is often the easier baseline when predictable latency or limited routing infrastructure matters more than maximum parameter capacity.
+
+### MoE changes the operational contract
+
+- The router must spread tokens across experts. Skewed traffic can overload a few experts while other weights sit idle.
+- Experts may be distributed across devices, so all-to-all communication and placement affect tail latency.
+- Evaluate quality by domain and routing behavior; a large total parameter count does not predict performance on a task.
+
+### Precision is a quality, memory, and kernel decision
+
+- Lower-precision weights can reduce memory bandwidth and increase capacity, but the effect depends on supported kernels and quantization method.
+- KV cache usually remains in a higher precision than aggressively quantized weights, so long-context memory may not shrink by the same factor.
+- Validate output quality, tool-call formats, safety behavior, and long-context retrieval after changing numerics. A smaller footprint is not a release decision.
+
+{% code-block file="/api/content/ml-systems/llm-fundamentals/code/serving-footprint.py" language="python" title="Estimate weight and KV-cache pressure before a serving deployment" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Failures that appear in production
+
+- **Context eviction:** the relevant source or instruction falls outside the window. Detect it with traceable context assembly and tests that place required evidence near budget boundaries.
+- **Confident unsupported output:** a fluent continuation has no sufficient evidence. Require citation checks, tool verification, or abstention for claims that need them.
+- **KV-cache exhaustion:** long prompts or many concurrent sequences exhaust memory before weight storage does. Enforce per-request budgets, admission control, and queue limits.
+- **MoE imbalance:** a small set of experts receives most tokens, producing hotspots and high tail latency. Monitor per-expert load, dropped tokens, routing entropy, and cross-device traffic.
+- **Silent regression after an optimization:** a new quantization, decoder default, prompt template, or model revision changes behavior. Compare versioned offline slices and staged production telemetry before broad release.
+{% /section-card %}
+
+{% section-card %}
+## Operate an LLM system with explicit controls
+
+Use a release record that ties together the model version, prompt template, retrieval configuration, decoding defaults, tool permissions, and evaluation evidence. Then monitor signals that correspond to the system's real risks.
+
+- **Answer quality:** task success, grounded-claim rate, citation validity, abstention appropriateness, and human escalation outcomes.
+- **Safety and security:** policy violations, prompt-injection success, tool authorization failures, sensitive-data exposure, and policy-specific false positives.
+- **Serving health:** time to first token, tokens per second, queue wait, input and output lengths, KV-cache utilization, cancellation rate, and per-expert balance where applicable.
+- **Cost and change control:** tokens and accelerator time per successful task, cache hit rate, model/prompt version distribution, canary comparisons, and rollback time.
+
+Start with a bounded task, an evidence contract, and a measurable fallback. Scale model size or complexity only when it addresses a measured quality or capacity constraint.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/llm-fundamentals/quiz/llm-fundamentals.json" lessonSlug="llm-fundamentals" /%}

@@ -1,0 +1,271 @@
+---
+registryId: neural-interface-architecture
+---
+
+{% section-card tone="intro" %}
+## What is neural interface architecture?
+
+**Neural interface architecture is the system design that turns measured neural activity into an estimated intent, applies policy and safety constraints, and delivers a bounded command or feedback signal.** It connects a sensing front end, time-synchronized data path, signal processing, a calibrated decoder, command gating, an output device, and an evidence trail.
+
+In plain language, a brain-computer interface does not read an unquestionable command from the brain. Sensors observe noisy physical signals. Software estimates what those signals may mean for a defined task. The system must preserve uncertainty and be able to hold or stop an action when its evidence is weak or stale.
+
+{% callout variant="warn" %}
+The core invariant is: **decoded intent is an uncertain, time-bounded estimate, never direct authority to perform an action.** Every command must remain traceable to fresh input, a known calibration and model version, an impact-aware policy, and a safe fallback.
+{% /callout %}
+
+This lesson describes architecture and operational controls. Its examples and interactive numbers are teaching fixtures, not clinical guidance, efficacy evidence, certification evidence, or specifications for a real device. Domain specialists must set validated limits for the intended use.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate sensing, inference, and control
+
+A **neural interface loop** is a feedback system with three different responsibilities: observe a signal, infer a task-specific intent, and decide whether an output is allowed. Collapsing them into one "AI model" hides where timing, uncertainty, and safety failures originate.
+
+{% system-flow title="A bounded neural interface control loop" caption="Each handoff carries timestamps, quality, provenance, and confidence. Feedback closes the loop without treating the decoder as an unquestionable controller." %}
+{% system-node title="Acquire and digitize" eyebrow="1. Observe" icon="activity" tone="blue" %}
+Electrodes or other sensors, analog conditioning, anti-alias filtering, and converters produce timestamped samples plus channel-health metadata.
+{% /system-node %}
+{% system-node title="Condition and represent" eyebrow="2. Prepare" icon="sliders" tone="cyan" %}
+The data plane references signals, removes defined interference, detects artifacts, windows samples, and extracts features without discarding provenance.
+{% /system-node %}
+{% system-node title="Estimate intent" eyebrow="3. Infer" icon="brain" tone="violet" %}
+A versioned decoder maps features to a task-specific output and reports confidence, calibration identity, model identity, and inference time.
+{% /system-node %}
+{% system-node title="Gate, command, and observe" eyebrow="4. Control" icon="shield" tone="green" %}
+Policy checks freshness, quality, confidence, impact, and device state before permitting a bounded command. Outcome feedback supports correction and monitoring.
+{% /system-node %}
+{% /system-flow %}
+
+The boundaries are deliberate:
+
+- **The sensing plane owns measurement integrity.**
+  - It reports disconnected, saturated, noisy, or drifting channels instead of silently substituting values.
+  - It timestamps data as close to acquisition as possible and identifies dropped or reordered frames.
+- **The inference plane owns uncertainty.**
+  - It emits scores for a closed task vocabulary, not a claim about unrestricted thoughts or intent.
+  - It binds every output to preprocessing, feature, calibration, and model versions.
+- **The control plane owns authority.**
+  - It decides whether an inferred output may become a command.
+  - It applies impact-aware limits, confirmation, rate bounds, watchdogs, and a safe state independently of the decoder.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose an interface by the signal and operating boundary
+
+An **interface class** describes where sensing occurs and what signal is available to the data path. It changes channel count, bandwidth, signal stability, servicing constraints, privacy exposure, and failure modes. It does not by itself determine usefulness for a person or task.
+
+{% concept-grid columns="3" %}
+{% concept-card title="External surface sensing" eyebrow="Outside the body" icon="waves" tone="blue" %}
+Scalp or other external sensors observe aggregate field activity through tissue and environmental noise. The system usually emphasizes setup quality, impedance or contact checks, artifact handling, and conservative task vocabularies.
+{% /concept-card %}
+
+{% concept-card title="Cortical field sensing" eyebrow="Local field activity" icon="scan-line" tone="violet" %}
+Sensors closer to neural tissue can expose different spatial and frequency information. Architecture adds implanted-device telemetry, constrained power and bandwidth, long-term channel monitoring, and specialized service boundaries.
+{% /concept-card %}
+
+{% concept-card title="Microelectrode sensing" eyebrow="Fine-grained activity" icon="binary" tone="amber" %}
+High-rate channel streams create large raw-data paths and stronger pressure for edge filtering or feature extraction. Channel turnover, calibration drift, thermal and power budgets, and safe maintenance paths become central concerns.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before selecting hardware, write the task contract:
+
+- the observable task and bounded output vocabulary;
+- the required response-time distribution, including p95 and p99 rather than only an average;
+- the tolerated false activation, missed activation, and stale-command behavior for each command class;
+- who can start, pause, recalibrate, update, and stop the system;
+- which raw signals, features, labels, outputs, and audit records may be retained, for what purpose, and for how long.
+
+If sampling, queues, or edge processing are unfamiliar, review the prerequisite [neuromorphic computing systems lesson](/fundamentals/neuromorphic-computing-systems) before assigning device budgets.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Budget the complete signal path
+
+A **signal-path budget** accounts for both data volume and elapsed time from sample acquisition to a policy decision. More channels and higher sample rates increase raw throughput. Longer windows may provide more temporal context, but they also add waiting time before inference can begin.
+
+Use the lab to choose an illustrative signal profile and transport, then change the frame window, retained payload, processing time, and decision deadline. The visible equation shows why a fast model cannot rescue an oversized window or saturated link.
+
+{% interactive-block id="fundamentals/neural-interface-architecture-signal-path-budget-lab" dataFile="/api/content/fundamentals/neural-interface-architecture/data/signal-path-budget-model.json" /%}
+
+The calculation should be explicit:
+
+- **Raw bit rate** = channels x samples per second x bits per sample.
+- **Frame payload** = raw bit rate x frame duration, before protocol overhead.
+- **Transport utilization** = retained payload rate / effective link capacity.
+- **Decision latency** = frame accumulation + queue allowance + processing + serialization + transport delay.
+
+{% callout variant="info" %}
+Sampling rate is not a quality slider. The analog front end must band-limit the signal before conversion, and the sample rate must support the frequencies the validated pipeline intends to retain. Increasing sample rate without a signal requirement only increases power, storage, and transport pressure.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Preserve time and backpressure across the data plane
+
+The **neural data plane** is the path that carries samples, metadata, features, and inference records between acquisition and control. It must make delay and loss observable because an apparently valid frame can still be unsafe when it arrives late or without its provenance.
+
+{% process-flow %}
+{% process-step number="1" title="Frame at acquisition" label="Time" %}
+Assign a monotonic sequence, acquisition timestamp, device clock identity, channel map, gain and filter configuration, and health flags before buffering.
+{% /process-step %}
+
+{% process-step number="2" title="Bound every queue" label="Flow" %}
+Give acquisition, preprocessing, inference, and command queues maximum depth and age. When a queue is full, apply an explicit drop, coalesce, or safe-stop policy.
+{% /process-step %}
+
+{% process-step number="3" title="Carry provenance" label="Trace" %}
+Bind derived features to source frame ranges, preprocessing version, calibration version, decoder version, and quality measurements.
+{% /process-step %}
+
+{% process-step number="4" title="Measure tail behavior" label="Operate" %}
+Track age at every boundary, dropped and reordered frames, queue occupancy, processing overruns, transport loss, and end-to-end p95 and p99 latency.
+{% /process-step %}
+{% /process-flow %}
+
+Do not let backpressure become hidden history:
+
+- For continuous movement, a newer frame may supersede an older queued frame; processing both can issue a stale trajectory.
+- For discrete selection, silently dropping an event may be worse than holding the command and asking for confirmation.
+- For calibration and model updates, mixing frames across incompatible feature contracts must fail closed rather than producing a best-effort result.
+- When clocks lose synchronization, report uncertainty in frame age and prevent high-impact commands until time integrity recovers.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat calibration as a versioned operating state
+
+**Calibration** maps one person's measured signals and task labels to a decoder's feature space for a bounded session or operating period. It is not a one-time setup flag. Sensors, physiology, environment, task strategy, preprocessing, and device placement can all change the input distribution.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Identity" eyebrow="What is bound?" icon="fingerprint" tone="blue" %}
+Bind the calibration to the participant or authorized user, sensor layout, channel map, task vocabulary, preprocessing contract, feature schema, decoder version, and capture conditions.
+{% /concept-card %}
+
+{% concept-card title="Quality" eyebrow="Is it usable?" icon="badge-check" tone="green" %}
+Define coverage, artifact limits, class balance, holdout evaluation, and uncertainty checks. A completed workflow is not automatically an acceptable calibration.
+{% /concept-card %}
+
+{% concept-card title="Freshness" eyebrow="Is it current?" icon="clock" tone="amber" %}
+Monitor elapsed time, channel changes, feature drift, confidence distribution, corrections, and task performance. Freshness limits depend on the validated use, not a universal number.
+{% /concept-card %}
+
+{% concept-card title="Rollback" eyebrow="Can it recover?" icon="history" tone="violet" %}
+Keep the last accepted calibration and decoder pair, the reason for promotion, compatibility checks, and a bounded rollback path. Never update the live loop without an accountable release record.
+{% /concept-card %}
+{% /concept-grid %}
+
+Online adaptation needs stricter evidence than offline retraining. User corrections can be delayed, ambiguous, or shaped by the system's previous output. Buffer candidate updates, evaluate them against fixed safety and performance checks, and promote them through a versioned release path rather than mutating the active decoder invisibly.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Gate commands by evidence and impact
+
+A **command gate** is an independent policy boundary between decoded intent and an output device. It verifies that the evidence is fresh enough and strong enough for the requested action. It also owns the fallback when acquisition, transport, inference, or the device heartbeat fails.
+
+Choose a signal condition and command class below. Then tune the confidence, artifact, and calibration-age limits. The same decoded score can produce a bounded command, a confirmation request, a hold, or a safe stop because command impact and system state matter.
+
+{% interactive-block id="fundamentals/neural-interface-architecture-command-safety-lab" dataFile="/api/content/fundamentals/neural-interface-architecture/data/command-safety-model.json" /%}
+
+Use layered gates instead of one confidence threshold:
+
+- **Liveness gate:** reject commands when acquisition, transport, policy, or output-device heartbeats are absent.
+- **Freshness gate:** reject frames and calibrations older than the command class permits.
+- **Quality gate:** hold when artifacts, saturation, disconnected channels, or clock uncertainty exceed validated limits.
+- **Inference gate:** compare calibrated confidence or uncertainty to a task- and impact-specific policy.
+- **Motion or output envelope:** constrain speed, force, range, repetition, duration, and rate even after other gates pass.
+- **Human control:** provide a reachable pause or stop path and make confirmation explicit where the task requires it.
+
+The safe state is output-specific. It might be no movement, zero force, a held cursor, muted selection, or a device-defined parked state. Define and test it with domain owners; "do nothing" is not automatically safe for every controlled system.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Design failures around visible user outcomes
+
+A **failure contract** connects a technical fault to detection, containment, user-visible behavior, evidence, and recovery. Redundant hardware alone does not provide safety when both paths share the same calibration, model, clock, power source, or software defect.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Signal failure" eyebrow="Input is unreliable" icon="triangle-alert" tone="rose" %}
+Disconnected, saturated, noisy, or artifact-heavy channels trigger degraded mode, reacquisition, or a hold. The system records affected channels and avoids presenting low quality as low confidence alone.
+{% /concept-card %}
+
+{% concept-card title="Timing failure" eyebrow="Input is stale" icon="timer-off" tone="amber" %}
+Queue growth, packet loss, clock drift, and transport interruption can make a correct estimate arrive too late. Age limits and watchdogs stop stale commands from executing.
+{% /concept-card %}
+
+{% concept-card title="Model failure" eyebrow="Inference is wrong" icon="brain-circuit" tone="violet" %}
+Distribution shift, incompatible features, bad promotion, or overconfident output triggers rollback, recalibration, narrowed command vocabulary, or suspension.
+{% /concept-card %}
+
+{% concept-card title="Control failure" eyebrow="Output is unsafe" icon="octagon-x" tone="blue" %}
+Lost device heartbeat, rejected acknowledgements, envelope violations, or repeated commands trigger a device-defined safe state and block new commands until recovery is verified.
+{% /concept-card %}
+{% /concept-grid %}
+
+For every failure, test:
+
+- how quickly the fault becomes observable;
+- whether one component can fail without suppressing its own alarm;
+- what command is already in flight and whether it can be cancelled;
+- which state survives restart and which state must be rebuilt;
+- what the user sees, hears, or can control during degradation;
+- which evidence proves the fallback and recovery actually occurred.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Minimize and govern neural data
+
+**Neural data governance** controls collection, use, sharing, retention, deletion, and access for raw signals and every derived representation. Features and decoder outputs may still reveal sensitive behavioral or health-related information; transforming raw samples does not automatically make them anonymous.
+
+- **Purpose limitation**
+  - Collect channels, frequencies, labels, and feedback only for a declared task and evaluation plan.
+  - Prevent research, personalization, monitoring, or product-analytics reuse from appearing as an undocumented secondary purpose.
+- **Data separation**
+  - Separate identity, raw signals, calibration labels, derived features, decoder outputs, command logs, and operational telemetry by access need.
+  - Keep production debugging from becoming a broad raw-signal export path.
+- **Retention and deletion**
+  - Assign retention to each data class and propagate deletion through indexes, caches, backups, feature stores, and derived datasets where policy requires it.
+  - Record legal or safety holds explicitly instead of silently ignoring a deletion request.
+- **Security and evidence**
+  - Encrypt data in transit and at rest, use least privilege, isolate signing and release authority, and audit access to raw and derived data.
+  - Keep enough provenance to investigate a command without retaining every raw signal indefinitely.
+
+Threat-model model extraction, membership inference, replayed frames, calibration poisoning, malicious firmware, debug interfaces, and unauthorized changes to command policy. Privacy and safety controls need independent owners and tests.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Implement explicit budgets and command gates
+
+The first teaching example computes raw throughput, frame size, transport utilization, and total decision latency from named terms. It rejects an overloaded link or missed deadline rather than converting the result into a vague score.
+
+{% code-block file="/api/content/fundamentals/neural-interface-architecture/code/budget-neural-signal-pipeline.ts" language="typescript" title="budget-neural-signal-pipeline.ts" /%}
+
+The second example evaluates one decoded command against liveness, freshness, signal quality, calibration age, confidence, and command impact. The policy returns an auditable decision and reasons. It is a teaching fixture, not a device safety controller.
+
+{% code-block file="/api/content/fundamentals/neural-interface-architecture/code/gate-decoded-command.py" language="python" title="gate-decoded-command.py" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Review the production design as a chain of evidence
+
+A **production readiness review** checks whether measurement, inference, control, governance, and recovery remain connected under normal and degraded conditions.
+
+- **Task and authority**
+  - The task vocabulary, command classes, impact levels, confirmation rules, output envelopes, safe states, and user stop controls have accountable owners.
+  - Clinical, accessibility, human-factors, security, privacy, and regulatory claims are reviewed by the appropriate specialists rather than inferred from architecture metrics.
+- **Signal and time integrity**
+  - Channel health, analog filtering, sample configuration, timestamps, clock uncertainty, sequence gaps, queue age, dropped frames, and tail latency are observable.
+  - Every buffer has a maximum depth and age plus a tested overflow policy.
+- **Calibration and model**
+  - Calibration, preprocessing, feature, and decoder versions are compatible, signed, reproducible, monitored for drift, and independently rollable.
+  - Offline and online evaluations include representative artifacts, missing channels, stale data, uncertainty, and command-specific error costs.
+- **Command and device**
+  - The gate runs independently of the decoder, checks fresh evidence, constrains output, observes acknowledgements, and enters a defined safe state on watchdog failure.
+  - Fault injection covers sensor loss, transport delay, process crash, model incompatibility, policy unavailability, device disconnect, and restart.
+- **Data and operations**
+  - Raw signals, labels, features, outputs, commands, telemetry, and evidence have explicit purpose, access, retention, deletion, and incident-response rules.
+  - Release, calibration, command-policy, and emergency changes are attributable and leave tamper-evident evidence.
+
+The architecture is ready for its next controlled evaluation only when owners can trace one output back to fresh measured evidence, explain why policy allowed it, stop it independently, and recover without silently changing the task contract.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/neural-interface-architecture/quiz/neural-interface-architecture-decisions.json" lessonSlug="neural-interface-architecture" title="Neural Interface Architecture Decision Review" /%}

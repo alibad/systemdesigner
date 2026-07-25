@@ -1,0 +1,283 @@
+---
+registryId: case-study-whatsapp-messaging
+---
+
+{% section-card tone="intro" %}
+## What is a WhatsApp-style messaging system?
+
+A WhatsApp-style messaging system is a private, real-time delivery network that accepts a message from one device, routes encrypted copies to the recipient's devices, and keeps retrying safely when a device is offline or an acknowledgement is lost.
+
+In plain language: the sender's device turns readable text into ciphertext before upload. The service moves and temporarily stores that unreadable envelope. Each recipient device then authenticates, decrypts, stores, and acknowledges its own copy. This separation matters because phones disconnect often, one person may have several devices, and a retry must not create a second visible message.
+
+{% callout variant="info" %}
+### Core invariant
+
+One logical message keeps one stable identity, remains encrypted while the service handles it, and has independent delivery state for every recipient device. Retries may repeat transport work, but they must not repeat the visible message or let one device's acknowledgement erase another device's pending copy.
+{% /callout %}
+{% /section-card %}
+
+This case study uses an illustrative planning envelope rather than claims about WhatsApp's current production fleet. It focuses on text delivery, long-lived connections, temporary offline storage, multi-device acknowledgement, and end-to-end encryption. Review [Concurrency Patterns](/technology/concurrency) first if isolated actors, mailboxes, and supervision are unfamiliar.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the private delivery promise" %}
+
+## The product promise separates acceptance, delivery, and reading
+
+A sender wants a fast, honest result. A recipient expects private content, prompt delivery when online, and eventual catch-up after reconnect. Those expectations are related, but they are not one distributed transaction across every device.
+
+### Functional requirements
+
+- Send one-to-one and group text messages from mobile, web, or desktop clients.
+- Encrypt content on the sender and decrypt only on intended recipient devices.
+- Deliver to online devices promptly and retain bounded ciphertext work for offline devices.
+- Synchronize linked devices without duplicate display when retries or reconnects occur.
+- Expose sent, device-delivered, and read states as separate evidence.
+- Upload media through a separate object path so large files do not block chat envelopes.
+
+### Non-functional requirements
+
+- Acknowledge sender acceptance only after authorized encrypted work is durable and replayable.
+- Target sub-second connected delivery while keeping queue age bounded during bursts.
+- Preserve one logical message identity across retries and one independent status per recipient device.
+- Keep plaintext and content keys outside routing, queue, and storage services.
+- Isolate a large group, reconnect wave, or failed partition from unrelated conversations.
+- Expire undelivered ciphertext according to an explicit retention contract.
+
+### State names must tell the truth
+
+- **Accepted** means the service durably owns authorized ciphertext delivery work.
+- **Device delivered** means one named recipient device persisted and acknowledged its envelope.
+- **Read** is a later recipient-generated event and may be disabled by product policy.
+- **Pending** means at least one intended device still lacks an acknowledgement.
+- **Expired** means the bounded server queue will no longer retry; it does not imply delivery.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+This design does not cover voice calls, video transport, contact discovery, backup encryption, search, or the policy details of abuse moderation. Those systems have different data, latency, and trust boundaries. The message router may use privacy-compatible metadata controls and user reports, but it cannot assume access to message plaintext.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Convert source messages into four capacity planes" %}
+
+## Recipient devices, not source writes, create most of the work
+
+The baseline assumes **450M active users**, **40 messages per user per day**, and a **2.5x peak multiplier**. That gives about **208K average source messages/s** and **521K peak source messages/s**.
+
+Group fan-out changes the next number. If 18% of sends are group messages and the typical group has 12 members, the weighted recipient count is `(82% x 1) + (18% x 11) = 2.8`. One peak source rate therefore becomes about **1.46M first recipient attempts/s**. With 35% of recipients offline, about **510K device envelopes/s** enter temporary queues while **948K/s** can attempt an immediate push.
+
+{% metric-strip %}
+{% metric value="521K/s" label="Peak source messages" detail="450M users x 40 per day x 2.5 peak multiplier" tone="blue" /%}
+{% metric value="2.8" label="Recipients per send" detail="Weighted direct and 12-member group-message mix" tone="violet" /%}
+{% metric value="1.46M/s" label="First deliveries" detail="One accepted source message becomes many device attempts" tone="green" /%}
+{% metric value="~12 TiB" label="Queued ciphertext" detail="35% offline, 900-byte envelopes, eight average queued hours" tone="amber" /%}
+{% /metric-strip %}
+
+### Capacity lab: find the first saturated plane
+
+Change users, message frequency, group size, and offline ratio. Watch the same workload produce different gateway, queue, storage, and delivery pressure; then identify which fleet actually needs capacity.
+
+{% interactive-block id="case-studies/whatsapp-messaging-capacity-lab" dataFile="/api/content/case-studies/whatsapp-messaging/data/message-capacity-model.json" /%}
+
+### What the estimate changes
+
+- **Gateway planning** follows concurrently connected device sessions, not daily message count alone.
+- **Queue write planning** follows offline recipient envelopes per second and partition skew.
+- **Temporary storage planning** follows offline enqueue rate, encrypted envelope size, residence time, replication, and expiry.
+- **Delivery worker planning** follows first attempts plus retries; group size can dominate even when source acceptance is healthy.
+- **Load testing** must vary group-size skew, devices per user, offline duration, reconnect waves, and one failed capacity zone.
+
+{% callout variant="tip" %}
+Fleet-wide averages hide hot groups and old queues. Track the largest group partitions and the oldest pending device envelope separately from aggregate utilization.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate trust, durability, routing, and device progress" %}
+
+## Each stage owns one decision
+
+The fastest design is not the one with the fewest boxes. It is the one that keeps each latency-sensitive stage narrow and gives failures a clear owner. Connection gateways should not become message-history authorities, and routing services should not receive keys merely to repair delivery.
+
+{% system-flow title="Private message acceptance and delivery path" caption="The sender acknowledgement follows durable ciphertext acceptance. Recipient delivery and read state happen later and independently per device." %}
+{% system-node title="Sender device" eyebrow="Identity and encryption" icon="lock" tone="blue" %}
+Create one client message ID, resolve recipient device sessions, and encrypt one authenticated envelope per target device.
+{% /system-node %}
+{% system-node title="Connection and conversation edge" eyebrow="Authenticate and order" icon="network" tone="cyan" %}
+Authenticate the long-lived session, enforce limits, authorize conversation membership, and assign conversation-local order.
+{% /system-node %}
+{% system-node title="Durable log and outbox" eyebrow="Acceptance boundary" icon="database" tone="violet" %}
+Commit ciphertext metadata and replayable per-device delivery events before acknowledging acceptance to the sender.
+{% /system-node %}
+{% system-node title="Device queues and gateways" eyebrow="Push, retry, acknowledge" icon="route" tone="green" %}
+Push to online sessions, retain bounded work for offline devices, retry at least once, and complete only the acknowledging device record.
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership boundaries
+
+- **Client devices:** content keys, encryption and decryption, durable seen-message IDs, local history, and session repair.
+- **Connection gateways:** socket lifecycle, authentication context, heartbeats, coarse rate limits, and active device location.
+- **Conversation service:** membership authorization, sender idempotency, conversation-local sequence, and admission control for hot groups.
+- **Message log and outbox:** durable acceptance, replay source, retention metadata, and atomic publication of delivery work.
+- **Per-device delivery plane:** encrypted envelope queues, retry schedule, device acknowledgements, expiry, and queue-age objectives.
+- **Media plane:** encrypted object upload, scanning permitted by the trust model, transcoding where applicable, object storage, and CDN delivery.
+
+Erlang/OTP-style actors fit long-lived messaging because an actor is a small isolated process with private state and a mailbox. One process can represent a connection or a partition owner, and supervision can restart failed work without crashing unrelated conversations. Actors still need durable logs, idempotency, fencing, and bounded mailboxes; the runtime does not create those guarantees automatically.
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model logical messages, device envelopes, and sessions" %}
+
+## Durable records make retries explainable
+
+{% concept-grid %}
+{% concept-card title="Logical message" eyebrow="Stable identity" icon="key" tone="blue" %}
+`conversation_id`, `client_message_id`, sender, conversation sequence, accepted time, and content type identify one user-visible send across uncertain retries.
+{% /concept-card %}
+{% concept-card title="Device envelope" eyebrow="Encrypted payload" icon="lock" tone="violet" %}
+Recipient device ID, session version, ciphertext reference, authentication metadata, and expiry describe bytes that only the endpoint should open.
+{% /concept-card %}
+{% concept-card title="Device delivery" eyebrow="Independent progress" icon="route" tone="green" %}
+`(device_id, message_id)` is the idempotency key for pending, attempted, acknowledged, session-repair-required, or expired delivery state.
+{% /concept-card %}
+{% concept-card title="Device session" eyebrow="Key lifecycle" icon="shield" tone="amber" %}
+Device identity, verified key-bundle version, session generation, and rotation status let clients detect stale or missing encryption state.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Storage follows access and trust boundaries
+
+- Partition conversation metadata and sender idempotency by `conversation_id` so one owner can authorize and order a send.
+- Keep a uniqueness rule on `(conversation_id, client_message_id)` through the longest supported sender retry window.
+- Partition delivery records by recipient device and due time so workers can fetch ready retries without scanning conversation history.
+- Store device envelopes as ciphertext with bounded expiry; deletion should be observable and independently auditable.
+- Keep active connection location in an expiring routing store. A lost lease means Unknown, not Offline and not Delivered.
+- Version device sessions so an undecryptable old envelope becomes a session-repair event rather than an infinite generic retry.
+
+{% callout variant="info" %}
+### Why not one queue per user?
+
+A person can have a connected tablet and an offline phone. Completing one user-level queue after the tablet acknowledgement loses the phone's pending work. Shared logical identity and independent device progress solve different problems and both are required.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Make acceptance and at-least-once delivery executable" %}
+
+## Accept once, attempt at least once, display once
+
+Exactly-once network delivery is not an honest promise. A device can persist an envelope and disconnect before its acknowledgement reaches the service. The service must retry because delivery is uncertain; the device must suppress duplicate display because the first attempt may already have succeeded.
+
+{% process-flow %}
+{% process-step number="1" title="Name and encrypt" label="Sender device" %}
+Reuse one client message ID across sender retries, resolve each recipient device session, and create authenticated ciphertext locally.
+{% /process-step %}
+{% process-step number="2" title="Authorize and commit" label="Acceptance boundary" %}
+Check membership and idempotency, assign conversation order, and atomically commit the message record plus per-device outbox events.
+{% /process-step %}
+{% process-step number="3" title="Push or retain" label="Delivery plane" %}
+Push online device envelopes, retain offline work with expiry, and schedule bounded retries using the same identity.
+{% /process-step %}
+{% process-step number="4" title="Persist and acknowledge" label="Recipient device" %}
+Authenticate and decrypt, store the message and seen ID together, then acknowledge only that device's queue item.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/case-studies/whatsapp-messaging/code/per-device-delivery.ts" language="typescript" title="Idempotent per-device delivery with session repair" /%}
+
+### The explicit semantics
+
+- **Sender acceptance:** proves authorized encrypted work crossed the durable boundary. It does not prove recipient delivery or reading.
+- **Transport delivery:** is at least once. A timeout retries the same device envelope identity after bounded backoff.
+- **Device display:** is idempotent. The local seen-ID record and message insert commit together before acknowledgement.
+- **Conversation order:** is meaningful inside one conversation, not across unrelated chats. A device repairs a sequence gap before presenting newer messages as contiguous.
+- **Key failure:** is classified separately from network failure. Repeating undecryptable ciphertext cannot repair an obsolete session.
+- **Expiry:** bounds service storage and retry work. Clients expose an honest not-delivered state rather than silently extending retention forever.
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Recover offline devices, lost ACKs, and broken sessions" %}
+
+## Recovery must preserve both delivery and privacy invariants
+
+A generic retry loop cannot distinguish a lost acknowledgement from a stale encryption session. The system needs failure-specific state: transport uncertainty retries the same identity, offline devices retain independent queue items, and key failures return to endpoint session setup without exposing plaintext to the service.
+
+### Failure lab: choose a recovery contract
+
+Inject an acknowledgement loss, an offline phone, a stale session, or unavailable new-device keys. Compare bounded per-device recovery with tempting shortcuts and watch the visible path, duplicate count, queue ownership, key response, and user result change together.
+
+{% interactive-block id="case-studies/whatsapp-messaging-delivery-failure-lab" dataFile="/api/content/case-studies/whatsapp-messaging/data/offline-delivery-failures.json" /%}
+
+### Recovery priorities
+
+1. Preserve the original logical message ID and the ciphertext-only server boundary.
+2. Identify the smallest failed unit: one attempt, device queue, session generation, partition, or gateway cohort.
+3. Retry transport uncertainty with bounded backoff and duplicate suppression.
+4. Keep other devices progressing while an offline or stale-session device remains pending.
+5. Repair keys between authenticated endpoints; never introduce a server plaintext fallback.
+6. Resume the affected device queue, reconcile acknowledgements, and verify oldest-envelope age returns to normal.
+
+{% callout variant="warn" %}
+Do not treat a device-key error as an ordinary timeout forever. Infinite retry consumes queue and storage capacity while the recipient can never decrypt the unchanged envelope.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make privacy, latency, and storage trade-offs explicit" %}
+
+## Optimize around the invariant, not through it
+
+- **Durable before sender acknowledgement versus gateway-first success**
+    - Durable acceptance gives replay an authoritative source after a worker or gateway crash.
+    - It adds a storage round trip to the sender path.
+    - Gateway-first success can look faster but may show acceptance for work that disappears before it is replayable.
+- **Per-device envelopes versus one user-level copy**
+    - Per-device encryption and acknowledgement handle independent sessions and offline states correctly.
+    - They amplify queue records, encrypted bytes, retry work, and key lifecycle complexity.
+    - One user-level record is cheaper but cannot prove which linked device received its own decryptable copy.
+- **Push live delivery versus pull after reconnect**
+    - Push gives connected conversations low latency.
+    - Cursor-based pull bounds gateway memory and repairs long offline periods efficiently.
+    - A hybrid needs one shared message identity and conversation sequence so the live and replay paths converge.
+- **Strict conversation order versus maximum write parallelism**
+    - One fenced partition owner makes membership checks and visible order deterministic.
+    - A very large group can become a hot partition and needs admission control, batching, and ownership transfer.
+    - Independent unfenced writers increase throughput by weakening a promise users can directly observe.
+- **Bounded offline retention versus indefinite server history**
+    - Expiry limits ciphertext storage, legal exposure, and stale retry work.
+    - A device offline beyond the window may need another recovery or backup path.
+    - The product must expose expiration honestly instead of implying guaranteed eventual delivery forever.
+- **End-to-end privacy versus server-side content inspection**
+    - Keeping keys at endpoints protects content from routing and storage services.
+    - Abuse controls rely more on rate limits, behavioral metadata, recipient controls, client-side protections, and user reports.
+    - Weakening encryption to simplify moderation changes the trust contract, not merely an implementation detail.
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Operate acceptance, delivery, and key repair separately" %}
+
+## Measure the queue after the fast acknowledgement
+
+A sender-latency dashboard can stay green while recipient queues become minutes old. Operations must follow the same ownership boundaries as the architecture and distinguish workload growth from a key/session failure that capacity cannot fix.
+
+### Operational scorecard
+
+- **Connection plane:** active device sessions, gateway CPU and memory, heartbeat loss, reconnect rate, authentication failures, and connection-admission latency.
+- **Acceptance plane:** authorization latency, duplicate sender commands, conversation-owner fencing conflicts, durable append failures, and acknowledgement P50/P95/P99.
+- **Delivery plane:** recipient attempts per source message, oldest device envelope, queue growth, retry count, expiry rate, hot partitions, and device acknowledgement latency.
+- **Storage plane:** queued ciphertext bytes, residence-time distribution, replication lag, deletion delay after acknowledgement or expiry, and capacity by retention bucket.
+- **Encryption plane:** stale-session rate, key-bundle fetch errors, prekey shortage, undecryptable-envelope classification, session-repair duration, and repeated repair loops.
+- **Recipient experience:** acceptance-to-device-delivery P50/P95/P99, duplicate suppression, sequence-gap repair, devices stuck pending, and false delivered-state reports.
+
+### Incident and release sequence
+
+1. Separate sender acceptance health from recipient delivery, storage, gateway, and key-session health.
+2. Find the smallest affected device cohorts, queue partitions, conversation owners, or session generations.
+3. Preserve the durable log, stable IDs, device queue records, and ciphertext-only boundary while shedding nonessential presence and typing work.
+4. Add or restore the saturated capacity plane; for key failures, repair session distribution instead of adding delivery retries.
+5. Replay from stable offsets, deduplicate by logical message ID, and complete acknowledgements per device.
+6. Verify oldest-envelope age, duplicate rate, session-repair loops, storage deletion, and recipient latency before restoring normal admission.
+7. Roll out by bounded gateway, conversation, and device cohorts with automatic rollback on queue age, privacy invariant, or duplicate-display regressions.
+
+The reusable lesson is that private real-time messaging is not one fast socket. It is a set of explicit contracts: client-owned encryption, one logical message identity, durable acceptance, independent device progress, bounded retries, and operations that can tell transport pressure from session repair.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/whatsapp-messaging/quiz/whatsapp-messaging.json" lessonSlug="whatsapp-messaging" title="Review the private messaging design" /%}

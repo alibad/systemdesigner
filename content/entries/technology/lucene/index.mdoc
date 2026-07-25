@@ -1,0 +1,269 @@
+---
+registryId: lucene
+---
+
+{% section-card tone="intro" %}
+## What is Apache Lucene?
+
+**Apache Lucene is a Java library for building search into an application.** It turns
+documents into index structures that can find words, exact values, phrases, numeric
+ranges, and nearest vectors without scanning every source record.
+
+Lucene is not a search server. It provides indexing, analysis, query, scoring, and
+storage APIs; the application still owns its network API, document lifecycle,
+authorization, replication, sharding, backups, and user experience.
+
+{% callout variant="info" %}
+The core invariant is simple: a query can only use structures created at index time,
+and an `IndexSearcher` only sees the point-in-time reader it was opened on. Field design
+and reader refresh are therefore part of the product contract, not hidden tuning.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Index evidence" eyebrow="Write path" icon="database" tone="blue" %}
+Choose fields and analyzers, then write searchable terms, typed points, doc values, and
+stored values into immutable segments.
+{% /concept-card %}
+{% concept-card title="Express intent" eyebrow="Query path" icon="search" tone="cyan" %}
+Build a `Query` whose semantics match the field representation: analyzed text, exact
+terms, phrases, ranges, prefixes, or vectors.
+{% /concept-card %}
+{% concept-card title="Publish a view" eyebrow="Reader lifecycle" icon="layers" tone="violet" %}
+Open or refresh a reader to expose a new point-in-time view while older readers continue
+using their existing snapshot.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow a document into the index
+
+A Lucene `Document` is a collection of named fields. Each field type decides which
+physical access paths are written; one logical source value may need more than one field
+representation when the product asks different questions.
+
+{% process-flow %}
+{% process-step number="1" title="Define the field contract" label="Product question" %}
+Write down whether the value must support full-text relevance, exact filtering, phrase
+positions, numeric ranges, sorting, or result retrieval.
+{% /process-step %}
+{% process-step number="2" title="Analyze or encode the value" label="Term policy" %}
+An `Analyzer` builds token streams for human language. Exact identifiers and typed
+numbers use field representations that preserve their application meaning.
+{% /process-step %}
+{% process-step number="3" title="Write access paths" label="Index structures" %}
+Postings locate matching terms, points support typed spatial or numeric queries, doc
+values provide column-style per-document values, and stored fields return payloads.
+{% /process-step %}
+{% process-step number="4" title="Publish a reader view" label="Search boundary" %}
+Open or refresh a reader, construct an `IndexSearcher`, and execute queries against that
+stable point-in-time view.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep the structures distinct
+
+- **Postings** answer term-oriented search questions and may carry frequencies,
+  positions, and offsets according to the field type.
+- **Stored fields** return selected values after another structure identifies a
+  document; storage alone does not make a value searchable.
+- **Doc values** expose strongly typed, per-document values used by operations such as
+  sorting and faceting.
+- **Point fields** encode typed values for exact, set, and range predicates.
+- **Term vectors** are optional per-document term statistics; they are separate from
+  the ordinary postings used by search.
+
+Lucene's current [`Field` API](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/document/Field.html)
+lists the purpose-built field classes and their intended access paths.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design fields from product questions
+
+Do not start from a generic "index everything" preset. Start with the questions the
+product must answer, then create the smallest explicit set of access paths that answers
+them.
+
+{% interactive-block id="technology/lucene-performance" dataFile="/api/content/technology/lucene/data/index-field-design.json" /%}
+
+### Rules that prevent common schema mistakes
+
+- Use [`TextField`](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/document/TextField.html)
+  for tokenized full-text search. Its standard field type indexes positions, which
+  enables phrase queries.
+- Use [`StringField`](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/document/StringField.html)
+  when the entire string is one exact term, such as a country code or identifier.
+- Add doc values when the read path needs sorting or faceting; for example,
+  `SortedDocValuesField` provides an ordered per-document byte value.
+- Use typed fields such as
+  [`IntField`](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/document/IntField.html)
+  for integer exact/range queries and per-document numeric behavior.
+- Store only values the result path must return from Lucene. Large source payloads can
+  stay in the system of record when the application can hydrate by stable ID.
+- Treat analyzer and field-type changes as a new index generation. Existing segments
+  retain the terms and structures written under the old contract.
+
+{% code-block file="/api/content/technology/lucene/code/validate-field-contract.ts" language="typescript" title="Reject a field recipe that cannot answer its product contract" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Construct queries at the correct boundary
+
+Query construction begins with ownership:
+
+- Human-language text needs the analyzer associated with the indexed text field.
+- Application-generated identifiers, dates, numbers, and selected filters should be
+  turned into query objects directly.
+- A phrase needs indexed positions, not merely the original stored string.
+- A required filter that should not affect relevance belongs in
+  `BooleanClause.Occur.FILTER` rather than a scoring clause.
+- A multi-term query such as a prefix, wildcard, or regular expression needs explicit
+  input bounds and measurement against the real term dictionary.
+
+{% interactive-block id="technology/lucene-query-planner" dataFile="/api/content/technology/lucene/data/query-decision-model.json" /%}
+
+The official query API defines concrete types such as `TermQuery`, `PhraseQuery`,
+`BooleanQuery`, and `PrefixQuery`.
+
+Lucene's
+[`QueryBuilder`](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/util/QueryBuilder.html)
+uses an analyzer to construct Boolean and phrase queries from plain text. The
+[`Classic QueryParser`](https://lucene.apache.org/core/10_3_2/queryparser/org/apache/lucene/queryparser/classic/package-summary.html)
+is intended for human-entered query syntax; program-generated values should normally
+use query APIs directly.
+
+{% code-block file="/api/content/technology/lucene/code/bound-query-contract.ts" language="typescript" title="Keep exact, numeric, and human-text request boundaries separate" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Separate search visibility from durable commit
+
+Lucene writes changes through `IndexWriter`, but "accepted by the writer," "visible to a
+reader," and "durable after a crash" are different states.
+
+{% system-flow title="Near-real-time index lifecycle" caption="Reader refresh and durable commit solve different problems; neither should be inferred from the other." %}
+{% system-node title="IndexWriter buffers" eyebrow="Mutation" icon="database" tone="blue" %}
+Add, update, or delete documents. An update identified by a term is implemented as a
+delete followed by adding the complete replacement document.
+{% /system-node %}
+{% system-node title="Flush creates a segment" eyebrow="Files" icon="layers" tone="violet" %}
+Move buffered state into index files. A flush is not an `fsync` commit and may also
+trigger background segment merges.
+{% /system-node %}
+{% system-node title="Reader refreshes" eyebrow="Visibility" icon="repeat" tone="cyan" %}
+Open a near-real-time reader from the writer or refresh a manager so searches can use a
+new point-in-time view without closing the writer.
+{% /system-node %}
+{% system-node title="Commit syncs a point" eyebrow="Durability" icon="shield" tone="green" %}
+Commit pending changes and sync referenced files so that the commit point survives an
+operating-system or machine crash.
+{% /system-node %}
+{% /system-flow %}
+
+Lucene's [`IndexWriter` documentation](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/index/IndexWriter.html)
+defines flush, commit, update, merge, locking, and sequence-number behavior. Use
+[`ReaderManager`](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/index/ReaderManager.html)
+or another reference manager when the application needs safe acquire, release, and
+refresh behavior around shared readers.
+
+### Plan identity and deletes deliberately
+
+1. Index a stable domain ID as an exact term.
+2. Use that term for replacement or deletion rather than retaining Lucene's internal
+   document number as business identity.
+3. Carry a source version when events can arrive out of order, and reject stale writes
+   before they replace newer documents.
+4. Remember that deleted documents consume space until segment merges reclaim them.
+5. Keep the source of truth replayable so a new analyzer, field contract, or Lucene
+   major version can build a clean generation.
+
+Internal Lucene document numbers are ephemeral and may change as documents are added,
+deleted, or merged. They are not stable external IDs.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Treat relevance as an evaluated product behavior
+
+Lucene includes `BM25Similarity` and other `Similarity` implementations, but a score is
+not a universal probability or quality guarantee. It is the result of one query,
+similarity, field statistics, boosts, and indexed document collection.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Score only what should rank" eyebrow="Boolean semantics" icon="filter" tone="blue" %}
+Use `FILTER` for required eligibility clauses that should not contribute to relevance.
+Keep scoring clauses focused on evidence that should change ordering.
+{% /concept-card %}
+{% concept-card title="Explain representative hits" eyebrow="Diagnosis" icon="search" tone="cyan" %}
+Inspect query rewrites and explanations on bounded samples to understand which terms,
+statistics, boosts, and clauses produced a score.
+{% /concept-card %}
+{% concept-card title="Evaluate with judgments" eyebrow="Release gate" icon="check" tone="green" %}
+Maintain a query set with expected relevant and irrelevant results. Compare ranking
+metrics and failure slices before changing analyzers, boosts, or similarity settings.
+{% /concept-card %}
+{% /concept-grid %}
+
+The official
+[`similarities` package](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/search/similarities/package-summary.html)
+documents available ranking models and the meaning of BM25 parameters. Tune them only
+against labeled product outcomes.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate measured segments, not guessed formulas
+
+Document count alone cannot predict Lucene index size, memory, indexing throughput,
+query latency, or query throughput. Those outcomes also depend on field structures,
+term distributions, stored payloads, analyzers, query shapes, concurrency, filesystem,
+hardware, reader refresh, caches, deletions, and merge activity.
+
+### Build a representative benchmark
+
+- Sample real document sizes, languages, term distributions, update rates, and delete
+  behavior.
+- Replay the actual query mix, result sizes, filters, sorts, phrase/prefix behavior,
+  concurrency, and timeout policy.
+- Measure median and tail latency together with indexing rate, refresh time, segment
+  count, merge work, disk bytes, cache behavior, errors, and rejected requests.
+- Include steady writes, burst writes, large merges, reader refresh, restart, and disk
+  pressure rather than benchmarking an idle, fully warmed index only.
+- Compare one controlled change at a time and retain the corpus, query set, environment,
+  and Lucene version with the result.
+
+### Production guardrails
+
+- Keep one `IndexWriter` per index directory; Lucene enforces a write lock.
+- Reuse thread-safe writers, readers, and searchers according to their documented
+  lifecycle instead of opening them per request.
+- Set request deadlines and use a query timeout where cancellation semantics fit the
+  product contract.
+- Bound user syntax, query length, Boolean clauses, prefix/wildcard expansion, result
+  count, and deep pagination.
+- Monitor uncommitted changes, buffered documents, segment count, deleted documents,
+  pending merges, merge I/O, refresh failures, commit failures, disk headroom, and tail
+  latency.
+- Do not schedule routine `forceMerge` on an actively updated index. Let merge policy
+  manage segments unless a measured, lifecycle-specific workflow justifies otherwise.
+- Keep independent backups or a replayable source. Lucene index files are a search
+  projection, not automatically a replicated system of record.
+{% /section-card %}
+
+{% section-card %}
+## Review the official contracts before shipping
+
+This lesson is grounded in Apache Lucene 10.3.2 documentation:
+
+- [Core API overview](https://lucene.apache.org/core/10_3_2/core/index.html)
+- [Field classes and access paths](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/document/Field.html)
+- [IndexWriter lifecycle](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/index/IndexWriter.html)
+- [IndexSearcher query execution](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/search/IndexSearcher.html)
+- [PhraseQuery semantics](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/search/PhraseQuery.html)
+- [PrefixQuery and multi-term rewrite](https://lucene.apache.org/core/10_3_2/core/org/apache/lucene/search/PrefixQuery.html)
+- [Classic QueryParser guidance](https://lucene.apache.org/core/10_3_2/queryparser/org/apache/lucene/queryparser/classic/package-summary.html)
+
+API contracts can change between Lucene releases. Read the migration guide for the
+version you deploy, rebuild representative indexes, and rerun relevance plus operational
+tests before a major-version cutover.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/lucene/quiz/lucene-production-design.json" lessonSlug="lucene" title="Apache Lucene Production Design Review" /%}

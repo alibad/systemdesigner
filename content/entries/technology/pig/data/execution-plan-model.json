@@ -1,0 +1,246 @@
+{
+  "title": "Compile a Pig Latin pipeline",
+  "description": "Choose a logical dataflow and execution backend, then scale the input. The model shows where key ownership forces a shuffle and how that boundary is represented physically.",
+  "modelNote": "Volumes are deterministic teaching estimates. Pig may combine, reorder, or specialize operators; use EXPLAIN on the deployed version and backend for the actual logical, physical, and execution plans.",
+  "defaults": {
+    "pipelineId": "grouped-summary",
+    "engineId": "tez",
+    "scale": 1
+  },
+  "scaleBounds": {
+    "min": 1,
+    "max": 8,
+    "step": 1
+  },
+  "engines": [
+    {
+      "id": "mapreduce",
+      "label": "MapReduce",
+      "detail": "Pig groups physical operators into one or more MapReduce jobs.",
+      "boundaryUnit": "job",
+      "planLabel": "Map Reduce plan",
+      "boundaryDetail": "A second shuffle generally requires another job boundary and intermediate materialization."
+    },
+    {
+      "id": "tez",
+      "label": "Apache Tez",
+      "detail": "Pig normally submits a DAG whose vertices are connected by data-movement edges.",
+      "boundaryUnit": "vertex",
+      "planLabel": "Tez plan",
+      "boundaryDetail": "The shuffle remains, but vertices can share a DAG and Tez can reuse containers."
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "map-only-cleanup",
+      "label": "Map-only cleanup",
+      "detail": "Filter bad rows and project four fields down to two before storing.",
+      "baseInputGiB": 240,
+      "operators": [
+        {
+          "id": "load-events",
+          "label": "LOAD",
+          "alias": "events",
+          "kind": "source",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(event_id:chararray, user_id:long, payload:chararray, ts:long)",
+          "explanation": "The loader creates a relation and applies the declared field contract."
+        },
+        {
+          "id": "filter-valid",
+          "label": "FILTER",
+          "alias": "valid",
+          "kind": "map",
+          "volumeFactor": 0.3,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "same fields, fewer tuples",
+          "explanation": "Each tuple is tested independently, so no key repartition is required."
+        },
+        {
+          "id": "project-thin",
+          "label": "FOREACH",
+          "alias": "thin",
+          "kind": "map",
+          "volumeFactor": 0.45,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(user_id:long, ts:long)",
+          "explanation": "Projection removes bytes before any later distributed boundary."
+        },
+        {
+          "id": "store-clean",
+          "label": "STORE",
+          "alias": "clean output",
+          "kind": "sink",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "loader-specific files",
+          "explanation": "A sink triggers execution of the aliases needed to produce it."
+        }
+      ]
+    },
+    {
+      "id": "grouped-summary",
+      "label": "Filtered group + aggregate",
+      "detail": "Filter and project events, repartition by customer, then emit one summary per key.",
+      "baseInputGiB": 480,
+      "operators": [
+        {
+          "id": "load-events",
+          "label": "LOAD",
+          "alias": "events",
+          "kind": "source",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(customer_id:long, event_type:chararray, payload:chararray, ts:long)",
+          "explanation": "The logical plan begins with a typed relation."
+        },
+        {
+          "id": "filter-events",
+          "label": "FILTER",
+          "alias": "valid",
+          "kind": "map",
+          "volumeFactor": 0.25,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "same fields, 25% of input bytes",
+          "explanation": "Invalid and irrelevant tuples are removed before repartitioning."
+        },
+        {
+          "id": "project-events",
+          "label": "FOREACH",
+          "alias": "thin",
+          "kind": "map",
+          "volumeFactor": 0.4,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(customer_id:long, event_type:chararray)",
+          "explanation": "Only the grouping key and measured field continue."
+        },
+        {
+          "id": "group-customer",
+          "label": "GROUP",
+          "alias": "by_customer",
+          "kind": "shuffle",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": true,
+          "schema": "(group:long, thin:bag{tuple(...)})",
+          "explanation": "All tuples for one customer must reach the same logical group."
+        },
+        {
+          "id": "aggregate-customer",
+          "label": "FOREACH",
+          "alias": "summary",
+          "kind": "map",
+          "volumeFactor": 0.03,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(customer_id:long, event_count:long)",
+          "explanation": "The grouped bag is reduced to one compact result tuple."
+        },
+        {
+          "id": "store-summary",
+          "label": "STORE",
+          "alias": "summary output",
+          "kind": "sink",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "loader-specific files",
+          "explanation": "The sink commits the final relation through the selected store function."
+        }
+      ]
+    },
+    {
+      "id": "join-then-group",
+      "label": "Regular join + grouped summary",
+      "detail": "Join a large event relation with another distributed relation, then regroup the joined rows.",
+      "baseInputGiB": 600,
+      "operators": [
+        {
+          "id": "load-large",
+          "label": "LOAD",
+          "alias": "events",
+          "kind": "source",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(customer_id:long, session_id:chararray, duration_ms:long)",
+          "explanation": "The large relation begins the dataflow."
+        },
+        {
+          "id": "filter-large",
+          "label": "FILTER",
+          "alias": "valid_events",
+          "kind": "map",
+          "volumeFactor": 0.35,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "same fields, fewer tuples",
+          "explanation": "Bad rows are removed before the join key is exchanged."
+        },
+        {
+          "id": "project-large",
+          "label": "FOREACH",
+          "alias": "thin_events",
+          "kind": "map",
+          "volumeFactor": 0.55,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(customer_id:long, duration_ms:long)",
+          "explanation": "Projection lowers the bytes carried into the join."
+        },
+        {
+          "id": "join-customer",
+          "label": "JOIN",
+          "alias": "enriched",
+          "kind": "shuffle",
+          "volumeFactor": 0.92,
+          "additionalInputGiB": 12,
+          "shuffle": true,
+          "schema": "flat tuple containing fields from both relations",
+          "explanation": "A regular equijoin repartitions both inputs by the join key."
+        },
+        {
+          "id": "group-region",
+          "label": "GROUP",
+          "alias": "by_region",
+          "kind": "shuffle",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": true,
+          "schema": "(group:chararray, enriched:bag{tuple(...)})",
+          "explanation": "Grouping by a different key changes ownership again."
+        },
+        {
+          "id": "aggregate-region",
+          "label": "FOREACH",
+          "alias": "summary",
+          "kind": "map",
+          "volumeFactor": 0.02,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "(region:chararray, total_duration:long)",
+          "explanation": "The grouped bag becomes one summary tuple per region."
+        },
+        {
+          "id": "store-region",
+          "label": "STORE",
+          "alias": "region output",
+          "kind": "sink",
+          "volumeFactor": 1,
+          "additionalInputGiB": 0,
+          "shuffle": false,
+          "schema": "loader-specific files",
+          "explanation": "The final sink triggers the required upstream work."
+        }
+      ]
+    }
+  ]
+}

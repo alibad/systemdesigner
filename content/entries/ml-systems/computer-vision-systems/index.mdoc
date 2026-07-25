@@ -1,0 +1,203 @@
+---
+registryId: computer-vision-systems
+---
+
+{% section-card tone="intro" %}
+## What is a computer vision system?
+
+A computer vision system turns pixels from images or video into a product decision: identify an object, follow it over time, measure a condition, retrieve similar media, or raise an alert. The model is one stage in a larger path that captures media, decodes and transforms frames, schedules accelerator work, applies temporal and business rules, and records evidence.
+
+This matters because users experience the whole path, not an offline accuracy score. **The core invariant is that every admitted frame must either produce a decision within a stated deadline or be handled by an explicit drop, defer, or fallback policy.** Unbounded queues create stale answers even when inference itself is fast.
+
+If accelerator serving and compression are new, review [Real-time ML inference](/ml-systems/real-time-ml-inference) and [Model compression techniques](/ml-systems/model-compression-techniques) first.
+{% /section-card %}
+
+{% system-flow title="From photons to an accountable decision" caption="Each boundary needs a versioned contract, latency budget, and observable failure state." %}
+{% system-node title="Capture and admit" eyebrow="Media contract" icon="camera" tone="cyan" %}
+Authenticate the source, timestamp the frame, preserve camera identity, and decide which frames enter a bounded pipeline.
+{% /system-node %}
+{% system-node title="Decode and transform" eyebrow="Tensor contract" icon="layers" tone="blue" %}
+Decode, resize, normalize, and batch with the exact color space, dimensions, and version used during evaluation.
+{% /system-node %}
+{% system-node title="Infer and associate" eyebrow="Visual evidence" icon="scan" tone="violet" %}
+Run the model, suppress duplicate boxes, and connect observations across frames when the product needs tracks rather than isolated detections.
+{% /system-node %}
+{% system-node title="Decide and observe" eyebrow="Product policy" icon="shield-check" tone="green" %}
+Apply thresholds and business rules, route uncertain cases, return results, and record model, input, latency, and outcome evidence.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Start with the decision, not the model name
+
+Before choosing an architecture, define what one result means and how late is too late. A **prediction contract** states the input unit, output schema, eligible population, deadline, quality floor, abstention behavior, and owner of uncertain results.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Image classification" eyebrow="One label per image" icon="image" tone="blue" %}
+Return a class or embedding for an independent image. Throughput and batching often matter more than frame-to-frame state.
+{% /concept-card %}
+{% concept-card title="Object detection" eyebrow="Boxes and classes" icon="scan" tone="violet" %}
+Locate multiple objects, then apply confidence filtering and class-aware duplicate suppression before downstream use.
+{% /concept-card %}
+{% concept-card title="Video tracking" eyebrow="Identity over time" icon="route" tone="green" %}
+Associate detections across frames. Sampling too sparsely can break identity continuity even when per-frame detection remains accurate.
+{% /concept-card %}
+{% /concept-grid %}
+
+Write the contract in product language. A loading-dock alert might require an event within `120 ms`, critical-event recall above a validated floor, no more than a bounded number of human reviews, and a safe degraded mode when one serving zone fails.
+{% /section-card %}
+
+{% section-card %}
+## Convert camera demand into a serving envelope
+
+A video stream is not one request. If `N` streams are sampled at `F` frames per second, the inference path receives `N x F` frames each second. Resolution, scene density, model profile, preprocessing, and tracking add work per frame.
+
+Plan against sustained safe capacity rather than benchmark peak capacity:
+
+- **Admitted frame rate:** `streams x sampled FPS`.
+- **Effective demand:** admitted frames multiplied by a measured complexity factor for the workload.
+- **Safe capacity:** live replica throughput multiplied by the steady-state utilization target.
+- **Required replicas:** effective demand divided by safe per-replica capacity, rounded up.
+- **Failure capacity:** repeat the calculation after losing a zone or accelerator pool.
+
+The numbers in the lab are planning assumptions, not hardware promises. Replace them with measurements from the exact model artifact, runtime, input distribution, and device before procurement or release.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/computer-vision-systems-calculator" dataFile="/api/content/ml-systems/computer-vision-systems/data/capacity-planning-lab.json" /%}
+
+{% section-card %}
+## Bound queues to protect freshness
+
+An **admission policy** decides what enters the expensive path. For live perception, processing every decoded frame can be worse than intentionally dropping stale frames: once arrival rate exceeds service rate, an unbounded first-in-first-out queue keeps returning older and older observations.
+
+- Bound every queue by count, bytes, or age.
+- Prefer the newest frame for freshness-sensitive streams; preserve all inputs only when the product contract requires complete batch processing.
+- Apply per-source quotas so one noisy camera cannot occupy every batch slot.
+- Carry source ID, capture time, sequence number, and transform version with the tensor.
+- Measure dropped, expired, retried, and processed frames separately.
+
+{% code-block file="/api/content/ml-systems/computer-vision-systems/code/latest-frame-admission.py" language="python" title="Keep a bounded latest-frame queue without external dependencies" /%}
+
+Dropping is a product decision. Validate that the remaining sample rate still captures the shortest event and preserves tracking continuity. For audit or safety workflows, write the original media to durable storage before sampling the live inference path.
+{% /section-card %}
+
+{% section-card %}
+## Make preprocessing a versioned contract
+
+**Preprocessing** converts decoded media into the tensor shape and numeric representation expected by the model. A silent mismatch can destroy production quality without changing model weights.
+
+The contract should pin:
+
+- decoder and codec behavior, including rotation and color range;
+- color space and channel order, such as RGB versus BGR;
+- resize policy, aspect-ratio handling, padding, and crop coordinates;
+- normalization constants, numeric precision, and tensor layout;
+- model and transform versions attached to every result.
+
+Test the training and serving implementations with golden images and expected tensors. Record hashes or summary statistics at the boundary so an incident can distinguish camera drift from transform drift.
+
+{% callout variant="warn" %}
+GPU utilization can look healthy while CPU decode, host-to-device copies, or non-max suppression saturates. Profile capture-to-decision latency by stage and by percentile before adding accelerators.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Treat scores as evidence, not decisions
+
+A detector emits scores and candidate boxes. The product needs a **decision policy** that maps those scores to actions, review, abstention, or rejection. The threshold changes recall, false alerts, queue load, and error cost together.
+
+- Lower thresholds usually recover more true events but send more false alerts downstream.
+- Higher thresholds reduce review load but hide more true events.
+- A threshold calibrated on one camera mix may fail under darkness, blur, weather, or a new installation angle.
+- Separate high-risk actions from low-risk metadata; uncertain high-risk events should abstain or route to review.
+
+Choose the operating point from labeled, production-like data and an explicit capacity budget. Average precision alone cannot tell whether the resulting queue or miss rate is acceptable.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/computer-vision-systems-calculator" dataFile="/api/content/ml-systems/computer-vision-systems/data/decision-policy-lab.json" /%}
+
+{% section-card %}
+## Post-process detections without erasing evidence
+
+**Intersection over union (IoU)** measures how much two boxes overlap. **Non-max suppression (NMS)** keeps a high-scoring box and removes lower-scoring boxes of the same class when their IoU exceeds a threshold. It reduces duplicate detections, but an aggressive threshold can merge nearby real objects.
+
+Apply confidence policy before NMS, keep suppression class-aware unless the product requires cross-class competition, and measure post-processing latency. Preserve the raw candidate set or enough sampled traces to investigate threshold and NMS changes later.
+
+{% code-block file="/api/content/ml-systems/computer-vision-systems/code/class-aware-nms.py" language="python" title="Run class-aware non-max suppression with standard Python" /%}
+
+Tracking adds another stateful contract. Define when a track starts, how long it can miss observations, when identity is retired, and how events remain idempotent across retries. Partition track state by camera or scene so related frames reach the same worker, and checkpoint only the state needed for the recovery objective.
+{% /section-card %}
+
+{% section-card %}
+## Build the production path around deadlines
+
+{% process-flow %}
+{% process-step number="1" title="Measure each stage" label="Profile" %}
+Record decode, transform, queue, transfer, inference, post-processing, tracking, and network latency at p50, p95, and p99 on representative media.
+{% /process-step %}
+{% process-step number="2" title="Schedule bounded work" label="Serve" %}
+Use per-source admission, deadline-aware micro-batches, warm model replicas, and backpressure before a queue becomes stale.
+{% /process-step %}
+{% process-step number="3" title="Degrade deliberately" label="Protect" %}
+Reduce sample rate, use a validated smaller profile, narrow eligible traffic, or route to review while preserving the minimum quality contract.
+{% /process-step %}
+{% process-step number="4" title="Release with evidence" label="Operate" %}
+Shadow and canary new models or transforms, compare named slices, and retain a compatible rollback artifact and policy version.
+{% /process-step %}
+{% /process-flow %}
+
+Deadline-aware batching waits only while the oldest admitted frame has enough slack. A larger batch may improve accelerator throughput but violate tail latency. Export queue age and batch-fill time so low GPU use is not mistaken for spare end-to-end capacity.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the system, not only the checkpoint
+
+{% metric-strip %}
+{% metric value="By slice" label="Visual quality" detail="Recall, precision, calibration, and tracking continuity for lighting, device, geography, and rare classes" tone="violet" /%}
+{% metric value="P50/P95/P99" label="Freshness" detail="Capture-to-decision latency, queue age, and result age at consumption" tone="blue" /%}
+{% metric value="Frames/s" label="Capacity" detail="Admitted, processed, dropped, expired, and retried frames by source and model version" tone="green" /%}
+{% metric value="Per event" label="Outcome" detail="Review load, false action cost, missed-event cost, and downstream product impact" tone="amber" /%}
+{% /metric-strip %}
+
+Create an untouched test set that mirrors deployment cameras and hard conditions. Add named slices for low light, motion blur, occlusion, small objects, crowded scenes, device families, and any safety- or fairness-sensitive population. For video, evaluate event detection delay, track fragmentation, and identity switches in addition to frame metrics.
+
+Release a model, preprocessing graph, post-processing policy, and threshold as one versioned bundle. A canary is acceptable only when automatic rollback signals cover quality proxies, latency, errors, and queue age; delayed labels still require a later outcome review.
+{% /section-card %}
+
+{% section-card %}
+## Design failure modes before they happen
+
+{% concept-grid columns="2" %}
+{% concept-card title="Camera or decoder failure" eyebrow="Missing or corrupt media" icon="camera-off" tone="rose" %}
+Detect frozen frames, timestamp gaps, codec errors, and source authentication failures. Mark the source unavailable rather than returning a confident result from stale media.
+{% /concept-card %}
+{% concept-card title="Accelerator loss" eyebrow="Capacity contraction" icon="server-off" tone="amber" %}
+Stop admitting low-priority work, route compatible models to another pool, and protect queue age. Test the fleet against the largest planned failure domain.
+{% /concept-card %}
+{% concept-card title="Transform mismatch" eyebrow="Silent quality failure" icon="split" tone="violet" %}
+Fail a golden-tensor check or version gate before serving. Roll back model and transform together rather than changing one side of the contract.
+{% /concept-card %}
+{% concept-card title="Distribution shift" eyebrow="Scores lose meaning" icon="activity" tone="blue" %}
+Compare input and confidence distributions by named slice, sample uncertain media for labeling, and narrow authority until outcome evidence is available.
+{% /concept-card %}
+{% /concept-grid %}
+
+Retain only the media and metadata needed for debugging, evaluation, and legal obligations. Encrypt transport and storage, restrict access by purpose, redact or crop where possible, and make retention deletion verifiable. Camera identity and embeddings can be sensitive even when raw frames are not kept.
+{% /section-card %}
+
+{% section-card %}
+## Use a production review checklist
+
+- **Contract:** input, output, deadline, quality floor, abstention, and review ownership are explicit.
+- **Data:** deployment cameras, hard conditions, rare events, and consent or retention rules are represented.
+- **Capacity:** stage profiles, headroom, batching delay, and the largest failure domain are measured.
+- **Correctness:** preprocessing parity, confidence policy, NMS, tracking, and idempotent events are versioned and tested.
+- **Reliability:** queues are bounded, degraded modes are quality-validated, and rollback is compatible and rehearsed.
+- **Observability:** capture-to-decision traces join source, frame, transform, model, policy, and result versions.
+- **Release:** shadow and canary evidence covers slices, latency, queue age, errors, and downstream outcomes.
+- **Privacy:** access, retention, deletion, encryption, and incident handling match the media risk.
+
+The most effective optimization is often reducing unnecessary admitted work. Sample with evidence, route simple scenes to cheaper profiles, batch only within deadline slack, and keep data transfers and post-processing visible in the same capacity model as inference.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/computer-vision-systems/quiz/computer-vision-systems.json" lessonSlug="computer-vision-systems" title="Computer Vision Systems Production Check" /%}

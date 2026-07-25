@@ -1,0 +1,403 @@
+---
+registryId: hbase
+---
+
+{% section-card tone="intro" %}
+## What is Apache HBase?
+
+**Apache HBase is a distributed, sorted, column-family database that stores its durable
+files on HDFS.** It is designed for low-latency reads and writes by row key across very
+large, sparse tables. Unlike an analytics engine that scans whole files, HBase keeps a
+serving layer of regions, write buffers, indexes, and caches above HDFS.
+
+Use HBase when an application knows its primary access paths and needs to fetch or
+change individual rows continuously at a scale that no single database server can own.
+It is a poor default for relational joins, ad hoc filters across arbitrary columns, or
+transactions spanning many unrelated rows.
+
+The core invariant is **a row key maps to exactly one active region, and every accepted
+mutation for that row must remain recoverable and appear in the correct version order**.
+Region movement, flushes, compactions, retries, and failures may change where bytes live,
+but they must not change that logical answer.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Decide whether the HBase access contract fits
+
+HBase makes one design choice unusually important: clients address data through a row
+key, and rows are stored in lexicographic key order. A strong fit starts with known key
+lookups or bounded key-range scans rather than an existing pile of unmodeled data.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Known access path" icon="key" tone="blue" %}
+Device history, entity state, counters, and event timelines can encode their common
+lookup into a row key and keep related values close together.
+{% /concept-card %}
+{% concept-card title="Conditional fit" eyebrow="Careful modeling" icon="layers" tone="amber" %}
+High-ingest systems fit only when row keys distribute writes, region count stays
+operable, and background compaction can keep pace.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Different query model" icon="search" tone="rose" %}
+Ad hoc predicates, many secondary indexes, cross-row transactions, and relational joins
+usually belong in a different serving or analytical system.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before continuing, review [HDFS](/technology/hadoop-hdfs) if block replication,
+checksums, or NameNode metadata are unfamiliar. HBase relies on those durability
+mechanisms but adds its own serving and recovery protocol.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Model a row as coordinates, not a fixed record
+
+An HBase cell is identified by four coordinates: **row key, column family, qualifier,
+and timestamp**. The stored value sits at that coordinate. Rows can be sparse because a
+missing qualifier consumes no cell storage.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Row key" eyebrow="Placement + lookup" icon="key" tone="blue" %}
+Orders rows, selects the owning region, and defines efficient point or range access.
+Every key byte is repeated across cells, so keep it meaningful and compact.
+{% /concept-card %}
+{% concept-card title="Column family" eyebrow="Physical policy" icon="database" tone="violet" %}
+Groups qualifiers that share flush, compaction, compression, version, Bloom-filter, and
+retention behavior. Families are declared before use.
+{% /concept-card %}
+{% concept-card title="Qualifier" eyebrow="Sparse field" icon="list" tone="cyan" %}
+Names a value inside a family. Qualifiers can vary by row, which supports sparse and
+evolving records without adding empty cells.
+{% /concept-card %}
+{% concept-card title="Timestamp" eyebrow="Version order" icon="clock" tone="amber" %}
+Orders versions of one cell. Retention settings control how many versions remain and
+when expired values can be reclaimed.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep row atomicity useful
+
+- Put values that must change atomically under one row key.
+- Keep column families few because each family owns separate MemStores and HFiles.
+- Separate data with materially different retention or access behavior into different
+  families or tables.
+- Avoid storing large media objects in cells when object storage plus an HBase pointer
+  gives a cleaner cost and recovery boundary.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make row-key trade-offs visible
+
+A row key must balance two competing goals: spread writes across regions and preserve
+the key ordering required by common scans. Salting can solve write concentration while
+making every range query fan out; entity-first keys preserve one entity's history while
+a dominant tenant can still become hot.
+
+{% interactive-block id="technology/hbase-row-key-distribution-lab" dataFile="/api/content/technology/hbase/data/row-key-distribution.json" /%}
+
+The region bars are a planning model, not a benchmark. Replace the per-region budget
+and traffic distribution with measured values, including burstiness and the largest
+tenant rather than only cluster averages.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Encode the row-key decision as an executable model
+
+This dependency-free script compares timestamp-first, salted, entity-time, and fully
+hashed layouts. It makes the two consequences explicit: hottest-region write load and
+range-query fan-out.
+
+{% code-block file="/api/content/technology/hbase/code/model-row-key-distribution.py" language="python" title="Compare row-key distribution and scan fan-out" /%}
+
+### Validate keys with representative traffic
+
+1. Generate keys from real tenant, entity, and timestamp distributions.
+2. Sort them as bytes, then map them through the intended split boundaries.
+3. Replay normal and burst writes while measuring the hottest region.
+4. Execute the dominant point and range reads, including every salted sub-scan.
+5. Recheck after large tenants, retention changes, or backfills alter the distribution.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow an accepted write to durable files
+
+The RegionServer that owns the key range handles the mutation. It protects the change
+in the write-ahead log (WAL), updates an in-memory MemStore, and later flushes a sorted
+HFile to HDFS. The client acknowledgement policy determines exactly how much WAL
+durability must be complete before success is returned.
+
+{% process-flow %}
+{% process-step number="1" title="Locate the region" label="Client cache" %}
+Resolve the row key through HBase metadata, cache the region location, and send the
+mutation directly to the owning RegionServer.
+{% /process-step %}
+{% process-step number="2" title="Append the WAL" label="Recovery boundary" %}
+Record the ordered mutation in the region's WAL and satisfy the configured sync policy
+before acknowledging a durable write.
+{% /process-step %}
+{% process-step number="3" title="Update MemStore" label="Visible state" %}
+Apply the new cell version to sorted memory. Reads can observe it before any HFile is
+created.
+{% /process-step %}
+{% process-step number="4" title="Flush to HFiles" label="Immutable storage" %}
+Freeze a full MemStore, write one HFile per affected family to HDFS, and later retire
+the covered WAL range when recovery no longer needs it.
+{% /process-step %}
+{% /process-flow %}
+
+Buffered client writes improve throughput, but the client must surface asynchronous
+errors and flush deliberately at its own commit boundary. Disabling or weakening WAL
+durability changes the data-loss contract; it is not a free performance setting.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Narrow a read before touching HDFS blocks
+
+A point read checks current memory and cache first. If disk work remains, HFile metadata,
+Bloom filters, and block indexes reduce the candidate set before HDFS returns a data
+block. A scan starts from a key range and streams ordered results across one or more
+regions.
+
+{% system-flow title="A point Get resolves one row version" caption="The newest visible cell version wins across memory and every candidate HFile." %}
+{% system-node title="Region locator" eyebrow="Find owner" icon="route" tone="blue" %}
+Use cached metadata to reach the RegionServer responsible for the row-key range.
+{% /system-node %}
+{% system-node title="MemStore + BlockCache" eyebrow="Fast path" icon="memory" tone="green" %}
+Check unflushed versions and cached HFile blocks before issuing a storage read.
+{% /system-node %}
+{% system-node title="Bloom + block index" eyebrow="Reject work" icon="filter" tone="cyan" %}
+Skip HFiles that cannot contain the row and locate the block that could contain it.
+{% /system-node %}
+{% system-node title="HFile on HDFS" eyebrow="Verify bytes" icon="storage" tone="violet" %}
+Read, decompress, and checksum the candidate block, then reconcile versions and delete
+markers.
+{% /system-node %}
+{% /system-flow %}
+
+### Design reads around the stored order
+
+- Use `Get` for complete row keys and bounded `Scan` calls for contiguous ranges.
+- Specify families and qualifiers so the server avoids reading and returning unused
+  cells.
+- Set scanner caching from row width and response-size limits, not a universal number.
+- Treat cache hit rate as a workload result; a large BlockCache cannot repair a row key
+  that makes every query scan unrelated data.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Understand regions, splits, and ownership
+
+A region is one contiguous row-key interval from a table. Exactly one RegionServer
+serves it at a time. As its stores grow, HBase can split the interval into two daughter
+regions; the master later balances region assignments across live servers.
+
+{% metric-strip %}
+{% metric label="Region count" value="ceil(data / target size)" detail="Estimate per table and per RegionServer" tone="blue" /%}
+{% metric label="Split rate" value="growth / target size" detail="High rates create assignment and metadata churn" tone="amber" /%}
+{% metric label="Physical storage" value="logical x replication" detail="Add compaction and recovery headroom" tone="violet" /%}
+{% metric label="Hot-region load" value="max(region QPS)" detail="Averages hide key-range skew" tone="rose" /%}
+{% /metric-strip %}
+
+Pre-splitting is useful only when the application knows the future key distribution.
+Bad split points create empty regions beside hot ones; excessive pre-splitting creates
+coordination overhead before data arrives.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size storage, regions, and compaction together
+
+Capacity is not just logical table size. HDFS replication multiplies durable bytes,
+target region size changes region count and split frequency, and compaction consumes
+background bandwidth while temporarily keeping input and output files.
+
+{% interactive-block id="technology/hbase-sizing" dataFile="/api/content/technology/hbase/data/capacity-envelope.json" /%}
+
+The workbench deliberately separates three failure modes. Adding disk does not fix a
+compaction throughput deficit; increasing region size does not fix a hot key; and adding
+RegionServers does not restore durability when replication is set to one.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Turn the capacity envelope into a repeatable check
+
+The model below estimates region count, required servers, physical storage, daily split
+rate, and compaction backlog. Its assumptions stay visible so operators can replace
+them with cluster measurements.
+
+{% code-block file="/api/content/technology/hbase/code/estimate-capacity-envelope.py" language="python" title="Estimate regions, storage, and compaction debt" /%}
+
+### Reserve more than steady-state capacity
+
+- Keep disk headroom for active compactions, HDFS re-replication, snapshots, and a
+  failed server's reassigned regions.
+- Size WAL and flush throughput for bursts while compaction is already active.
+- Bound regions per server by heap, handler, store-file, and recovery observations.
+- Load-test with the real family count, cell size, compression ratio, versions, and
+  tombstone density.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Keep consistency claims scoped to one row
+
+HBase normally serves strongly consistent reads and atomic mutations at row scope. A
+reader should not observe half of one row mutation, and ordered cell versions determine
+the current value. That guarantee does not become a general transaction across rows.
+
+{% concept-grid columns="3" %}
+{% concept-card title="One row" eyebrow="Native boundary" icon="shield" tone="green" %}
+Use Put, Delete, increment, append, and conditional mutation APIs so related values
+change atomically under one row key.
+{% /concept-card %}
+{% concept-card title="Several rows" eyebrow="Application protocol" icon="repeat" tone="amber" %}
+Design idempotent workflows, explicit states, and reconciliation. A retry can repeat
+part of a multi-row operation unless the application records its identity.
+{% /concept-card %}
+{% concept-card title="Timeline read" eyebrow="Key-range scope" icon="clock" tone="blue" %}
+A scan crosses regions independently. Concurrent writers can change later portions, so
+do not claim one cluster-wide snapshot unless another protocol provides it.
+{% /concept-card %}
+{% /concept-grid %}
+
+Avoid timeline consistency when the product requires a single committed view across
+many entities. That is a transaction-model mismatch, not a tuning problem.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Control flush and compaction pressure
+
+Each flush creates a new immutable HFile. Reads may need to reconcile several HFiles
+until compaction merges them, discards obsolete versions, and eventually reclaims
+delete markers that are safe to remove.
+
+{% process-flow %}
+{% process-step number="1" title="Flush creates files" label="Foreground consequence" %}
+Rapid MemStore flushes increase store-file count. Too many files can trigger write
+backpressure before disk is full.
+{% /process-step %}
+{% process-step number="2" title="Minor compaction merges" label="Routine convergence" %}
+Combine selected files to reduce read amplification without rewriting every file in a
+family.
+{% /process-step %}
+{% process-step number="3" title="Major compaction reclaims" label="Expensive sweep" %}
+Rewrite all eligible files in a region and family so obsolete versions and safe delete
+markers can disappear.
+{% /process-step %}
+{% process-step number="4" title="Backlog applies pressure" label="Capacity failure" %}
+When rewrite demand stays above available I/O, file count, read latency, disk usage,
+and eventually flush stalls all rise.
+{% /process-step %}
+{% /process-flow %}
+
+Schedule and throttle major compactions from measured I/O headroom. Triggering them
+indiscriminately across a large table can create the outage they were intended to
+prevent.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Recover regions without losing accepted mutations
+
+HBase recovery combines HDFS durability, RegionServer liveness, region reassignment,
+and WAL replay. The master coordinates ownership; ZooKeeper participates in discovery
+and coordination; neither stores the table's durable cells.
+
+{% concept-grid columns="3" %}
+{% concept-card title="RegionServer crash" eyebrow="Reassign + replay" icon="warning" tone="rose" %}
+Fence the failed owner, split or replay its surviving WAL edits, assign affected regions
+to live servers, and verify that acknowledged mutations become visible.
+{% /concept-card %}
+{% concept-card title="HDFS replica loss" eyebrow="Restore copy margin" icon="storage" tone="amber" %}
+Let HDFS re-replicate healthy blocks while operators protect foreground I/O. A region
+can move, but unavailable or corrupt HFiles still require storage-layer recovery.
+{% /concept-card %}
+{% concept-card title="Master failure" eyebrow="Restore coordination" icon="network" tone="blue" %}
+An active backup master can take over administrative work. Existing RegionServers can
+continue serving assigned regions while control-plane leadership recovers.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Test the complete recovery path
+
+1. Kill a RegionServer during sustained writes and record reassignment time.
+2. Confirm WAL replay restores acknowledged, unflushed mutations exactly once at the
+   logical row level.
+3. Measure client retries, stale location-cache refreshes, and p99 latency during move.
+4. Verify region, HFile, and HDFS checksum health after service returns.
+5. Restore a snapshot or backup into an isolated cluster and validate application-level
+   row counts and invariants.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Secure every path to the table
+
+Production security combines authenticated service identities, authorization at the
+right data scope, encrypted transport, protected storage, and auditable administration.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Authenticate" eyebrow="Identity" icon="shield" tone="blue" %}
+Use Kerberos or the platform's supported strong identity mechanism for clients,
+RegionServers, masters, and supporting services. Rotate key material deliberately.
+{% /concept-card %}
+{% concept-card title="Authorize" eyebrow="Least privilege" icon="key" tone="green" %}
+Grant only the required namespace, table, family, qualifier, or cell permissions.
+Separate application, operator, backup, and break-glass identities.
+{% /concept-card %}
+{% concept-card title="Audit + encrypt" eyebrow="Evidence and secrecy" icon="lock" tone="violet" %}
+Protect RPC traffic, HFiles, WALs, snapshots, and credentials. Centralize audit events
+with actor, operation, object, decision, and correlation identity.
+{% /concept-card %}
+{% /concept-grid %}
+
+Security policy must cover Phoenix, Thrift, REST gateways, bulk-load paths, snapshots,
+and administrative tooling as well as native HBase clients.
+{% /section-card %}
+
+{% section-card %}
+## Operate from user symptoms back to storage pressure
+
+### Watch service-level behavior
+
+- Read and write latency by operation, table, result size, and consistency mode.
+- Error, timeout, retry, and stale-region-location rates from clients.
+- Hottest regions and RegionServers by requests, bytes, queue time, and handler use.
+- Scan width, rows returned, bytes returned, and server-side work discarded by clients.
+
+### Watch background convergence
+
+- WAL sync latency, append failures, retained WAL age, and replay duration.
+- MemStore size, flush queue depth, flush duration, and blocked update time.
+- Store files per family, compaction queue age, bytes pending, throughput, and failures.
+- Region count, split rate, assignment churn, failed moves, and recovery time.
+- HDFS capacity, under-replicated or corrupt blocks, disk imbalance, and snapshot growth.
+
+### Define operational gates
+
+- Reject schema launches without representative row-key distribution tests.
+- Block growth plans that exceed compaction capacity or recovery headroom.
+- Rehearse RegionServer, master, ZooKeeper, and HDFS failure modes separately.
+- Keep backups and snapshots only when restore tests prove they meet the recovery
+  objective.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make the trade-offs explicit
+
+{% concept-grid columns="3" %}
+{% concept-card title="HBase over a relational database" eyebrow="Scale by key range" icon="database" tone="blue" %}
+Choose HBase when sparse rows, sustained keyed writes, and horizontal range ownership
+matter more than joins, flexible secondary indexes, and cross-row transactions.
+{% /concept-card %}
+{% concept-card title="HBase over object files" eyebrow="Online serving" icon="bolt" tone="amber" %}
+Choose HBase when clients need frequent point updates and low-latency key reads. Choose
+files and analytical engines when large scans dominate and serving latency is secondary.
+{% /concept-card %}
+{% concept-card title="HBase over another wide-column store" eyebrow="Ecosystem boundary" icon="network" tone="violet" %}
+Prefer HBase when HDFS integration, existing Hadoop operations, and its consistency
+model fit. Compare failure domains, multi-region behavior, tooling, and team expertise.
+{% /concept-card %}
+{% /concept-grid %}
+
+The production question is not whether HBase can store the data. It is whether the
+team can encode the required reads into row keys, keep the hottest region within its
+budget, sustain background convergence, and recover the row invariant under failure.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/hbase/quiz/hbase-production-design.json" lessonSlug="hbase" title="Apache HBase Production Design Review" /%}

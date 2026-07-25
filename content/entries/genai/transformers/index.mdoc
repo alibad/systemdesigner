@@ -1,0 +1,231 @@
+---
+title: "Transformer Architecture"
+section: genai
+level: advanced
+duration: 30 min
+description: "Understand Transformer attention, encoder and decoder variants, training behavior, KV-cache economics, and production architecture decisions."
+registryId: transformers
+---
+
+{% section-card tone="intro" %}
+## What is a Transformer?
+
+A **Transformer** is a neural-network architecture that moves information between sequence positions with attention. Each position creates a query, compares it with keys from positions it is allowed to read, and blends their values into a new contextual representation.
+
+In plain language: every token asks, "Which other tokens matter to what I mean right now?" The answer changes at every layer and attention head.
+
+The core invariant is **attention may combine only information allowed by the model's task contract**. An encoder may read both directions; an autoregressive decoder must hide future tokens; an encoder-decoder model adds cross-attention from generated tokens to encoded input.
+
+- **Attention moves information between positions.**
+- **Feed-forward layers transform each position independently after information has moved.**
+- **Residual paths preserve an update route through deep stacks.**
+- **Position signals distinguish token order because attention alone is permutation-invariant.**
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Q, K, V" label="Attention contract" detail="Queries choose; keys are compared; values carry the information that is blended" tone="blue" /%}
+{% metric value="n x n" label="Full attention map" detail="A straightforward full-attention layer scores every permitted token pair" tone="violet" /%}
+{% metric value="Mask" label="Information boundary" detail="Visibility rules decide whether a position may use past, future, or encoded source tokens" tone="amber" /%}
+{% metric value="KV" label="Decode state" detail="Autoregressive serving reuses prior keys and values instead of recomputing the whole prefix" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Follow one representation through a Transformer block
+
+Tokens enter as vectors that combine content and position. A block first lets positions exchange information, then applies the same feed-forward transformation to each position. Normalization and residual connections keep the updates trainable across many stacked blocks.
+
+{% system-flow title="One pre-normalized Transformer block" caption="Modern implementations vary, but the information-moving attention sublayer and position-wise feed-forward sublayer remain the central pattern." %}
+{% system-node title="Token plus position" eyebrow="Represent" icon="braces" tone="blue" %}
+Create one vector per token and encode where it appears in the sequence.
+{% /system-node %}
+{% system-node title="Normalize and attend" eyebrow="Move information" icon="network" tone="violet" %}
+Project queries, keys, and values; apply the visibility mask; blend permitted values.
+{% /system-node %}
+{% system-node title="Add the residual" eyebrow="Preserve" icon="repeat" tone="cyan" %}
+Combine the attention update with the representation that entered the sublayer.
+{% /system-node %}
+{% system-node title="Normalize and transform" eyebrow="Compute" icon="layers" tone="amber" %}
+Apply a position-wise feed-forward network, commonly with an expanded hidden dimension.
+{% /system-node %}
+{% system-node title="Add and continue" eyebrow="Stack" icon="check" tone="green" %}
+Merge the feed-forward update and pass the contextual representation to the next block.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the responsibilities separate
+
+- **Tokenization** defines the sequence units and therefore the length presented to the model.
+- **Position encoding** makes order available to attention; learned positions, relative schemes, and rotary embeddings encode it differently.
+- **Attention** selects and moves information between permitted positions.
+- **The feed-forward network** performs nonlinear feature transformation at each position.
+- **Normalization and residuals** shape optimization and signal flow; their exact placement is an architectural choice.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Compute scaled dot-product attention step by step
+
+For one attention head, the standard operation is `softmax(QK^T / sqrt(d_k) + mask)V`.
+
+1. Project the current representations into query, key, and value vectors.
+2. Take query-key dot products to obtain compatibility scores.
+3. Divide by `sqrt(d_k)` so large key dimensions do not make softmax unnecessarily sharp.
+4. Replace disallowed scores with an effectively negative-infinite mask value.
+5. Normalize the permitted scores so their weights sum to one.
+6. Compute a weighted sum of value vectors.
+
+Multiple heads repeat this operation with different learned projections. Heads are not guaranteed to acquire human-readable jobs, so inspect measured behavior rather than assigning a story from one attractive visualization.
+{% /section-card %}
+
+{% interactive-block id="genai/transformers-attention-routing-lab" dataFile="/api/content/genai/transformers/data/attention-routing-scenarios.json" /%}
+
+{% section-card %}
+## Implement the mechanism before optimizing it
+
+The focused example below performs scaled dot-product attention without a machine-learning framework. It makes the mask, normalization, and weighted-value sum explicit enough to test with small vectors.
+
+{% code-block file="/api/content/genai/transformers/code/scaled-dot-product-attention.py" language="python" title="Scaled dot-product attention with a causal mask" /%}
+
+### Check these invariants in tests
+
+- permitted attention weights sum to `1` within floating-point tolerance;
+- masked positions receive zero probability after softmax;
+- query, key, and value dimensions agree with the projection contract;
+- all-masked rows are rejected instead of producing undefined values;
+- padding masks and causal masks compose without revealing hidden tokens.
+{% /section-card %}
+
+{% section-card %}
+## Choose the architecture around the information boundary
+
+{% concept-grid columns="3" %}
+{% concept-card title="Encoder-only" eyebrow="Read both directions" icon="search" tone="blue" %}
+Every non-padding token can usually attend across the full input. This fits representation tasks such as classification, extraction, ranking, and embedding. BERT is the canonical example.
+{% /concept-card %}
+{% concept-card title="Decoder-only" eyebrow="Predict left to right" icon="code" tone="violet" %}
+Each position can attend only to itself and earlier positions. The model predicts the next token repeatedly, which fits open-ended generation and tool-using language models.
+{% /concept-card %}
+{% concept-card title="Encoder-decoder" eyebrow="Read, then generate" icon="workflow" tone="green" %}
+The encoder builds source representations; the decoder uses causal self-attention plus cross-attention to that source. This fits transformations such as translation and structured rewriting. T5 uses this family.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Match the model family to the product path
+
+- Choose **encoder-only** when the output is a bounded label, score, span, or representation and generation is unnecessary.
+- Choose **decoder-only** when one autoregressive interface must support flexible generation and in-context task specification.
+- Choose **encoder-decoder** when source understanding and target generation benefit from separate stacks and explicit cross-attention.
+- Compare task quality, throughput, memory, tokenizer behavior, and operational support on the actual workload; architecture names do not settle the decision.
+{% /section-card %}
+
+{% section-card %}
+## Train a Transformer as a distributed state machine
+
+Architecture defines the computation graph, while the objective defines what behavior the parameters learn. Encoder models often reconstruct masked content or solve discriminative tasks. Autoregressive decoders minimize next-token prediction loss. Encoder-decoder models commonly predict a target sequence conditioned on a source sequence.
+
+{% process-flow %}
+{% process-step number="1" title="Build deterministic batches" label="Data contract" %}
+Version tokenization, filtering, sequence packing, masks, labels, and train-validation boundaries.
+{% /process-step %}
+{% process-step number="2" title="Run the forward graph" label="Model contract" %}
+Apply embeddings, attention masks, stacked blocks, and the output head under a declared precision policy.
+{% /process-step %}
+{% process-step number="3" title="Accumulate and update" label="Optimization" %}
+Backpropagate loss, aggregate distributed gradients, clip or scale when required, and update parameters.
+{% /process-step %}
+{% process-step number="4" title="Evaluate and checkpoint" label="Evidence" %}
+Measure held-out quality and stability, then persist model, optimizer, scheduler, tokenizer, and data lineage together.
+{% /process-step %}
+{% /process-flow %}
+
+### Watch the failure signals, not only average loss
+
+- loss spikes, non-finite gradients, and abnormal gradient norms;
+- token or language slices that improve while important slices regress;
+- padding, label-shift, or mask bugs that leak target information;
+- data duplication and evaluation contamination;
+- checkpoint-resume drift caused by missing optimizer, scheduler, or random state;
+- utilization stalls from input pipelines, collectives, activation memory, or stragglers.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Separate prefill cost from decode cost
+
+During **prefill**, the model processes the prompt in parallel and builds a key-value cache for every decoder layer. With full attention, the number of query-key pairs grows quadratically with prompt length. IO-aware kernels such as FlashAttention avoid materializing the full attention matrix in high-bandwidth memory, but they do not remove the underlying full-attention pairwise work.
+
+During **decode**, the model produces one token at a time. Cached keys and values avoid recomputing the prefix, but every active sequence consumes cache memory and each new query reads the accumulated cache. Batch size, context length, number of KV heads, head dimension, layer count, and cache precision therefore become serving constraints.
+{% /section-card %}
+
+{% interactive-block id="genai/transformers-inference-memory-lab" dataFile="/api/content/genai/transformers/data/inference-memory-model.json" /%}
+
+{% section-card %}
+## Calculate KV-cache memory explicitly
+
+For a dense decoder with a uniform shape, a useful planning formula is:
+
+`KV bytes = 2 x layers x batch x cached tokens x KV heads x head dimension x bytes per element`
+
+The leading `2` accounts for keys and values. Real systems can add allocator overhead, padding, page metadata, sliding-window layers, quantized cache formats, or nonuniform layer shapes, so reconcile the estimate with runtime measurements.
+
+{% code-block file="/api/content/genai/transformers/code/kv-cache-budget.py" language="python" title="KV-cache capacity model for MHA, GQA, and MQA" /%}
+
+Grouped-query attention and multi-query attention reduce KV heads, but they are checkpoint architecture choices rather than arbitrary server toggles. The model must have compatible projections or be deliberately converted and evaluated.
+{% /section-card %}
+
+{% section-card %}
+## Make production decisions with joint evidence
+
+### Before training or selecting a checkpoint
+
+- define the information boundary: bidirectional, causal, or source-to-target;
+- choose vocabulary and position strategy from measured domain and context needs;
+- estimate parameter, optimizer, gradient, and activation memory separately;
+- verify the attention and feed-forward kernels supported by the target hardware;
+- specify quality slices, safety tests, and contamination controls before scaling compute.
+
+### Before serving
+
+- measure prefill latency and decode token latency separately across prompt lengths;
+- budget KV cache per active sequence and test fragmentation under continuous batching;
+- cap admitted tokens and concurrency before memory pressure causes process failure;
+- test batching, prefix reuse, speculative methods, and quantization against output quality;
+- trace queue time, cache allocation, model execution, and output streaming as separate stages;
+- canary checkpoint, tokenizer, runtime, kernel, and cache policy as one versioned release.
+
+### During incidents
+
+- protect admission and bounded queues before maximizing accelerator utilization;
+- distinguish prompt-length pressure from decode-length pressure and model-load failures;
+- degrade through explicit context, concurrency, or model-tier policies rather than silent truncation;
+- preserve request-level evidence for the mask, tokenizer, checkpoint, runtime, and sampling contract;
+- roll back the complete serving bundle when quality and systems behavior cannot be separated safely.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Mask leakage" eyebrow="Correctness failure" icon="eye" tone="rose" %}
+Future labels or tokens become visible during training, so evaluation looks strong while causal generation fails in production.
+{% /concept-card %}
+{% concept-card title="Context pressure" eyebrow="Capacity failure" icon="gauge" tone="amber" %}
+Long prompts and high concurrency exhaust KV-cache or activation memory even when model weights fit on the devices.
+{% /concept-card %}
+{% concept-card title="Kernel mismatch" eyebrow="Performance failure" icon="speed" tone="violet" %}
+An architecture feature is theoretically efficient but unsupported or poorly shaped for the deployed compiler, precision, and hardware.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+**Do not infer production fitness from parameter count alone.** Sequence length, batch shape, KV-head count, precision, kernels, interconnect, and queue policy can dominate latency and memory. Measure the complete request path with the checkpoint you will actually deploy.
+{% /callout %}
+
+{% section-card %}
+## Primary sources
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) defines scaled dot-product attention, multi-head attention, masking, and the original encoder-decoder Transformer.
+- [BERT](https://arxiv.org/abs/1810.04805) demonstrates deep bidirectional encoder pretraining for language representation tasks.
+- [T5](https://www.jmlr.org/papers/v21/20-074.html) studies a unified text-to-text transfer-learning framework with an encoder-decoder Transformer.
+- [Fast Transformer Decoding: One Write-Head is All You Need](https://arxiv.org/abs/1911.02150) introduces multi-query attention to reduce incremental-decoding KV bandwidth.
+- [GQA](https://arxiv.org/abs/2305.13245) introduces grouped-query attention between multi-head and multi-query designs and evaluates uptraining from multi-head checkpoints.
+- [FlashAttention](https://arxiv.org/abs/2205.14135) presents an exact, IO-aware attention algorithm that reduces memory traffic through tiling.
+- [On Layer Normalization in the Transformer Architecture](https://arxiv.org/abs/2002.04745) analyzes optimization differences between post-normalized and pre-normalized blocks.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/transformers/quiz/transformers-architecture.json" lessonSlug="transformers" /%}

@@ -1,0 +1,265 @@
+---
+registryId: fasttext
+---
+
+{% section-card tone="intro" %}
+## What is fastText?
+
+**fastText is a CPU-oriented library for learning word vectors and training text
+classifiers.** It turns text into a bag of word and subword features, learns compact
+vectors for those features, and uses a linear model for supervised classification.
+
+The important idea is efficiency. fastText does not run a deep sequence model over
+every token. That makes training and inference practical on modest hardware, but it
+also means the model does not understand long-range word order or reason across a
+document. Use it when a measured bag-of-features model satisfies the product contract,
+not merely because it is fast.
+
+{% callout variant="info" %}
+The original `facebookresearch/fastText` repository was archived and made read-only in
+March 2024. Existing artifacts and APIs remain useful, but a new production adoption
+should explicitly review package provenance, runtime compatibility, security ownership,
+and a migration path.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate the library's two jobs
+
+fastText exposes two related model families. Both use shallow vector operations, but
+they optimize different objectives and have different defaults.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Word representations" eyebrow="Unsupervised" icon="network" tone="blue" %}
+`skipgram` predicts nearby words from a target word; `cbow` predicts a target from its
+surrounding context. Character n-grams are enabled by default with `minn=3` and
+`maxn=6`, which helps related and unseen words share statistical evidence.
+{% /concept-card %}
+{% concept-card title="Text classification" eyebrow="Supervised" icon="layers" tone="violet" %}
+Each labeled line becomes word and optional n-gram features. Their vectors are averaged
+and fed to a linear classifier. Character n-grams are **off by default** in supervised
+mode (`minn=0`, `maxn=0`), so enable and validate them deliberately when they match the
+task.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep the boundary explicit
+
+- A word vector represents distributional patterns learned from the training corpus;
+  it is not a dictionary definition or a factual knowledge record.
+- A classifier score ranks labels under one artifact and input; it is not a universal
+  confidence guarantee.
+- Subword support creates a vector for an unseen token; it does not prove that the
+  vector has useful semantics for an identifier, random string, or new domain.
+- Bag-of-features models lose much of the original sequence. Negation, distant context,
+  compositional meaning, and multi-step reasoning can require a different model family.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## How subword representations work
+
+A fastText word-representation model associates a word with character n-grams. The
+word vector is formed from the word and its subword vectors; an out-of-vocabulary word
+can still be represented from its subwords because those fragments hash into learned
+input rows.
+
+{% system-flow title="Conceptual word-vector path" caption="The exact fragments and hash IDs belong to the trained artifact. Inspect them with get_subwords() rather than rebuilding the algorithm in application code." %}
+{% system-node title="UTF-8 token" eyebrow="Input" icon="code" tone="blue" %}
+Normalize and tokenize text with the same contract used during training. fastText's
+documented tokenizer recognizes a fixed set of ASCII whitespace characters.
+{% /system-node %}
+{% system-node title="Character n-grams" eyebrow="Subwords" icon="layers" tone="cyan" %}
+Generate fragments between `minn` and `maxn`, including word-boundary information.
+Each fragment maps through a hash bucket.
+{% /system-node %}
+{% system-node title="Input vectors" eyebrow="Learned rows" icon="database" tone="violet" %}
+Look up the dedicated word row when it exists and the rows selected by the subword
+hashes.
+{% /system-node %}
+{% system-node title="Word vector" eyebrow="Composition" icon="chart" tone="green" %}
+Combine the contributing vectors into one fixed-width representation for similarity or
+downstream use.
+{% /system-node %}
+{% /system-flow %}
+
+### Trace the evidence instead of assuming it
+
+Change the word and n-gram range below. Watch how a familiar stem can preserve shared
+features while an opaque token has much weaker recognizable overlap.
+
+{% interactive-block id="technology/fasttext-performance" dataFile="/api/content/technology/fasttext/data/subword-explorer.json" /%}
+
+{% callout variant="warn" %}
+The lab is a teaching view of character overlap. Hash collisions, corpus frequency,
+optimization, and the learned values of the actual bucket rows determine the deployed
+vector. Use `model.get_subwords(token)` and task-specific evaluation to inspect reality.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Train a classifier from an explicit data contract
+
+A supervised fastText example is one UTF-8 line containing text and one or more labels.
+By default, labels begin with `__label__`. The newline ends the example, so extraction,
+normalization, label policy, and split boundaries are part of the model contract.
+
+### Build the split before tuning
+
+1. Create a training split used to fit candidate models.
+2. Create a validation split used by autotune or manual model selection.
+3. Keep a final test split untouched until the configuration is selected.
+4. Split by the unit that can leak: customer, conversation, document family, or time
+   window, rather than randomly splitting near-duplicate lines.
+
+### Format every line consistently
+
+- Place labels using the configured prefix, for example `__label__billing`.
+- Decide whether the task is single-label or multilabel before selecting `k`, loss,
+  metrics, and serving behavior.
+- Normalize Unicode and whitespace consistently. The official Python documentation
+  notes that tokenization does not recognize every UTF-8 whitespace character.
+- Preserve a stable mapping from product taxonomy to labels. A renamed or merged label
+  is a data migration, not a cosmetic change.
+- Version the extraction code and split manifest with the artifact.
+
+{% code-block file="/api/content/technology/fasttext/code/train-and-evaluate-classifier.py" language="python" title="Tune on validation data, test once, then remeasure quantization" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Evaluate the decision the product actually makes
+
+An offline score is useful only when its unit and error cost match the product. The
+Python `model.test()` method returns the number of examples, precision at `k`, and
+recall at `k`; its second value is not a generic accuracy metric for every task.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Precision at k" eyebrow="Predicted labels" icon="check" tone="green" %}
+Of the labels returned in the top `k`, what fraction is correct? Precision matters when
+a wrong automatic route or action is expensive.
+{% /concept-card %}
+{% concept-card title="Recall at k" eyebrow="True labels" icon="search" tone="blue" %}
+Of the labels that should have been returned, what fraction did the model recover?
+Recall matters when missing a rare or safety-relevant class is expensive.
+{% /concept-card %}
+{% concept-card title="Slice metrics" eyebrow="Hidden failures" icon="warning" tone="rose" %}
+Break results down by label, language, source, text length, tenant, and time. A strong
+aggregate can hide a failing minority class or a new traffic segment.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Convert rates into operational consequences
+
+For a class receiving `V` true examples per day with measured recall `R`, the expected
+miss envelope is `V x (1 - R)`. This does not predict the future perfectly; it translates
+an observed rate into a volume that product and operations teams can reason about.
+
+- Review confusion pairs, not just one summary number.
+- Record bootstrap intervals or repeated-run variance when sample sizes are small.
+- Evaluate on production-shaped text, including malformed, empty, very short,
+  multilingual, and unsupported inputs.
+- Add an abstention or review route when the downstream action is difficult to reverse.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Release an artifact only when every gate passes
+
+A model release is a joint quality and systems decision. File size, latency, memory,
+critical-class behavior, and rollback readiness all belong to the same acceptance
+contract. Quantization can reduce a supervised model's footprint, but its quality must
+be remeasured after compression.
+
+Select a measured fixture, then change the deployment policy and traffic volume. Notice
+that no profile is universally best: the eligible artifact changes with the product's
+declared constraint.
+
+{% interactive-block id="technology/fasttext-performance" dataFile="/api/content/technology/fasttext/data/release-decision.json" /%}
+
+### Do not turn the fixture into a benchmark
+
+- Measure latency with the exact runtime, CPU, thread policy, batch shape, and text
+  length distribution used in production.
+- Measure resident memory and artifact download or startup time, not only file size.
+- Compare the full `.bin` and quantized `.ftz` candidates on the same untouched test
+  set and critical slices.
+- Treat autotune's `autotuneModelSize` as a search constraint, not proof that the
+  resulting quality is acceptable.
+- Store the label map, preprocessing version, hyperparameters, package build, and test
+  report beside the artifact.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate the complete inference path
+
+Production behavior includes everything before and after `model.predict()`. A reliable
+service preserves one contract from raw input through normalization, prediction,
+policy, observability, and rollback.
+
+{% process-flow %}
+{% process-step number="1" title="Validate and normalize" label="Input" %}
+Reject or route empty and oversized inputs, normalize Unicode and whitespace, and apply
+the same transformations used to build the training rows.
+{% /process-step %}
+{% process-step number="2" title="Load one immutable artifact" label="Model" %}
+Load a versioned `.bin` or `.ftz` once per worker. Record a checksum and fail readiness
+when the expected artifact cannot be loaded.
+{% /process-step %}
+{% process-step number="3" title="Predict within a policy" label="Decision" %}
+Request the required top `k`, apply product-specific acceptance or abstention rules,
+and return the model and taxonomy versions with the result.
+{% /process-step %}
+{% process-step number="4" title="Observe labeled outcomes" label="Feedback" %}
+Track latency, errors, input drift, label mix, score distributions, overrides, and
+delayed ground truth by the slices used for release review.
+{% /process-step %}
+{% process-step number="5" title="Canary and roll back" label="Change" %}
+Shadow or canary a candidate, compare its decisions with the current artifact, and keep
+the previous model deployable until the new version passes production checks.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/fasttext/code/inspect-model-subwords.py" language="python" title="Inspect the exact subword rows in a trained artifact" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Know when fastText is the wrong boundary
+
+fastText is a strong baseline when CPU efficiency, compact deployment, and a known
+label space matter. Choose a different architecture when the task's required evidence
+is absent from its bag-of-features representation.
+
+### Good fits
+
+- Topic, intent, or routing classification with representative labeled text.
+- Language or content triage where a shallow baseline meets measured slice targets.
+- Static word vectors that benefit from morphological and spelling-related subwords.
+- Edge or batch environments where a validated quantized artifact is useful.
+
+### Escalate to another model or pipeline when
+
+- Long-range order, discourse, negation scope, or multi-step reasoning determines the
+  label.
+- The product needs token-level extraction, generated text, or grounded answers rather
+  than a fixed label prediction.
+- Labels change so quickly that the retraining and taxonomy process cannot keep pace.
+- An unseen identifier receives a vector but has no meaningful linguistic substructure.
+- Required quality cannot be reached on the hardest production slices without adding
+  contextual features or a more expressive model.
+{% /section-card %}
+
+{% section-card %}
+## Use the official contract, then pin what you deploy
+
+The [official Python module documentation](https://fasttext.cc/docs/en/python-module.html)
+defines training arguments, UTF-8 and tokenization behavior, `get_subwords()`,
+`model.test()`, prediction, and quantization. The official tutorials cover
+[supervised text classification](https://fasttext.cc/docs/en/supervised-tutorial.html),
+[word representations](https://fasttext.cc/docs/en/unsupervised-tutorial.html), and
+[autotune](https://fasttext.cc/docs/en/autotune.html).
+
+The [archived source repository](https://github.com/facebookresearch/fastText) is the
+reference for the implementation and release history. Pin the exact source or package
+artifact used by the service; do not assume an unversioned installation matches an old
+tutorial or pre-trained model.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/fasttext/quiz/fasttext-production-review.json" lessonSlug="fasttext" title="fastText Production Design Review" /%}

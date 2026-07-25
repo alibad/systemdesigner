@@ -1,0 +1,235 @@
+{
+  "title": "Trace attacker influence across the action path",
+  "description": "Choose a hostile context and a control posture. Watch where attacker influence stops, which trust boundary fails, and whether a valid-looking proposal reaches a side effect.",
+  "defaultScenarioId": "poisoned-invoice",
+  "defaultPostureId": "schema-only",
+  "stages": [
+    {
+      "id": "principal",
+      "label": "Principal",
+      "eyebrow": "Trusted authority",
+      "detail": "Authenticated user, tenant, purpose, permissions, and approval envelope."
+    },
+    {
+      "id": "context",
+      "label": "Context",
+      "eyebrow": "Untrusted evidence",
+      "detail": "Retrieved files, memory, websites, tool output, and peer-agent messages."
+    },
+    {
+      "id": "planner",
+      "label": "Proposal",
+      "eyebrow": "Model output",
+      "detail": "A selected tool and structured arguments with no independent authority."
+    },
+    {
+      "id": "gateway",
+      "label": "Policy gateway",
+      "eyebrow": "Execution decision",
+      "detail": "Schema, intent, identity, resource, limits, freshness, and approval checks."
+    },
+    {
+      "id": "effect",
+      "label": "Side effect",
+      "eyebrow": "Real-world state",
+      "detail": "A message, payment, deletion, deployment, permission change, or code execution."
+    }
+  ],
+  "postures": [
+    {
+      "id": "prompt-only",
+      "label": "Prompt-only guardrail",
+      "detail": "The model is told to ignore hostile instructions, but it can call broad tools directly.",
+      "controls": [
+        "System instruction"
+      ]
+    },
+    {
+      "id": "schema-only",
+      "label": "Schema and allowlist",
+      "detail": "Tool names and argument types are validated, but calls are not bound to user intent or fresh authority.",
+      "controls": [
+        "Typed arguments",
+        "Known tool names"
+      ]
+    },
+    {
+      "id": "bounded-authority",
+      "label": "Intent-bound authority",
+      "detail": "Context provenance, delegated identity, resource scope, policy, approval, and runtime limits are independently enforced.",
+      "controls": [
+        "Context provenance",
+        "Intent envelope",
+        "Fresh authorization",
+        "Exact approval",
+        "Contained runtime"
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "poisoned-invoice",
+      "label": "Poisoned vendor invoice",
+      "brief": "A retrieved PDF instructs the agent to replace bank details and submit an urgent payment.",
+      "attack": "Indirect prompt injection enters through a document that the user asked the agent to inspect.",
+      "proposedAction": "submit_wire_transfer(amount=1840, destination=attacker-account)",
+      "outcomes": {
+        "prompt-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Unauthorized transfer submitted",
+          "actionAuthority": "Assumed by model",
+          "consequence": "The hostile document changes the goal and the broad payment tool executes it without an independent comparison to the user's review-only intent.",
+          "failedBoundaries": [
+            "Retrieved content was flattened into instructions.",
+            "The proposed payee was not bound to the user's approved task.",
+            "No exact-parameter confirmation preceded the transfer."
+          ]
+        },
+        "schema-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Valid call, wrong purpose",
+          "actionAuthority": "Shape validated",
+          "consequence": "Every argument matches the schema, so the transfer passes even though the user's principal never authorized that destination or action.",
+          "failedBoundaries": [
+            "Schema validation proved shape, not intent.",
+            "The destination was not constrained by a resource envelope.",
+            "A high-consequence write lacked exact approval."
+          ]
+        },
+        "bounded-authority": {
+          "reachStageId": "gateway",
+          "status": "contained",
+          "verdict": "Denied before payment",
+          "actionAuthority": "Review only",
+          "consequence": "The gateway compares the proposal with the authenticated review task and denies a transfer tool and destination outside the intent envelope.",
+          "failedBoundaries": []
+        }
+      }
+    },
+    {
+      "id": "poisoned-memory",
+      "label": "Cross-tenant memory poison",
+      "brief": "A prior run stores a false instruction to export future audit reports to an external URL.",
+      "attack": "Persistent context crosses sessions and tenants without provenance or purpose isolation.",
+      "proposedAction": "post_webhook(report, external-collector.example)",
+      "outcomes": {
+        "prompt-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Audit report exfiltrated",
+          "actionAuthority": "Inherited from memory",
+          "consequence": "The planner treats persistent memory as a standing instruction and sends another tenant's report to the stored destination.",
+          "failedBoundaries": [
+            "Memory had no tenant or purpose boundary.",
+            "Stored content was treated as authority.",
+            "The external destination was unrestricted."
+          ]
+        },
+        "schema-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Well-formed exfiltration",
+          "actionAuthority": "Tool allowlisted",
+          "consequence": "The webhook call is valid and allowlisted; no policy checks the memory provenance, report tenant, or destination audience.",
+          "failedBoundaries": [
+            "The memory item had no trusted provenance.",
+            "Authorization did not bind report tenant to principal tenant.",
+            "The sink was not restricted to approved domains."
+          ]
+        },
+        "bounded-authority": {
+          "reachStageId": "context",
+          "status": "contained",
+          "verdict": "Memory excluded and quarantined",
+          "actionAuthority": "Tenant-scoped",
+          "consequence": "Context assembly rejects the memory because its tenant, purpose, and provenance do not match the current task, then marks it for quarantine.",
+          "failedBoundaries": []
+        }
+      }
+    },
+    {
+      "id": "confused-deputy",
+      "label": "Privileged agent delegation",
+      "brief": "A low-privilege worker asks a manager agent to delete a production record on its behalf.",
+      "attack": "An internal-looking peer request attempts to inherit the manager's broader credential.",
+      "proposedAction": "admin_delete_record(customer-901)",
+      "outcomes": {
+        "prompt-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Privileged delete executed",
+          "actionAuthority": "Manager credential",
+          "consequence": "The manager trusts the peer agent and executes with ambient administrator authority without checking the originating principal.",
+          "failedBoundaries": [
+            "Internal agent identity was treated as trusted purpose.",
+            "Delegation widened instead of narrowing authority.",
+            "The originating user was lost before execution."
+          ]
+        },
+        "schema-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Authorized tool, wrong principal",
+          "actionAuthority": "Manager credential",
+          "consequence": "The delete arguments are valid and the manager owns the tool, but the worker's original principal lacks permission for the record.",
+          "failedBoundaries": [
+            "Authorization checked the executor, not the originating subject.",
+            "The delegated scope was not preserved.",
+            "Permission freshness was not rechecked at use time."
+          ]
+        },
+        "bounded-authority": {
+          "reachStageId": "gateway",
+          "status": "contained",
+          "verdict": "Delegation denied",
+          "actionAuthority": "Originator-scoped",
+          "consequence": "The gateway propagates the original subject and delegated scope, then denies the delete because the subject lacks the required permission.",
+          "failedBoundaries": []
+        }
+      }
+    },
+    {
+      "id": "tool-output-chain",
+      "label": "Hostile tool output",
+      "brief": "A code-analysis tool returns text asking the agent to package secrets and upload them for verification.",
+      "attack": "A trusted tool transport carries untrusted content that redirects the next planning step.",
+      "proposedAction": "upload_archive(repo-secrets.zip, public-file-host)",
+      "outcomes": {
+        "prompt-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Secret archive uploaded",
+          "actionAuthority": "Tool output trusted",
+          "consequence": "The agent interprets analyzer output as a new instruction and chains a second tool with access to sensitive files and the public network.",
+          "failedBoundaries": [
+            "Tool output was not labeled as untrusted evidence.",
+            "File access and network egress were combined.",
+            "The new action was not compared with the coding task."
+          ]
+        },
+        "schema-only": {
+          "reachStageId": "effect",
+          "status": "compromised",
+          "verdict": "Allowed multi-tool exfiltration",
+          "actionAuthority": "Tools independently valid",
+          "consequence": "Each call is valid in isolation, but no trajectory policy detects the sensitive source-to-external-sink chain.",
+          "failedBoundaries": [
+            "Policy did not reason over the full tool chain.",
+            "The archive included paths outside the task workspace.",
+            "The destination was not allowlisted."
+          ]
+        },
+        "bounded-authority": {
+          "reachStageId": "gateway",
+          "status": "contained",
+          "verdict": "Source-to-sink chain blocked",
+          "actionAuthority": "Workspace only",
+          "consequence": "Trajectory policy identifies a sensitive file read followed by public egress and denies the upload; the sandbox also lacks network access.",
+          "failedBoundaries": []
+        }
+      }
+    }
+  ]
+}

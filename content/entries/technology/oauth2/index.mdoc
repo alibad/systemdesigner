@@ -1,0 +1,297 @@
+---
+registryId: oauth2
+---
+
+{% section-card tone="intro" %}
+## What is OAuth 2.0?
+
+**OAuth 2.0 is a framework for delegated authorization.** It lets a client obtain
+limited access to a protected HTTP resource without collecting the resource owner's
+password. The authorization server issues a token for a particular client, resource,
+and set of permissions; the resource server enforces that token.
+
+For example, a photo-printing app can receive permission to read selected photos
+without receiving the user's photo-service credentials. A machine workload can receive
+access on its own behalf without pretending to be a person.
+
+{% callout variant="warn" %}
+### OAuth is not a login protocol
+
+An OAuth access token tells a resource server what access was granted. It is not a
+standard proof to the client that a person logged in. Use OpenID Connect when the
+client needs authentication and an ID token with defined identity semantics.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Resource owner" eyebrow="Grants access" icon="user" tone="cyan" %}
+The person or entity able to authorize access to a protected resource. Not every grant
+has a resource owner; Client Credentials represents the client itself.
+{% /concept-card %}
+{% concept-card title="Client" eyebrow="Requests access" icon="app-window" tone="blue" %}
+The application using the token. A confidential client can protect credentials; a
+public client cannot safely keep a shared secret.
+{% /concept-card %}
+{% concept-card title="Authorization server" eyebrow="Issues tokens" icon="key-round" tone="violet" %}
+Authenticates clients where applicable, handles user authorization, binds grants, and
+issues access and optional refresh tokens.
+{% /concept-card %}
+{% concept-card title="Resource server" eyebrow="Enforces access" icon="shield-check" tone="green" %}
+The protected API. It validates issuer or introspection source, audience, expiry,
+scope, and application-specific authorization before serving the request.
+{% /concept-card %}
+{% /concept-grid %}
+
+OAuth 2.0 began with [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749).
+The security guidance in this lesson follows the newer
+[OAuth 2.0 Security Best Current Practice, RFC 9700](https://www.rfc-editor.org/rfc/rfc9700).
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose the flow from the client's trust boundary
+
+Grant selection is not a performance score. First decide whether a user participates
+and whether the client can protect credentials from its users and execution environment.
+Then choose where tokens can live without crossing that boundary.
+
+### Lab 1: match client, grant, and token location
+
+Try server web, SPA, native, and machine clients. Deliberately select the implicit or
+password grant, or put tokens in the wrong place, and inspect the concrete reason the
+design is rejected.
+
+{% interactive-block id="technology/oauth2-performance" dataFile="/api/content/technology/oauth2/data/client-grant-policy.json" /%}
+
+The four common starting points are:
+
+- **Server web client:** Authorization Code; PKCE with S256 is recommended even for
+  confidential clients. Exchange and store tokens on the backend.
+- **SPA:** public client using Authorization Code with transaction-specific PKCE.
+  Prefer a backend-for-frontend when durable tokens can remain off the browser.
+- **Native app:** public client using Authorization Code with PKCE in an external
+  user-agent. Follow the platform redirect patterns in
+  [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252).
+- **Machine client:** confidential workload using Client Credentials to act as itself.
+  No user identity or delegated consent is created by this grant.
+
+Do not ship a shared client secret in browser JavaScript or an installed app and then
+call it confidential. Anyone who receives the code or binary can extract that value.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Understand what PKCE binds
+
+PKCE adds a transaction-specific secret to the Authorization Code flow:
+
+{% process-flow %}
+{% process-step number="1" title="Create the verifier" label="Client" %}
+Generate a high-entropy code verifier for this authorization transaction. Keep it in
+the client-side transaction state; do not place it in the authorization URL.
+{% /process-step %}
+{% process-step number="2" title="Send the challenge" label="Front channel" %}
+Hash the verifier with SHA-256, encode it as base64url without padding, and send the
+result as the code challenge with the S256 method.
+{% /process-step %}
+{% process-step number="3" title="Bind the code" label="Authorization server" %}
+Issue a short-lived, single-use code bound to the client, redirect URI, and challenge.
+The code may cross the browser because it is not sufficient for redemption by itself.
+{% /process-step %}
+{% process-step number="4" title="Prove possession" label="Token endpoint" %}
+Redeem the code with the original verifier. The server recomputes the challenge and
+rejects a missing, wrong, reused, or downgraded verifier.
+{% /process-step %}
+{% /process-flow %}
+
+[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636) defines the verifier and challenge.
+RFC 9700 requires public clients using Authorization Code to use PKCE, recommends it
+for confidential clients, and says authorization servers must support it.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace attacks to the server-side rejection point
+
+Security properties come from validation at each boundary, not from hiding the
+authorization URL. Select the healthy flow, then inject a stolen code, unregistered
+redirect URI, or reused refresh token.
+
+{% topology-lab dataFile="/api/content/technology/oauth2/data/authorization-attack-paths.json" /%}
+
+### Lab 2: read each failure as an invariant
+
+- **Stolen code:** the token endpoint must require the verifier bound to that code.
+  PKCE does not stop code theft; it stops an interceptor from redeeming the stolen code.
+- **Redirect mismatch:** the authorization server must compare against a registered URI
+  using exact string matching. The standards-defined native loopback port exception is
+  narrow; wildcard callbacks are not equivalent.
+- **Refresh reuse:** rotation keeps the relationship between token generations. Reuse
+  of an invalidated token signals compromise, so the active grant family is revoked.
+- **Happy path:** the access token comes from the token response, not a browser URL,
+  and reaches only its intended resource server.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Keep redirect, state, PKCE, and nonce responsibilities separate
+
+These controls participate in one transaction but answer different questions.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Redirect URI" eyebrow="Where may the response go?" icon="route" tone="amber" %}
+Register exact callbacks and send the same URI when the protocol requires it. Reject an
+unregistered value before redirecting, including error responses.
+{% /concept-card %}
+{% concept-card title="state" eyebrow="Which browser transaction?" icon="link" tone="cyan" %}
+Use a one-time unpredictable value bound to the user-agent session when state is the
+CSRF control. Validate and invalidate it at the callback. Protect application data
+carried inside it against tampering.
+{% /concept-card %}
+{% concept-card title="PKCE" eyebrow="Who can redeem the code?" icon="key-round" tone="blue" %}
+Bind the authorization request to a verifier held by the client. PKCE protects code
+redemption and can provide CSRF protection when support and transaction binding are
+correctly enforced.
+{% /concept-card %}
+{% concept-card title="nonce" eyebrow="Which OIDC authentication?" icon="fingerprint" tone="violet" %}
+In OpenID Connect, send a transaction-specific nonce and require the matching claim in
+the validated ID token. It links the authentication response to the client transaction
+and helps resist replay.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not substitute an access token for an ID token. With OpenID Connect, validate the ID
+token signature, issuer, audience, expiry, and nonce according to the provider metadata
+and protocol profile. The ID token is for the client; the access token is for the
+resource server.
+
+See [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) for the
+authentication layer and ID token semantics.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Restrict every access token to one job
+
+A bearer token can be used by whoever possesses it. Reduce the value of leakage and
+make resource servers reject tokens minted for somewhere else.
+
+- **Audience:** mint the token for a specific resource server or small set. The resource
+  server must refuse an audience mismatch.
+- **Scope or authorization details:** express only the actions and resources required
+  by the use case. A granted scope is still an upper bound, not proof that this subject
+  may access every object.
+- **Issuer and validation source:** accept tokens only from the configured authorization
+  server and validate signature/key metadata or use authenticated introspection.
+- **Expiry and status:** reject expired or inactive tokens. Design revocation and
+  incident response around the actual token format and caching behavior.
+- **Sender constraint where appropriate:** mutual TLS or DPoP can require the caller to
+  prove possession of a key instead of relying on a bearer token alone.
+
+RFC 9700 recommends audience restriction and minimum privileges. A resource server must
+still apply its own authorization, such as tenant ownership, object permissions, and
+business invariants, after validating the token.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Store tokens according to the execution environment
+
+There is no storage API that makes a bearer token safe from all compromise. Select a
+boundary that reduces exposure, then address script injection, device compromise,
+server compromise, logs, backups, and operational access separately.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Server web" eyebrow="Backend boundary" icon="server" tone="blue" %}
+Keep access and refresh tokens in encrypted server-side storage. Give the browser a
+Secure, HttpOnly, SameSite application session cookie and defend state-changing routes
+against CSRF.
+{% /concept-card %}
+{% concept-card title="SPA" eyebrow="Public browser client" icon="code" tone="cyan" %}
+Prefer a backend-for-frontend when feasible. If the SPA receives an access token, keep
+its authority and lifetime narrow. Memory avoids persistence but does not defeat script
+running in the page.
+{% /concept-card %}
+{% concept-card title="Native app" eyebrow="Device boundary" icon="smartphone" tone="green" %}
+Use the operating system's protected credential storage. Open authorization in an
+external browser and use app-claimed HTTPS or another RFC 8252 redirect pattern.
+{% /concept-card %}
+{% concept-card title="Machine client" eyebrow="Workload boundary" icon="bot" tone="violet" %}
+Protect client credentials with a workload identity, secret manager, private key, or
+mutual TLS setup. Rotate credentials and prevent them from entering images or logs.
+{% /concept-card %}
+{% /concept-grid %}
+
+For public clients, RFC 9700 requires refresh tokens to be sender-constrained or use
+rotation. Rotation issues a new refresh token on each successful refresh and retains
+the family relationship. Reuse of an invalidated token revokes the active family
+because the server cannot know whether the attacker or legitimate client arrived first.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Use Client Credentials only for the client itself
+
+The Client Credentials grant has no resource owner and no browser redirect. The
+confidential client authenticates to the token endpoint and receives access representing
+that workload.
+
+Use it for bounded service tasks such as:
+
+- a deployment controller reading deployment metadata;
+- a billing worker submitting usage records;
+- a scheduled job reading one internal API;
+- a gateway calling a downstream API under its own service identity.
+
+Do not use Client Credentials to manufacture a user subject. If a service must preserve
+the initiating user, use a protocol and architecture that carry delegated user context
+without confusing the client identity with the resource owner.
+
+Request a narrow resource audience and scopes. A long-lived, broadly scoped client
+secret plus a broad bearer token creates two reusable credentials with large blast
+radius.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Implement the code flow with one-time transaction state
+
+This server-side example generates independent state and PKCE values, stores them
+against the application session, consumes the transaction once, and sends the verifier
+only to the token endpoint.
+
+{% code-block file="/api/content/technology/oauth2/code/authorization-code-pkce.ts" language="typescript" title="Begin and complete Authorization Code with PKCE" /%}
+
+The resource-server example uses authenticated token introspection for an opaque access
+token. It checks active status, expiry, audience, scope, and client binding before
+application-level authorization.
+
+{% code-block file="/api/content/technology/oauth2/code/introspect-and-authorize.ts" language="typescript" title="Introspect and authorize an opaque access token" /%}
+
+Production clients should use a maintained OAuth or OpenID Connect library and the
+authorization server's published metadata. Protocol code must also handle issuer mix-up,
+key rotation, errors, timeouts, replay, and secure logging.
+{% /section-card %}
+
+{% section-card %}
+## Review the complete authorization boundary
+
+### Client and authorization server
+
+- Register the correct public or confidential client type.
+- Require Authorization Code protections and use PKCE S256.
+- Reject the implicit and Resource Owner Password Credentials grants for new designs.
+- Match redirect URIs exactly, with only the standards-defined native exception.
+- Keep state, verifier, and nonce transaction-specific and one-time.
+- Prevent open redirects on both authorization-server and client endpoints.
+
+### Token endpoint and storage
+
+- Authenticate confidential clients with credentials protected outside public code.
+- Bind each code to client, redirect URI, and PKCE challenge; reject reuse.
+- Decide whether a refresh token is justified instead of issuing one automatically.
+- For public clients, sender-constrain refresh tokens or rotate them with reuse detection.
+- Keep tokens out of URLs, application logs, analytics events, crash reports, and error pages.
+
+### Resource server
+
+- Validate active status or signature, issuer, audience, expiry, and relevant token type.
+- Enforce scopes plus resource-level and tenant-level authorization.
+- Never send the token to a different API merely because that API accepts the same format.
+- Record security-relevant failures without recording the credential itself.
+- Rehearse credential revocation, key rotation, compromised refresh-family response,
+  and authorization-server outage behavior.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/oauth2/quiz/oauth2-security.json" lessonSlug="oauth2" title="OAuth 2.0 Security Review" /%}

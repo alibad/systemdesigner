@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="daily-orders"
+              xmlns="uri:oozie:workflow:0.5">
+    <global>
+        <job-tracker>${resourceManager}</job-tracker>
+        <name-node>${nameNode}</name-node>
+        <configuration>
+            <property>
+                <name>mapreduce.job.queuename</name>
+                <value>${queueName}</value>
+            </property>
+        </configuration>
+    </global>
+
+    <credentials>
+        <credential name="hive2-token" type="hive2">
+            <property>
+                <name>hive2.jdbc.url</name>
+                <value>${hiveJdbcUrl}</value>
+            </property>
+            <property>
+                <name>hive2.server.principal</name>
+                <value>${hiveServerPrincipal}</value>
+            </property>
+        </credential>
+    </credentials>
+
+    <start to="build-summary"/>
+
+    <action name="build-summary"
+            cred="hive2-token"
+            retry-max="2"
+            retry-interval="60">
+        <hive2 xmlns="uri:oozie:hive2-action:0.2">
+            <jdbc-url>${hiveJdbcUrl}</jdbc-url>
+            <script>sql/build-orders-summary.sql</script>
+            <param>INPUT=${inputPath}</param>
+            <param>OUTPUT_TMP=${outputPath}.staging/${wf:id()}</param>
+        </hive2>
+        <ok to="validate-output"/>
+        <error to="fail"/>
+    </action>
+
+    <action name="validate-output">
+        <shell xmlns="uri:oozie:shell-action:0.3">
+            <exec>validate-output.sh</exec>
+            <argument>${outputPath}.staging/${wf:id()}</argument>
+            <file>scripts/validate-output.sh#validate-output.sh</file>
+        </shell>
+        <ok to="publish-output"/>
+        <error to="fail"/>
+    </action>
+
+    <action name="publish-output">
+        <fs>
+            <delete path="${outputPath}"/>
+            <move source="${outputPath}.staging/${wf:id()}"
+                  target="${outputPath}"/>
+        </fs>
+        <ok to="end"/>
+        <error to="fail"/>
+    </action>
+
+    <kill name="fail">
+        <message>
+            Node ${wf:lastErrorNode()} failed: ${wf:errorMessage(wf:lastErrorNode())}
+        </message>
+    </kill>
+
+    <end name="end"/>
+</workflow-app>

@@ -1,0 +1,163 @@
+---
+registryId: what-is-system-design
+---
+
+{% section-card tone="intro" %}
+## What is system design?
+
+**System design is the process of turning a product need into a technical plan that keeps working under real constraints.** It names the parts of a system, the data each part owns, the path a request follows, and the behavior users can expect when traffic rises or a dependency fails.
+
+In plain language, a product requirement says *what* a person needs to do. System design explains *how* the software can do it reliably, quickly, safely, and at a cost the team can operate.
+
+{% callout variant="info" %}
+The first invariant is simple: protect the user action and the facts that must remain true. Technology is a means to that end, not the starting point. A good design makes its assumptions, limits, and trade-offs visible.
+{% /callout %}
+
+Before this lesson, it helps to know that a request is one attempt by a client to use a service, and that a database is a system that stores authoritative records. This lesson introduces the decisions that connect those building blocks.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## The forces a design must balance
+
+Every design spends complexity to protect something important. Name the priority before selecting an implementation, because no architecture maximizes every quality at once.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Scalability" eyebrow="Growth" icon="scale" tone="blue" %}
+Keep useful performance as requests, users, and stored data increase. Scale can mean less work per request, more workers, or data split by a stable key.
+{% /concept-card %}
+
+{% concept-card title="Reliability" eyebrow="Failure" icon="shield" tone="green" %}
+Keep the promised behavior available when a process, machine, network link, or dependency fails. Isolation, redundancy, and rehearsed recovery make this credible.
+{% /concept-card %}
+
+{% concept-card title="Performance" eyebrow="Speed" icon="gauge" tone="violet" %}
+Meet response-time and throughput goals for the real workload. Tail latency matters because a small group of slow requests can shape the user experience.
+{% /concept-card %}
+
+{% concept-card title="Security" eyebrow="Trust" icon="lock" tone="amber" %}
+Protect identities, data, and capacity with validation, least privilege, encryption, audit trails, and abuse controls placed before expensive work.
+{% /concept-card %}
+{% /concept-grid %}
+
+Maintainability and cost apply across all four. A design that reaches a latency target but cannot be observed, restored, or afforded is incomplete.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Start with constraints, then choose the shape
+
+A diagram is an answer, not the first question. First identify the dominant constraint: a small product may need fast iteration; a read-heavy product may need to protect the database; a critical write path may need a clear authority for the record.
+
+Choose a scenario in the lab, then select a component in the map. The active route and result show why the architecture changed. The point is not to collect components; it is to add the smallest mechanism that protects the stated constraint.
+
+{% topology-lab dataFile="/api/content/fundamentals/what-is-system-design/data/constraint-architecture-lab.json" /%}
+
+{% callout variant="tip" %}
+Begin with a modular monolith when one deployable unit can meet the workload. Add a load balancer when one worker is the limit, a cache when repeated reads are the limit, and replicas or partitions only when their consistency and operational costs are justified.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Turn vague scale into a small estimate
+
+Scale is not only the number of registered users. A useful first estimate states the peak request rate, read-to-write ratio, response-size range, latency target, and how much traffic can be lost before users notice.
+
+For example, a redirect service receiving **60,000 requests per second** at peak with a **92% cache hit rate** sends about **4,800 requests per second** to its authoritative store: `60,000 x (1 - 0.92)`. The store must be tested for a colder cache, not only this warm average.
+
+{% metric-strip %}
+{% metric value="60K/s" label="Peak requests" detail="The demand entering the system" tone="blue" /%}
+{% metric value="92%" label="Cache hit rate" detail="A warm-cache assumption, not a guarantee" tone="green" /%}
+{% metric value="4.8K/s" label="Store fallbacks" detail="The derived miss-path load" tone="amber" /%}
+{% metric value="8K/s" label="Protection threshold" detail="The tested fallback envelope" tone="rose" /%}
+{% /metric-strip %}
+
+Use the control below to model a cache regression or a growing working set. It preserves the 60,000 requests per second total, recomputes both branches, and turns into a warning when the authoritative store crosses its tested fallback limit.
+
+{% traffic-split dataFile="/api/content/fundamentals/what-is-system-design/data/cache-growth-pressure-lab.json" /%}
+
+The lesson is not "maximize cache hits." A longer cache lifetime can return data that is too stale for inventory, price, or permissions. Choose the freshness rule first, then provision the miss path for the lowest acceptable hit rate.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Trace one critical request before expanding the system
+
+The critical path is the sequence that must complete before the user can receive a correct answer. For a URL shortener, redirection is usually critical; analytics collection is valuable but can happen after the redirect.
+
+{% system-flow title="A simple read path with deliberate boundaries" caption="A request should cross only the components required to satisfy the user action. Non-critical work belongs off the response path when correctness allows it." %}
+{% system-node title="Client request" eyebrow="1. Ask" icon="globe" tone="blue" %}
+The client asks for a short link and expects a redirect within its latency budget.
+{% /system-node %}
+{% system-node title="Stateless service" eyebrow="2. Decide" icon="route" tone="green" %}
+The service validates the key, applies rate limits, and owns the response contract.
+{% /system-node %}
+{% system-node title="Cache or record store" eyebrow="3. Read" icon="database" tone="violet" %}
+The cache serves reusable mappings; a miss reads the authoritative record.
+{% /system-node %}
+{% system-node title="Async analytics" eyebrow="4. Observe" icon="activity" tone="amber" %}
+Click events are queued after the redirect so analytics trouble does not block the user.
+{% /system-node %}
+{% /system-flow %}
+
+When tracing a path, ask three questions:
+
+- Which component owns the authoritative fact?
+- What deadline and fallback apply if the next dependency is slow?
+- Which work can move out of the request without changing the promised user result?
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design for failure as part of normal behavior
+
+Failures are ordinary operating conditions. A timeout does not prove a write failed, a replica is not a backup, and retrying an unsafe request can create a duplicate side effect. Define what the user sees and which component owns recovery before an incident does it for you.
+
+{% process-flow %}
+{% process-step number="1" title="Set a deadline" label="Contain" %}
+Give dependency calls a bounded time budget so one slow component cannot consume the entire request.
+{% /process-step %}
+
+{% process-step number="2" title="Choose a safe fallback" label="Degrade" %}
+Return a cached, limited, queued, or explicit unavailable result only when it preserves the product's invariant.
+{% /process-step %}
+
+{% process-step number="3" title="Recover with evidence" label="Restore" %}
+Use health checks, failover, idempotency keys, backups, and tested restore procedures for the failure you actually observed.
+{% /process-step %}
+{% /process-flow %}
+
+Useful failure rules include:
+
+- **Timeouts and retries:** retry only bounded, idempotent work. Add jitter so many clients do not retry together.
+- **Replica lag:** route read-after-write confirmation to the primary or expose a freshness wait; do not pretend an asynchronous replica is immediately current.
+- **Data loss and corruption:** maintain backups separately from high availability, then practice a restore to prove the recovery objective.
+- **Dependency outages:** isolate optional work with queues or fallbacks so it cannot block the critical path.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make trade-offs and operations explicit
+
+System design is a set of reversible and irreversible commitments. Write down what each choice buys, what it costs, and which signal would make the team revisit it.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Simplicity versus distribution" icon="boxes" tone="neutral" %}
+A single deployable unit is easier to change and debug. More services can isolate scale or ownership, but add network failures and coordination work.
+{% /concept-card %}
+{% concept-card title="Freshness versus load" icon="cache" tone="blue" %}
+Caches reduce store work, but invalidation and bounded staleness become product decisions. The miss path still needs capacity.
+{% /concept-card %}
+{% concept-card title="Availability versus consistency" icon="scale" tone="violet" %}
+Some facts, such as a balance or inventory reservation, need strict coordination. Other views can lag if the user-facing rule says so.
+{% /concept-card %}
+{% concept-card title="Speed versus protection" icon="lock" tone="amber" %}
+Rate limits and validation add work, but rejecting abusive or invalid input early preserves capacity and protects authoritative data.
+{% /concept-card %}
+{% concept-card title="Redundancy versus recovery" icon="shield" tone="green" %}
+Replicas improve availability. Backups and restore drills protect against deletion and corruption. Plan for both when the data matters.
+{% /concept-card %}
+{% concept-card title="Features versus operability" icon="activity" tone="cyan" %}
+Logs, metrics, traces, alerts, runbooks, and capacity tests let operators prove a design is healthy and recover it when it is not.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before shipping, name the operating signals: request rate, error rate, p95 or p99 latency, saturation, queue depth, cache hit rate, replica lag, and recovery success. Alerts should point to an owner and a usable response, not merely report that a graph changed.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/what-is-system-design/quiz/what-is-system-design-review.json" lessonSlug="what-is-system-design" title="System Design Decision Review" /%}

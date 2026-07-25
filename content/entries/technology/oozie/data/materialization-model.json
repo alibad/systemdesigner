@@ -1,0 +1,152 @@
+{
+  "kind": "oozie-materialization",
+  "blockId": "technology/oozie-materialization-lab",
+  "title": "Decide when a scheduled action is actually ready",
+  "description": "Change the readiness contract, observed storage state, backlog policy, and configuration layer. The lab separates nominal time from proof that input data is complete.",
+  "defaults": {
+    "scenarioId": "daily-partition",
+    "dataStateId": "partial-files",
+    "readinessContractId": "success-marker",
+    "executionStrategyId": "FIFO",
+    "configurationLayerId": "coordinator-run"
+  },
+  "scenarios": [
+    {
+      "id": "daily-partition",
+      "label": "Daily warehouse partition",
+      "detail": "One run owns one UTC date and waits for the upstream commit marker.",
+      "nominalTime": "2026-07-23 00:00Z",
+      "actualDelayMinutes": 80,
+      "timeoutMinutes": 180,
+      "backlogActions": 2,
+      "inputUri": "hdfs:///lake/events/2026/07/23",
+      "outputPartition": "dt=2026-07-23"
+    },
+    {
+      "id": "hourly-arrivals",
+      "label": "Late hourly arrivals",
+      "detail": "Six nominal slots accumulated while the source publisher was unavailable.",
+      "nominalTime": "2026-07-23 14:00Z",
+      "actualDelayMinutes": 210,
+      "timeoutMinutes": 240,
+      "backlogActions": 6,
+      "inputUri": "hdfs:///landing/orders/2026/07/23/14",
+      "outputPartition": "hour=2026-07-23T14"
+    },
+    {
+      "id": "expired-window",
+      "label": "Expired freshness window",
+      "detail": "The data predicate is still false after the coordinator timeout.",
+      "nominalTime": "2026-07-22 06:00Z",
+      "actualDelayMinutes": 390,
+      "timeoutMinutes": 180,
+      "backlogActions": 4,
+      "inputUri": "hdfs:///feeds/risk/2026/07/22/06",
+      "outputPartition": "window=2026-07-22T06"
+    }
+  ],
+  "dataStates": [
+    {
+      "id": "missing",
+      "label": "No directory",
+      "detail": "The expected dataset instance has not appeared.",
+      "directoryExists": false,
+      "markers": []
+    },
+    {
+      "id": "partial-files",
+      "label": "Directory with partial files",
+      "detail": "Objects exist, but no producer commit marker is present.",
+      "directoryExists": true,
+      "markers": []
+    },
+    {
+      "id": "success-committed",
+      "label": "Committed with _SUCCESS",
+      "detail": "The producer published the conventional MapReduce completion marker.",
+      "directoryExists": true,
+      "markers": [
+        "_SUCCESS"
+      ]
+    },
+    {
+      "id": "custom-committed",
+      "label": "Committed with _READY",
+      "detail": "The producer published the custom marker required by this contract.",
+      "directoryExists": true,
+      "markers": [
+        "_READY"
+      ]
+    }
+  ],
+  "readinessContracts": [
+    {
+      "id": "directory-only",
+      "label": "Directory existence",
+      "detail": "An empty done-flag treats the directory itself as ready.",
+      "marker": null,
+      "warning": "Directory existence is a weak contract when producers write files incrementally."
+    },
+    {
+      "id": "success-marker",
+      "label": "_SUCCESS marker",
+      "detail": "An omitted done-flag uses the conventional _SUCCESS marker.",
+      "marker": "_SUCCESS",
+      "warning": "Wait for _SUCCESS; files may still be partial before the producer commits."
+    },
+    {
+      "id": "custom-marker",
+      "label": "_READY marker",
+      "detail": "A named done-flag requires the selected producer-owned marker.",
+      "marker": "_READY",
+      "warning": "Wait for _READY; another marker does not satisfy this dataset contract."
+    }
+  ],
+  "executionStrategies": [
+    {
+      "id": "FIFO",
+      "label": "FIFO",
+      "detail": "Submit older READY actions before newer ones."
+    },
+    {
+      "id": "LIFO",
+      "label": "LIFO",
+      "detail": "Submit newer READY actions first without discarding older instances."
+    },
+    {
+      "id": "LAST_ONLY",
+      "label": "LAST_ONLY",
+      "detail": "Keep only the latest eligible instance when older runs no longer matter."
+    },
+    {
+      "id": "NONE",
+      "label": "NONE",
+      "detail": "Skip actions that miss the server's small nominal-time tolerance."
+    }
+  ],
+  "configurationLayers": [
+    {
+      "id": "submission-default",
+      "label": "Submission config",
+      "detail": "job.properties supplies the base parameter used to resolve the application.",
+      "source": "job.properties",
+      "outputRoot": "hdfs:///warehouse/default"
+    },
+    {
+      "id": "coordinator-run",
+      "label": "Coordinator action config",
+      "detail": "The coordinator passes a run-scoped value into the materialized workflow.",
+      "source": "coordinator.xml workflow configuration",
+      "outputRoot": "hdfs:///warehouse/curated"
+    },
+    {
+      "id": "action-override",
+      "label": "Action-local config",
+      "detail": "The action configuration is the final workflow layer for this property.",
+      "source": "workflow.xml action configuration",
+      "outputRoot": "hdfs:///warehouse/quarantine"
+    }
+  ],
+  "noneToleranceMinutes": 1,
+  "notice": "This is a state model, not a timing benchmark. Verify exact precedence, timeout, and execution behavior against the deployed Oozie 5.2.1 configuration before changing a production coordinator."
+}

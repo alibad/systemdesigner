@@ -1,0 +1,113 @@
+{
+  "title": "Trace a progressive rollout and rollback",
+  "description": "Switch release stages to see which path serves customers, where evidence is collected, and how a breached gate returns traffic to the stable version. Select any component for its responsibility.",
+  "nodes": [
+    {
+      "id": "customer",
+      "label": "Customer cohort",
+      "eyebrow": "Real requests",
+      "detail": "A named cohort keeps the canary measurable. It may be a region, tenant group, internal users, or a random but logged percentage of eligible traffic.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 48
+    },
+    {
+      "id": "edge-router",
+      "label": "Edge router",
+      "eyebrow": "Traffic policy",
+      "detail": "Applies the rollout policy and records which version served the request. It must support freezing or reversing traffic without deploying another binary.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 28,
+      "y": 48
+    },
+    {
+      "id": "stable",
+      "label": "Stable version",
+      "eyebrow": "Baseline",
+      "detail": "Serves the established path and supplies the comparison baseline for errors, latency, saturation, and customer outcomes.",
+      "kind": "service",
+      "tone": "green",
+      "x": 53,
+      "y": 26
+    },
+    {
+      "id": "canary",
+      "label": "Canary version",
+      "eyebrow": "Candidate",
+      "detail": "Receives only the permitted cohort. Its code and data behavior must remain compatible with the stable version while both are live.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 53,
+      "y": 70
+    },
+    {
+      "id": "release-gate",
+      "label": "Release gate",
+      "eyebrow": "Promote or stop",
+      "detail": "Evaluates a fixed observation window against a stable baseline and explicit thresholds. It is an evidence source, not an automated excuse to ignore a customer regression.",
+      "kind": "analytics",
+      "tone": "amber",
+      "x": 78,
+      "y": 28
+    },
+    {
+      "id": "rollback-control",
+      "label": "Rollback control",
+      "eyebrow": "Route back",
+      "detail": "Freezes promotion and updates routing or the emergency flag. It protects new requests first; reconciliation handles any state that the failed version already changed.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 78,
+      "y": 74
+    }
+  ],
+  "edges": [
+    { "id": "customer-router", "from": "customer", "to": "edge-router", "label": "request" },
+    { "id": "router-stable", "from": "edge-router", "to": "stable", "label": "stable share" },
+    { "id": "router-canary", "from": "edge-router", "to": "canary", "label": "canary share" },
+    { "id": "router-shadow", "from": "edge-router", "to": "canary", "label": "mirrored request", "mode": "async" },
+    { "id": "stable-gate", "from": "stable", "to": "release-gate", "label": "baseline", "mode": "async" },
+    { "id": "canary-gate", "from": "canary", "to": "release-gate", "label": "candidate signals", "mode": "async" },
+    { "id": "gate-rollback", "from": "release-gate", "to": "rollback-control", "label": "breach", "mode": "async" },
+    { "id": "rollback-router", "from": "rollback-control", "to": "edge-router", "label": "freeze and route back", "via": { "x": 49, "y": 92 } }
+  ],
+  "scenarios": [
+    {
+      "id": "shadow",
+      "label": "Shadow comparison",
+      "summary": "Customers receive the stable response while eligible requests are mirrored to the candidate outside the response path. Candidate output can be compared without broad user exposure.",
+      "activeEdges": ["customer-router", "router-stable", "router-shadow", "stable-gate", "canary-gate"],
+      "focusNode": "canary",
+      "result": "Shadowing exposes production input diversity, but it does not prove the customer experience. Isolate writes and downstream effects before mirroring a request."
+    },
+    {
+      "id": "one-percent-canary",
+      "label": "1% healthy canary",
+      "summary": "A small logged cohort receives the candidate while the remaining customers stay on the stable version. The release gate compares both groups over the observation window.",
+      "activeEdges": ["customer-router", "router-stable", "router-canary", "stable-gate", "canary-gate"],
+      "focusNode": "release-gate",
+      "result": "Promote only if technical guardrails and the named customer outcome stay within threshold. A green aggregate dashboard can still hide a harmful cohort."
+    },
+    {
+      "id": "ten-percent-breach",
+      "label": "10% guardrail breach",
+      "summary": "At a larger canary stage, candidate errors and checkout failures exceed the allowed difference from stable. The gate emits a breach instead of permitting the next traffic increase.",
+      "activeEdges": ["customer-router", "router-stable", "router-canary", "stable-gate", "canary-gate", "gate-rollback"],
+      "degradedNodes": ["release-gate"],
+      "failedNodes": ["canary"],
+      "focusNode": "release-gate",
+      "result": "Do not continue collecting evidence on more customers. Freeze the rollout and execute the route-back while request, version, and cohort evidence is still available."
+    },
+    {
+      "id": "rollback",
+      "label": "Rollback complete",
+      "summary": "The rollback control has removed the candidate from new customer traffic. The stable version serves the cohort while the incident owner investigates and assesses any writes made before the route-back.",
+      "activeEdges": ["customer-router", "router-stable", "stable-gate", "gate-rollback", "rollback-router"],
+      "failedNodes": ["canary"],
+      "focusNode": "rollback-control",
+      "result": "Customer exposure stops at the router. The remaining work is diagnosis, data reconciliation, and a forward-compatible fix; do not redeploy the same change only because traffic is stable again."
+    }
+  ]
+}

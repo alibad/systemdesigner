@@ -1,0 +1,307 @@
+---
+registryId: influxdb
+---
+
+{% section-card tone="intro" %}
+## What is InfluxDB?
+
+InfluxDB is a family of databases for **time-series data**: observations whose timestamp
+is part of their identity and whose useful queries usually scan a bounded time window.
+Service metrics, device readings, energy measurements, and operational events are
+typical examples.
+
+InfluxDB matters because a telemetry workload is usually append-heavy, time-filtered,
+and aggregation-heavy. A general relational database can store those rows, but InfluxDB
+adds a time-series data model, line protocol ingestion, time-aware query functions, and
+retention controls.
+
+### Core invariant
+
+Every accepted point must preserve its event time, schema identity, and measured values
+well enough that a later windowed query returns the right series. Write rate alone is
+not success; rejected points, accidental new series, unbounded retention, or a mismatched
+query language can all break the system.
+
+{% callout variant="warn" %}
+### Choose a product generation before copying a query
+
+InfluxDB OSS v2 and InfluxDB 3 do not share one universal storage or query contract.
+OSS v2 uses the TSM engine and treats Flux as its native v2 query language. InfluxDB 3
+uses a columnar engine and supports SQL and InfluxQL, but not Flux. APIs, retention
+behavior, schema guidance, and operational limits must match the installed generation.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Convert the point stream into an explicit storage plan
+
+Capacity planning starts with facts the application can measure:
+
+- accepted points per second;
+- observed stored bytes per point for the selected schema and product;
+- required raw-data retention;
+- the number of stored copies required by the deployment architecture;
+- operational headroom and the actual storage budget.
+
+The planner below keeps every formula visible. Its result is a **planning envelope**,
+not an InfluxDB benchmark and not a prediction of compression, latency, RAM, or query
+throughput.
+
+{% interactive-block id="technology/influxdb-performance" /%}
+
+Measure bytes per point from a representative run by dividing observed storage growth
+by accepted points over the same stable interval. Keep temporary WAL, cache, index,
+catalog, compaction, backup, and operating-system space separate unless the headroom
+input intentionally covers them.
+{% /section-card %}
+
+{% section-card %}
+## Model a point before choosing tags
+
+A point combines a logical container, a table-like name, metadata, measured values, and
+one timestamp. The names differ by generation, but the design questions remain visible.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Database or bucket" eyebrow="Lifecycle boundary" icon="database" tone="blue" %}
+InfluxDB OSS v2 stores points in a **bucket** with a retention duration. In InfluxDB 3,
+the corresponding top-level container is a **database**.
+{% /concept-card %}
+{% concept-card title="Table or measurement" eyebrow="Related observations" icon="layers" tone="violet" %}
+OSS v2 calls the logical point family a **measurement**. InfluxDB 3 presents the same
+concept as a **table**. Keep each family coherent rather than mixing unrelated fields.
+{% /concept-card %}
+{% concept-card title="Tags" eyebrow="Identity and filters" icon="filter" tone="green" %}
+Tags are string metadata such as `site`, `host`, or `device_type`. They participate in
+series identity and are useful for common filters and groups.
+{% /concept-card %}
+{% concept-card title="Fields and time" eyebrow="Observed values" icon="clock" tone="amber" %}
+Fields hold measured values such as temperature or request duration. The timestamp
+records when the observation happened and must use an explicit precision contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+This line-protocol point records two numeric fields for one site and room:
+
+{% code-block file="/api/content/technology/influxdb/code/environment-sensor.lp" language="text" title="One line-protocol point" /%}
+
+Do not generate nanosecond timestamps when the source only measures seconds. InfluxData
+recommends the coarsest precision that preserves the application's ordering requirement,
+and all producers should synchronize clocks.
+{% /section-card %}
+
+{% section-card %}
+## Treat product generation as an architecture decision
+
+The name “InfluxDB” spans products with materially different internal and external
+contracts.
+
+{% concept-grid columns="3" %}
+{% concept-card title="InfluxDB OSS v2" eyebrow="TSM generation" icon="storage" tone="blue" %}
+Writes enter a WAL and memory cache, then flush into TSM files. TSI organizes series
+keys. Flux is the native v2 query path; InfluxQL uses the v1 compatibility endpoint and
+database-retention-policy mappings.
+{% /concept-card %}
+{% concept-card title="InfluxDB 3 Core" eyebrow="Single-server v3" icon="braces" tone="violet" %}
+The v3 engine persists columnar Parquet data and queries it with Apache Arrow and
+DataFusion. It supports SQL and InfluxQL, not Flux. Current Core documentation also
+bounds one query to an approximately 72-hour time range.
+{% /concept-card %}
+{% concept-card title="InfluxDB 3 Enterprise" eyebrow="Clustered v3" icon="network" tone="green" %}
+Enterprise is a superset of Core for multi-node deployments. Routers, ingesters, object
+storage, a catalog, queriers, and compaction form distinct operational boundaries.
+Database and table retention can be configured explicitly.
+{% /concept-card %}
+{% /concept-grid %}
+
+The older TICK acronym can still describe a v1/v2-era toolchain, but it is not a
+universal architecture for modern InfluxDB. Telegraf remains a useful collector; the
+storage, query, visualization, and processing components should be chosen from the
+actual generation and deployment.
+{% /section-card %}
+
+{% section-card %}
+## Match the query language to the installed product
+
+All three examples compute five-minute temperature averages, but their endpoint,
+container naming, functions, and supported product generation differ.
+
+{% tabs %}
+{% tab title="InfluxDB 3 SQL" %}
+Use DataFusion SQL with InfluxDB 3 Core or Enterprise. SQL is the native choice when
+joins, unions, window functions, or familiar relational expressions matter.
+
+{% code-block file="/api/content/technology/influxdb/code/influxdb3-window.sql" language="sql" title="Five-minute averages with InfluxDB 3 SQL" /%}
+{% /tab %}
+{% tab title="InfluxDB 3 or mapped InfluxQL" %}
+InfluxQL is a time-series SQL-like language. InfluxDB 3 supports it directly; OSS v2
+supports a documented subset through its v1 compatibility endpoint after a bucket has a
+database-retention-policy mapping.
+
+{% code-block file="/api/content/technology/influxdb/code/influxql-window.influxql" language="sql" title="Five-minute averages with InfluxQL" /%}
+{% /tab %}
+{% tab title="InfluxDB OSS v2 Flux" %}
+Flux is the functional query language exposed by the OSS v2 query API. It is **not**
+supported by InfluxDB 3, so a v2-to-v3 migration must translate or replace Flux queries
+and tasks rather than merely changing the server URL.
+
+{% code-block file="/api/content/technology/influxdb/code/flux-window.flux" language="text" title="Five-minute averages with Flux" /%}
+{% /tab %}
+{% /tabs %}
+
+Always bind a time predicate. A dashboard that repeatedly scans its entire retention
+window has a different capacity shape from one that reads the last hour, even when both
+return the same number of plotted points.
+{% /section-card %}
+
+{% section-card %}
+## Trace ingestion, storage, query, and failure behavior
+
+Select the deployed generation, then inject a condition. Watch which stages remain
+active, where the contract rejects or slows work, what a user or producer observes, and
+which response addresses the actual boundary.
+
+{% interactive-block id="technology/influxdb-generation-failure-lab" /%}
+
+Backpressure belongs at the producer boundary. A client should batch, compress, parse
+every response, retry only retryable failures with bounded exponential backoff and
+jitter, and define what happens when its local queue reaches its limit. “Never lose a
+metric” is not a strategy if infinite buffering can exhaust the application host.
+{% /section-card %}
+
+{% section-card %}
+## Design schema from bounded query shapes
+
+The same tag rule is not equally true in every generation.
+
+### In OSS v2
+
+Each unique measurement plus tag set creates a series identity. Highly variable values
+such as request IDs, hashes, and raw timestamps can create many indexed series and place
+pressure on TSI and series discovery. Store unique or frequently changing values as
+fields unless they must be indexed dimensions.
+
+### In InfluxDB 3
+
+InfluxData documents that tag-value and series cardinality no longer have the same
+database-wide performance effect as earlier generations. That does **not** make every
+schema free:
+
+- too many tag and field columns create a wide primary key and extra persistence work;
+- sparse tables waste structure and complicate queries;
+- unrelated field families make scans and type evolution harder;
+- the first write fixes physical column order, so frequently filtered tags should appear
+  first;
+- a tag and field should not reuse the same name.
+
+{% process-flow %}
+{% process-step number="1" title="Write the query contract" label="Access" %}
+Name the table or measurement, time range, required fields, tag predicates, grouping,
+freshness, result size, and user-visible latency objective.
+{% /process-step %}
+{% process-step number="2" title="Build the smallest coherent schema" label="Shape" %}
+Keep source identity and commonly filtered dimensions as tags. Keep observations and
+unique values as fields. Split unrelated field families into separate tables.
+{% /process-step %}
+{% process-step number="3" title="Replay representative data" label="Measure" %}
+Record accepted points, response errors, stored bytes per point, series or column growth,
+WAL and compaction behavior, and bounded query plans under realistic concurrency.
+{% /process-step %}
+{% process-step number="4" title="Enforce the contract" label="Operate" %}
+Version producer schemas, reject accidental new dimensions, cap local retry queues, and
+alert on accepted-versus-attempted gaps rather than only host CPU.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Separate raw retention, rollups, and recovery
+
+Retention answers **how long a container should expose raw points**. Downsampling answers
+**which lower-resolution facts should survive longer**. Backup and recovery answer
+**how to restore data after loss or corruption**. None replaces the others.
+
+A common lifecycle is:
+
+1. keep high-resolution raw points for a short, operationally useful window;
+2. compute reviewed rollups such as five-minute or hourly aggregates;
+3. write rollups to a separate bucket, database, or table with a longer lifecycle;
+4. expire raw and rollup data according to separate requirements;
+5. test that late points, corrected points, and replay do not double-count aggregates;
+6. restore backups into an isolated environment and verify query results.
+
+Implementation is generation-specific. OSS v2 can use Flux tasks or an external
+processor. InfluxDB 3 has a processing engine and can also use external stream or batch
+jobs. Do not label a generic “continuous query” as portable across every generation.
+
+{% callout variant="info" %}
+### Retention is not an instantaneous disk-reclamation promise
+
+OSS v2 deletes expired shard groups on a periodic enforcement cycle, so old points can
+remain queryable until the whole shard group expires. InfluxDB 3 Enterprise enforces
+retention at query time, while physical object deletion and compaction can complete
+later. Capacity alerts should follow the documented generation-specific behavior.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate the data contract, not just the process
+
+Review these signals together:
+
+- **ingestion:** attempted points, accepted points, rejected points by reason, batch
+  bytes, request latency, retry count, local queue age, and dropped samples;
+- **schema:** new tables or measurements, column growth, field-type conflicts, exact
+  series cardinality where relevant, and unexpected tag values;
+- **storage:** WAL growth, cache pressure, flushes, compaction backlog, object or disk
+  errors, stored bytes per accepted point, and free-space margin;
+- **queries:** bounded time range, rows or bytes scanned, query concurrency, cancellation,
+  errors, latency percentiles, and result freshness;
+- **lifecycle:** oldest queryable raw and rollup points, retention-job status, physical
+  reclamation lag, backup completion, and restore-test evidence.
+
+During an incident, preserve the difference between **attempted**, **acknowledged**, and
+**query-visible** points. A `204` or successful client call proves only the documented
+write acknowledgement boundary for that product; it does not prove that every upstream
+sample was attempted or that every future query is correctly scoped.
+{% /section-card %}
+
+{% section-card %}
+## Know when InfluxDB is the wrong primary store
+
+InfluxDB is a strong candidate when timestamped observations dominate and queries use
+time windows, tag filters, aggregations, and recent-value access. Choose another primary
+system when the core requirement is:
+
+- multi-row business transactions and relational constraints;
+- an ordered work queue with consumer acknowledgement semantics;
+- large blobs or immutable files;
+- unrestricted historical joins that exceed the chosen InfluxDB product's query scope;
+- full-text search or arbitrary document retrieval;
+- a compliance archive whose deletion, legal hold, and evidence model are better served
+  by purpose-built immutable storage.
+
+Hybrid designs are normal. A transactional database can own device and tenant metadata,
+InfluxDB can own telemetry, an object store can retain raw exports, and a warehouse can
+run broad historical analytics.
+{% /section-card %}
+
+{% section-card %}
+## Verify against the official product documentation
+
+These primary InfluxData references define the generation-specific claims used here:
+
+- [InfluxDB 3 Core query languages and current query scope](https://docs.influxdata.com/influxdb3/core/get-started/query/)
+- [InfluxDB 3 schema design recommendations](https://docs.influxdata.com/influxdb3/core/write-data/best-practices/schema-design/)
+- [InfluxDB 3 write optimization guidance](https://docs.influxdata.com/influxdb3/core/write-data/best-practices/optimize-writes/)
+- [InfluxDB 3 storage engine architecture](https://docs.influxdata.com/influxdb3/clustered/reference/internals/storage-engine/)
+- [InfluxDB 3 Enterprise retention behavior](https://docs.influxdata.com/influxdb3/enterprise/reference/internals/data-retention/)
+- [InfluxDB OSS v2 storage engine](https://docs.influxdata.com/influxdb/v2/reference/internals/storage-engine/)
+- [InfluxDB OSS v2 query surfaces](https://docs.influxdata.com/influxdb/v2/query-data/)
+- [InfluxDB OSS v2 retention behavior](https://docs.influxdata.com/influxdb/v2/reference/internals/data-retention/)
+
+Pin the installed version in deployment manifests and release notes. Product
+documentation and defaults can change; a production runbook should link to the exact
+version it was tested against.
+{% /section-card %}
+
+{% quiz quizId="influxdb" lessonSlug="influxdb" title="InfluxDB Production Design Review" questionsFile="/api/content/technology/influxdb/quiz/influxdb-production-design.json" /%}

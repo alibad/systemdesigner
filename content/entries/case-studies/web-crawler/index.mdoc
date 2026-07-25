@@ -1,0 +1,220 @@
+---
+registryId: case-study-web-crawler
+---
+
+{% section-card tone="intro" %}
+## What is a distributed web crawler?
+
+A distributed web crawler is a fleet of programs that discovers web addresses, decides which address is safe and useful to visit next, downloads a response, and uses any accepted links to continue the loop. Search engines use crawlers to build the collection of documents that an index can later search.
+
+In plain language, a crawler is a careful map maker. Its central invariant is: **a URL may be fetched only after it is normalized, deduplicated, allowed by the host's policy, and eligible under that host's crawl budget.** More workers can increase global throughput, but they must never turn one busy or failing website into a victim of the crawl.
+
+This case study designs a crawl system for one billion pages each month. You will move from the crawl contract and capacity math to the frontier state machine, polite failure paths, operations, and the trade-offs behind a responsible crawler.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the crawl contract before choosing queues" %}
+
+## Define what the crawler is allowed to do
+
+A crawler does not own the sites it visits. The first design decision is therefore a behavioral contract, not a worker count: discover useful public documents while placing an explicit, bounded load on each remote host.
+
+### Functional scope
+
+- Start from supplied seed URLs and discover links from accepted HTML documents.
+- Fetch HTML and selected documents such as PDFs; treat rendering-heavy pages as an explicit later capability.
+- Normalize URLs, record redirects, suppress repeat work, and schedule refreshes.
+- Read and cache `robots.txt`; honor applicable allow/disallow rules and configured crawl delays.
+
+### Non-functional guardrails
+
+- **Scale:** crawl one billion pages per month, with headroom for daily spikes.
+- **Politeness:** a host's rules and health always override a URL's global priority.
+- **Safety:** bound redirects, response size, URL length, traversal depth, parser time, and retries.
+- **Recoverability:** isolate a bad host or failed worker so unrelated hosts continue making progress.
+
+{% callout variant="info" %}
+`robots.txt` is a crawl-policy signal, not an authorization system. A production crawler still needs a recognizable User-Agent, a contact channel, retention policy, and legal review appropriate to its data use.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="scale" title="2. Turn the monthly target into an operating envelope" %}
+
+## Estimate the global rate, then remember the host limit
+
+One billion pages over a 30-day month is about **386 pages per second** on average. Designing for a two-times burst gives a planning rate near 800 pages per second. That rate is small enough for a worker fleet, but it says almost nothing about whether any individual host may be contacted now.
+
+{% metric-strip %}
+{% metric value="386/s" label="Average fetches" detail="1B pages divided across 30 days." tone="blue" /%}
+{% metric value="800/s" label="Planning peak" detail="Two-times headroom for uneven discovery and recovery." tone="cyan" /%}
+{% metric value="400 TB" label="Compressed bodies" detail="Assume 400 KB average retained response before replicas." tone="violet" /%}
+{% metric value="160 MB/s" label="Peak ingress" detail="800 fetches/s times 200 KB transferred on average." tone="green" /%}
+{% /metric-strip %}
+
+The numbers are estimates, not service-level objectives. A 400 KB retained body and 200 KB transferred response can both be true after compression and filtering. Store URL state separately from bodies: URL metadata, hashes, timestamps, and host eligibility are queried far more often than old document bytes.
+
+### Capacity decisions that follow from the estimate
+
+- Partition ownership by a stable host or registrable-domain hash, so one scheduler owns its politeness state.
+- Keep enough ready hosts to fill workers when many high-priority hosts are waiting for their next allowed time.
+- Autoscale on eligible frontier depth and processing lag, not raw discovered-URL count; blocked URLs are not immediate work.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate scheduling, fetching, and processing" %}
+
+## Keep the fetch path short and the discovery loop durable
+
+The crawler has two loops. The synchronous loop determines whether a single URL may be fetched now. The asynchronous loop turns an accepted response into storage records and new candidate URLs. Separating them prevents slow parsing or object storage from holding a host's crawl slot.
+
+{% system-flow title="One responsible crawl cycle" caption="The frontier grants work only after the host is eligible. Parsing produces candidates asynchronously, which return through normalization before they can be scheduled." %}
+{% system-node title="Normalize and deduplicate" eyebrow="Admission" icon="route" tone="blue" %}
+Canonicalize safe URL parts, reject unsupported schemes, and check seen-URL state.
+{% /system-node %}
+{% system-node title="Frontier and host queue" eyebrow="Schedule" icon="timer" tone="violet" %}
+Rank eligible work while maintaining a separate next-allowed time for every host.
+{% /system-node %}
+{% system-node title="Fetch with limits" eyebrow="Acquire" icon="network" tone="cyan" %}
+Apply robots policy, timeouts, response caps, redirect bounds, and bounded retries.
+{% /system-node %}
+{% system-node title="Parse, fingerprint, persist" eyebrow="Expand" icon="database" tone="green" %}
+Store accepted content, detect duplicate bodies, and return extracted links to admission.
+{% /system-node %}
+{% /system-flow %}
+
+### Component responsibilities
+
+| Component | Owns | Must not do |
+| --- | --- | --- |
+| Admission service | URL normalization, scheme policy, exact seen state | Grant a fetch before host eligibility is checked |
+| URL frontier | Priority, freshness, host ownership, next-allowed time | Parse large document bodies |
+| Fetch worker | HTTP, redirects, response limits, result classification | Independently override a host delay |
+| Processor | Parsing, content hashes, link extraction, storage handoff | Reinsert raw links without admission |
+
+{% /accordion-item %}
+
+{% accordion-item id="frontier" title="4. Trace the frontier state instead of treating it as one queue" %}
+
+## A URL has state before it has a worker
+
+The frontier is a policy engine. It combines global value, freshness, duplicate state, and a host-specific timer. Select each scenario below, then select a component to inspect its responsibility. The active path shows why a newly discovered URL, a duplicate, and a robots-blocked URL do not consume the same resources.
+
+{% topology-lab dataFile="/api/content/case-studies/web-crawler/data/frontier-state-topology.json" /%}
+
+### The frontier's useful state record
+
+- **URL key:** normalized URL, redirect aliases, discovery source, and exact seen status.
+- **Host key:** registrable domain or host, policy cache expiry, next allowed fetch time, and failure history.
+- **Scheduling key:** priority score, last successful fetch, predicted change rate, and a lease that prevents duplicate worker assignment.
+
+Use a fast probabilistic filter to reject likely repeats before an exact backing lookup. A Bloom-filter false positive can delay discovery, so protect important seed and recrawl candidates with an exact store or a second-chance policy.
+
+{% /accordion-item %}
+
+{% accordion-item id="politeness" title="5. Make politeness and failure paths visible" %}
+
+## A high-priority URL is still allowed to wait
+
+Politeness is enforced at the host scheduler, before a worker opens a connection. That decision keeps a fresh news page from bypassing a crawl delay and makes retries a controlled state transition rather than a request storm.
+
+Select a healthy path, a crawl-delay wait, a robots denial, or a timeout. The scenario changes the active route and outcome; selecting nodes explains where the decision is owned.
+
+{% topology-lab dataFile="/api/content/case-studies/web-crawler/data/politeness-failure-topology.json" /%}
+
+### Failure policy
+
+- **Retry only classified transient failures:** network resets, 429s, and selected 5xx responses qualify; policy denials and most 4xx responses do not.
+- **Back off per host:** increase the host's next-allowed time with jitter, and open a circuit after repeated failures.
+- **Bound the attempt:** cap DNS, connect, first-byte, total download, redirect count, and body size independently.
+- **Preserve evidence:** record the status, policy version, response timing, and retry reason before sending exhausted work to a review or replay queue.
+
+{% callout variant="warn" %}
+Never recover a fleet-wide throughput dip by removing host delays. The crawler can borrow capacity only from other eligible hosts, not from a remote server's patience.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="defenses" title="6. Defend capacity against duplicates, traps, and bad content" %}
+
+## Stop unbounded work before it becomes a scale problem
+
+The web contains aliases, calendars, faceted navigation, session IDs, infinite paths, malformed documents, and intentionally hostile responses. Each defense has a different job; no single URL hash is enough.
+
+{% concept-grid columns="3" %}
+{% concept-card title="URL duplicates" eyebrow="Before fetch" icon="repeat" tone="blue" %}
+Normalize fragments and safe parameters, track redirects, and perform exact seen checks after a probabilistic prefilter.
+{% /concept-card %}
+{% concept-card title="Content duplicates" eyebrow="After fetch" icon="layers" tone="violet" %}
+Use a cryptographic body hash for exact copies and a near-duplicate fingerprint for template-heavy mirrors.
+{% /concept-card %}
+{% concept-card title="Crawler traps" eyebrow="Before expansion" icon="warning" tone="amber" %}
+Cap depth, URL length, parameter growth, unique paths per host, and repeated structural patterns before adding links.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Defensive defaults
+
+1. Reject unsupported schemes and URLs over the configured size limit before they enter durable state.
+2. Enforce per-response byte and parser CPU limits, then classify the failure without retaining unsafe payloads by default.
+3. Detect repeated path templates and high-cardinality parameter patterns per host; quarantine the pattern rather than banning the entire site immediately.
+4. Keep a dead-letter stream for policy exceptions, persistent parser failures, and manually reviewed traps.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate the crawler as a set of host-level budgets" %}
+
+## Monitor whether the crawler is useful and safe
+
+Global fetches per second can look healthy while the crawler ignores fresh sites, hammers a small host set, or sends most bytes to duplicates. Operators need metrics that reveal the frontier's decisions and the remote impact of those decisions.
+
+### Metrics that should page, freeze, or trend
+
+- **Page:** policy-cache corruption, a large increase in requests after robots denials, scheduler lease duplication, or an emergency host complaint.
+- **Freeze new work for a host:** sustained 429/5xx rates, circuit breaker opening, robots parse ambiguity, or rapidly growing trap signatures.
+- **Trend:** eligible frontier age by priority, host-delay compliance, duplicate suppression rate, bytes retained per accepted document, retry exhaustion, and processor lag.
+
+{% process-flow %}
+{% process-step number="1" title="Observe" label="Signals" %}
+Measure host eligibility, fetch outcome, byte cost, extracted-link yield, and freshness lag with host and policy dimensions.
+{% /process-step %}
+{% process-step number="2" title="Classify" label="Decision" %}
+Separate policy blocks, permanent failures, transient failures, duplicate work, traps, and processor defects.
+{% /process-step %}
+{% process-step number="3" title="Contain" label="Action" %}
+Delay, circuit-break, quarantine, or reduce priority for the smallest affected host or URL pattern.
+{% /process-step %}
+{% process-step number="4" title="Recover" label="Review" %}
+Replay bounded dead-letter work after the policy, parser, or remote-host condition has changed.
+{% /process-step %}
+{% /process-flow %}
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Choose explicit trade-offs and the next maturity step" %}
+
+## Optimize for useful coverage, not raw request volume
+
+There is no universally correct crawl order. The right choice depends on whether the product values breaking news, broad coverage, archival retention, or low operational risk. Record the trade-off so operators do not quietly optimize the wrong number.
+
+| Decision | Conservative default | Cost | Escalate when |
+| --- | --- | --- |
+| URL deduplication | Probabilistic filter plus exact backing store | More lookup latency and state | High-value URLs are delayed by false positives |
+| Host ownership | Stable domain-hash partition | Rebalancing can move policy state | A few hosts create hot partitions |
+| Freshness | Recrawl from observed change history | New pages may wait longer | Product needs near-real-time coverage |
+| Rendering | Fetch raw responses first | Misses client-rendered links | Evidence shows important coverage gaps |
+
+### Risks and extensions
+
+- Add a renderer queue only after it has a distinct budget, sandbox, response limit, and per-host concurrency policy; browser rendering must not silently borrow ordinary fetch capacity.
+- Move from static scores to learned crawl priority only when logged outcomes can show that freshness improves without reducing host-delay compliance.
+- Support content deletion, retention, and access-request workflows before expanding long-term body storage.
+
+The durable design lesson is simple: the frontier decides what the fleet is permitted to do next. Its host-level state is as important as its global priority score.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/web-crawler/quiz/web-crawler.json" lessonSlug="web-crawler" title="Review the crawler design" /%}

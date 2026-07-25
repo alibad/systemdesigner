@@ -1,0 +1,275 @@
+---
+registryId: case-study-github-collaboration
+---
+
+{% section-card tone="intro" %}
+## What is GitHub collaboration architecture?
+
+GitHub collaboration architecture is the system that turns a Git repository into a shared development workflow. It stores immutable source objects and branch references, then coordinates pull requests, reviews, required checks, merges, search, notifications, automation, audit records, and webhooks around that repository truth.
+
+In plain language: the branch must say exactly which code is accepted even when thousands of slower follow-up tasks are still running. A safe design keeps the protected reference authoritative and lets derived systems catch up without blocking or rewriting history.
+
+{% callout variant="info" %}
+### Core invariant
+
+A protected branch advances only after policy is revalidated for the exact candidate commit and the expected target head. Search, Actions, notifications, audit, and webhooks consume the committed result; none of them may become the source of truth for repository history.
+{% /callout %}
+{% /section-card %}
+
+This case study uses an illustrative planning envelope of **18K repository events per second**, **12 downstream subscribers per event**, and **30% delivery headroom**. These figures make the capacity decisions concrete; they are not claims about GitHub's private production deployment. Review [event-driven architecture](/fundamentals/event-driven-architecture) and [message queues](/fundamentals/message-queues) first if durable events, retries, or consumer offsets are new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the collaboration promise and scope" %}
+
+## The product coordinates change without weakening Git history
+
+A collaboration request is not just a database update. A push creates immutable Git objects and proposes reference changes. A pull request adds review state around candidate commits. A merge must reconcile the candidate with the current target branch, enforce policy, and publish one durable outcome that downstream products can observe.
+
+### Functional requirements
+
+- Store and retrieve commits, trees, blobs, tags, and branch references for private and public repositories.
+- Accept pushes and pull requests while preserving repository permissions and object integrity.
+- Support inline review, approvals, requested changes, required status checks, and branch protection.
+- Merge only an authorized candidate that is compatible with the current target head.
+- Publish committed events to search, notifications, Actions, audit, analytics, and customer webhooks.
+- Let operators inspect retries, replay failed deliveries, and explain why a merge was accepted or rejected.
+
+### Non-functional requirements
+
+- Keep repository writes durable even when a derived consumer is slow or unavailable.
+- Prevent lost updates when two merges race for the same target branch.
+- Bind review and status evidence to exact commit identities, not mutable pull-request labels.
+- Bound event backlog and webhook retries so one repository or subscriber cannot exhaust the shared fleet.
+- Preserve tenant isolation, least-privilege credentials, auditability, and explicit retention policies.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+This lesson designs repository collaboration, protected merges, and event delivery. Git protocol internals, a complete code-search engine, runner sandbox implementation, billing, and AI code generation are separate systems even though they connect to this platform.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Turn repository events into a fan-out budget" %}
+
+## One durable event can create many delivery attempts
+
+The source event rate is only the beginning of the capacity model. A merged pull request may update search, notify participants, trigger workflows, append audit data, feed analytics, and enqueue several customer webhooks. The delivery tier must therefore plan around **event rate x average subscribers**, not event rate alone.
+
+{% metric-strip %}
+{% metric value="18K/s" label="Source events" detail="Illustrative peak pushes, merges, comments, and check updates" tone="blue" /%}
+{% metric value="12" label="Average subscribers" detail="Independent internal and external destinations per event" tone="violet" /%}
+{% metric value="216K/s" label="Delivery attempts" detail="18K events/s multiplied by 12 subscribers" tone="amber" /%}
+{% metric value="30%" label="Reserved headroom" detail="Capacity for retries, skew, worker loss, and replay" tone="green" /%}
+{% /metric-strip %}
+
+### Event and fan-out capacity lab
+
+Change the source rate, average subscriber count, payload size, and worker fleet. Watch the exact delivery rate, event egress, operating-target pressure, and backlog consequence move together. Increasing subscribers teaches amplification; increasing workers teaches how much capacity is needed to absorb it.
+
+{% interactive-block id="case-studies/github-collaboration-event-fanout-capacity-lab" /%}
+
+### What the calculation changes operationally
+
+- **Subscriber count multiplies work:** adding one consumer to every event can cost more than a modest increase in repository writes.
+- **Payload size multiplies network pressure:** event envelopes should carry stable identifiers and necessary context, while large blobs remain in owned storage.
+- **Raw benchmarks are not an operating target:** retries, hot repositories, uneven partitions, and worker loss consume the reserved headroom.
+- **Backlog is a freshness budget:** queue depth alone is incomplete; measure the age of the oldest undelivered event for each consumer.
+
+{% callout variant="tip" %}
+Load-test the fan-out tier with a hot repository, a slow subscriber, a retry burst, and one failed worker zone. A healthy average can hide partition skew and an old-event tail.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate repository truth from derived collaboration views" %}
+
+## The synchronous path ends after an authorized durable update
+
+The merge request needs policy evidence and one atomic reference change. Everything that can safely converge later should leave through a durable event boundary. This separation protects developer-facing write latency and stops a webhook or search incident from becoming a repository outage.
+
+{% system-flow title="Protected merge and asynchronous collaboration path" caption="The protected reference commits once; replayable consumers derive their own views from the resulting event." %}
+{% system-node title="Merge coordinator" eyebrow="Authorize" icon="shield" tone="violet" %}
+
+Load the candidate SHA, current target head, permissions, reviews, required checks, and branch policy. Reject evidence that belongs to a different commit.
+
+{% /system-node %}
+{% system-node title="Git objects and refs" eyebrow="Commit" icon="storage" tone="green" %}
+
+Verify objects exist, atomically advance the target reference only if its old value still matches, and durably record the reference transition for publication.
+
+{% /system-node %}
+{% system-node title="Durable event log" eyebrow="Publish" icon="activity" tone="cyan" %}
+
+Tail the durable reference journal or outbox and append a versioned event with the repository, actor, old and new references, policy version, and trace ID.
+
+{% /system-node %}
+{% system-node title="Independent consumers" eyebrow="Converge" icon="network" tone="blue" %}
+
+Update search, notifications, Actions, audit, analytics, and webhook queues with separate offsets, retries, and service-level objectives.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership boundaries
+
+- **Repository service** owns Git objects, references, visibility, authorization, and the durable journal or outbox for committed reference transitions.
+- **Merge coordinator** owns policy evaluation, commit-bound evidence, mergeability, and compare-and-swap retries.
+- **Event platform** owns durable publication, partition ordering, retention, consumer offsets, and replay controls.
+- **Derived products** own their indexes, schedules, notification state, and delivery histories; they do not write branch truth.
+- **Webhook service** owns signing, subscriber isolation, bounded retries, dead-letter handling, and delivery observability.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model immutable identity and replayable outcomes" %}
+
+## Mutable workflow names must resolve to immutable commits
+
+Pull-request numbers, branch names, check names, and review labels are convenient handles, but they can change while a developer is looking at them. Safety comes from recording which immutable commit and which target-head version each decision used.
+
+### Minimum authoritative records
+
+- **Git object:** content-addressed ID, object type, size, storage location, integrity state, and reachability metadata.
+- **Protected reference:** repository ID, reference name, current object ID, monotonically increasing version, protection-policy version, update time, and durable publication intent.
+- **Pull-request snapshot:** source and target references, candidate commit, merge-base commit, author, draft state, and last synchronization time.
+- **Review evidence:** reviewer, disposition, reviewed commit, team or ownership rule, dismissal state, and policy version.
+- **Status evidence:** check name, exact commit SHA, conclusion, attempt, producer identity, completion time, and artifact link.
+
+### Minimum asynchronous records
+
+- **Repository event:** event ID, repository, actor, event type, old and new object IDs, schema version, commit time, and trace ID.
+- **Consumer offset:** subscriber, partition, last completed position, lease owner, update time, and replay mode.
+- **Webhook delivery:** stable delivery ID, endpoint, event ID, attempt count, next attempt, response class, completion state, and dead-letter reason.
+- **Audit record:** actor, action, resource, authorization context, policy decision, request identity, region, and tamper-evident retention metadata.
+
+{% callout variant="info" %}
+### Why keep policy and evidence versions?
+
+An operator must be able to explain a past merge without evaluating today's rules against yesterday's commits. Versioned evidence shows which candidate, target head, checks, reviews, and protection policy produced the decision.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Make the merge a validated compare-and-swap" %}
+
+## Policy evaluation and reference update must agree on the same heads
+
+Two developers can request merges at nearly the same time. If both coordinators read the same target head and then write unconditionally, one update can hide the other. The safe design treats the branch update as a compare-and-swap: advance from the expected old object ID to the chosen new object ID, or fail and recompute.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the candidate" label="Identity" %}
+
+Resolve the pull request to an exact candidate SHA and read the current protected target head. Do not authorize a moving branch-name pair.
+
+{% /process-step %}
+{% process-step number="2" title="Revalidate evidence" label="Policy" %}
+
+Check permissions, required reviews, status results for the candidate SHA, mergeability against the target head, and the active protection-policy version.
+
+{% /process-step %}
+{% process-step number="3" title="Advance atomically" label="Commit" %}
+
+Create or verify the merge result, then update the protected reference only when its stored old head still equals the expected target head. Persist the ref-change journal record or outbox intent in the same authoritative operation.
+
+{% /process-step %}
+{% process-step number="4" title="Publish the outcome" label="Fan-out" %}
+
+Publish the committed journal record with stable identity. Derived consumers process it asynchronously and can replay without creating another merge.
+
+{% /process-step %}
+{% /process-flow %}
+
+### Race and policy rules
+
+- A changed candidate SHA invalidates status checks and approvals whose policy requires review of the latest code.
+- A moved target head invalidates the previous mergeability result and compare-and-swap expectation.
+- A failed compare-and-swap does not imply data loss; it means another valid update won and this merge must recompute.
+- A successful reference update must not be repeated merely because event delivery acknowledgement was lost.
+- A merge queue can serialize or batch compatible candidates, but each resulting reference transition still needs explicit identity and evidence.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Isolate stale merge evidence and webhook failure" %}
+
+## Fail closed on merge authority and recover asynchronously after commit
+
+Merge failures and webhook failures belong to different consistency domains. Stale evidence must prevent the protected reference from moving. A slow external endpoint must not undo a valid merge or block unrelated consumers.
+
+### Merge and webhook failure topology
+
+Switch among the healthy merge, stale-check, moved-head, webhook-timeout, and dead-letter scenarios. The active route, failed or degraded component, and user-visible result change together. Inspect individual nodes to see which component owns the decision.
+
+{% topology-lab dataFile="/api/content/case-studies/github-collaboration/data/merge-webhook-failure-topology.json" /%}
+
+### An at-least-once webhook worker
+
+The worker sends a stable delivery ID, records successful completion, retries transient failure with capped exponential backoff and jitter, and dead-letters exhausted work. A timeout can occur after the receiver accepted the request but before the sender recorded success, so the receiver must deduplicate by delivery ID.
+
+{% code-block file="/api/content/case-studies/github-collaboration/code/webhook-delivery-worker.ts" language="typescript" title="Bounded webhook delivery with stable identity" /%}
+
+### Failure rules worth writing down
+
+- **Stale status evidence:** reject it and wait for checks tied to the current candidate SHA.
+- **Moved target head:** fail the atomic update, recompute mergeability, and reevaluate policy against the new head.
+- **Webhook timeout:** retain the successful merge, retry the same delivery identity, and never infer that timeout means rejection.
+- **Repeated subscriber failure:** move only that delivery to a dead-letter queue; keep other destinations and consumers advancing.
+- **Consumer replay:** make derived writes idempotent and version-aware so replay repairs missing work without duplicating side effects.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make consistency, freshness, and isolation trade-offs explicit" %}
+
+## Strong repository authority permits weaker derived freshness
+
+The platform should spend coordination where a mistake would corrupt or bypass repository policy. It can use asynchronous convergence where a short delay is visible but repairable.
+
+### Decision guide
+
+- **Synchronous branch policy, asynchronous side effects**
+    - Protects repository correctness and keeps external failures off the merge path.
+    - Allows temporary lag in search, notifications, workflow starts, and webhooks.
+    - Requires a durable publication boundary and visible freshness objectives per consumer.
+- **Per-consumer queues instead of one shared acknowledgement**
+    - Isolates a slow webhook or indexer and supports independent retry policies.
+    - Adds offsets, queue ownership, replay controls, and more operational state.
+    - Prevents the weakest subscriber from defining platform availability.
+- **At-least-once webhook delivery instead of a distributed transaction**
+    - Survives sender crashes and uncertain external responses with practical retry semantics.
+    - Can produce duplicate attempts, so stable delivery IDs and receiver idempotency are part of the contract.
+    - Cannot promise exactly-once effects across an uncoordinated customer endpoint.
+- **Reference compare-and-swap instead of a global repository lock**
+    - Preserves concurrent work and makes races explicit at the affected branch.
+    - Can force merge recomputation under contention.
+    - Avoids serializing unrelated repositories or branches behind one coordinator.
+
+{% callout variant="warn" %}
+Do not call the platform healthy from merge latency alone. A system can preserve branch correctness while silently accumulating hours of webhook, search, or workflow lag. Correctness and derived freshness need separate service-level indicators.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Operate the repository and fan-out planes together" %}
+
+## Measure authority, backlog age, and recovery evidence
+
+Operations should answer three questions continuously: can an authorized repository change commit safely, how stale is each derived view, and can failed work be replayed without creating new side effects?
+
+### Metrics that should trigger action
+
+- **Repository authority:** push and merge success rate, policy rejection reason, compare-and-swap conflict rate, reference-update latency, object-integrity errors, and permission-denial anomalies.
+- **Event publication:** commit-to-event latency, append failures, partition skew, retained-event age, producer retry rate, and event-schema compatibility.
+- **Consumer freshness:** oldest unprocessed event age, queue depth, processing rate, offset stalls, replay volume, and idempotency conflicts per subscriber.
+- **Webhook delivery:** first-attempt success, terminal success, latency by endpoint class, retry rate, dead-letter age, signature failures, and disabled noisy destinations.
+- **Developer impact:** time from merge to searchable code, workflow start, notification delivery, audit visibility, and webhook completion.
+
+### Incident and release sequence
+
+1. Confirm whether repository truth is safe before repairing derived views; never roll back a valid branch merely to hide consumer lag.
+2. Identify the affected event partitions, repositories, or webhook destinations and isolate the smallest failing scope.
+3. Protect healthy consumers by pausing or rate-limiting the failing destination, then preserve its offset and replay identity.
+4. Restore capacity or compatibility, replay a bounded window, and verify idempotency plus monotonic version handling.
+5. Compare source reference transitions with consumer outcomes, account for every dead-letter item, and revise the tested capacity or retry assumption.
+
+The durable lesson is that collaboration combines one strict authority with many repairable views. Protected references need exact identity and atomic updates; fan-out needs durable events, explicit headroom, subscriber isolation, and observable replay.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/github-collaboration/quiz/github-collaboration.json" lessonSlug="github-collaboration" title="Review the collaboration architecture" /%}

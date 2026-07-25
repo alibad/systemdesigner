@@ -1,0 +1,106 @@
+name: versioned-ai-evaluation
+
+on:
+  pull_request:
+    paths:
+      - "prompts/**"
+      - "retrieval/**"
+      - "tools/**"
+      - "evaluations/**"
+  workflow_dispatch:
+    inputs:
+      candidate_id:
+        description: Immutable candidate release ID
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: eval-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes -r evaluations/requirements.lock
+      - name: Validate prompts, schemas, and tools
+        run: python -m evaluations.smoke --manifest evaluations/release-manifest.yaml
+      - name: Upload immutable smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-evidence-${{ github.sha }}
+          path: artifacts/smoke-evidence.json
+          if-no-files-found: error
+
+  candidate-comparison:
+    needs: deterministic-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: evaluation-secrets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes -r evaluations/requirements.lock
+      - name: Run frozen candidate-versus-baseline protocol
+        env:
+          EVALUATION_PROVIDER_TOKEN: ${{ secrets.EVALUATION_PROVIDER_TOKEN }}
+        run: |
+          python -m evaluations.compare \
+            --candidate-manifest evaluations/candidate.yaml \
+            --baseline-manifest evaluations/baseline.yaml \
+            --protocol evaluations/protocol-v17.yaml \
+            --output artifacts/comparison.json
+      - name: Apply uncertainty and critical-slice gates
+        run: |
+          python -m evaluations.gate \
+            --comparison artifacts/comparison.json \
+            --policy evaluations/release-policy-v9.yaml \
+            --decision artifacts/release-decision.json
+      - name: Upload reviewable evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: |
+            artifacts/comparison.json
+            artifacts/release-decision.json
+            artifacts/disagreements.jsonl
+          if-no-files-found: error
+
+  authorize-canary:
+    needs: candidate-comparison
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: artifacts
+      - name: Verify decision and create bounded rollout request
+        run: |
+          python -m evaluations.authorize \
+            --decision artifacts/release-decision.json \
+            --candidate-id "${{ inputs.candidate_id }}" \
+            --maximum-exposure 5 \
+            --require-rollback-target \
+            --require-abort-signals \
+            --output artifacts/canary-request.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canary-request-${{ github.sha }}
+          path: artifacts/canary-request.json
+          if-no-files-found: error

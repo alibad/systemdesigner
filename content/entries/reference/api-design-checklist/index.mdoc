@@ -1,0 +1,201 @@
+---
+registryId: reference-api-design-checklist
+---
+
+{% section-card tone="intro" %}
+## What is an API design checklist?
+
+An API design checklist is a repeatable review of the agreement between a caller and a service. It checks whether the interface names the resource and owner, limits who may act, describes normal and error responses, survives retries, evolves without surprising clients, and leaves enough evidence to operate it.
+
+It matters because an API is not just an endpoint that works once. It is a promise other software will automate for years. A payment endpoint that accepts the same request twice, a list endpoint that can return every record, or an error that gives no recovery guidance can turn an ordinary network problem into lost money, downtime, or a support incident.
+
+The core invariant is: **for the same valid request, identity, and documented preconditions, the API has one predictable meaning for authorization, success, failure, and retry.** Names, versions, pagination, telemetry, and deployment policies all preserve that meaning.
+
+Before continuing, review [API Design Fundamentals](/fundamentals/api-design) for HTTP and resource basics. [API Patterns](/reference/api-patterns) explains when to choose a resource, operation, graph, or event boundary.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Review the contract in dependency order
+
+An API review is easier when earlier decisions constrain later ones. First establish the thing being controlled and its owner. Then protect the boundary, make outcomes recoverable, and finally prove that the contract is working in production.
+
+{% process-flow %}
+{% process-step number="1" title="Name the resource and owner" label="Meaning" %}
+Define the resource identity, lifecycle, authoritative service, permitted operations, and whether an action is synchronous or creates a tracked operation.
+{% /process-step %}
+{% process-step number="2" title="Protect each request" label="Trust" %}
+Authenticate the caller, authorize this resource and action, validate input, constrain cost, and avoid putting secret or unbounded data in URLs or logs.
+{% /process-step %}
+{% process-step number="3" title="Specify outcomes and retries" label="Recovery" %}
+Publish successful representations, stable error codes, retryability, idempotency behavior, deadlines, concurrency preconditions, and pagination bounds.
+{% /process-step %}
+{% process-step number="4" title="Evolve and operate it" label="Evidence" %}
+Test compatibility, trace one request, measure outcomes, publish deprecation dates, and rehearse rollback and uncertain-write recovery.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep these responsibilities separate
+
+{% concept-grid columns="3" %}
+{% concept-card title="Authentication" eyebrow="Who is calling?" icon="key" tone="blue" %}
+Verify a credential and resolve its principal. A valid token says who the caller is; it does not, on its own, permit every action.
+{% /concept-card %}
+{% concept-card title="Authorization" eyebrow="May they do this?" icon="shield" tone="violet" %}
+Check tenant, scope, ownership, role, and state at the resource boundary. The service must prevent a caller from acting on another tenant's payment.
+{% /concept-card %}
+{% concept-card title="Idempotency" eyebrow="Is this one intent?" icon="repeat" tone="amber" %}
+Recognize a replay of the same non-idempotent business action. It does not authorize a caller or make a changed request body safe.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab: turn review choices into release gates
+
+Review a public payment-creation API. Choose the contract decision for each boundary. The lab calculates completeness and severity, identifies release blockers, and orders remediation. A checked-looking option alone has no value: every choice must have a test, documented behavior, and operating evidence.
+
+{% interactive-block id="reference/api-design-checklist-contract-readiness-lab" dataFile="/api/content/reference/api-design-checklist/data/contract-readiness-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Specify the request path before implementation
+
+Every request should cross named controls in a bounded order. This makes responsibility visible and gives failures one place to become a stable client result rather than a framework exception.
+
+{% system-flow title="A recoverable payment request" caption="The service owns the resource-level decision and records enough evidence to recognize one logical write." %}
+{% system-node title="Gateway verifies credentials" eyebrow="Authentication" icon="key" tone="blue" %}
+Reject invalid credentials early, apply coarse abuse controls, and pass a verified principal plus correlation ID. Do not treat gateway validation as resource permission.
+{% /system-node %}
+{% system-node title="Payments service authorizes and validates" eyebrow="Boundary" icon="shield" tone="violet" %}
+Check tenant and scope for this order, validate the amount and currency, and apply concurrency or business-state preconditions before creating any durable effect.
+{% /system-node %}
+{% system-node title="Idempotency store resolves one intent" eyebrow="Replay" icon="repeat" tone="amber" %}
+Bind a caller-scoped key and request fingerprint to one result or in-progress operation. A reused key with a different body is a client error, not a new payment.
+{% /system-node %}
+{% system-node title="Return a documented outcome" eyebrow="Evidence" icon="activity" tone="green" %}
+Return the stable status, representation or error envelope, correlation ID, and retry semantics. Emit bounded metrics and traces for the same outcome.
+{% /system-node %}
+{% /system-flow %}
+
+### Define the response contract deliberately
+
+- **Success:** specify the status, resource location or operation ID, fields guaranteed now, and any state that may still be pending. Use `201 Created` for a newly created resource and `202 Accepted` only when durable acceptance is separate from completion.
+- **Client errors:** distinguish invalid shape or range (`400`), absent or invalid authentication (`401`), insufficient permission (`403`), missing resource (`404`), state conflict or stale precondition (`409` or `412`), and exhausted rate policy (`429`).
+- **Server and dependency errors:** do not expose stack traces. Return a stable machine code, safe human detail, correlation ID, and documented retry behavior. A generic `500` cannot tell a caller whether repeating an irreversible write is safe.
+- **Collections:** define an opaque cursor, stable ordering, maximum page size, filters, and continuation metadata. Offset pagination can be acceptable for small static data, but becomes slow and unstable when rows are inserted or deleted between pages.
+
+{% callout variant="warn" %}
+A timeout tells the client that it lacks a response, not that the server did no work. For a non-idempotent write, document the status lookup or same-key replay path before allowing automatic retries.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement one logical payment, not one network attempt
+
+For a payment creation, store the idempotency key with the authenticated caller, a request fingerprint, the durable outcome, and an expiry window. Make the binding and state transition atomic at the payment owner. Return the first result for a valid replay; reject the same key when its fingerprint changes.
+
+{% code-block file="/api/content/reference/api-design-checklist/code/idempotent-payment-contract.http" language="http" title="A payment contract with replay and correlation evidence" /%}
+
+The example does not make every POST automatically safe. The server still needs authorization, input validation, payment-provider reconciliation, and a policy for how long the replay record remains valid. If work is long-running, return an operation resource whose status can be read instead of pretending `202 Accepted` means the payment completed.
+
+### Protect concurrent changes too
+
+Use an explicit precondition when a client is changing state it previously read:
+
+- Return a version or ETag with the representation.
+- Require `If-Match` or an equivalent version on a conditional update.
+- Reject a stale write with a conflict response that tells the client to refresh and decide again.
+- Do not use a blind last-write-wins update for balances, inventory, or approval state unless that loss is the explicit business rule.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: combine a contract change with an uncertain write
+
+Change the versioning and rollout policy, then place a timeout and retry on `POST /payments`. This is a different decision from readiness review: it tests whether an old consumer can keep working while the server can still prove one payment intent. Watch client breakage, server state, recovery, and migration risk move together.
+
+{% interactive-block id="reference/api-design-checklist-change-retry-lab" dataFile="/api/content/reference/api-design-checklist/data/change-retry-scenarios.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Evolve without silently changing meaning
+
+Backward compatibility means an existing client can continue using documented behavior. It is broader than JSON parsing: changing a required field, authorization rule, error code, pagination order, default, or retryability can all break a client that was following the previous contract.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Additive change" eyebrow="Usually safe" icon="plus" tone="green" %}
+Add an optional response field, endpoint, or enum value only when documented clients can ignore it. Keep old semantics intact and test generated clients that might treat unknown values strictly.
+{% /concept-card %}
+{% concept-card title="Versioned migration" eyebrow="Intentional break" icon="git-branch" tone="blue" %}
+Publish a new contract, migration guide, SDK support, telemetry for old consumers, and a support window. Versioning creates time to migrate; it does not repair an unclear change.
+{% /concept-card %}
+{% concept-card title="Deprecation and sunset" eyebrow="Operations work" icon="calendar-clock" tone="amber" %}
+Announce a date, warn through documentation and response metadata, contact active consumers, track remaining usage, and keep a rollback path until the transition is proven.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Run compatibility checks in delivery
+
+1. Diff the OpenAPI or schema contract and flag removed fields, required additions, changed enums, status changes, and altered retry semantics.
+2. Run provider and consumer contract tests against the candidate release, including old supported client versions.
+3. Shadow or canary the route, then break down errors, latency, and usage by API version, consumer version, tenant tier, and release version using bounded labels.
+4. Keep an executable rollback plan. Database and event changes may require forward repair rather than application rollback, so state the repair owner before deployment.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the API as a product boundary
+
+Documentation is part of the interface. Publish examples for successful calls, authentication, pagination, concurrency conflicts, rate limiting, error recovery, and idempotent retries. Keep the specification generated or verified in CI so examples cannot drift from behavior.
+
+### Minimum operating evidence
+
+- **Request outcome:** request count, success and error ratio by route template, status class, stable error code, and API version. Never use raw IDs, keys, or free-form messages as metric labels.
+- **Latency and dependencies:** p50, p95, and p99 latency; timeout ratio; connection wait; downstream result; and remaining deadline. Averages hide a slow tail that clients may retry.
+- **Write safety:** idempotency replay count, key-fingerprint mismatch count, duplicate reconciliation count, conditional-write conflicts, and operation completion age.
+- **Consumer migration:** supported version traffic, deprecated version traffic, client or SDK version where available, and remaining high-value consumers before sunset.
+- **Traceability:** propagate a correlation ID through the gateway, service, database or queue boundary, and response. Log the ID with structured, redacted event fields.
+
+{% accordion defaultOpen="uncertain-write" %}
+{% accordion-item id="uncertain-write" title="A client times out after the payment commits" %}
+
+The durable result may exist while the caller has no response. Do not create a new idempotency key and retry automatically.
+
+- Retry with the same caller-scoped key and request fingerprint, or read the operation or payment state using a stable business reference.
+- Return the recorded result when the key maps to the same intent; reject a changed request body for that key.
+- Trace the correlation ID through the payment provider and reconciliation job so support can determine whether money moved.
+
+{% /accordion-item %}
+{% accordion-item id="authorization-drift" title="A gateway allows a token but the resource belongs to another tenant" %}
+
+Authentication succeeded, but the action is still forbidden. The payments service must authorize the target resource before revealing its existence or mutating it.
+
+- Test cross-tenant reads and writes, scope reduction, token expiry, and service-to-service delegation.
+- Return a deliberate denial response consistent with your information-disclosure policy.
+- Alert on unusual authorization-denial patterns without logging raw credentials or sensitive payment data.
+
+{% /accordion-item %}
+{% accordion-item id="pagination-pressure" title="A history endpoint becomes expensive as records grow" %}
+
+An unbounded list can exhaust database capacity and bandwidth even when every request is valid.
+
+- Enforce an upper page size, stable sort, opaque cursor, and response-size budget.
+- Index the selected order and filter shape; reject unsupported broad queries rather than hiding a full scan behind a slow response.
+- Measure rows scanned, payload bytes, cursor continuation depth, and slow-query rate by route template.
+
+{% /accordion-item %}
+{% accordion-item id="version-sunset" title="A deprecated client still calls v1 near its sunset date" %}
+
+Removing a supported version without evidence turns a planned change into an outage for the last consumers.
+
+- Contact owners using active v1 traffic, publish migration examples, and provide a test environment or dual-read period where relevant.
+- Gate final removal on measured traffic and migration completion, not on a calendar date alone.
+- Keep the deprecation message, usage dashboard, and rollback decision documented for incident responders.
+
+{% /accordion-item %}
+{% /accordion %}
+{% /section-card %}
+
+{% section-card %}
+## Check your API design decisions
+
+{% quiz questionsFile="/api/content/reference/api-design-checklist/quiz/api-contract-readiness.json" lessonSlug="api-design-checklist" title="API Contract Readiness Check" /%}
+{% /section-card %}

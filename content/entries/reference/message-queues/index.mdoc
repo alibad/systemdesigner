@@ -1,0 +1,175 @@
+---
+registryId: message-queues
+---
+
+{% section-card tone="intro" %}
+## What is a message queue?
+
+A message queue is durable, asynchronous handoff between software services. A producer records a message such as `order.created`; a broker holds it; one or more consumers perform work later. The producer does not need to wait for the consumer to finish.
+
+Message queues matter when a user action, a traffic spike, or a slow dependency should not make every service fail together. They absorb short bursts, let work scale independently, and make retries and recovery explicit instead of hiding them in a request timeout.
+
+The core invariant is: **every accepted message must have one observable outcome: it is processed, deliberately retried, deliberately dead-lettered, or deliberately expired.** Queue depth alone is not success. A consumer must make the business effect correct when a message is delayed or delivered more than once.
+
+For first principles, start with [Message Queues](/fundamentals/message-queues). This reference focuses on sizing, delivery contracts, and operating the system under failure.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace the handoff and name the ownership boundary
+
+The broker owns durable delivery and retention. The consumer owns the business effect. Neither role can prove the other's state from a network response alone, so the acknowledgement point and a stable message identity are part of the system contract.
+
+{% system-flow title="A durable work-queue path" caption="The acknowledgement follows the durable business effect. Retry and dead-letter paths keep failures visible rather than silently dropping them." %}
+{% system-node title="Producer" eyebrow="Publish" icon="send" tone="blue" %}
+
+Choose a stable event ID, partition key, schema version, and deadline. Retry only when the publish operation can be identified safely.
+
+{% /system-node %}
+{% system-node title="Broker" eyebrow="Buffer" icon="database" tone="cyan" %}
+
+Persist the message, route it to a partition or queue, enforce retention, and expose lag and redrive state.
+
+{% /system-node %}
+{% system-node title="Consumer" eyebrow="Effect" icon="settings" tone="violet" %}
+
+Apply one durable effect or record a duplicate-safe result. Acknowledge only after that evidence exists.
+
+{% /system-node %}
+{% system-node title="Recovery owner" eyebrow="Repair" icon="shield-alert" tone="amber" %}
+
+Use delayed retry for transient failure and a dead-letter queue for bounded, accountable repair and replay.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Decide the workload shape before selecting a product
+
+{% concept-grid columns="3" %}
+{% concept-card title="Work queue" eyebrow="One worker owns one task" icon="list-todo" tone="blue" %}
+Use for background jobs such as image conversion, email delivery, or payment capture. Competing consumers raise throughput; a completed task can be removed.
+{% /concept-card %}
+{% concept-card title="Event stream" eyebrow="Many readers observe a fact" icon="radio" tone="violet" %}
+Use when independent consumers need their own cursor and replay window, such as analytics, audit, indexing, or materialized views.
+{% /concept-card %}
+{% concept-card title="Delayed or routed work" eyebrow="Broker chooses a path" icon="route" tone="amber" %}
+Use when priority, delay, routing rules, or request-reply behavior matter more than a long replayable log.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: expose the capacity bottleneck
+
+Producer rate is not the same as useful throughput. Retries create extra deliveries, and consumer parallelism cannot exceed the number of usable partitions. Change the inputs until the model enters overload, then identify whether another consumer, another partition, faster service, or less retry pressure is the first useful change.
+
+{% interactive-block id="reference/message-queues-capacity-lab" dataFile="/api/content/reference/message-queues/data/capacity-model.json" /%}
+
+### Read the model as an operational invariant
+
+- **Ingress** includes both original messages and retry deliveries. A retry storm can exhaust a healthy-looking consumer fleet without adding new customer work.
+- **Capacity** is bounded by `min(partitions, consumers)`. Adding consumers beyond partitions does not increase parallel consumption for a consumer group.
+- **Backlog age** is often more actionable than depth. It estimates how long the oldest work has waited and should be compared with a business deadline.
+- **Retention storage** scales with bytes and time. Keep payloads small and put large objects in object storage, sending a reference and integrity metadata through the queue.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Turn the estimate into a service-level plan
+
+Start from a target rather than a generic queue-depth rule. If a notification must be processed within 30 seconds, alert well before the oldest message age reaches 30 seconds. If the queue supports replay, provision storage for the retained production rate, not only the current backlog.
+
+{% process-flow %}
+{% process-step number="1" title="Measure the peak" label="Ingress" %}
+Record messages per second, bytes per message, burst duration, and retry amplification per message type. Use the peak, not a daily average.
+{% /process-step %}
+{% process-step number="2" title="Set the delay objective" label="Deadline" %}
+Name the maximum acceptable backlog age for each workflow. A password reset and a weekly index rebuild should not share one alert threshold.
+{% /process-step %}
+{% process-step number="3" title="Size owned parallelism" label="Capacity" %}
+Choose partitions from ordering-key distribution, then deploy enough consumers to use them. Benchmark the real handler with its database and downstream calls.
+{% /process-step %}
+{% process-step number="4" title="Reserve recovery room" label="Headroom" %}
+Keep headroom for a consumer rollout, an uneven key, a replay, and retries. Scale on sustained lag and utilization, not a single noisy sample.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="tip" %}
+Partitioning is an ordering decision before it is a scaling decision. Messages with the same key can be ordered within one partition; messages on different partitions have no global order. Do not increase partition count until the key and consumer behavior make that scope safe.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab: make delivery and failure consequences explicit
+
+“Exactly once” is not a property a broker can grant to an arbitrary external side effect. Choose an acknowledgement point, then inject redelivery and poison-message conditions. The model shows whether a duplicate is only a repeated delivery or can become a repeated business effect, plus what ordering and recovery behavior the chosen partitions and redrive policy create.
+
+{% interactive-block id="reference/message-queues-delivery-semantics-lab" dataFile="/api/content/reference/message-queues/data/delivery-semantics-model.json" /%}
+
+### Use delivery words precisely
+
+- **At-most-once** acknowledges before the effect. It avoids broker redelivery but accepts loss when the consumer crashes after acknowledgement.
+- **At-least-once** acknowledges after the effect. It avoids that loss path, but a lost acknowledgement can redeliver the message.
+- **Effectively-once** means the consumer turns an at-least-once delivery into one observable business result with a stable message identity and an atomic or compensating effect. It does not erase external side effects that cannot participate in that decision.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement the consumer around a stable message identity
+
+An idempotent consumer makes a replay harmless for a defined business operation. It does not merely log that a duplicate occurred. Store the consumer name and message ID with the business write in the same transaction when both use the same database; only then acknowledge the broker.
+
+{% code-block file="/api/content/reference/message-queues/code/idempotent-consumer.ts" language="typescript" title="Idempotent ledger consumer" /%}
+
+When the business effect is in another system, use that system's idempotency key or an outbox/inbox pattern. A database transaction cannot make an email provider, payment gateway, or object store transactional by itself. Preserve the message ID, correlation ID, attempt count, and result so an operator can reconcile uncertain work.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Handle failure without turning retries into an outage
+
+Failures have different recovery paths. Treat them differently so a permanent defect does not consume the entire queue or hide a missing side effect.
+
+- **Transient dependency failure:** retry with a bounded attempt count, deadline, exponential backoff, and jitter. Record the reason and next-visible-at time.
+- **Poison message:** stop unbounded retry. Send the payload reference, schema version, error class, attempts, and correlation ID to a dead-letter queue with an accountable repair owner.
+- **Consumer crash after effect:** assume a duplicate delivery is possible. Query or reserve the stable message identity before repeating the business effect.
+- **Hot partition:** add consumers only when idle partitions exist. If one key dominates, changing the partition count cannot distribute that key; redesign the key or serialize its work deliberately.
+- **Schema incompatibility:** validate at the boundary, retain a compatible decoder for the replay period, and quarantine messages that no deployed consumer can understand.
+
+### Redrive is a product decision
+
+Dead-lettering frees the main path, but replaying repaired work later can violate the business sequence. Some workflows must hold a partition and accept delay; others can process later events and compensate when the repaired event returns. Document the policy per message type instead of applying one broker default everywhere.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose a system by the responsibility you can operate
+
+{% concept-grid columns="2" %}
+{% concept-card title="Managed queue" eyebrow="Operational simplicity" icon="cloud" tone="blue" %}
+Managed services fit task delivery when a team wants durable buffering, retry, and access control without running broker nodes. Confirm visibility timeout, ordering scope, throughput limits, and dead-letter behavior.
+{% /concept-card %}
+{% concept-card title="Routing broker" eyebrow="Tasks and protocols" icon="git-fork" tone="amber" %}
+Routing-oriented brokers fit work queues with acknowledgement, priority, delay, request-reply, and flexible delivery rules. Plan cluster recovery and per-queue hot spots.
+{% /concept-card %}
+{% concept-card title="Distributed log" eyebrow="Replay and fan-out" icon="history" tone="violet" %}
+Log-based systems fit retained events, independent consumer positions, high throughput, and replay. Operate partitions, storage, rebalancing, schema evolution, and hot keys deliberately.
+{% /concept-card %}
+{% concept-card title="Ephemeral pub/sub" eyebrow="Fast best effort" icon="zap" tone="green" %}
+Ephemeral delivery fits live hints and presence where a disconnected consumer may miss an update and can recover from another source. Do not use it as the only record for critical work.
+{% /concept-card %}
+{% /concept-grid %}
+
+The product names are secondary to the contract. Kafka-style logs are usually a strong fit for replayable streams; RabbitMQ-style brokers are often a strong fit for routed tasks; managed queues such as SQS reduce cluster operations. Each can be misused when delivery, ordering, retention, and recovery are left implicit.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate the backlog and the recovery path
+
+Alert on a small set of metrics that reveal whether the invariant is holding:
+
+- **Backlog age and consumer lag:** compare oldest-message age with the workflow deadline; segment by queue, consumer group, and priority.
+- **Ingress, throughput, and utilization:** detect sustained capacity gaps and retry amplification before storage or user-facing delay grows.
+- **Failures and redrive:** track retry attempts, dead-letter arrivals, poison-message reasons, and time-to-repair. A growing dead-letter queue is unfinished work, not successful isolation.
+- **Correctness:** measure duplicate suppression, idempotency-key conflicts, skipped messages, schema failures, and reconciliation outcomes.
+- **Storage and retention:** track bytes retained, partition skew, disk headroom, replay volume, and the age of the oldest retained record.
+
+Run a recovery drill: pause a consumer, inject a duplicate after a committed effect, poison one message, and replay a repaired item. The drill should prove the operator can find the message, explain its status, repair it, and verify exactly one intended business result.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/message-queues/quiz/message-queue-decisions.json" title="Message Queue Decision Review" /%}

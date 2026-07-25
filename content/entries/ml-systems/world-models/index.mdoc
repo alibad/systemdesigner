@@ -1,0 +1,222 @@
+---
+registryId: world-models
+---
+
+{% section-card tone="intro" %}
+## What is a world model?
+
+A **world model** is a learned model that predicts how an environment changes when an agent takes an action. It turns a stream of partial observations into an internal state, advances that state under candidate actions, and predicts consequences such as the next observation, reward, value, or safety event.
+
+In plain language: the agent uses a compact internal simulator to ask **"what is likely to happen if I do this?"** before acting.
+
+World models matter when real interaction is expensive, slow, or dangerous. They can improve data efficiency and support planning, but they also create a new failure mode: a policy may exploit mistakes in the learned model instead of solving the real task.
+
+{% callout variant="info" %}
+The core invariant is **decision usefulness, not visual realism**. A world model is useful only while its imagined action consequences remain accurate enough to support the next real decision.
+{% /callout %}
+{% /section-card %}
+
+{% process-flow %}
+{% process-step number="1" title="Observe a partial view" label="Sense" %}
+Receive pixels, telemetry, proprioception, events, or other measurements. An observation is evidence about the environment, not necessarily its complete state.
+{% /process-step %}
+{% process-step number="2" title="Infer a latent state" label="Believe" %}
+Combine the new observation with prior state and the previous action to estimate hidden variables that matter for prediction and control.
+{% /process-step %}
+{% process-step number="3" title="Imagine action outcomes" label="Roll out" %}
+Advance the learned dynamics under candidate actions and predict rewards, values, constraints, or future observations.
+{% /process-step %}
+{% process-step number="4" title="Choose a bounded plan" label="Decide" %}
+Compare candidate trajectories while penalizing uncertainty and rejecting plans that cross a safety boundary.
+{% /process-step %}
+{% process-step number="5" title="Act once and correct" label="Replan" %}
+Execute a limited action, observe reality again, update the latent state, and shorten or abandon the plan when evidence disagrees.
+{% /process-step %}
+{% /process-flow %}
+
+{% section-card %}
+## Separate the world, observation, belief, and action
+
+The environment has a state whether or not the agent can see it. A camera frame or sensor reading is only an observation generated from that state. The agent therefore needs a **belief state**: a compact summary of what may be true now, conditioned on prior observations and actions.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Environment state" eyebrow="What is true" icon="globe" tone="neutral" %}
+The task-relevant physical or logical state, including hidden variables. In a warehouse this could include obstacle positions, floor friction, and another robot behind a shelf.
+{% /concept-card %}
+{% concept-card title="Observation model" eyebrow="What is sensed" icon="search" tone="blue" %}
+Describes how hidden state produces measurements. Occlusion, noise, delay, and missing sensors mean different states can produce similar observations.
+{% /concept-card %}
+{% concept-card title="Latent belief" eyebrow="What is inferred" icon="layers" tone="violet" %}
+Compresses history into a state useful for predicting consequences. A recurrent state-space model can combine deterministic memory with stochastic uncertainty.
+{% /concept-card %}
+{% concept-card title="Action model" eyebrow="What can change" icon="route" tone="green" %}
+Predicts how each candidate action changes latent state. Without action conditioning, the model forecasts motion but cannot support counterfactual planning.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A useful latent state preserves control-relevant information
+
+- It remembers evidence that is no longer visible in the latest frame.
+- It separates uncertainty from a single guessed state when several explanations remain possible.
+- It predicts how actions change state, reward, termination, and safety constraints.
+- It discards visual detail that does not improve the target decisions.
+- It can be corrected quickly when a real observation contradicts an imagined transition.
+
+{% callout variant="warn" %}
+A sharp next-frame reconstruction can still be a poor control model. If it predicts texture well but misses contact, reward, or hazard dynamics, a planner can confidently select the wrong action.
+{% /callout %}
+{% /section-card %}
+
+{% system-flow title="An action-conditioned latent world model" caption="Training connects real experience to the latent dynamics; control uses the same model for bounded imagination and returns to reality after each executed action." %}
+{% system-node title="Experience buffer" eyebrow="Observed transitions" icon="database" tone="blue" %}
+Stores versioned tuples of observation, action, reward, termination, constraint signals, and the next observation.
+{% /system-node %}
+{% system-node title="State inference" eyebrow="Posterior" icon="search" tone="violet" %}
+Encodes the current observation and combines it with prior latent state to estimate what is true now.
+{% /system-node %}
+{% system-node title="Latent dynamics" eyebrow="Prior" icon="repeat" tone="cyan" %}
+Predicts the next latent-state distribution from current latent state and a candidate action.
+{% /system-node %}
+{% system-node title="Prediction heads" eyebrow="Decision targets" icon="network" tone="amber" %}
+Predict reward, value, continuation, constraints, or observations needed by the planner and training losses.
+{% /system-node %}
+{% system-node title="Planner or policy" eyebrow="Control" icon="route" tone="green" %}
+Searches action sequences or learns a policy from imagined trajectories, then proposes a bounded real action.
+{% /system-node %}
+{% system-node title="Reality and safety gate" eyebrow="Correct" icon="shield" tone="rose" %}
+Checks uncertainty and hard constraints, executes only allowed actions, and feeds the next real observation back into inference.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Build the latent state from evidence, not the latest frame
+
+Use the lab to compare an observation-only representation with a belief state that retains prior evidence. Change the scenario, sensor reliability, representation, and action; the inferred hazard probability and next-state consequence update together.
+
+{% interactive-block id="ml-systems/world-models-latent-state-lab" dataFile="/api/content/ml-systems/world-models/data/latent-state-scenarios.json" /%}
+
+The dependency-free example applies the same idea with a two-state Bayesian filter. It first predicts how the hidden state changes after an action, then corrects that prior with a noisy observation.
+
+{% code-block file="/api/content/ml-systems/world-models/code/belief-state-filter.py" language="python" title="Update a belief state with actions and observations" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose an architecture for the decision, not the trend
+
+Modern systems share the idea of learned dynamics, but they optimize different prediction targets and use imagination differently.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Reconstructive latent model" eyebrow="World Models and PlaNet" icon="layers" tone="blue" %}
+An encoder maps observations into a compact state and a recurrent or state-space model predicts future latent states. Observation and reward heads make the representation trainable. PlaNet plans candidate actions online in latent space.
+{% /concept-card %}
+{% concept-card title="Latent actor-critic" eyebrow="Dreamer" icon="repeat" tone="violet" %}
+A recurrent state-space model learns from real trajectories. Actor and critic networks improve from imagined latent trajectories, so expensive environment interaction is not required for every policy update.
+{% /concept-card %}
+{% concept-card title="Value-equivalent model" eyebrow="MuZero" icon="network" tone="amber" %}
+The model need not reconstruct observations. It learns latent transitions plus reward, policy, and value predictions that make tree search effective for the task.
+{% /concept-card %}
+{% concept-card title="Latent model-predictive control" eyebrow="TD-MPC2" icon="route" tone="green" %}
+An implicit, decoder-free world model predicts control-relevant quantities. Local trajectory optimization searches in latent space and executes the first action before replanning.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Decide what the model must predict
+
+1. **Representation target:** reconstruct observations, predict learned features, or preserve only reward and value-relevant information.
+2. **Dynamics target:** predict one next state, a distribution, or an ensemble whose disagreement estimates epistemic uncertainty.
+3. **Control target:** support online search, train an actor in imagination, or combine both.
+4. **Task heads:** predict reward, continuation, terminal state, constraints, and value only when each has a clear owner and evaluation.
+5. **Correction cadence:** define how frequently real observations replace imagined state and invalidate stale plans.
+
+There is no universal best world-model objective. The right objective preserves the distinctions that change action ranking in the intended operating regime.
+{% /section-card %}
+
+{% section-card %}
+## Rollout error grows with distance from real evidence
+
+A one-step model is trained near states present in its dataset. During planning, its own prediction becomes the next input. Small state errors can therefore move later predictions away from the training distribution, change action rankings, and compound over the rollout horizon.
+
+The practical question is not "how far can the model generate?" It is **"how far can this model support this decision before uncertainty or error can change the preferred action?"**
+
+{% interactive-block id="ml-systems/world-models-rollout-control-lab" dataFile="/api/content/ml-systems/world-models/data/rollout-control-scenarios.json" /%}
+
+{% callout variant="tip" %}
+Model-predictive control limits exposure to stale imagination: optimize a short sequence, execute the first action, observe the real next state, and plan again. This does not remove model bias, but it repeatedly anchors planning to evidence.
+{% /callout %}
+
+The example below ranks candidate action sequences with an uncertainty penalty, enforces a hard risk boundary, and returns only the first action of the selected plan.
+
+{% code-block file="/api/content/ml-systems/world-models/code/uncertainty-aware-planner.py" language="python" title="Select one action with uncertainty-aware receding-horizon control" /%}
+{% /section-card %}
+
+{% section-card %}
+## Measure prediction quality where planning uses it
+
+Single-step reconstruction loss is useful for training diagnostics, but it is not enough to validate a controller. Evaluate open-loop rollouts from held-out real states and connect prediction errors to the decisions they can change.
+
+{% metric-strip %}
+{% metric value="1 to H" label="Multi-step horizon" detail="Report error and calibration at every planning depth, not only the first transition" tone="blue" /%}
+{% metric value="By regime" label="Coverage" detail="Slice contact, speed, weather, object, map, task, and other control-relevant conditions" tone="violet" /%}
+{% metric value="Rank" label="Decision agreement" detail="Check whether model and reality prefer the same candidate action or policy" tone="amber" /%}
+{% metric value="Bounded" label="Safety" detail="Measure constraint prediction, uncertainty coverage, fallback, and recovery behavior" tone="green" /%}
+{% /metric-strip %}
+
+### Keep four evaluation sets separate
+
+- **One-step holdout:** detects local transition, reward, continuation, and observation-prediction errors.
+- **Open-loop rollout holdout:** reveals error accumulation when predicted state is fed back without correction.
+- **Policy-conditioned holdout:** covers states visited by the current planner, including actions the data-collection policy rarely chose.
+- **Real control trial:** tests task return, safety constraints, recovery, and action ranking under a bounded deployment protocol.
+
+### Monitor the model-policy feedback loop
+
+- Record world-model, policy, planner, reward, constraint, and dataset versions for every decision trace.
+- Compare ensemble disagreement with realized error; uncertainty that is not calibrated cannot define a trustworthy gate.
+- Detect policy exploitation by searching for high predicted return paired with unusual state or action sequences.
+- Refresh protected real traces after environment changes without letting the training loop optimize against every holdout.
+- Track the credible planning horizon by regime and shorten it automatically when residuals or disagreement rise.
+{% /section-card %}
+
+{% section-card %}
+## Respond when imagination and reality diverge
+
+{% process-flow %}
+{% process-step number="1" title="Stop extending the stale rollout" label="Contain" %}
+Reject the current plan when a hard constraint, uncertainty budget, or observed residual crosses its boundary.
+{% /process-step %}
+{% process-step number="2" title="Return to a known controller" label="Fallback" %}
+Use a conservative policy, emergency stop, human handoff, or rule-based controller whose operating envelope is explicit.
+{% /process-step %}
+{% process-step number="3" title="Preserve the divergence trace" label="Diagnose" %}
+Store observations, actions, latent states, ensemble predictions, planner scores, safety decisions, and actual outcomes.
+{% /process-step %}
+{% process-step number="4" title="Repair evidence and boundaries" label="Recover" %}
+Add representative real data, fix objectives or sensors, recalibrate uncertainty, and narrow the horizon or operating domain before release.
+{% /process-step %}
+{% /process-flow %}
+
+### Avoid common world-model failures
+
+- **Observation aliasing:** two different hidden states look similar, so the latest frame cannot identify the safe action.
+- **Missing action effects:** the model predicts what usually happens but not what happens under the planner's counterfactual action.
+- **Compounding error:** small transition errors move long rollouts into unsupported latent regions.
+- **Model exploitation:** the policy finds imagined high-reward states caused by model error.
+- **Uncalibrated confidence:** low ensemble disagreement is mistaken for proof of correctness outside training support.
+- **Objective mismatch:** visual prediction improves while reward, constraint, or action ranking gets worse.
+- **Unsafe transfer:** simulated success is promoted without controlled real evidence in the same operating regimes.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [World Models](https://arxiv.org/abs/1803.10122) demonstrates a compressed visual representation, recurrent dynamics, and a compact controller trained inside imagined rollouts.
+- [Learning Latent Dynamics for Planning from Pixels](https://arxiv.org/abs/1811.04551) introduces PlaNet, a latent dynamics model with deterministic and stochastic state components plus online planning from pixels.
+- [Dream to Control](https://arxiv.org/abs/1912.01603) trains actor and value networks through trajectories imagined in a learned latent dynamics model.
+- [Mastering Atari, Go, chess and shogi by planning with a learned model](https://www.nature.com/articles/s41586-020-03051-4) presents MuZero's learned representation, dynamics, reward, policy, and value predictions for search without reconstructing environment observations.
+- [Mastering diverse control tasks through world models](https://www.nature.com/articles/s41586-025-08744-2) reports DreamerV3 across more than 150 tasks with one configuration and documents the model, actor, and critic training loop.
+- [TD-MPC2: Scalable, Robust World Models for Continuous Control](https://arxiv.org/abs/2310.16828) uses local trajectory optimization in the latent space of an implicit decoder-free world model.
+- [Deep Reinforcement Learning in a Handful of Trials using Probabilistic Dynamics Models](https://papers.nips.cc/paper_files/paper/2018/hash/3de568f8597b94bda53149c7d7f5958c-Abstract.html) combines probabilistic ensembles with trajectory sampling to propagate model uncertainty.
+- [When to Trust Your Model: Model-Based Policy Optimization](https://proceedings.neurips.cc/paper/2019/hash/5faf461eff3099671ad63c6f3f094f7f-Abstract.html) motivates short model rollouts branched from real data to limit model bias.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/world-models/quiz/world-models.json" lessonSlug="world-models" title="World Model Design and Control Check" /%}

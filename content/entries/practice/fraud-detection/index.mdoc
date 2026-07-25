@@ -1,0 +1,303 @@
+---
+registryId: practice-fraud-detection
+---
+
+{% section-card tone="intro" %}
+## What is a fraud detection system?
+
+A fraud detection system estimates whether a transaction is abusive, then turns that estimate into an action: **allow**, **challenge**, **review**, or **block**. The model supplies evidence, but a versioned decision policy owns the customer-facing outcome.
+
+For this interview, design a payment-risk system that handles **10 billion transactions per day**, reaches **120,000 transactions per second at peak**, and returns a decision within **100 ms p99**. Fraud affects about **1%** of transactions. The central invariant is: **every decision must be reproducible from the model, features, rules, and thresholds used at that moment**.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Spend latency deliberately" eyebrow="Critical path" icon="timer" tone="blue" %}
+Authenticate, load fresh risk signals, score, apply policy, and record the decision before the payment deadline.
+{% /concept-card %}
+{% concept-card title="Price both errors" eyebrow="Business objective" icon="scale" tone="violet" %}
+A missed fraud loses money; a false block rejects a real customer and can cost the relationship.
+{% /concept-card %}
+{% concept-card title="Degrade predictably" eyebrow="Reliability" icon="shield" tone="green" %}
+When a feature or model dependency fails, use a bounded, auditable fallback instead of silently allowing or blocking everything.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Business Boundary" %}
+
+
+### Define the decision before the model
+
+The service receives a payment attempt and returns a risk score, an action, reason codes, and version lineage. The score is not the final product. A policy combines model output with hard rules, customer context, transaction value, and review capacity.
+
+**Functional requirements**
+
+- Score card-not-present payments in real time.
+- Detect account takeover, stolen credentials, velocity abuse, and coordinated merchant or device attacks.
+- Return an action with stable reason codes and the feature, model, rule, and policy versions.
+- Accept delayed labels from disputes, chargebacks, investigations, and confirmed customer reports.
+- Support a manual-review queue for valuable but ambiguous transactions.
+
+**Non-functional requirements**
+
+- Keep end-to-end scoring below 100 ms p99 at 120,000 peak transactions/s.
+- Keep the legitimate-transaction false-positive rate below 0.8% on every critical market and payment slice.
+- Make requests idempotent so retries cannot create conflicting decisions.
+- Isolate payment data, encrypt sensitive fields, and retain only the evidence required for audit and learning.
+- Continue making bounded decisions when an online feature or model dependency is unavailable.
+
+### Ask questions that change the architecture
+
+1. **Which action is synchronous?** A payment authorization needs an immediate answer; account suspension and network investigation can happen later.
+2. **What does the label mean?** A chargeback is delayed and noisy, while confirmed account takeover is stronger but rarer evidence.
+3. **Who owns the threshold?** Risk, payments, compliance, and customer support must agree on error costs and override rules.
+4. **Which transactions deserve review?** Human capacity should be reserved for high-value uncertainty, not used as an unlimited fallback.
+
+### State the initial scope
+
+- Include payment authorization and post-transaction monitoring.
+- Defer identity-document verification and anti-money-laundering case management.
+- Use global models with market-specific calibration where data supports it.
+- Require a human or a separate policy for permanent account actions.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Traffic, State, and the Latency Budget" %}
+
+
+### Convert the brief into service demand
+
+- **Average rate:** 10 billion / 86,400 seconds is about 116,000 transactions/s.
+- **Peak rate:** use the stated 120,000 transactions/s, then provision at least 50% headroom for retries, failover, and growth.
+- **Fraud prevalence:** 1% produces about 100 million fraudulent attempts per day before prevention.
+- **False-positive ceiling:** 0.8% of 9.9 billion legitimate attempts is still 79.2 million false alerts per day, so only a small fraction can enter human review.
+- **Feature fan-out:** 120,000 requests/s with 20 online feature groups creates 2.4 million logical feature reads/s before cache and batching effects.
+
+{% metric-strip %}
+{% metric value="120K/s" label="Peak decisions" detail="The entire online path must absorb this rate during events." tone="blue" /%}
+{% metric value="100 ms" label="p99 deadline" detail="Gateway, features, model, policy, and audit write share one budget." tone="cyan" /%}
+{% metric value="1.2 PB/day" label="Raw event volume" detail="10B events x 120 KB before compression and retention tiering." tone="violet" /%}
+{% metric value="79.2M/day" label="0.8% false alerts" detail="Proof that the false-positive target alone does not size review operations." tone="amber" /%}
+{% /metric-strip %}
+
+### Allocate the online latency budget
+
+1. Gateway validation and idempotency lookup: **10 ms**.
+2. Rules and cached profile lookup: **10 ms**.
+3. Online feature retrieval and freshness checks: **35 ms**.
+4. Model inference and calibration: **25 ms**.
+5. Policy evaluation, audit append, and network margin: **20 ms**.
+
+Do not size replicas from the average alone. Load-test the path at peak while one availability zone and one hot feature shard are unavailable.
+
+{% /accordion-item %}
+
+{% accordion-item id="ml-framing" title="3. Frame the Model and Calibrate Action Thresholds" %}
+
+
+### Predict a bounded outcome
+
+Define the target as: **will this transaction become confirmed fraud within the chosen label window?** Use a window long enough to observe disputes and investigations, but do not treat every unresolved payment as legitimate.
+
+**Useful signal families**
+
+- Transaction context: amount, currency, merchant category, payment rail, and retry sequence.
+- Account behavior: spend velocity, login changes, beneficiary novelty, and historical disputes.
+- Device and network: device reputation, emulator signals, IP risk, and impossible travel.
+- Relationship features: shared devices, cards, addresses, merchants, and coordinated graph communities.
+
+Start with explicit deny lists, velocity rules, and a calibrated gradient-boosted tree baseline. Add graph or sequence models only when they improve a measured fraud slice within the latency budget.
+
+### Turn scores into actions
+
+{% interactive-block id="practice/fraud-detection-threshold-lab" /%}
+
+One global threshold is not a strategy. Version thresholds by risk policy, calibrate them on time-based holdouts, and constrain the review band with actual investigator capacity.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. Design the End-to-End Training and Serving Architecture" %}
+
+
+### Keep the authorization path short
+
+{% system-flow title="Real-time payment-risk path" caption="The decision service turns versioned evidence into one idempotent customer-facing action." %}
+{% system-node title="Payment gateway" eyebrow="Validate" icon="credit-card" tone="blue" %}
+Authenticate the caller, validate the request, and assign an idempotency key before risk work begins.
+{% /system-node %}
+{% system-node title="Feature gateway" eyebrow="Assemble" icon="database" tone="cyan" %}
+Fetch cached profiles and fresh velocity signals with timestamps, defaults, and feature versions.
+{% /system-node %}
+{% system-node title="Risk scorer" eyebrow="Estimate" icon="activity" tone="violet" %}
+Run the production model and calibrator under a strict inference deadline.
+{% /system-node %}
+{% system-node title="Decision policy" eyebrow="Act" icon="shield" tone="amber" %}
+Combine score, rules, value, uncertainty, and review capacity into allow, challenge, review, or block.
+{% /system-node %}
+{% system-node title="Decision ledger" eyebrow="Record" icon="file-check" tone="green" %}
+Append evidence and versions once, then publish the result for payment execution and later feedback.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate online and asynchronous work
+
+**Online serving**
+
+- Read only bounded feature groups required by the active model manifest.
+- Apply hard compliance rules before or after scoring according to their semantics.
+- Return one idempotent action before the deadline.
+- Emit the complete decision envelope to an append-only audit stream.
+
+**Asynchronous learning and investigation**
+
+- Join delayed disputes and investigator outcomes to the original decision envelope.
+- Build point-in-time-correct training features without reading future events.
+- Mine hard negatives, new attack clusters, and underperforming market slices.
+- Train challengers, validate them, and shadow them before any customer-facing rollout.
+
+### Preserve one release manifest
+
+Bundle the training snapshot, feature definitions, preprocessing code, model artifact, calibrator, thresholds, and rule snapshot into one immutable release. Online requests should record that manifest ID rather than a collection of mutable “latest” pointers.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep Dive on Features, Labels, and Decision Serving" %}
+
+
+### Make features point-in-time correct
+
+A feature such as “chargebacks in the last 30 days” must be computed using only information known when the transaction occurred. Training on a value recomputed after the chargeback arrived leaks the answer and produces unrealistic offline accuracy.
+
+Use three feature classes:
+
+1. **Static profile features** change slowly and can be cached with explicit expiry.
+2. **Streaming aggregates** maintain velocity windows such as cards per device or spend per account.
+3. **Request features** come directly from the current payment and need no remote lookup.
+
+Each returned feature group should carry an event time, computation time, definition version, and freshness state. The scorer can then reject, default, or down-weight stale evidence deliberately.
+
+### Treat labels as evidence with provenance
+
+- A confirmed customer report is high-confidence but may arrive hours later.
+- A chargeback is useful but can represent service disputes rather than fraud.
+- An investigator decision needs confidence, evidence links, and reviewer identity.
+- An approved transaction without a dispute is not immediately a trustworthy negative.
+
+Train with matured cohorts whose label windows have closed. Keep uncertain and censored outcomes separate instead of forcing them into the negative class.
+
+### Keep the decision contract reproducible
+
+The response should include `transaction_id`, `risk_score`, `action`, stable `reason_codes`, `release_manifest_id`, `feature_snapshot_id`, and `decision_id`. A retry with the same idempotency key must return the same recorded decision unless the API explicitly models a new assessment.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Build Evaluation and QA Release Gates" %}
+
+
+### Evaluate the model and policy separately
+
+- **Precision and recall:** measure fraud detection, but report them at the deployed thresholds.
+- **False-positive rate:** report legitimate actions incorrectly challenged, reviewed, or blocked by action type.
+- **Calibration error:** verify that predicted probabilities match observed fraud frequency.
+- **Expected cost:** combine prevented fraud, missed loss, customer friction, and review cost.
+- **Review yield:** measure confirmed fraud per reviewed case and queue time.
+- **System metrics:** track p50, p95, and p99 latency, feature freshness, timeout rate, and fallback use.
+
+### Slice before approving a release
+
+Report every metric by market, payment rail, merchant category, transaction value, account age, device class, and important protected or proxy-sensitive groups permitted by policy. Aggregate gains cannot excuse a severe regression in one customer segment.
+
+### Require evidence at each rollout stage
+
+1. Beat the rules-only and production-model baselines on a time-forward holdout.
+2. Pass hard floors for false positives, fraud recall, calibration, and every critical slice.
+3. Replay production-shaped traffic to verify point-in-time features and the 100 ms p99 budget.
+4. Shadow the challenger without changing actions and compare decision disagreement.
+5. Canary by a bounded market or merchant cohort with automatic rollback triggers.
+
+Accuracy alone is not a release gate. A model that improves recall while overflowing review or doubling high-value false blocks is operationally worse.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate, Degrade, and Retrain Safely" %}
+
+
+### Choose the fallback before a dependency fails
+
+{% interactive-block id="practice/fraud-detection-degraded-mode-lab" /%}
+
+The fallback must be part of the release manifest and rehearsed under load. Record when it activates, which evidence was missing, which policy made the action, and whether asynchronous reconciliation is required.
+
+### Monitor customer-facing invariants
+
+- Alert on action rates, false-positive proxies, confirmed fraud loss, and review queue age by slice.
+- Track feature missingness, freshness, score distribution, calibration drift, and model disagreement.
+- Measure fallback activation and recovery instead of treating it as invisible success traffic.
+- Reconcile delayed labels against the exact decision manifest that produced each action.
+
+### Retrain only through a controlled loop
+
+{% process-flow %}
+{% process-step number="1" title="Mature labels" label="Evidence" %}
+Wait for the label window, deduplicate outcomes, and quarantine ambiguous or suspicious feedback.
+{% /process-step %}
+{% process-step number="2" title="Build a snapshot" label="Training" %}
+Join point-in-time features and preserve source, code, and definition versions.
+{% /process-step %}
+{% process-step number="3" title="Challenge production" label="Evaluation" %}
+Test cost, calibration, slices, latency, fallback compatibility, and adversarial cases.
+{% /process-step %}
+{% process-step number="4" title="Shadow and canary" label="Release" %}
+Observe disagreement first, then shift bounded traffic with automatic rollback criteria.
+{% /process-step %}
+{% /process-flow %}
+
+Retraining may run daily, but promotion should depend on measured drift or business value. Keep the previous release warm until the new model, calibrator, features, and policy have all passed rollback windows.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Compare Trade-offs and Plan Improvements" %}
+
+
+### Make the main choices explicit
+
+**Rules plus ML vs pure ML**
+
+- Choose a layered design: rules enforce known constraints and emergency controls; ML ranks complex risk.
+- Accept the cost of maintaining both because rules provide a fast, explainable fallback and ML adapts beyond known signatures.
+
+**One global model vs market models**
+
+- Start with a shared model and calibrated market policies where behavior overlaps.
+- Split only when data volume, regulation, or persistent slice performance justifies separate ownership and release paths.
+
+**Real-time graph features vs asynchronous graph analysis**
+
+- Serve bounded, precomputed graph summaries online.
+- Run expensive community detection asynchronously and feed versioned results back into the feature store.
+
+**Automatic blocks vs human review**
+
+- Automatically block only high-confidence, policy-approved cases.
+- Route valuable uncertainty to a capacity-limited queue and let low-value ambiguity use challenge or conservative allow policies.
+
+### Name the residual risks
+
+- Attackers adapt to visible controls and probe threshold boundaries.
+- Delayed and biased labels can hide model decay or poison retraining.
+- Shared devices and networks can create unfair graph associations.
+- Overly broad fallbacks can turn a dependency incident into either fraud loss or customer denial.
+
+### Close the interview in one minute
+
+The design uses a bounded online path, point-in-time features, a calibrated risk model, and a versioned policy that owns actions. It prices false positives and missed fraud separately, limits review by capacity, records reproducible evidence, and falls back to rehearsed rules when online ML evidence is incomplete.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/fraud-detection/quiz/fraud-detection-design-review.json"
+   lessonSlug="practice-fraud-detection"
+   title="Fraud Detection Design Review" /%}

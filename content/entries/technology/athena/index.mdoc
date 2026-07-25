@@ -1,0 +1,197 @@
+---
+registryId: athena
+---
+
+{% section-card tone="intro" %}
+## What is Amazon Athena?
+
+**Amazon Athena is a serverless analytics service that runs SQL over data where it
+lives, most commonly in Amazon S3.** You define table metadata, submit a query, and
+Athena allocates a distributed query engine for the work. There is no database server
+to provision or keep idle.
+
+Athena matters because it turns an object-store data lake into an immediately
+queryable analytical system. The central design invariant is simple: **the physical
+bytes and files a query must read drive its cost and much of its latency.** SQL text
+alone does not define the work; storage format, compression, partition layout, and
+filter shape do.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Scan and aggregate" icon="search" tone="blue" %}
+Use Athena for ad hoc exploration, log and security analysis, governed reporting, and
+infrequent scans over data already stored in S3.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Serve and transact" icon="warning" tone="rose" %}
+Do not put Athena on a request path that needs millisecond point reads, frequent row
+updates, multi-row transactions, or predictable low tail latency.
+{% /concept-card %}
+{% concept-card title="Team responsibility" eyebrow="Serverless is not ownerless" icon="shield" tone="green" %}
+AWS operates the query service. Your team still owns schemas, object layout, access,
+workgroups, scan limits, result handling, data quality, and recovery requirements.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Turn scanned bytes and concurrency into a plan
+
+Athena SQL can use on-demand pricing based on bytes scanned or capacity reservations
+based on allocated Data Processing Units (DPUs). For on-demand planning, start with:
+
+`monthly scan cost = scanned TB per query x queries per month x regional price per TB`
+
+Compression, partition pruning, and column pruning reduce the first term. Query reuse,
+admission control, and workload design reduce the second. Capacity planning adds a
+different question: how many concurrent queries must run during the peak, and how many
+DPUs does each one require?
+
+The lab uses editable planning assumptions. It is not a billing quote; confirm current
+regional rates and reservation terms on the
+[official Athena pricing page](https://aws.amazon.com/athena/pricing/).
+
+{% interactive-block id="technology/athena-scan-cost-capacity-lab" dataFile="/api/content/technology/athena/data/scan-cost-capacity-model.json" /%}
+
+### Cost controls that belong in production
+
+- Set a per-query scan cutoff in each workgroup so an accidental broad query is
+  canceled before it exceeds the intended boundary.
+- Publish workgroup metrics and attribute queries to teams, applications, or reports.
+- Alert on changes in bytes scanned by a stable query fingerprint, not only the total
+  account bill.
+- Compare on-demand and reserved capacity with observed peaks, queueing, runtime, and
+  duty cycle rather than one average month.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace the architecture and query path
+
+Athena separates data storage, metadata, query compute, and result storage. That
+separation removes cluster administration, but it also means a query depends on
+several contracts: identity, table metadata, S3 object layout, encryption access, and
+a valid results location.
+
+{% system-flow title="Athena SQL query path" caption="Metadata determines what can be pruned before distributed workers read S3 objects. Query results are written back to the configured S3 location." %}
+{% system-node title="Client and workgroup" eyebrow="Admit" icon="users" tone="blue" %}
+Authenticate the caller, apply the engine and result settings, and enforce scan limits.
+{% /system-node %}
+{% system-node title="Glue Data Catalog" eyebrow="Plan" icon="braces" tone="violet" %}
+Resolve the table schema, partition keys, locations, and partition metadata or
+projection rules.
+{% /system-node %}
+{% system-node title="Athena workers" eyebrow="Execute" icon="activity" tone="cyan" %}
+List matching objects, read required ranges and columns, then perform filters, joins,
+aggregations, and exchanges.
+{% /system-node %}
+{% system-node title="S3 result location" eyebrow="Persist" icon="storage" tone="green" %}
+Store the result set and expose execution statistics such as runtime and bytes scanned.
+{% /system-node %}
+{% /system-flow %}
+
+### What can fail along the path
+
+- **Admission:** IAM, Lake Formation, workgroup, KMS, or result-bucket policy rejects
+  the request.
+- **Planning:** the catalog schema or partition metadata does not match the S3 layout.
+- **Scanning:** too many small objects increase listing and request overhead, or a
+  broad query reaches its scan cutoff.
+- **Execution:** skewed joins, large windows, or excessive intermediate state exhaust
+  available resources even when the input scan is small.
+- **Result handling:** the query succeeds but the caller loses its polling state,
+  repeats downstream work, or exposes results through an overly broad S3 policy.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Match formats and partitions to real queries
+
+A columnar format such as Parquet or ORC lets Athena avoid reading columns that the
+query does not reference. Compression reduces bytes read before decompression.
+Partitions let Athena avoid entire S3 prefixes when the query includes usable
+predicates on the partition keys.
+
+These controls multiply, but each has a failure mode:
+
+- Too few partitions produce broad scans.
+- Too many fine-grained partitions produce sparse prefixes and small files.
+- Partition projection avoids catalog lookups but can issue many S3 listings when its
+  declared value space is much larger than the populated data.
+- A catalog that is not updated can silently omit fresh partitions.
+- A format or SerDe that disagrees with the stored schema can fail or misread rows.
+
+{% interactive-block id="technology/athena-layout-failure-lab" dataFile="/api/content/technology/athena/data/layout-failure-model.json" /%}
+
+AWS recommends choosing partition keys for common query predicates, using compressed
+columnar formats, and avoiding excessive small files. See the official guides to
+[optimizing Athena data](https://docs.aws.amazon.com/athena/latest/ug/performance-tuning-data-optimization-techniques.html)
+and [partitioning data](https://docs.aws.amazon.com/athena/latest/ug/partitions.html).
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate Athena as a governed query service
+
+Serverless removes host maintenance, not operational design. Build an evidence loop
+around each important workload.
+
+{% process-flow %}
+{% process-step number="1" title="Define the query contract" label="Bound" %}
+Name the owner, source tables, acceptable freshness, expected scan range, timeout,
+result location, and whether repeated execution is safe.
+{% /process-step %}
+{% process-step number="2" title="Measure the physical work" label="Observe" %}
+Track bytes scanned, execution time, queue time, failures, spill or resource errors,
+and S3 request pressure by workgroup and query fingerprint.
+{% /process-step %}
+{% process-step number="3" title="Change one boundary" label="Optimize" %}
+Prune columns or partitions, compact files, convert formats, rewrite a heavy stage, or
+isolate a workload. Do not change layout and SQL simultaneously if you need causal
+evidence.
+{% /process-step %}
+{% process-step number="4" title="Prove the result" label="Verify" %}
+Compare equivalent windows, confirm result completeness, test scan cutoffs, and keep
+the change only when cost, latency, and correctness all satisfy the contract.
+{% /process-step %}
+{% /process-flow %}
+
+### Production review
+
+- Data and metadata
+  - Validate partition freshness, schema compatibility, retention, and late-arriving
+    data.
+  - Compact small files and keep each table in an unambiguous S3 prefix hierarchy.
+- Access and results
+  - Apply least privilege to source objects, catalog metadata, KMS keys, and result
+    buckets.
+  - Encrypt results, expire them deliberately, and prevent one tenant from reading
+    another tenant's output.
+- Query control
+  - Use separate workgroups for interactive, scheduled, and exploratory workloads.
+  - Set scan limits and timeouts, and retry only failures known to be transient.
+- Reliability
+  - Treat the catalog, S3 data, and result location as separate dependencies.
+  - Define how critical reports behave when data is late, incomplete, or temporarily
+    unavailable; a successful query is not proof of fresh input.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Put the design into focused code
+
+The first example converts raw JSON into compressed, daily partitioned Parquet. It
+places the partition column last in the `SELECT`, uses a string partition key, and
+keeps the output in a separate S3 prefix.
+
+{% code-block file="/api/content/technology/athena/code/create-partitioned-parquet-table.sql" language="sql" title="Create a query-efficient Parquet table" /%}
+
+The second example submits a query through a named workgroup, reuses a stable client
+request token, waits for a terminal state, and records the actual bytes scanned. The
+workgroup owns the hard scan cutoff; the client treats the execution statistics as
+evidence for future planning.
+
+{% code-block file="/api/content/technology/athena/code/run-bounded-query.ts" language="typescript" title="Run and measure a bounded Athena query" /%}
+
+{% callout variant="tip" %}
+Keep the query runner small. Schema migration, partition maintenance, and file
+compaction belong in versioned data pipelines rather than hidden inside an analyst's
+query client.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/athena/quiz/athena-query-design.json" lessonSlug="athena" title="Amazon Athena Query Design Review" /%}

@@ -1,0 +1,336 @@
+---
+registryId: pytorch
+---
+
+{% section-card tone="intro" %}
+## What is PyTorch?
+
+**PyTorch is a tensor and automatic-differentiation library used to build, train, and
+run machine-learning models on CPUs and accelerators.** A tensor stores numeric data; a
+model composes tensor operations; automatic differentiation calculates how each
+trainable parameter contributed to the loss.
+
+PyTorch matters because its normal eager mode follows Python control flow. Operations
+run when the program calls them, so a developer can inspect tensors, branch on values,
+and debug the same program that performs training. Production quality still depends on
+the surrounding system: input pipelines, numeric precision, distributed coordination,
+checkpoint integrity, observability, and a stable serving contract.
+
+The core invariant is: **every optimizer step must consume the intended sample batch
+and update one coherent model state, even when work is accumulated, distributed,
+restarted, or optimized by a compiler.** Fast kernels cannot repair duplicated data,
+partial checkpoints, or divergent ranks.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Tensors carry state" eyebrow="Data" icon="boxes" tone="blue" %}
+Shape, dtype, device, layout, and gradient tracking are part of a tensor's runtime
+contract. An incorrect one can change memory, speed, or model behavior.
+{% /concept-card %}
+{% concept-card title="Modules compose work" eyebrow="Model" icon="layers" tone="violet" %}
+An `nn.Module` owns parameters and registered buffers while its forward method defines
+how an input becomes an output.
+{% /concept-card %}
+{% concept-card title="Autograd records a graph" eyebrow="Gradient" icon="workflow" tone="cyan" %}
+Differentiable operations connect outputs back to leaf parameters so `backward()` can
+accumulate gradients.
+{% /concept-card %}
+{% concept-card title="The loop owns correctness" eyebrow="System" icon="shield" tone="green" %}
+Data order, loss scaling, updates, evaluation mode, checkpoints, and recovery remain
+explicit application decisions.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one optimizer step before scaling it
+
+Training is a repeated state transition. The model's parameters and optimizer state
+enter the step; a batch and RNG state influence the computation; new parameters and
+optimizer state leave it. If the process fails halfway through, recovery must return to
+a previously complete transition.
+
+{% process-flow %}
+{% process-step number="1" title="Load a bounded batch" label="Input" %}
+Decode, transform, and move tensors to the target device. Validate shape, dtype, label,
+and sample identity before expensive compute begins.
+{% /process-step %}
+{% process-step number="2" title="Compute prediction and loss" label="Forward" %}
+The module runs tensor operations. Autograd records differentiable operations whose
+inputs require gradients.
+{% /process-step %}
+{% process-step number="3" title="Accumulate gradients" label="Backward" %}
+Scale the loss when accumulating micro-batches, run backward, unscale before clipping,
+and detect non-finite values.
+{% /process-step %}
+{% process-step number="4" title="Commit the update" label="Optimizer" %}
+Apply one optimizer step only at the declared accumulation boundary, then clear
+gradients and advance scheduler and progress state consistently.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep modes and gradient scope explicit
+
+- Use `model.train()` for training behavior such as dropout and batch-statistic updates.
+- Use `model.eval()` for validation and inference behavior; it does not itself disable
+  gradient recording.
+- Use `torch.no_grad()` or `torch.inference_mode()` where gradients are not required.
+- Clear gradients deliberately. PyTorch accumulates into `.grad` by default, which is
+  useful for micro-batch accumulation and dangerous when accidental.
+- Move every tensor involved in one operation to compatible devices and dtypes rather
+  than relying on implicit copies.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Fit model state, activations, and runtime workspace together
+
+An out-of-memory error is not explained by parameter count alone. A training rank may
+hold weights, gradients, optimizer moments, master weights, saved activations,
+temporary kernels, communication buffers, and allocator headroom at the same time.
+
+{% metric-strip %}
+{% metric label="Global batch" value="micro x accumulation x ranks" detail="The optimization batch is larger than the per-rank micro-batch" tone="blue" /%}
+{% metric label="Model state" value="weights + gradients + optimizer" detail="DDP replicates it; FSDP can shard it" tone="violet" /%}
+{% metric label="Activations" value="batch x shape x layers" detail="Longer inputs and larger micro-batches raise the live graph" tone="amber" /%}
+{% metric label="Headroom" value="measured peak < device limit" detail="Temporary kernels and fragmentation need space too" tone="green" /%}
+{% /metric-strip %}
+
+Gradient accumulation increases the effective batch without keeping every micro-batch's
+activations alive simultaneously. It does **not** reduce the memory needed by the
+current micro-batch. Activation checkpointing stores fewer forward values and
+recomputes them during backward, trading extra compute for lower memory.
+
+Use the lab to separate these decisions. The values are transparent planning
+assumptions rather than vendor benchmarks; profile a representative batch before
+reserving a cluster.
+
+{% interactive-block id="technology/pytorch-training-cost" dataFile="/api/content/technology/pytorch/data/training-envelope.json" /%}
+
+{% code-block file="/api/content/technology/pytorch/code/amp-training-step.py" language="python" title="AMP, accumulation, clipping, and one optimizer boundary" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose numeric precision as a stability contract
+
+Automatic mixed precision uses lower precision for selected operations while retaining
+higher precision where it protects numerical behavior. In current PyTorch APIs,
+`torch.autocast` chooses operation dtypes within a region and `torch.amp.GradScaler`
+helps prevent gradient underflow for formats that need scaling.
+
+### Review the entire update order
+
+1. Enter autocast for the forward pass and loss computation.
+2. Divide loss by the number of accumulation steps before backward.
+3. Scale the loss, then accumulate gradients for each micro-step.
+4. At the update boundary, unscale before inspecting or clipping gradients.
+5. Step every intended optimizer, update the scaler once, and clear gradients.
+6. Record skipped updates, non-finite gradients, scale changes, and the effective batch.
+
+Do not assume lower precision is safe because loss decreases for a few steps. Compare
+quality, overflow behavior, throughput, and memory on the target accelerator. Keep
+sensitive custom operations in a stable dtype when necessary. The official
+[AMP examples](https://docs.pytorch.org/docs/stable/notes/amp_examples.html) document
+the required ordering for accumulation, clipping, and multiple optimizers.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Scale from one process to a coordinated group
+
+PyTorch distributed training is a process-coordination problem, not merely a GPU-count
+setting. Each rank owns a device, reads a distinct sample shard, performs compatible
+collectives in the same order, and advances one logical training step with the group.
+
+{% system-flow title="A synchronous distributed training step" caption="Every rank computes locally, then the process group coordinates gradients before parameters advance." %}
+{% system-node title="Dataset and sampler" eyebrow="Assign" icon="database" tone="blue" %}
+Partition sample ownership by rank, epoch, and seed. Persist enough position to prevent
+silent duplicates or omissions after resume.
+{% /system-node %}
+{% system-node title="Per-rank forward and backward" eyebrow="Compute" icon="server" tone="cyan" %}
+Each process uses its local micro-batch and produces gradients for the same model step.
+A slow rank delays synchronous peers.
+{% /system-node %}
+{% system-node title="Gradient collective" eyebrow="Synchronize" icon="network" tone="violet" %}
+DDP reduces replica gradients. Every member must issue compatible collectives in the
+same order or the group can hang or fail.
+{% /system-node %}
+{% system-node title="Optimizer state" eyebrow="Update" icon="workflow" tone="green" %}
+All ranks apply the coordinated update. FSDP additionally gathers and shards model
+state around computation according to its configuration.
+{% /system-node %}
+{% system-node title="Checkpoint store" eyebrow="Recover" icon="storage" tone="amber" %}
+Publish a complete manifest only after model, optimizer, progress, RNG, and sampler
+state are durable and mutually consistent.
+{% /system-node %}
+{% /system-flow %}
+
+### DDP and FSDP solve different pressure
+
+{% concept-grid columns="3" %}
+{% concept-card title="DistributedDataParallel" eyebrow="Replicated state" icon="repeat" tone="blue" %}
+Use one process per accelerator and one full model replica per rank. DDP is usually the
+simpler starting point when a complete training state fits comfortably on each device.
+{% /concept-card %}
+{% concept-card title="FullyShardedDataParallel" eyebrow="Sharded state" icon="layers" tone="violet" %}
+Shard parameter, gradient, and optimizer state across ranks when replication exceeds
+the per-rank memory envelope. Budget collectives and checkpoint format explicitly.
+{% /concept-card %}
+{% concept-card title="Other parallel dimensions" eyebrow="Beyond data" icon="network" tone="amber" %}
+Tensor, pipeline, sequence, or expert parallelism may be needed at larger scale. Each
+adds placement, communication, scheduling, and recovery contracts.
+{% /concept-card %}
+{% /concept-grid %}
+
+PyTorch recommends one device per DDP process, and the application remains responsible
+for distributing input data. Read the current [DDP documentation](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html)
+and [FSDP documentation](https://docs.pytorch.org/docs/stable/fsdp.html) before choosing
+version-specific arguments.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Treat distributed recovery as one state transition
+
+A synchronous run can be wrong without crashing. One rank may repeat samples after a
+resume, a stalled loader may make every peer wait in collectives, or model weights may
+load while optimizer and sampler state come from a different step.
+
+Use the lab to inject these failures. Toggle controls until detection, coordinated
+restart, checkpoint restore, and sample ownership form one bounded recovery path.
+
+{% interactive-block id="technology/pytorch-distributed-recovery-lab" dataFile="/api/content/technology/pytorch/data/distributed-failure-scenarios.json" /%}
+
+### Design the checkpoint before the incident
+
+- Save model, optimizer, scheduler, gradient scaler, global step, epoch, RNG, and input
+  position needed for the chosen data pipeline.
+- Give every checkpoint an immutable run ID, code and configuration fingerprint,
+  world-size and sharding metadata, metric summary, and schema version.
+- Write to a temporary location, verify every expected shard and checksum, then publish
+  one atomic manifest or completion marker.
+- Retain more than the newest checkpoint so latent corruption does not replace the only
+  recovery point.
+- Restore on replacement infrastructure and compare the next steps with a controlled
+  baseline. A file that has never restored is not a recovery guarantee.
+
+{% code-block file="/api/content/technology/pytorch/code/checkpoint-resume-contract.py" language="python" title="Validate a complete training-resume contract" /%}
+
+For inference, saving and loading a model `state_dict` is flexible and widely used. A
+training resume needs more state than an inference artifact. The official
+[saving and loading guide](https://docs.pytorch.org/tutorials/beginner/saving_loading_models.html)
+shows the distinction.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Optimize only after measuring the bottleneck
+
+### Separate data, compute, communication, and idle time
+
+- **Data path:** measure queue depth, fetch and decode latency, worker restarts, pinned
+  memory use, host-to-device copies, and samples per second.
+- **Compute path:** measure operator time, achieved throughput, memory allocation and
+  reservation, kernel launch gaps, and numeric overflow.
+- **Communication path:** measure collective duration and bytes by rank; averages hide
+  one slow participant.
+- **Control path:** measure compilation time, graph breaks, recompilations, checkpoint
+  duration, skipped updates, and time spent waiting at barriers.
+
+`torch.compile` can optimize a model or function while preserving normal PyTorch
+programming patterns, but changing shapes, Python side effects, graph breaks, and guard
+failures can introduce compilation or re-compilation cost. Establish a correct eager
+baseline first, compile a bounded region, warm it up, and compare steady-state latency,
+memory, and output quality under representative shapes.
+
+Use the current
+[torch.compile documentation](https://docs.pytorch.org/docs/stable/generated/torch.compile.html)
+and compiler logs to diagnose behavior rather than assuming every graph improves.
+
+{% callout variant="tip" %}
+The fastest optimization is often outside the model: vectorize Python-side transforms,
+batch small work, keep accelerator input queues fed, avoid repeated device transfers,
+and remove synchronization from the hot path before changing model math.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate the training artifact from the serving contract
+
+Training code is stateful and failure-oriented. Serving code needs bounded latency,
+versioned inputs, deterministic preprocessing, safe batching, and rollback. Do not ship
+an arbitrary training checkpoint directly into a request handler.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze an evaluated candidate" label="Select" %}
+Choose a checkpoint from held-out quality, safety, slice, and operational evidence, not
+training loss alone.
+{% /process-step %}
+{% process-step number="2" title="Package a versioned artifact" label="Build" %}
+Bind weights to architecture, preprocessing, tokenizer or label map, runtime versions,
+input schema, and immutable provenance.
+{% /process-step %}
+{% process-step number="3" title="Verify the target runtime" label="Test" %}
+Compare outputs and performance for eager, compiled, exported, or interoperable runtime
+paths using representative shapes and devices.
+{% /process-step %}
+{% process-step number="4" title="Roll out with containment" label="Operate" %}
+Canary by model version, monitor quality proxies and system health, preserve the prior
+artifact, and make rollback independent of retraining.
+{% /process-step %}
+{% /process-flow %}
+
+### Protect model and data boundaries
+
+- Load artifacts only from trusted, authenticated storage. Serialization formats can
+  execute or instantiate more than numeric weights if treated carelessly.
+- Minimize sensitive training data in logs, checkpoints, traces, and failure samples.
+- Restrict who may start runs, change code or data, publish artifacts, and promote a
+  serving version; audit each transition.
+- Pin runtime and accelerator dependencies, scan images, and test restore and inference
+  after upgrades.
+- Bound request shapes and batch sizes so one caller cannot exhaust accelerator memory.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate PyTorch with evidence, not framework folklore
+
+### Record the complete run identity
+
+- Source revision, dependency lock, container image, accelerator and driver inventory.
+- Dataset snapshot, feature and label schema, sampler seed, split definitions, and data
+  quality report.
+- Model configuration, precision, batch construction, parallel strategy, and compiler
+  settings.
+- Checkpoint lineage, evaluation suite, approval decision, artifact digest, and serving
+  rollout.
+
+### Alert on user-visible risk
+
+- Loss divergence, non-finite gradients, skipped optimizer steps, and quality-regression
+  slices.
+- Per-rank step, input-wait, collective, and memory pressure rather than cluster averages
+  alone.
+- Checkpoint age, save failure, checksum mismatch, and measured restore duration.
+- Training throughput against the capacity model and cost per accepted candidate.
+- Serving latency, error, saturation, output drift, and rollback readiness by model
+  version.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the smallest PyTorch system that preserves the invariant
+
+- Start with one process and eager execution until the training step, evaluation, and
+  checkpoint restore are correct.
+- Add automatic mixed precision when the target device supports it and stability tests
+  pass.
+- Add DDP when data-parallel throughput is useful and a full training state fits on
+  every rank.
+- Add FSDP when replicated state is the limiting resource and the team can own its
+  communication and checkpoint contracts.
+- Add compilation after profiling shows a supported compute bottleneck and input shapes
+  are representative.
+- Add a separate serving runtime only when its latency, portability, hardware, or
+  operations benefits outweigh another compatibility boundary.
+
+Related lessons: [Model Training](/ml-systems/model-training) establishes the broader
+training system, [TensorFlow](/technology/tensorflow) provides another framework
+perspective, and [ONNX](/technology/onnx) covers an interoperability contract.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/pytorch/quiz/pytorch-production.json" lessonSlug="pytorch" title="PyTorch Production Review" /%}

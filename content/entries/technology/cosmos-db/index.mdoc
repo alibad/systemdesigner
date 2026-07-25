@@ -1,0 +1,247 @@
+---
+registryId: cosmos-db
+---
+
+{% section-card tone="intro" %}
+## What is Azure Cosmos DB?
+
+Azure Cosmos DB is a managed, globally distributed database service. An application
+stores items in a **container**, groups them by a **logical partition key**, and pays
+for database work in **request units (RU)**. Cosmos DB then maps logical partitions to
+physical partitions, replicates them, and routes SDK requests to the configured regions.
+
+It matters when a workload needs predictable database capacity, regional placement,
+automatic partitioning, and an explicit consistency contract without operating its own
+distributed database fleet. It does not remove the two hardest design decisions: which
+key owns related data, and how stale a read may be.
+
+{% callout variant="info" %}
+**Core invariant:**
+
+Every request spends RU inside one or more partition key ranges. A high account-level
+RU budget cannot compensate for a low-cardinality key that concentrates traffic on one
+physical partition.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Items" eyebrow="Data" icon="database" tone="blue" %}
+JSON records live in containers. Item ID plus partition key is the efficient address
+for a point read.
+{% /concept-card %}
+{% concept-card title="Partition key" eyebrow="Ownership" icon="key" tone="violet" %}
+The key groups related items into a logical partition and determines transaction and
+query boundaries.
+{% /concept-card %}
+{% concept-card title="Request units" eyebrow="Capacity" icon="speed" tone="cyan" %}
+RU normalizes CPU, I/O, and memory consumed by reads, writes, and queries.
+{% /concept-card %}
+{% concept-card title="Consistency" eyebrow="Read contract" icon="shield" tone="green" %}
+The selected level defines freshness and ordering, while region distance and quorum
+work shape latency and throughput.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Budget requests before provisioning capacity
+
+A point read with the item ID and partition key is usually the cheapest read path.
+Queries cost more as they inspect more items, predicates, projections, functions, or
+partition key ranges. Writes also pay for item size and indexed properties. The SDK
+response exposes the actual request charge; measure it instead of relying on one global
+average.
+
+The lab uses transparent teaching assumptions so you can separate two limits:
+
+- **Aggregate pressure:** required RU/s divided by provisioned RU/s in one region.
+- **Hot-partition pressure:** RU/s aimed at the busiest key range divided by that
+  modeled physical partition's share.
+- **Global capacity:** configured RU/s is available in every associated region, so
+  region count multiplies the globally provisioned envelope.
+- **Consistency cost:** strong and bounded-staleness reads use approximately twice the
+  RU of relaxed reads for the same operation.
+
+{% interactive-block id="technology/cosmos-db-performance" /%}
+
+The model is not a price quote or benchmark. Calibrate it with request-charge headers,
+normalized RU consumption by partition key range, item-size percentiles, index policy,
+real queries, and a representative multi-region account.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose a partition key from access and growth invariants
+
+A logical partition contains all items with one partition-key value. This creates a
+useful atomicity and routing boundary, but it also creates a local storage and throughput
+boundary. A good key has enough cardinality to distribute load and still appears in the
+application's dominant reads, writes, and transaction groups.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Tenant or customer ID" eyebrow="Common fit" icon="users" tone="green" %}
+Co-locates one tenant's state and makes tenant-scoped queries efficient. Split or use a
+hierarchical key when a small number of tenants can dominate traffic or storage.
+{% /concept-card %}
+{% concept-card title="Status or country" eyebrow="Low cardinality" icon="warning" tone="rose" %}
+A few values collect most items and requests. Account metrics may look quiet while one
+physical partition throttles.
+{% /concept-card %}
+{% concept-card title="Item ID" eyebrow="Point-access fit" icon="key" tone="amber" %}
+Distributes writes and makes point reads efficient, but broader queries fan out because
+the business grouping is no longer the partition boundary.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Trace the failure, not only the happy path
+
+{% topology-lab dataFile="/api/content/technology/cosmos-db/data/regional-partition-topology.json" /%}
+
+Before creating a container, test candidate keys against:
+
+1. the largest value's lifetime storage;
+2. the busiest value's peak RU/s;
+3. every atomic batch or stored-procedure boundary;
+4. the dominant point reads and filtered queries;
+5. growth from unusually large tenants, products, devices, or time windows;
+6. migration options if ownership must change later.
+
+The current [partitioning guidance](https://learn.microsoft.com/en-us/azure/cosmos-db/partitioning)
+documents logical and physical partitions, hierarchical keys, and common key
+anti-patterns.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Select consistency from a user-visible promise
+
+Read consistency applies to an individual read within a logical partition. Choose the
+weakest level that still preserves the product invariant, then carry its client state
+correctly. Lower network distance does not strengthen the selected guarantee.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong" eyebrow="Latest committed value" icon="shield" tone="blue" %}
+Provides linearizable reads. Cross-region coordination raises latency, and read
+throughput per RU is lower than relaxed levels.
+{% /concept-card %}
+{% concept-card title="Bounded staleness" eyebrow="Finite lag" icon="clock" tone="violet" %}
+Bounds lag by versions or time. Use it when the product can state and verify a concrete
+freshness window.
+{% /concept-card %}
+{% concept-card title="Session" eyebrow="Client continuity" icon="users" tone="green" %}
+Provides read-your-writes and monotonic reads inside a session. Preserve and route the
+partition-bound session token when work crosses processes.
+{% /concept-card %}
+{% concept-card title="Consistent prefix" eyebrow="Ordered history" icon="layers" tone="cyan" %}
+Readers can lag but will not observe writes out of order. It does not guarantee a
+maximum freshness delay.
+{% /concept-card %}
+{% concept-card title="Eventual" eyebrow="Convergent replicas" icon="network" tone="amber" %}
+Prioritizes availability and low read coordination without ordering or freshness for
+one read.
+{% /concept-card %}
+{% concept-card title="Per-request override" eyebrow="Narrow relaxation" icon="settings" tone="rose" %}
+An SDK request can use a weaker read level than the account default. It cannot upgrade
+a read beyond the account's configured write and replication contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+The official [consistency-level guide](https://learn.microsoft.com/en-us/azure/cosmos-db/consistency-levels)
+defines the five guarantees and their quorum behavior. Recreate SDK clients after an
+account-level consistency change so cached configuration does not outlive the rollout.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Follow the complete request path
+
+{% process-flow %}
+{% process-step number="1" title="Address the item" label="Application" %}
+Supply item ID and partition key for a point operation, or state explicitly that a
+query may cross key ranges.
+{% /process-step %}
+{% process-step number="2" title="Route to a range" label="SDK" %}
+Use cached account and partition maps, preferred regions, bounded retries, and the
+session token required by the read contract.
+{% /process-step %}
+{% process-step number="3" title="Spend request units" label="Partition" %}
+Execute the operation inside one physical partition or fan query work across several.
+Return request charge and throttling metadata.
+{% /process-step %}
+{% process-step number="4" title="Replicate and observe" label="Service" %}
+Apply the configured consistency and regional topology, then expose latency, RU,
+availability, and partition-level pressure signals.
+{% /process-step %}
+{% /process-flow %}
+
+### Prefer point reads when the address is known
+
+{% code-block file="/api/content/technology/cosmos-db/code/point-read.ts" language="typescript" title="Point read with request-charge telemetry" /%}
+
+The item ID alone is not the full address in a partitioned container. Passing the key
+lets the SDK route directly instead of broadcasting a query. Record request charge and
+activity ID as operational metadata, but keep customer data and credentials out of logs.
+
+### Make assumptions executable
+
+{% code-block file="/api/content/technology/cosmos-db/code/plan-request-envelope.py" language="python" title="Transparent RU and hot-key planning model" /%}
+
+The script is deliberately small enough to review. Replace its illustrative RU weights
+with measured request charges from the intended index policy, item sizes, and query set.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Provision and recover from measured demand
+
+Choose one throughput mode from the workload, not from a generic preference:
+
+- **Manual provisioned throughput** fits stable demand with a known envelope and an
+  explicit scaling process.
+- **Autoscale throughput** fits variable or unpredictable demand, but can still return
+  `429` when total demand or one hot partition exceeds its available budget.
+- **Dynamic autoscale** can scale regions and partitions independently for supported
+  configurations; verify availability and account settings before relying on it.
+- **Serverless** fits intermittent workloads within its documented limits; compare its
+  economics and regional capabilities with the production contract.
+
+Treat `429 Too Many Requests` as a capacity signal, not an invitation to retry without
+a bound. Respect the SDK retry delay, cap end-to-end attempts, protect the caller's
+latency budget, and separate expected RU saturation from hot-key concentration.
+
+{% callout variant="warn" %}
+**A regional account is not automatically a tested recovery plan.**
+
+Availability depends on write-region mode, consistency, SDK preferred regions, retry
+behavior, and the operation being attempted. Exercise region loss, stale topology,
+session-token transfer, throttling, and ambiguous client timeouts with the exact account
+configuration.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate Cosmos DB as a partitioned system
+
+### Monitor together
+
+- request charge and latency by operation, container, region, and status code;
+- normalized RU consumption and throttled requests by partition key range;
+- item size, index size, cross-partition query fan-out, and result cardinality;
+- regional availability, replication behavior, SDK retries, and dependency latency;
+- the business keys responsible for hot traffic without logging sensitive values.
+
+### Drill deliberately
+
+- one tenant or product becoming disproportionately hot;
+- a traffic burst against a previously cold container;
+- preferred-region loss and delayed topology refresh;
+- an index-policy rollout that increases write RU or changes query behavior;
+- a consistency change with old SDK instances still running;
+- restore or migration into a container with a different partition contract.
+
+### Review before release
+
+1. Name the authority and atomicity boundary for every item family.
+2. Measure point reads, writes, and representative queries with production-like items.
+3. Prove the busiest logical key fits its storage and throughput envelope.
+4. State the consistency promise in product language and test session propagation.
+5. Bound retries and define user-visible behavior during sustained `429` responses.
+6. Test regional routing and recovery rather than inferring it from the region count.
+{% /section-card %}
+
+{% quiz quizId="cosmos-db" lessonSlug="cosmos-db" title="Cosmos DB Production Design Review" questionsFile="/api/content/technology/cosmos-db/quiz/cosmos-db-production-design.json" /%}

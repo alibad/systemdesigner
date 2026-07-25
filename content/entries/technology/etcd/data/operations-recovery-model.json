@@ -1,0 +1,266 @@
+{
+  "kind": "etcd-operations-recovery",
+  "blockId": "technology/etcd-operations-recovery-lab",
+  "title": "Choose the repair that matches the failure",
+  "description": "Select an observed incident, then choose an operator response. The result distinguishes client cache repair, keyspace maintenance, storage remediation, member replacement, and whole-cluster disaster recovery.",
+  "defaults": {
+    "incidentId": "nospace-alarm",
+    "actionId": "recover-space"
+  },
+  "actions": [
+    {
+      "id": "relist-watch",
+      "label": "Relist, record revision, resume watch",
+      "detail": "Rebuild the client cache from a current read and start the next watch from the returned revision.",
+      "category": "Client state"
+    },
+    {
+      "id": "recover-space",
+      "label": "Delete, compact, defrag, then disarm",
+      "detail": "Remove unneeded keys, compact history, reclaim each member's file space, and clear NOSPACE only after evidence is healthy.",
+      "category": "Keyspace"
+    },
+    {
+      "id": "fix-storage",
+      "label": "Repair the durable storage path",
+      "detail": "Move or repair the slow WAL/backend device and verify fsync and backend commit latency under load.",
+      "category": "Latency"
+    },
+    {
+      "id": "replace-member",
+      "label": "Replace one member through quorum",
+      "detail": "Remove and add one member at a time while the remaining voting majority stays healthy.",
+      "category": "Membership"
+    },
+    {
+      "id": "restore-cluster",
+      "label": "Restore a tested snapshot as a new cluster",
+      "detail": "Create new member and cluster identity, then reconnect clients only after integrity and revision behavior are verified.",
+      "category": "Disaster recovery"
+    }
+  ],
+  "incidents": [
+    {
+      "id": "compacted-watch",
+      "label": "Watcher requests compacted history",
+      "detail": "A controller reconnects from a revision older than the retained MVCC history.",
+      "signal": "ErrCompacted",
+      "dataRisk": "Stale client cache",
+      "evidence": [
+        "The server reports the requested watch revision has been compacted.",
+        "A current range read succeeds and returns a newer response revision.",
+        "The client cache can be rebuilt from authoritative key-value state."
+      ],
+      "requiredSequence": [
+        "Discard the incomplete local cache rather than guessing missed events.",
+        "Perform the required current range read and record its response revision.",
+        "Resume the watch after that revision and handle another compaction race."
+      ],
+      "outcomes": {
+        "relist-watch": {
+          "status": "effective",
+          "headline": "The client re-establishes a complete state boundary.",
+          "consequence": "A fresh list plus revision closes the gap that compacted watch history can no longer replay."
+        },
+        "recover-space": {
+          "status": "harmful",
+          "headline": "More maintenance cannot recreate deleted event history.",
+          "consequence": "Compaction is the reason the old events are unavailable. Defragmentation changes file allocation, not client cache correctness."
+        },
+        "fix-storage": {
+          "status": "harmful",
+          "headline": "Storage replacement does not repair a stale cache.",
+          "consequence": "The cluster is serving current data; the watcher must rebuild from a current revision."
+        },
+        "replace-member": {
+          "status": "harmful",
+          "headline": "Member replacement targets the wrong boundary.",
+          "consequence": "Every healthy member observes the same compacted history window. Replacing one member does not restore old watch events."
+        },
+        "restore-cluster": {
+          "status": "harmful",
+          "headline": "A cluster restore is disproportionate and risks regression.",
+          "consequence": "The authoritative cluster is healthy. Restoring an older snapshot can lose newer committed state and invalidate more watchers."
+        }
+      }
+    },
+    {
+      "id": "nospace-alarm",
+      "label": "Backend quota raises NOSPACE",
+      "detail": "The cluster enters limited-operation maintenance mode after backend usage reaches its configured quota.",
+      "signal": "NOSPACE alarm",
+      "dataRisk": "Writes rejected",
+      "evidence": [
+        "The alarm list contains NOSPACE and endpoint status shows high backend use.",
+        "Live keyspace size and retained revision history are both measured.",
+        "A reviewed set of keys or old history can be removed safely."
+      ],
+      "requiredSequence": [
+        "Delete unnecessary live keys and stop the workload causing unbounded growth.",
+        "Compact old MVCC revisions so etcd can reuse their pages.",
+        "Defragment members one at a time to return free pages to the filesystem.",
+        "Verify space and health, then disarm NOSPACE and test a bounded write."
+      ],
+      "outcomes": {
+        "relist-watch": {
+          "status": "harmful",
+          "headline": "Refreshing a watcher does not free backend space.",
+          "consequence": "The cluster remains in maintenance mode because key and history storage still exceed the quota."
+        },
+        "recover-space": {
+          "status": "effective",
+          "headline": "The response addresses logical history and physical file space.",
+          "consequence": "Compaction makes old revisions reusable; defragmentation returns that reusable space to the filesystem. The alarm is cleared only after verification."
+        },
+        "fix-storage": {
+          "status": "partial",
+          "headline": "A larger or faster disk buys time but leaves growth unbounded.",
+          "consequence": "The current quota and retained history still need correction, or the replacement storage will fill again."
+        },
+        "replace-member": {
+          "status": "harmful",
+          "headline": "Replacing a member does not remove cluster-wide key history.",
+          "consequence": "The restored member catches up to the same oversized logical state and the NOSPACE condition remains."
+        },
+        "restore-cluster": {
+          "status": "harmful",
+          "headline": "Snapshot restore is not routine space maintenance.",
+          "consequence": "It can discard committed changes and creates an avoidable cluster-identity migration while the existing quorum is healthy."
+        }
+      }
+    },
+    {
+      "id": "slow-fsync",
+      "label": "WAL fsync latency spikes",
+      "detail": "Write latency and leader stability degrade while disk persistence histograms rise.",
+      "signal": "wal_fsync p99",
+      "dataRisk": "Quorum instability",
+      "evidence": [
+        "WAL fsync or backend commit latency rises on one or more members.",
+        "Peer RTT, CPU throttling, and application request shape are checked separately.",
+        "Pending proposals or leader changes correlate with the storage slowdown."
+      ],
+      "requiredSequence": [
+        "Protect the workload with admission control and preserve a voting majority.",
+        "Repair or replace the slow durable storage path one member at a time.",
+        "Re-run a representative benchmark and verify proposal and leadership metrics."
+      ],
+      "outcomes": {
+        "relist-watch": {
+          "status": "harmful",
+          "headline": "Client cache refresh does not shorten durable commits.",
+          "consequence": "Writes still wait on the slow consensus storage path and the cluster can remain unstable."
+        },
+        "recover-space": {
+          "status": "partial",
+          "headline": "Maintenance helps only if fragmentation is the measured cause.",
+          "consequence": "Live defragmentation blocks a member and can worsen latency. Do not use it as a generic fix for slow fsync."
+        },
+        "fix-storage": {
+          "status": "effective",
+          "headline": "The response repairs the physical commit bottleneck.",
+          "consequence": "Healthy low-latency durable storage reduces the RTT-plus-fsync floor that constrains Raft commits."
+        },
+        "replace-member": {
+          "status": "partial",
+          "headline": "Replacement works only when it includes a healthy storage path.",
+          "consequence": "Replacing a member on the same overloaded device or class reproduces the failure."
+        },
+        "restore-cluster": {
+          "status": "harmful",
+          "headline": "Restoring data does not make the storage device faster.",
+          "consequence": "The new cluster can inherit the same latency fault while adding unnecessary recovery risk."
+        }
+      }
+    },
+    {
+      "id": "single-corrupt-member",
+      "label": "One member reports corruption",
+      "detail": "A healthy voting majority remains available while one member's persisted state diverges.",
+      "signal": "CORRUPT alarm",
+      "dataRisk": "One replica invalid",
+      "evidence": [
+        "Endpoint and hash checks isolate the problem to one member.",
+        "The remaining voting members still form a healthy majority.",
+        "A current snapshot and the affected data directory are preserved for analysis."
+      ],
+      "requiredSequence": [
+        "Stop or isolate the affected member without removing another voter.",
+        "Use the version-matched corruption runbook to purge or replace that member.",
+        "Wait for catch-up, verify hashes and health, then clear the alarm."
+      ],
+      "outcomes": {
+        "relist-watch": {
+          "status": "harmful",
+          "headline": "A client relist does not repair persisted member state.",
+          "consequence": "The corrupt replica remains unsafe even if a client happens to read from a healthy member."
+        },
+        "recover-space": {
+          "status": "harmful",
+          "headline": "Compaction and defrag are not corruption repair.",
+          "consequence": "Changing storage layout can destroy evidence without restoring agreement."
+        },
+        "fix-storage": {
+          "status": "partial",
+          "headline": "Hardware repair may prevent recurrence but does not rebuild state.",
+          "consequence": "The member still needs a documented purge or replacement path from healthy cluster data."
+        },
+        "replace-member": {
+          "status": "effective",
+          "headline": "The healthy quorum can safely rebuild one replica.",
+          "consequence": "One-at-a-time replacement preserves quorum and lets the new member catch up from authoritative state."
+        },
+        "restore-cluster": {
+          "status": "harmful",
+          "headline": "Whole-cluster restore expands the blast radius.",
+          "consequence": "A healthy majority already contains authoritative state. Restoring every member risks losing newer commits."
+        }
+      }
+    },
+    {
+      "id": "majority-lost",
+      "label": "Voting majority is permanently lost",
+      "detail": "Too few original voters can form quorum and the missing members cannot be recovered.",
+      "signal": "No leader or quorum",
+      "dataRisk": "RPO since snapshot",
+      "evidence": [
+        "The original voting majority cannot be restored safely.",
+        "The latest usable snapshot has a known revision, integrity result, and protected copy.",
+        "RPO, cluster endpoints, certificates, and dependent-client restart behavior are approved."
+      ],
+      "requiredSequence": [
+        "Fence every surviving old member and preserve forensic evidence.",
+        "Restore the tested snapshot into new member directories and a new cluster identity.",
+        "For revision-sensitive consumers, apply the version-supported revision bump and mark-compacted procedure.",
+        "Verify hashes, alarms, membership, TLS, and application reconciliation before reopening writes."
+      ],
+      "outcomes": {
+        "relist-watch": {
+          "status": "harmful",
+          "headline": "Clients cannot relist from a cluster without quorum.",
+          "consequence": "The authoritative service cannot prove a current read or commit a write."
+        },
+        "recover-space": {
+          "status": "harmful",
+          "headline": "Space maintenance cannot recreate a voting majority.",
+          "consequence": "Compaction and defragmentation operate on storage, not lost consensus membership."
+        },
+        "fix-storage": {
+          "status": "partial",
+          "headline": "Repair surviving disks only helps if the old majority returns.",
+          "consequence": "When missing voters are permanently lost, durable storage on a minority cannot authorize new commits."
+        },
+        "replace-member": {
+          "status": "harmful",
+          "headline": "Runtime membership changes require the quorum that is gone.",
+          "consequence": "Adding or removing members through the unavailable cluster cannot safely establish a new authority."
+        },
+        "restore-cluster": {
+          "status": "effective",
+          "headline": "A tested snapshot becomes the recovery authority.",
+          "consequence": "Restore creates new cluster and member identity. Clients must reconcile the declared RPO and invalidate revision-sensitive caches correctly."
+        }
+      }
+    }
+  ]
+}

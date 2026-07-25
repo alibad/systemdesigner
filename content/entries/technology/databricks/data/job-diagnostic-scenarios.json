@@ -1,0 +1,179 @@
+{
+  "title": "Diagnose the evidence before changing compute",
+  "description": "Compare four synthetic Spark run profiles and choose the first action. Each profile reports observed phase durations and task evidence; no action claims a guaranteed speedup.",
+  "defaultScenarioId": "scan-heavy",
+  "scenarios": [
+    {
+      "id": "scan-heavy",
+      "label": "Scan-heavy query",
+      "detail": "Most time and bytes are spent reading files that the final filter discards.",
+      "symptom": "A selective daily report reads 4.8 TB to return 18 GB.",
+      "phases": [
+        {"id":"planning","label":"Planning and listing","seconds":24,"detail":"File discovery and plan construction","tone":"blue"},
+        {"id":"scan","label":"Scan and decode","seconds":214,"detail":"Object storage reads and column decoding","tone":"rose"},
+        {"id":"shuffle","label":"Shuffle","seconds":31,"detail":"Exchange before aggregation","tone":"violet"},
+        {"id":"compute","label":"Aggregate and write","seconds":27,"detail":"Final calculation and output","tone":"cyan"}
+      ],
+      "signals": [
+        {"label":"Input read","value":"4.8 TB","detail":"The report returns 18 GB after filtering."},
+        {"label":"Files opened","value":"182,000","detail":"Median file size is 27 MB."},
+        {"label":"Filter selectivity","value":"0.38%","detail":"Most scanned rows cannot affect the result."}
+      ],
+      "actions": [
+        {
+          "id":"double-workers",
+          "label":"Double the worker count",
+          "detail":"Add parallel readers before investigating why so much data is read.",
+          "fit":"wrong",
+          "result":"More readers can increase storage concurrency, but they do not reduce 4.8 TB of unnecessary input or 182,000 file opens. Fix scan selectivity and layout first, then right-size compute from the new trace.",
+          "verify":["Open the query profile and confirm which scan operator owns the input bytes and file count.","Compare filters with available statistics, pruning, and clustering keys on the table.","Rerun the unchanged workload and verify input bytes and files opened fall before changing worker bounds."]
+        },
+        {
+          "id":"fix-pruning",
+          "label":"Inspect pruning, statistics, and layout",
+          "detail":"Test whether query predicates can skip files and whether layout matches recurring filters.",
+          "fit":"best",
+          "result":"The profile is dominated by scan work and weak data reduction. Verify the predicate is pushdown-friendly, statistics cover useful columns, and liquid clustering or maintenance matches measured access patterns.",
+          "verify":["Record the physical plan, input bytes, files read, and pruning evidence before any table change.","Test the predicate and a representative clustering strategy on a copy or controlled slice.","Compare scanned bytes, file count, runtime, and maintenance cost over several real query shapes."]
+        },
+        {
+          "id":"cache-result",
+          "label":"Cache this result in the notebook",
+          "detail":"Avoid a second scan only while one interactive session retains the materialized data.",
+          "fit":"investigate",
+          "result":"Caching may help repeated actions in the same session, but it does not repair the production table path and may not survive a new job run. First establish whether repeated reads or one bad scan is the actual contract.",
+          "verify":["Measure how often the exact intermediate result is reused within one run or session.","Check memory pressure, eviction, and whether downstream jobs can reuse a durable materialization instead.","Prefer a governed materialized data product when reuse crosses job or user boundaries."]
+        }
+      ]
+    },
+    {
+      "id": "shuffle-skew",
+      "label": "Skewed join",
+      "detail": "One post-shuffle task runs far longer than its peers and gates completion.",
+      "symptom": "A customer join has a 42-second median task and one 611-second straggler.",
+      "phases": [
+        {"id":"scan","label":"Input scans","seconds":72,"detail":"Both join sides are read","tone":"blue"},
+        {"id":"shuffle","label":"Shuffle exchange","seconds":188,"detail":"Records move by join key","tone":"violet"},
+        {"id":"straggler","label":"Skewed task tail","seconds":611,"detail":"One key dominates a partition","tone":"rose"},
+        {"id":"write","label":"Output write","seconds":36,"detail":"Completed partitions commit","tone":"cyan"}
+      ],
+      "signals": [
+        {"label":"Median task","value":"42s","detail":"Most partitions complete normally."},
+        {"label":"Longest task","value":"611s","detail":"One task gates the whole stage."},
+        {"label":"Largest partition","value":"19x median","detail":"Runtime distribution indicates key skew."}
+      ],
+      "actions": [
+        {
+          "id":"raise-driver-memory",
+          "label":"Increase driver memory",
+          "detail":"Resize the coordinator even though the slow work is one executor task.",
+          "fit":"wrong",
+          "result":"The observed tail is inside one executor task after shuffle. Driver memory does not rebalance a hot join key, so this change targets the wrong process.",
+          "verify":["Confirm the long task executor, input size, shuffle read, spill, and key distribution in the stage details.","Inspect driver metrics separately before changing driver size.","Keep driver changes tied to driver evidence such as planning pressure, result collection, or OOM events."]
+        },
+        {
+          "id":"inspect-aqe-keys",
+          "label":"Inspect AQE and hot keys",
+          "detail":"Verify runtime skew handling, statistics, and the business meaning of dominant keys.",
+          "fit":"best",
+          "result":"A 19x partition and 14x task tail are direct skew evidence. Confirm adaptive execution, inspect the hot keys, and then choose pre-aggregation, filtering, key repair, salting, or a different join shape that preserves correctness.",
+          "verify":["Use the SQL or Spark UI to verify adaptive plan changes and identify the skewed partition.","Profile key frequency and determine whether null, unknown, or default keys are legitimate or data-quality defects.","Rerun with the chosen correction and compare task-duration distribution, shuffle bytes, spill, and output equality."]
+        },
+        {
+          "id":"broadcast-small-side",
+          "label":"Test a broadcast join",
+          "detail":"Remove the shuffle only if one side is reliably small enough and supported by the plan.",
+          "fit":"investigate",
+          "result":"Broadcasting can avoid a shuffle when one relation is genuinely small, but forcing it without fresh size evidence can create executor memory pressure. Inspect plan statistics and runtime size first.",
+          "verify":["Measure the serialized size of the candidate side after filters, not the raw source table size.","Inspect whether Photon or the optimizer already selects an appropriate join strategy with current statistics.","Load-test executor memory and verify output correctness before using a hint."]
+        }
+      ]
+    },
+    {
+      "id": "driver-bound",
+      "label": "Driver-bound notebook",
+      "detail": "Executors go idle while local collection and Python work dominate the driver.",
+      "symptom": "A notebook collects 11 million rows and spends most of the run in local Python.",
+      "phases": [
+        {"id":"distributed","label":"Distributed filtering","seconds":54,"detail":"Executors reduce source data","tone":"blue"},
+        {"id":"transfer","label":"Collect to driver","seconds":96,"detail":"Rows move to one process","tone":"amber"},
+        {"id":"local","label":"Local Python loop","seconds":428,"detail":"Single-process transformation","tone":"rose"},
+        {"id":"upload","label":"Write result","seconds":42,"detail":"Driver sends output back","tone":"cyan"}
+      ],
+      "signals": [
+        {"label":"Rows collected","value":"11 million","detail":"All records enter driver memory."},
+        {"label":"Executor idle time","value":"71%","detail":"Workers wait during local processing."},
+        {"label":"Driver memory","value":"92%","detail":"The coordinator approaches its limit."}
+      ],
+      "actions": [
+        {
+          "id":"add-workers",
+          "label":"Add more workers",
+          "detail":"Increase executor capacity while the local Python loop remains serial.",
+          "fit":"wrong",
+          "result":"The executors are already idle for most of the run. More workers cannot parallelize code after collect has moved the dataset into one driver process.",
+          "verify":["Locate the collect or conversion action in the notebook and correlate it with executor idle time.","Record driver memory, result size, and local execution duration before resizing anything.","Remove the centralization boundary, then right-size compute from the distributed run."]
+        },
+        {
+          "id":"distribute-transform",
+          "label":"Keep the transform distributed",
+          "detail":"Replace collection and local loops with Spark SQL, DataFrame operations, or a bounded output.",
+          "fit":"best",
+          "result":"The evidence shows a driver-side serialization point. Express the transformation with distributed operators, aggregate before collection, or write a governed table and collect only a bounded presentation result.",
+          "verify":["Rewrite one transformation using built-in SQL or DataFrame operators and compare the physical plan.","Verify output equality, executor utilization, driver memory, and rows returned to the client.","Set an explicit row or byte bound for any result that must still leave the distributed engine."]
+        },
+        {
+          "id":"increase-driver",
+          "label":"Increase driver memory temporarily",
+          "detail":"Create incident headroom while planning removal of the centralization point.",
+          "fit":"investigate",
+          "result":"A larger driver may prevent an immediate OOM, but it preserves the serial bottleneck and makes the next data increase more dangerous. Use only as a bounded mitigation with an owner and expiry.",
+          "verify":["Confirm the failure or pressure is genuinely driver memory rather than executor spill or skew.","Set a short-lived mitigation window and alert before the new memory limit is reached.","Track the code change that removes unbounded collection as the durable fix."]
+        }
+      ]
+    },
+    {
+      "id": "small-files",
+      "label": "Small-file overhead",
+      "detail": "Planning and file opening dominate even though total input volume is modest.",
+      "symptom": "A 640 GB table contains 1.4 million files and takes minutes to start useful work.",
+      "phases": [
+        {"id":"listing","label":"Listing and planning","seconds":286,"detail":"Metadata and file enumeration","tone":"rose"},
+        {"id":"open","label":"File open overhead","seconds":172,"detail":"Many short object reads","tone":"amber"},
+        {"id":"scan","label":"Data scan","seconds":83,"detail":"Useful bytes are decoded","tone":"blue"},
+        {"id":"compute","label":"Transform and write","seconds":69,"detail":"Business logic completes","tone":"cyan"}
+      ],
+      "signals": [
+        {"label":"Table size","value":"640 GB","detail":"The byte volume is not the dominant clue."},
+        {"label":"Data files","value":"1.4 million","detail":"Average file size is below 0.5 MB."},
+        {"label":"Planning share","value":"47%","detail":"Useful executor work starts late."}
+      ],
+      "actions": [
+        {
+          "id":"max-workers",
+          "label":"Set the maximum worker count",
+          "detail":"Scale executors before reducing planning and object-open overhead.",
+          "fit":"wrong",
+          "result":"Executor count does not remove 1.4 million metadata entries or make tiny files larger. Planning can remain serial or coordinator-heavy while extra workers wait.",
+          "verify":["Separate planning, file-open, scan, and compute time in the query profile.","Measure average and percentile file sizes plus files added per write operation.","Change layout and maintenance first, then reassess worker utilization."]
+        },
+        {
+          "id":"maintenance-policy",
+          "label":"Fix write and maintenance policy",
+          "detail":"Use supported compaction, predictive optimization, and appropriate clustering.",
+          "fit":"best",
+          "result":"The evidence points to file-count overhead. For eligible managed tables, predictive optimization can automate maintenance; liquid clustering can organize data without creating a brittle high-cardinality partition tree.",
+          "verify":["Identify which writers create tiny files and whether optimized writes or batching can prevent them.","Test compaction or predictive optimization on a controlled table and record file-size distribution before and after.","Compare planning time, files opened, scanned bytes, maintenance duration, and concurrent-write behavior."]
+        },
+        {
+          "id":"manual-repartition-read",
+          "label":"Repartition every read",
+          "detail":"Add a shuffle after the files have already been listed and opened.",
+          "fit":"investigate",
+          "result":"Read-time repartitioning may improve downstream parallelism, but it happens after the expensive listing and opening work. Determine whether the issue is output partitioning or persistent table layout before adding a shuffle.",
+          "verify":["Check whether the extra shuffle reduces a downstream bottleneck independently of file-open cost.","Measure total runtime and shuffle bytes with and without repartitioning.","Prefer correcting the write path when the same table is read repeatedly."]
+        }
+      ]
+    }
+  ]
+}

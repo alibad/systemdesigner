@@ -1,0 +1,265 @@
+---
+registryId: production-tokenization
+---
+
+{% section-card tone="intro" %}
+## What is a production tokenization system?
+
+A **production tokenization system** is the bounded, observable path that turns application text into the exact token IDs, masks, offsets, and control markers expected by a deployed model. It may run inside each model worker or behind a dedicated service, but it always sits on the model's correctness boundary.
+
+In a notebook, correct output for one string may be enough. In production, the same tokenizer must handle concurrent traffic, hostile or malformed input, multiple languages, cache isolation, versioned artifacts, and rollbacks without silently changing what the model receives.
+
+### The invariant to protect
+
+**Release the tokenizer, model checkpoint, prompt template, normalization rules, and special-token IDs as one immutable contract.** A faster tokenizer that maps text to different IDs is not an optimization; it is a different model interface.
+
+This lesson assumes the segmentation mechanics from [Tokenization Fundamentals](/genai/tokenization-fundamentals) and [BPE Algorithm Deep Dive](/genai/bpe-algorithm).
+
+{% metric-strip %}
+{% metric value="Exact" label="Contract" detail="Golden inputs must preserve expected IDs, masks, offsets, and control-token boundaries." tone="violet" /%}
+{% metric value="Bounded" label="Work" detail="Bytes, texts per request, output tokens, queue time, and tenant rate all need explicit limits." tone="blue" /%}
+{% metric value="Pinned" label="Version" detail="Every response and metric must identify the tokenizer and model bundle that produced it." tone="amber" /%}
+{% metric value="Reversible" label="Release" detail="Traffic can return to a known-compatible bundle without rebuilding artifacts during an incident." tone="green" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card %}
+## Put tokenization on the request path deliberately
+
+Tokenization is CPU work performed before accelerator inference. Its placement determines whether model replicas waste memory on duplicate tokenizer state, whether requests cross another network boundary, and whether training, evaluation, and serving can drift.
+
+{% concept-grid columns="3" %}
+{% concept-card title="In-process library" eyebrow="Lowest boundary cost" icon="cpu" tone="green" %}
+Load one immutable tokenizer per process and encode beside the model server. This avoids an extra hop and keeps admission decisions close to inference, but every serving runtime must pin and validate the same bundle.
+{% /concept-card %}
+{% concept-card title="Shared tokenization service" eyebrow="Centralized policy" icon="server" tone="blue" %}
+Use a bounded service when many clients need the same tokenizer fleet, asynchronous document preprocessing, or centralized metering. The added hop, queue, tenancy, and availability dependency must be justified.
+{% /concept-card %}
+{% concept-card title="Offline preprocessing" eyebrow="Stable corpora" icon="database" tone="violet" %}
+Pre-tokenize immutable training or batch data when storage cost and artifact lineage are acceptable. Never reuse stored IDs with a model bundle whose tokenizer contract differs.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Trace the synchronous hot path
+
+{% system-flow title="Bounded text-to-ID path" caption="Cache lookup is optional. Contract validation, request limits, and version identity are not." %}
+{% system-node title="Admit input" eyebrow="Bytes and tenant" icon="shield" tone="blue" %}
+Validate UTF-8 handling, content size, batch width, requested options, and tenant quota before expensive work.
+{% /system-node %}
+{% system-node title="Resolve bundle" eyebrow="Immutable identity" icon="storage" tone="violet" %}
+Select the exact normalizer, vocabulary, merges, special-token map, template, and model revision.
+{% /system-node %}
+{% system-node title="Encode bounded batch" eyebrow="CPU workers" icon="layers" tone="cyan" %}
+Group compatible requests, apply a maximum wait, and keep one warmed tokenizer instance per worker.
+{% /system-node %}
+{% system-node title="Return evidence" eyebrow="IDs and lineage" icon="activity" tone="green" %}
+Return IDs, masks, offsets, truncation metadata, and the bundle fingerprint; record work by tokens and bytes.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Estimate CPU and queue pressure before scaling
+
+**Offered token work** is the incoming request rate multiplied by the average encoded length for a measured traffic slice. Request count alone hides the difference between short chat turns, long documents, code, and byte-heavy multilingual input.
+
+For one slice:
+
+- `token work/s = requests/s x average tokens/request`
+- `encode cores ~= uncached token work/s / measured tokens/core/s`
+- `fixed-cost cores ~= uncached requests/s x fixed request seconds / batch size`
+- `required workers = ceil(total cores / (cores per worker x target utilization))`
+
+These are planning estimates, not vendor benchmarks. Measure the real tokenizer, CPU type, options, and input distribution. Then reserve headroom for bursts, long-tail inputs, garbage collection, and deployment overlap.
+{% /section-card %}
+
+{% interactive-block id="genai/production-tokenization-capacity-batching-lab" dataFile="/api/content/genai/production-tokenization/data/capacity-batching-model.json" /%}
+
+{% section-card %}
+## Batch for efficiency without hiding queue delay
+
+A **micro-batch** groups compatible encode operations so fixed per-call costs are shared. It does not make token work disappear.
+
+### Batch only compatible work
+
+- Group requests by tokenizer bundle, normalization mode, special-token policy, truncation side, padding strategy, offset requirements, and output format.
+- Set both a maximum batch size and a maximum wait. A large target batch under light traffic can spend the entire latency budget waiting to fill.
+- Separate low-latency interactive traffic from asynchronous preprocessing so document jobs cannot block chat requests.
+- Bound every request before it enters the queue. Rejecting an oversized payload after batching wastes shared capacity.
+- Scale from queue age and measured CPU saturation, not raw request count alone.
+
+### Know when not to use a remote service
+
+- Keep tokenization in process when one model server owns the contract and an extra network hop adds no operational value.
+- Use a shared service when centralized policy, reuse across runtimes, or asynchronous preprocessing outweigh the extra dependency.
+- Keep the service stateless with respect to requests; worker-local tokenizer instances and caches are performance state, not correctness state.
+
+{% callout variant="tip" %}
+The queue's oldest-item age is usually a better autoscaling signal than queue length. The same number of queued requests can represent a few short prompts or several million document tokens.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Cache only exact, reusable encode results
+
+A tokenization cache is correct only when its key represents every input that can change the output.
+
+Build a key from:
+
+1. a cryptographic hash of the original input bytes;
+2. the immutable tokenizer-bundle fingerprint;
+3. normalization and pre-tokenization settings;
+4. special-token, template, padding, and truncation options;
+5. maximum length and requested offset unit;
+6. tenant or policy scope when data reuse is not globally permitted.
+
+Do not log raw text or use it directly as a cache key. Hashing protects the key shape, but it does not automatically make a shared cache safe: low-entropy sensitive values can still be guessed, and cached token IDs may remain tenant data.
+
+### Cache where reuse is real
+
+- **Worker-local cache:** lowest latency and smallest blast radius, but hit rate falls as replicas scale.
+- **Shared cache:** better reuse across workers, but adds network latency, dependency risk, eviction pressure, and tenancy controls.
+- **Offline artifact store:** useful for immutable corpora when IDs are tied to a bundle fingerprint and source lineage.
+- **No result cache:** often correct for unique user prompts; warmed tokenizer objects and memory-mapped artifacts still remove repeated setup work.
+{% /section-card %}
+
+{% section-card %}
+## Implement a bounded worker
+
+The service example keeps the contract explicit: the application supplies an allow-listed bundle ID, request models enforce limits, CPU work leaves the event loop, and responses include a fingerprint and truncation evidence.
+
+{% code-block file="/api/content/genai/production-tokenization/code/tokenization-worker.py" language="python" title="Bounded FastAPI tokenization worker" /%}
+
+Important production details:
+
+- Load and validate allowed bundles during startup so the first user request does not pay artifact download or compilation time.
+- Use fast native tokenizers where their exact outputs match the approved contract.
+- Keep blocking tokenization off the async event loop and cap concurrent CPU jobs with a worker pool or semaphore.
+- Return offsets only with a named unit and source stage, such as UTF-8 bytes in original text or character positions in normalized text.
+- Reject sequences over a declared token bound, as the example does, or return `truncated: true` with the original token count when policy removes content. Silent truncation turns an admission decision into an apparent model failure.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Make failures explicit and bounded
+
+Production tokenization fails in more ways than returning an exception.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Malformed or adversarial input" eyebrow="Admission failure" icon="warning" tone="rose" %}
+Reject or replace malformed byte sequences according to a declared policy. Bound deeply repeated text, control characters, enormous batches, and inputs designed to expand into unusually many tokens.
+{% /concept-card %}
+{% concept-card title="Queue saturation" eyebrow="Capacity failure" icon="gauge" tone="amber" %}
+Reject with a retryable status before latency becomes unbounded. Preserve per-tenant fairness so one document workload cannot consume every worker.
+{% /concept-card %}
+{% concept-card title="Artifact unavailable" eyebrow="Startup failure" icon="storage" tone="violet" %}
+Fail readiness rather than serving with a default tokenizer. A fallback is valid only when it is the exact tokenizer contract for the selected model.
+{% /concept-card %}
+{% concept-card title="Contract drift" eyebrow="Correctness failure" icon="repeat" tone="rose" %}
+Stop the release when golden IDs, special-token mappings, templates, masks, or offsets differ unexpectedly. Healthy CPU and low latency do not make mismatched IDs safe.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Preserve a clear client contract
+
+- Use `400` for invalid options or malformed content under the declared encoding policy.
+- Use `413` when bytes, texts, or configured output bounds exceed hard limits.
+- Use `422` when input is structurally valid but incompatible with the chosen tokenizer contract.
+- Use `429` for tenant admission limits and include bounded retry guidance.
+- Use `503` when no compatible bundle or worker capacity is ready; never silently route to a different vocabulary.
+{% /section-card %}
+
+{% section-card %}
+## Release tokenizer and model changes together
+
+A **compatibility gate** compares a candidate bundle with the production baseline before traffic expands. It combines exact contract tests with measured slice-level regressions.
+
+Exact checks and statistical checks answer different questions:
+
+- **Exact fixtures** protect known IDs, role boundaries, special-token IDs, masks, offsets, decode behavior, and fingerprints.
+- **Corpus slices** measure token expansion, truncation, unknown or byte-fallback rates, latency, and memory by language, domain, and content type.
+- **Downstream evaluations** reveal model-quality and safety changes caused by a different representation.
+- **Rollback evidence** proves the previous complete bundle can still be loaded and routed.
+
+An average improvement cannot compensate for a broken exact invariant. A candidate that saves 8% of tokens but remaps an existing ID to another embedding row is incompatible.
+{% /section-card %}
+
+{% interactive-block id="genai/production-tokenization-release-compatibility-lab" dataFile="/api/content/genai/production-tokenization/data/release-compatibility-model.json" /%}
+
+{% section-card %}
+## Use a staged release with a complete rollback unit
+
+{% process-flow %}
+{% process-step number="1" title="Build and fingerprint" label="Immutable bundle" %}
+Package tokenizer files, normalizer, template, special-token map, library version, Unicode behavior, model checkpoint, and hashes.
+{% /process-step %}
+{% process-step number="2" title="Run exact gates" label="No traffic" %}
+Compare golden IDs, masks, offsets, decoding, role serialization, and control-token boundaries against approved expectations.
+{% /process-step %}
+{% process-step number="3" title="Evaluate protected slices" label="Shadow or offline" %}
+Measure expansion, truncation, latency, downstream quality, and security cases by language, domain, tenant class, and input shape.
+{% /process-step %}
+{% process-step number="4" title="Canary and observe" label="Bounded exposure" %}
+Route a small cohort by complete bundle ID, compare with the baseline, and stop on hard contract or quality failures.
+{% /process-step %}
+{% process-step number="5" title="Promote or roll back" label="One unit" %}
+Expand only after evidence thresholds pass. Roll back model, tokenizer, template, policy, and caches together.
+{% /process-step %}
+{% /process-flow %}
+
+The release-gate example treats exact contract failures as blockers and keeps distribution regressions as explicit thresholds.
+
+{% code-block file="/api/content/genai/production-tokenization/code/tokenizer-release-gate.py" language="python" title="Tokenizer compatibility release gate" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate the system from token-level signals
+
+Observe the path by bundle, tenant class, traffic slice, endpoint, and result. Global averages conceal the inputs that consume the most work or suffer the most truncation.
+
+### Service-level signals
+
+- request rate, byte rate, token rate, batch width, batch wait, queue age, and admitted versus rejected work;
+- p50, p95, and p99 latency split into admission, queue, cache, encode, and serialization time;
+- CPU time per million tokens, resident memory per loaded bundle, worker restarts, and artifact load time;
+- cache hit rate and latency by bundle and scope, plus evictions and cache dependency errors.
+
+### Correctness and product signals
+
+- token-count distributions by language, script, code language, document type, and model route;
+- truncation rate, tokens removed, offset-alignment failures, unknown-token or byte-fallback rate;
+- golden-fixture mismatches, special-token or template fingerprint mismatches, and unexpected bundle IDs;
+- downstream quality, safety, retrieval, labeling, or citation regressions associated with the candidate bundle.
+
+### Alert on user impact
+
+- Page when no compatible tokenizer bundle is ready, queue age exceeds the latency budget, or exact contract mismatches appear.
+- Stop a rollout when protected slices breach declared expansion, truncation, latency, or downstream-quality thresholds.
+- Investigate a cache-hit collapse as a key/versioning change before simply adding capacity.
+- Retain sampled text only under explicit consent, minimization, redaction, access, and deletion policy; prefer aggregate distributions and fixture identifiers.
+{% /section-card %}
+
+{% section-card %}
+## Apply the production review checklist
+
+Before release, confirm:
+
+- Every model route resolves one immutable tokenizer-bundle fingerprint.
+- Byte, batch, token, queue, concurrency, and tenant limits are enforced before expensive work.
+- Exact fixtures cover multilingual text, code, emoji, combining marks, malformed input, role templates, and control-looking strings.
+- Capacity tests use measured token distributions and the production CPU architecture.
+- Cache keys include the full output contract and cache scopes prevent cross-tenant leakage.
+- Dashboards separate queue time, cache time, encode time, and serialization time.
+- Canary routing, metrics, traces, and logs all carry the complete bundle ID.
+- The previous model-tokenizer-template bundle is loaded, tested, and ready for rollback.
+
+During an incident:
+
+1. stop rollout expansion and preserve the affected bundle ID;
+2. bound new work with admission control rather than allowing queue latency to grow;
+3. separate capacity symptoms from contract mismatches using exact fixtures;
+4. route only to a known-compatible bundle or fail explicitly;
+5. compare affected slices and cache keys before changing capacity;
+6. record the failed invariant, user impact, rollback action, and new regression fixture.
+{% /section-card %}
+
+{% quiz title="Production Tokenization Decision Check" lessonSlug="production-tokenization" questionsFile="/api/content/genai/production-tokenization/quiz/production-tokenization-decisions.json" /%}

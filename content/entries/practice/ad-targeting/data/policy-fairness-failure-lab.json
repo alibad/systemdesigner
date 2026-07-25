@@ -1,0 +1,153 @@
+{
+  "title": "Trace the auction when policy or features change",
+  "description": "Choose a serving scenario to see which path is active, which component owns the decision, and why a useful fallback may reduce personalization without relaxing consent, budget, frequency, or delivery safeguards.",
+  "nodes": [
+    {
+      "id": "request",
+      "label": "Ad opportunity",
+      "eyebrow": "Placement + context",
+      "detail": "Carries placement, deadline, region, approved contextual fields, and a consent reference. It never supplies permission by implication.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 22
+    },
+    {
+      "id": "gateway",
+      "label": "Auction gateway",
+      "eyebrow": "Normalize + deadline",
+      "detail": "Validates request shape, attaches the trace and policy versions, limits fan-out, and sends only approved fields to downstream services.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 25,
+      "y": 22
+    },
+    {
+      "id": "eligibility",
+      "label": "Eligibility gate",
+      "eyebrow": "Hard constraints",
+      "detail": "Checks consent, inventory, targeting rules, campaign status, frequency caps, and current budget authority before a candidate can be ranked.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 44,
+      "y": 22
+    },
+    {
+      "id": "features",
+      "label": "Approved features",
+      "eyebrow": "Version + freshness",
+      "detail": "Serves bounded contextual and consented first-party features with freshness and schema metadata. It is not an authority for consent or spending.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 57,
+      "y": 54
+    },
+    {
+      "id": "ranker",
+      "label": "Ranker + pacing",
+      "eyebrow": "Predict value",
+      "detail": "Scores a bounded eligible set, applies an explicit pacing multiplier, and can use an approved contextual-only model when personalization is unavailable.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 63,
+      "y": 22
+    },
+    {
+      "id": "fairness",
+      "label": "Delivery guard",
+      "eyebrow": "Exposure constraints",
+      "detail": "Applies campaign-specific delivery and creative constraints, records the evaluated slice, and blocks rules that cannot be verified for the surface.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 78,
+      "y": 54
+    },
+    {
+      "id": "auction",
+      "label": "Auction + reservation",
+      "eyebrow": "Choose + commit",
+      "detail": "Runs the documented pricing rule, atomically reserves spend for the selected eligible candidate, and returns one traceable decision before the deadline.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 82,
+      "y": 22
+    },
+    {
+      "id": "events",
+      "label": "Decision event stream",
+      "eyebrow": "Async record",
+      "detail": "Records candidate set, positions, feature and policy versions, price, and later outcome events without delaying the auction response.",
+      "kind": "stream",
+      "tone": "green",
+      "x": 88,
+      "y": 78
+    },
+    {
+      "id": "evaluation",
+      "label": "Evaluation + training",
+      "eyebrow": "Versioned evidence",
+      "detail": "Builds point-in-time training data and evaluates calibration, value, privacy, and delivery slices before a new model can be released.",
+      "kind": "analytics",
+      "tone": "green",
+      "x": 62,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "request-gateway", "from": "request", "to": "gateway", "label": "bid request" },
+    { "id": "gateway-eligibility", "from": "gateway", "to": "eligibility", "label": "approved context" },
+    { "id": "eligibility-ranker", "from": "eligibility", "to": "ranker", "label": "eligible set" },
+    { "id": "ranker-features", "from": "ranker", "to": "features", "label": "feature lookup" },
+    { "id": "features-ranker", "from": "features", "to": "ranker", "label": "versioned values" },
+    { "id": "ranker-fairness", "from": "ranker", "to": "fairness", "label": "ranked candidates" },
+    { "id": "fairness-auction", "from": "fairness", "to": "auction", "label": "allowed winner set" },
+    { "id": "auction-events", "from": "auction", "to": "events", "label": "decision trace", "mode": "async" },
+    { "id": "events-evaluation", "from": "events", "to": "evaluation", "label": "outcomes", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-auction",
+      "label": "Healthy auction",
+      "summary": "All required authorities respond within the deadline. Eligible candidates are scored, delivery controls run, the winner reserves budget, and the decision is logged asynchronously.",
+      "activeEdges": ["request-gateway", "gateway-eligibility", "eligibility-ranker", "ranker-features", "features-ranker", "ranker-fairness", "fairness-auction", "auction-events", "events-evaluation"],
+      "focusNode": "auction",
+      "result": "The response is fast because work is bounded, not because it skips constraints. The decision record makes later billing and evaluation explainable."
+    },
+    {
+      "id": "personalization-outage",
+      "label": "Personalization outage",
+      "summary": "The approved personal-feature dependency is unavailable. The ranker uses its preapproved contextual-only feature subset, while all eligibility and delivery rules remain in force.",
+      "activeEdges": ["request-gateway", "gateway-eligibility", "eligibility-ranker", "ranker-fairness", "fairness-auction", "auction-events", "events-evaluation"],
+      "degradedNodes": ["features", "ranker"],
+      "focusNode": "ranker",
+      "result": "Personalization and revenue may decline, but the system is explicit about the fallback and does not reuse expired or unconsented features."
+    },
+    {
+      "id": "consent-unavailable",
+      "label": "Consent cannot be verified",
+      "summary": "The gateway cannot obtain a required consent decision for the request. Candidate targeting that needs that signal never reaches ranking or the auction.",
+      "activeEdges": ["request-gateway", "gateway-eligibility"],
+      "failedNodes": ["eligibility"],
+      "focusNode": "eligibility",
+      "result": "Fail closed for the affected targeting path or use an independent, policy-approved contextual path. A timeout is not permission to profile or serve."
+    },
+    {
+      "id": "delivery-regression",
+      "label": "Delivery fairness regression",
+      "summary": "Monitoring finds a material delivery disparity for a governed campaign slice. The guard blocks the affected configuration while evaluation retains versioned evidence for investigation.",
+      "activeEdges": ["request-gateway", "gateway-eligibility", "eligibility-ranker", "ranker-features", "features-ranker", "ranker-fairness", "auction-events", "events-evaluation"],
+      "degradedNodes": ["fairness"],
+      "focusNode": "fairness",
+      "result": "Do not hide a slice regression behind aggregate revenue. Pause or constrain the affected campaign configuration and roll back the responsible model or rule version."
+    },
+    {
+      "id": "budget-race",
+      "label": "Budget reservation conflict",
+      "summary": "Several auctions try to spend the last budget amount at once. The auction cannot reserve the apparent winner, so it removes that candidate and continues before the deadline.",
+      "activeEdges": ["request-gateway", "gateway-eligibility", "eligibility-ranker", "ranker-features", "features-ranker", "ranker-fairness", "fairness-auction", "auction-events", "events-evaluation"],
+      "degradedNodes": ["auction"],
+      "focusNode": "auction",
+      "result": "The campaign may lose a marginal opportunity, but spend remains correct. Returning an unreserved winner would turn a concurrency conflict into overspend."
+    }
+  ]
+}

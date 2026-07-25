@@ -1,0 +1,189 @@
+{
+  "title": "Follow a training step through failure and recovery",
+  "description": "Switch scenarios to see how rank health, collective membership, checkpoint publication, and scheduler decisions determine whether training can continue safely.",
+  "nodes": [
+    {
+      "id": "input",
+      "label": "Input shards",
+      "eyebrow": "Data ownership",
+      "detail": "Assigns deterministic examples or token ranges to data-parallel ranks and records enough progress to avoid silent skips or duplicates after recovery.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 9,
+      "y": 24
+    },
+    {
+      "id": "workers",
+      "label": "Worker group",
+      "eyebrow": "Local compute",
+      "detail": "Runs forward and backward work for each data, tensor, pipeline, context, or expert partition in the launched process groups.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 31,
+      "y": 24
+    },
+    {
+      "id": "collective",
+      "label": "Collective fabric",
+      "eyebrow": "Synchronization",
+      "detail": "Executes all-reduce, all-gather, reduce-scatter, and point-to-point operations. Every participating rank must enter compatible operations in the same order.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 55,
+      "y": 24
+    },
+    {
+      "id": "optimizer",
+      "label": "Global step state",
+      "eyebrow": "Update",
+      "detail": "Represents model, optimizer, scheduler, scaler, and progress state after a coherent distributed update has completed.",
+      "kind": "analytics",
+      "tone": "green",
+      "x": 79,
+      "y": 24
+    },
+    {
+      "id": "checkpoint",
+      "label": "Checkpoint store",
+      "eyebrow": "Committed recovery",
+      "detail": "Stores immutable shards and exposes a checkpoint only after its manifest, expected files, versions, and integrity checks are complete.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 68,
+      "y": 78
+    },
+    {
+      "id": "scheduler",
+      "label": "Job scheduler",
+      "eyebrow": "Replacement",
+      "detail": "Detects failed ranks, tears down invalid process groups, allocates replacements, and launches a restore from the last committed checkpoint.",
+      "kind": "allocator",
+      "tone": "rose",
+      "x": 34,
+      "y": 78
+    }
+  ],
+  "edges": [
+    {
+      "id": "input-workers",
+      "from": "input",
+      "to": "workers",
+      "label": "owned batches",
+      "mode": "sync"
+    },
+    {
+      "id": "workers-collective",
+      "from": "workers",
+      "to": "collective",
+      "label": "local tensors",
+      "mode": "sync"
+    },
+    {
+      "id": "collective-optimizer",
+      "from": "collective",
+      "to": "optimizer",
+      "label": "coherent update",
+      "mode": "sync"
+    },
+    {
+      "id": "optimizer-checkpoint",
+      "from": "optimizer",
+      "to": "checkpoint",
+      "label": "state shards",
+      "mode": "async"
+    },
+    {
+      "id": "workers-scheduler",
+      "from": "workers",
+      "to": "scheduler",
+      "label": "health signal",
+      "mode": "async",
+      "via": {
+        "x": 20,
+        "y": 54
+      }
+    },
+    {
+      "id": "checkpoint-scheduler",
+      "from": "checkpoint",
+      "to": "scheduler",
+      "label": "committed manifest",
+      "mode": "async"
+    },
+    {
+      "id": "scheduler-workers",
+      "from": "scheduler",
+      "to": "workers",
+      "label": "restore + relaunch",
+      "mode": "sync"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-step",
+      "label": "Healthy step",
+      "summary": "All ranks consume their assigned data, enter the expected collectives, apply one coherent update, and publish a background checkpoint.",
+      "activeEdges": [
+        "input-workers",
+        "workers-collective",
+        "collective-optimizer",
+        "optimizer-checkpoint",
+        "workers-scheduler"
+      ],
+      "focusNode": "collective",
+      "result": "Training may advance because the synchronization contract completed. The checkpoint becomes a recovery point only after all shards and its manifest are committed."
+    },
+    {
+      "id": "slow-rank",
+      "label": "Slow rank",
+      "summary": "One worker receives data late, so peers reach the next collective first and wait for the straggler.",
+      "activeEdges": [
+        "input-workers",
+        "workers-collective"
+      ],
+      "degradedNodes": [
+        "input",
+        "workers",
+        "collective"
+      ],
+      "focusNode": "collective",
+      "result": "The step remains correct but its tail latency rises to the slowest required rank. Compare per-rank input and collective timelines before adding more devices."
+    },
+    {
+      "id": "rank-lost",
+      "label": "Rank lost",
+      "summary": "A rank disappears before the collective finishes, invalidating the current process group and partial step.",
+      "activeEdges": [
+        "workers-scheduler",
+        "checkpoint-scheduler",
+        "scheduler-workers"
+      ],
+      "failedNodes": [
+        "workers",
+        "collective"
+      ],
+      "degradedNodes": [
+        "scheduler"
+      ],
+      "focusNode": "scheduler",
+      "result": "Do not apply the partial update. Tear down the failed group, allocate a complete replacement group, and resume model, optimizer, progress, and sampler state from the last committed checkpoint."
+    },
+    {
+      "id": "checkpoint-incomplete",
+      "label": "Incomplete checkpoint",
+      "summary": "Training wrote some state shards, but the storage path failed before the checkpoint manifest was committed.",
+      "activeEdges": [
+        "optimizer-checkpoint",
+        "checkpoint-scheduler"
+      ],
+      "failedNodes": [
+        "checkpoint"
+      ],
+      "degradedNodes": [
+        "scheduler"
+      ],
+      "focusNode": "checkpoint",
+      "result": "The incomplete version must remain undiscoverable. Retain and restore the previous validated manifest, then investigate storage capacity, atomic publication, and checkpoint-age risk."
+    }
+  ]
+}

@@ -1,0 +1,325 @@
+---
+registryId: case-study-instagram-photos
+---
+
+{% section-card tone="intro" %}
+## What is a photo-sharing system?
+
+A photo-sharing system accepts an image from a creator, preserves the original, makes
+device-appropriate derivatives, checks whether the post is allowed, and delivers it
+through profiles and personalized feeds. The large image bytes and the small feed
+records follow different paths, but both must agree on which media version is safe to
+show.
+
+In plain language: a successful upload is not automatically a published photo. The
+platform first protects the original, prepares smaller copies, applies moderation, and
+then exposes a versioned post that followers can discover and load from a nearby CDN.
+
+{% callout variant="info" %}
+### Core invariant
+
+Never publish a media version until its original is durable, its required derivatives
+are addressable, and its moderation state permits delivery. Feed caches and CDN edges
+may converge later, but a versioned tombstone or authorization denial must prevent an
+old copy from becoming visible again.
+{% /callout %}
+{% /section-card %}
+
+This case study uses an illustrative planning envelope of **100M accepted photos per
+day**, a **4 MB average original**, **six delivery derivatives**, and a **3x peak
+multiplier**. The estimates are design inputs, not claims about Instagram's current
+private infrastructure. Review [message queues](/fundamentals/message-queues) and
+[CDN behavior](/reference/cdn-and-network) first if asynchronous workers or edge
+caches are new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the publication promise and scope" %}
+
+## The unit of work is a publishable media version
+
+A post combines small metadata with large immutable objects. The upload API owns the
+creator's durable receipt; the publication service owns the transition from private
+processing state to an eligible version that feeds and caches may reference.
+
+### Functional requirements
+
+- Let a creator resumably upload a photo and inspect `uploading`, `processing`, `review`, `published`, or `blocked` state.
+- Preserve the accepted original and generate device-appropriate thumbnails and display derivatives.
+- Publish eligible posts to the creator profile and follower feeds with likes, comments, saves, reports, and deletes.
+- Apply automated and human moderation before broad distribution, then propagate later policy decisions.
+- Deliver a prepared derivative through a CDN without routing ordinary views through the upload service.
+
+### Non-functional requirements
+
+- Acknowledge an upload only after the original and its checksum are durably recorded.
+- Return profile and feed metadata within **300 ms P99** from supported regions; transfer image bytes separately from the CDN.
+- Make publication retries idempotent so duplicate jobs cannot create duplicate derivatives, posts, or fan-out events.
+- Keep the creator's state monotonic and readable after a successful transition, while follower feeds converge asynchronously.
+- Degrade freshness or image quality before bypassing moderation, deletion, or authorization decisions.
+
+### Consistency promises
+
+- **Creator state is read-your-writes:** after `published` is returned, the creator's profile must show that version or a newer policy state.
+- **Follower discovery is eventually consistent:** fan-out workers and feed caches may take seconds to converge, and that delay is measured.
+- **Media objects are immutable:** a correction creates a new derivative manifest and URL rather than overwriting bytes under a warm cache key.
+- **Removal is deny-first:** authorization and post metadata reject a removed version immediately; CDN purge is an additional cleanup path, not the only protection.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+This design covers still-photo upload, derivatives, moderation, post publication,
+feed references, and CDN delivery. Video transcoding, Stories expiration, direct
+messages, ad auctions, and ranking-model training are separate systems.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Size uploads, derivatives, storage, and workers" %}
+
+## One accepted photo creates several kinds of load
+
+At 100M uploads per day, the average rate is about **1,157 uploads/s**. A 3x peak is
+about **3,472 uploads/s**. With 4 MB originals, that peak brings roughly **111 Gbps**
+into the ingest tier before protocol overhead, retries, or multi-part upload traffic.
+
+{% metric-strip %}
+{% metric value="100M/day" label="Accepted photos" detail="The source rate for object, metadata, moderation, and fan-out work" tone="blue" /%}
+{% metric value="400 TB/day" label="Logical originals" detail="100M photos x 4 MB before durable-copy overhead" tone="violet" /%}
+{% metric value="600M/day" label="Derivative jobs" detail="Six device and display variants per accepted photo" tone="amber" /%}
+{% metric value="3x" label="Peak multiplier" detail="Queues absorb bursts, but workers still need a recovery envelope" tone="green" /%}
+{% /metric-strip %}
+
+### Upload, derivative, and storage capacity lab
+
+Choose a derivative policy and change demand, source size, burstiness, and worker
+capacity. The model recomputes ingress, daily storage, annual two-copy footprint,
+variant work, and queue pressure from the same assumptions.
+
+{% interactive-block id="case-studies/instagram-photos-capacity-lab" /%}
+
+### What the estimate changes
+
+- **Upload gateway:** provision connection, checksum, metadata-write, and object-store request capacity for peak uploads rather than the daily average.
+- **Processing fleet:** size for variant jobs per second and measured seconds per variant; track queue age because a stable queue can still violate publish latency.
+- **Object storage:** separate immutable originals from rebuildable derivatives and apply lifecycle tiers according to recovery needs.
+- **Disaster recovery:** validate object-store durability and regional recovery independently; the lab's two-copy footprint is a planning simplification, not a substitute for the provider's erasure-coding model.
+
+{% callout variant="tip" %}
+The useful output is a test envelope. Replay realistic image sizes, corrupt files,
+hot creators, retry bursts, regional loss, and moderation holds before converting the
+worksheet into a production fleet.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate media preparation from feed delivery" %}
+
+## Publish references, not image bytes
+
+The synchronous upload path ends when the original is sealed and a durable processing
+receipt exists. Derivative generation, content analysis, publication, feed fan-out,
+and cache fill happen through retryable events. Feed APIs return post metadata and
+versioned media URLs; CDN edges serve the bytes.
+
+{% system-flow title="Two planes joined by a versioned manifest" caption="The preparation plane creates an eligible media version; the delivery plane distributes small references and serves immutable derivatives." %}
+{% system-node title="Seal the original" eyebrow="Creator path" icon="storage" tone="blue" %}
+Authorize a resumable session, verify size and checksum, commit the immutable object, and issue one stable photo ID.
+{% /system-node %}
+{% system-node title="Prepare and moderate" eyebrow="Asynchronous media path" icon="shield" tone="amber" %}
+Generate derivatives, extract metadata, run policy checks, and hold uncertain content for accountable review.
+{% /system-node %}
+{% system-node title="Publish and fan out" eyebrow="Metadata path" icon="network" tone="violet" %}
+Commit one eligible manifest, update the creator profile, and distribute compact post references to feed stores.
+{% /system-node %}
+{% system-node title="Rank and deliver" eyebrow="Viewer path" icon="globe" tone="green" %}
+Rank eligible references, enforce current policy, and let the CDN return the device-appropriate immutable object.
+{% /system-node %}
+{% /system-flow %}
+
+### Use hybrid feed fan-out
+
+- **Fan-out on write for ordinary accounts:** append a compact post reference to follower inboxes after publication. Reads stay cheap, but write amplification grows with follower count.
+- **Fan-out on read for very large accounts:** store the post once and merge that creator's recent posts during feed retrieval. Publication stays bounded, but reads do more work.
+- **Hybrid fan-out:** choose a threshold using measured follower distribution, active-follower ratio, publish rate, and read latency. The threshold is an operating policy, not a permanent constant.
+
+### Keep the CDN outside the truth boundary
+
+- Use versioned, immutable derivative keys so a long cache TTL cannot return bytes from a different manifest version.
+- Put an origin shield between edge misses and object storage to collapse repeated fills for a newly popular post.
+- Include media version and policy-relevant authorization in the feed response; do not treat possession of a stale URL as permission.
+- Pre-warm only when predicted demand justifies the egress. Normal content can fill caches on demand.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model immutable objects and monotonic publication state" %}
+
+## The photo ID is stable; every published version is explicit
+
+Mutable status belongs in metadata. Large objects remain immutable. A worker may retry
+the same processing version, but it must not overwrite a newer manifest or publish a
+second fan-out event for the same transition.
+
+### Minimum records
+
+- **Upload session:** `upload_id`, creator, chunk state, expected size, checksum, expiration, and idempotency key.
+- **Photo asset:** `photo_id`, creator, original object key, checksum, dimensions, accepted time, and source version.
+- **Derivative manifest:** `photo_id`, source version, profile version, derivative keys, checksums, dimensions, and readiness state.
+- **Moderation decision:** policy version, automated evidence, reviewer outcome, reason codes, appeal state, and decision time.
+- **Post record:** `post_id`, `photo_id`, visible manifest version, caption, audience, publication state, and tombstone version.
+- **Feed reference:** viewer partition, post ID, creator ID, publication version, ranking features, and expiration or removal marker.
+
+### State transitions carry the consistency contract
+
+1. `uploading` becomes `stored` only after checksum verification and durable object commit.
+2. `stored` becomes `processing`; workers may repeat work under the same versioned idempotency key.
+3. `processing` becomes `review` when policy evidence is uncertain, or `ready` when required checks pass.
+4. `ready` becomes `published` through one conditional metadata commit and one replayable outbox event.
+5. `published` becomes `blocked` or `deleted` by advancing the tombstone version before asynchronous feed cleanup and CDN purge.
+
+### Keep retries from duplicating publication
+
+The worker below names every output from the photo and processing versions. A
+conditional manifest commit elects one publisher; retries may verify existing output
+but cannot create a second publication event.
+
+{% code-block file="/api/content/case-studies/instagram-photos/code/idempotent-derivative-worker.ts" language="typescript" title="Idempotent derivative publication" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Trace upload, moderation, fan-out, and cache fill" %}
+
+## A durable handoff separates creator latency from processing time
+
+The creator waits for bytes to reach durable storage, not for every thumbnail, model,
+review, and follower inbox. The returned receipt names the photo and current state, so
+the app can poll or subscribe without repeating the upload.
+
+{% process-flow %}
+{% process-step number="1" title="Accept and seal" label="Synchronous ingest" %}
+Authorize a resumable upload, verify chunks and checksum, commit the original once, and return a stable processing receipt.
+{% /process-step %}
+{% process-step number="2" title="Prepare versioned outputs" label="Retryable workers" %}
+Consume the accepted event, extract safe metadata, generate required derivatives, and store outputs under immutable versioned keys.
+{% /process-step %}
+{% process-step number="3" title="Decide eligibility" label="Moderation boundary" %}
+Combine automated evidence, rights and audience rules, and human review when needed; uncertain media remains undiscoverable.
+{% /process-step %}
+{% process-step number="4" title="Publish and deliver" label="Feed and CDN" %}
+Conditionally commit the manifest and post, emit one fan-out event, rank compact references, and serve derivatives through edge caches.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep the moderation boundary explicit
+
+- Cheap validation rejects malformed, oversized, or unsupported images before expensive work.
+- Automated classifiers attach versioned evidence; they do not silently become the permanent policy record.
+- Ambiguous or high-risk cases enter a bounded reviewer queue with priority, deadline, and escalation reason.
+- A later takedown advances authoritative state first, then distributes tombstones and purge requests with retryable evidence.
+
+### Prevent retry storms from becoming publish storms
+
+- Deduplicate jobs by `photo_id`, source version, and derivative profile version.
+- Make object writes conditional or content-addressed so repeated workers converge on identical output.
+- Use an outbox beside the publication transaction, then make fan-out consumers idempotent by post version.
+- Route poison images to a dead-letter workflow after bounded attempts; never retry corrupt input forever.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Inject processing and delivery failures" %}
+
+## Failure behavior must preserve the publication invariant
+
+Switch scenarios below to trace the active path and inspect the affected component.
+Processor loss holds publication while preserving the original; fan-out lag changes
+discovery freshness; CDN loss changes delivery routing; moderation uncertainty stops
+exposure even when every performance dependency is healthy.
+
+{% topology-lab dataFile="/api/content/case-studies/instagram-photos/data/media-publication-topology.json" /%}
+
+### Degradation rules
+
+- **Ingest or object-store uncertainty:** do not acknowledge durability. Resume the upload from confirmed chunks or ask the creator to retry.
+- **Processor outage:** preserve accepted originals and queue positions; show `processing` and scale or fail over workers without publishing incomplete manifests.
+- **Moderation backlog:** prioritize dangerous or high-reach content, cap automated publication by policy, and keep uncertain posts out of broad discovery.
+- **Fan-out lag:** let the creator's profile read authoritative published state while follower inboxes catch up; expose lag instead of claiming strong global visibility.
+- **CDN region failure:** route to another healthy edge or prepared origin shield and allow a lower-resolution derivative. Never serve the unmoderated original as a fallback.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make consistency, fan-out, and media trade-offs explicit" %}
+
+## Optimize each boundary for its actual promise
+
+The system does not need one global consistency level. It needs strong, monotonic
+transitions for upload and policy state, then versioned asynchronous propagation for
+derivatives, feed references, caches, and analytics.
+
+### Fan-out on write versus fan-out on read
+
+- Choose fan-out on write when most creators have bounded active followings and feed-read latency is the dominant constraint.
+- Choose fan-out on read for very large or high-frequency accounts whose publication amplification would overwhelm inbox writes.
+- Prefer a hybrid when follower count is skewed; measure active followers and cache effectiveness rather than using total followers alone.
+
+### Eager versus lazy derivatives
+
+- Eagerly build the small set required by common devices so first view does not wait on processing.
+- Lazily build rare formats only when demand justifies compute and storage, then protect the on-demand worker path from request floods.
+- Keep the original so future codecs or crops can be generated without repeatedly degrading an older derivative.
+
+### Long CDN TTL versus rapid policy response
+
+- Immutable versioned URLs make long TTLs safe for byte correctness and improve hit rate.
+- Authorization, post metadata, and tombstone versions decide whether a viewer may still request those bytes.
+- Purges reduce residual cache occupancy, but deny-first delivery prevents safety from depending on every edge receiving a purge instantly.
+
+### Availability versus freshness
+
+- A bounded-age feed batch can keep reads available during ranking or fan-out trouble if current policy is rechecked.
+- A stale policy decision is not an availability fallback. Removed or uncertain media must stay unavailable until authoritative state permits delivery.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="8. Operate the media lifecycle and close the design" %}
+
+## Measure each promise from acceptance to last cache
+
+Global averages hide regional queue growth, one derivative profile failing, or one
+policy version producing abnormal outcomes. Slice service indicators by region,
+client version, source format, derivative profile, policy version, fan-out mode, CDN
+status, and fallback reason.
+
+### Operational scorecard
+
+- **Upload:** completion rate, resume rate, checksum failures, durable-commit latency, rejected bytes, and accepted originals missing a processing event.
+- **Processing:** queue age, jobs per photo, retry and dead-letter rate, seconds per derivative, manifest commit conflicts, and time to ready.
+- **Moderation:** automated decision mix, review backlog age, reports per exposure, appeal outcomes, takedown propagation time, and policy-version drift.
+- **Feed:** publication-to-profile delay, publication-to-follower P95/P99, fan-out amplification, inbox write failures, stale references, and celebrity merge latency.
+- **Delivery:** CDN hit ratio, origin-shield load, image start time, derivative error rate, egress by format, regional failover, and purge completion.
+- **Consistency:** creator read-your-writes violations, state regressions, old-version exposure, deleted-media authorization attempts, and tombstone convergence.
+
+### Incident and rollout procedure
+
+1. Roll out a derivative profile, moderation policy, fan-out threshold, or cache rule to a bounded cohort with a compatible rollback version.
+2. Stop promotion when durability, publish latency, review, exposure, or delivery guardrails breach; engagement does not override these signals.
+3. Reconstruct the photo ID, source and manifest versions, policy evidence, publication transition, feed references, and CDN request involved.
+4. Restore the last compatible state, replay idempotent events, and verify creator, profile, feed, authorization, and edge behavior independently.
+5. Update the capacity envelope and failure drill so the same queue, retry, or propagation gap is detected before the next release.
+
+### Design review checklist
+
+- Can every accepted original be found by receipt and rebuilt into derivatives?
+- Can a duplicate worker or replayed event publish the same version more than once?
+- Can a removed version be denied before all feed caches and CDN edges converge?
+- Does celebrity fan-out have a bounded alternative that protects ordinary creators?
+- Are processing, moderation, fan-out, and purge backlogs visible with owners and recovery targets?
+- Has the team rehearsed object-store, worker, policy, feed, and CDN regional failures?
+
+{% callout variant="tip" %}
+The transferable design is a controlled publication state machine. Durable originals,
+idempotent processing, explicit eligibility, hybrid fan-out, and versioned delivery
+let each subsystem scale without weakening the user-visible promise.
+{% /callout %}
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/instagram-photos/quiz/instagram-photos.json" lessonSlug="instagram-photos" title="Review the Photo-Sharing Design" /%}

@@ -1,0 +1,224 @@
+---
+registryId: neuromorphic-computing
+---
+
+{% section-card tone="intro" %}
+## What is neuromorphic computing?
+
+**Neuromorphic computing** designs algorithms and hardware around local state, asynchronous events, and highly parallel communication inspired by nervous systems. A common implementation uses a **spiking neural network (SNN)**: each neuron keeps a small state, integrates incoming spike events, and emits a new spike only when its state crosses a threshold.
+
+In plain language: a conventional model often evaluates a dense tensor on every scheduled step, while an event-driven system can stay mostly idle and react only to changes. That can reduce work for sparse temporal signals such as event-camera motion, acoustic transients, tactile events, or machine vibration.
+
+The core invariant is conditional: **event-driven hardware saves useful work only when the complete sensor-to-decision path stays sparse, fits the hardware mapping, and meets the same task-quality target as the baseline.** Dense encoding, spike storms, routing pressure, or expensive format conversion can erase the advantage.
+
+{% callout variant="warn" %}
+Neuromorphic computing is broader than digital SNN processors; it also includes analog, mixed-signal, in-memory, and other brain-inspired systems. This lesson focuses on the system-design decisions shared by event-driven SNN deployments. Do not generalize a result from one device, coding scheme, or task to the entire field.
+{% /callout %}
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Event" label="Communication" detail="Transmit a change or spike instead of a full activation frame" tone="blue" /%}
+{% metric value="State" label="Computation" detail="Integrate local neuron and synapse state over time" tone="violet" /%}
+{% metric value="Sparse" label="Opportunity" detail="Skip work while the input and network remain quiet" tone="green" /%}
+{% metric value="Measured" label="Evidence" detail="Compare quality, latency, and energy across the complete path" tone="amber" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Follow one change from sensor to decision
+
+An event-driven path has no free efficiency. Every boundary must preserve the timing and sparsity that made the signal attractive in the first place.
+
+{% process-flow %}
+{% process-step number="1" title="Detect a meaningful change" label="Sense" %}
+An event sensor or encoder emits a timestamped change. The threshold controls a trade-off: too sensitive produces noise traffic; too selective removes task evidence.
+{% /process-step %}
+{% process-step number="2" title="Route the event" label="Communicate" %}
+The event address and payload travel to connected neuron cores. Fan-out, placement, queue depth, and burst rate determine routing pressure.
+{% /process-step %}
+{% process-step number="3" title="Update local state" label="Integrate" %}
+A neuron updates membrane state from the event, leaks over time, and fires when it crosses a threshold. Synaptic work follows arrived events rather than every possible connection.
+{% /process-step %}
+{% process-step number="4" title="Decode a bounded action" label="Decide" %}
+A readout converts spike timing, count, or state into a class, alert, or control output. The user-visible metric belongs to this complete decision, not to an isolated core.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep three quantities separate
+
+- **Sensor event rate:** how many input changes arrive per second under each operating regime.
+- **Synaptic additions:** input events multiplied by actual network fan-out and layer activity.
+- **Dense update opportunities:** fixed-rate samples multiplied by channels and possible connections in the matched baseline.
+
+Sparse input does not guarantee sparse internal activity. Recurrent loops, low thresholds, rate coding, or broad fan-out can amplify a small input into a large spike stream.
+{% /section-card %}
+
+{% section-card %}
+## Trace when sparse events actually save work
+
+Use the workbench to change the signal shape, encoding, activity, and firing threshold. Watch input events, burst routing, membrane integration, and output spikes change together. Then force continuous texture or rate coding to see the sparse advantage erode.
+
+{% interactive-block id="ml-systems/neuromorphic-computing-event-flow-lab" dataFile="/api/content/ml-systems/neuromorphic-computing/data/event-flow-model.json" /%}
+
+The example below makes the comparison explicit. It reports dense synaptic opportunities, event-triggered additions, and peak router utilization without converting those operation counts into an unsupported energy claim.
+
+{% code-block file="/api/content/ml-systems/neuromorphic-computing/code/event-work-model.py" language="python" title="Estimate event work and peak routing pressure" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat the model and hardware as one contract
+
+A trained SNN is not yet a deployable neuromorphic system. The compiler must map neuron state, synapses, delays, and routes onto bounded cores while preserving the behavior used during validation.
+
+{% system-flow title="Neuromorphic deployment contract" caption="Each translation can change timing, precision, activity, or observability. Preserve a traceable relationship from training artifact to measured decision." %}
+{% system-node title="Event contract" eyebrow="Input" icon="activity" tone="blue" %}
+Defines address, timestamp, polarity or payload, ordering, clock assumptions, and behavior when an ingress queue overflows.
+{% /system-node %}
+{% system-node title="Neuron contract" eyebrow="Dynamics" icon="repeat" tone="violet" %}
+Defines state variables, integration, leak, threshold, reset, refractory behavior, precision, and supported learning rules.
+{% /system-node %}
+{% system-node title="Mapping contract" eyebrow="Placement" icon="network" tone="amber" %}
+Partitions neurons and synapses across cores while respecting memory, fan-in, fan-out, routing, delay, and synchronization limits.
+{% /system-node %}
+{% system-node title="Readout contract" eyebrow="Output" icon="gauge" tone="green" %}
+Defines the decision window, decode rule, confidence, deadline, and fallback when events, state, or timing become unreliable.
+{% /system-node %}
+{% /system-flow %}
+
+### Audit the mapping before hardware trials
+
+- Count neurons, synapses, state variables, precision, delay ranges, and learning traces per core.
+- Measure average and burst event rates on every inter-core and inter-chip route.
+- Compare simulator and target-device outputs using the same timestamped input trace.
+- Record compiler, mapper, firmware, model, quantization, and routing-table versions.
+- Reject silent approximation when the target cannot represent a trained neuron or synapse behavior.
+- Reserve a recovery path for queue overflow, reset, event loss, or unsupported operating regimes.
+{% /section-card %}
+
+{% section-card %}
+## Choose a training path by the deployment boundary
+
+Spikes are discrete, so the firing function does not provide the ordinary derivative expected by backpropagation. Different training approaches place that difficulty in different parts of the system.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Surrogate-gradient training" eyebrow="Train an SNN directly" icon="workflow" tone="blue" %}
+Use a smooth proxy derivative during the backward pass while keeping discrete spikes in the forward pass. Validate sequence length, threshold dynamics, quantization, and the exact target neuron model.
+{% /concept-card %}
+{% concept-card title="ANN-to-SNN conversion" eyebrow="Start from a dense model" icon="repeat" tone="violet" %}
+Translate activations into spike rates or timing. Conversion can preserve task quality, but long rate windows and dense firing can increase latency and remove event sparsity.
+{% /concept-card %}
+{% concept-card title="Local plasticity" eyebrow="Learn near the sensor" icon="activity" tone="green" %}
+STDP or three-factor rules update synapses from local spike traces plus an optional reward signal. Bound updates, monitor activity, and keep a rollbackable base configuration.
+{% /concept-card %}
+{% concept-card title="Hybrid training and inference" eyebrow="Use each path selectively" icon="network" tone="amber" %}
+A dense model may train or resolve ambiguous cases while an event-driven front end handles temporal filtering. Include every conversion and fallback in the measured boundary.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Validate more than top-line accuracy
+
+- Measure time-to-first-correct decision and quality as the decision window changes.
+- Report spike counts, activation sparsity, synaptic operations, and routing bursts by layer.
+- Test sensitivity to sensor threshold, timing jitter, precision, neuron mismatch, and reset state.
+- Compare the deployed artifact with the training graph on identical event traces.
+- Evaluate calibration and abstention when output spike evidence is weak.
+{% /section-card %}
+
+{% section-card %}
+## Find the deployment envelope before choosing hardware
+
+The right question is not whether neuromorphic hardware is efficient in general. Ask whether a specific workload, execution path, and disturbance remain inside capacity, latency, and task-quality boundaries at the same time.
+
+Use the lab to compare a native event path, a dense-to-spike adapter, a hybrid design, and a conventional dense baseline. Inject a sensor noise burst or event loss. Notice that the best nominal energy index is irrelevant once routing saturates or quality falls below the release floor.
+
+{% interactive-block id="ml-systems/neuromorphic-computing-deployment-envelope-lab" dataFile="/api/content/ml-systems/neuromorphic-computing/data/deployment-envelope-model.json" /%}
+
+The executable gate below applies the same rule: promotion requires capacity, deadline, and quality to pass together. A nominal trace can pass while a burst from the same workload requires containment or fallback.
+
+{% code-block file="/api/content/ml-systems/neuromorphic-computing/code/deployment-envelope.py" language="python" title="Gate a deployment across capacity, latency, and quality" /%}
+{% /section-card %}
+
+{% section-card %}
+## Benchmark the complete sensor-to-decision system
+
+Peak synaptic operations per watt, energy per spike, or core latency can characterize hardware, but they do not prove application-level improvement. A fair comparison fixes the task and quality target, then measures every stage needed to produce the decision.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Task evidence" eyebrow="Same outcome" icon="gauge" tone="blue" %}
+Report task quality, calibration, time-to-first-correct decision, and worst-case behavior on identical input traces and decision windows.
+{% /concept-card %}
+{% concept-card title="Work evidence" eyebrow="Same boundary" icon="server" tone="violet" %}
+Count preprocessing, encoding, host transfers, routing, state updates, readout, retries, and fallback work rather than only accelerator activity.
+{% /concept-card %}
+{% concept-card title="Energy evidence" eyebrow="Measure the path" icon="activity" tone="green" %}
+Measure sensor, interfaces, host, accelerator, memory, and output over the same wall-clock interval. Separate idle, dynamic, and amortized setup energy.
+{% /concept-card %}
+{% concept-card title="Robustness evidence" eyebrow="Stress the signal" icon="scale" tone="amber" %}
+Slice quiet, typical, burst, noisy, dense, and recovery regimes. Report queue depth, event loss, state reset, and quality under each stress.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Build a matched comparison
+
+1. Freeze the dataset or event traces, task metric, quality floor, deadline, and confidence interval.
+2. Tune a credible conventional baseline at the same boundary; do not compare against an intentionally weak model.
+3. Measure preprocessing through readout with synchronized energy and latency instrumentation.
+4. Publish event rates, spike sparsity, operation counts, mapping utilization, and dropped-event behavior.
+5. Repeat across seeds, devices, environmental regimes, and warm and cold start conditions.
+6. State which costs are measured, estimated, excluded, or amortized.
+
+{% callout variant="info" %}
+[NeuroBench](https://neurobench.readthedocs.io/en/latest/) separates solution-level workload metrics from hardware-dependent system measurements. That is a useful pattern: keep algorithm behavior, target-system execution, and application outcome linked without pretending they are the same metric.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate for bursts, drift, and state recovery
+
+Event-driven systems fail differently from stateless request handlers. A restart can erase neuron state; a noise burst can overload routes; online plasticity can change behavior after release.
+
+{% process-flow %}
+{% process-step number="1" title="Detect the regime change" label="Observe" %}
+Track ingress event rate, per-route utilization, queue depth, dropped events, firing-rate distributions, decision latency, and abstention by sensor regime.
+{% /process-step %}
+{% process-step number="2" title="Contain event pressure" label="Protect" %}
+Raise an input filter, cap fan-out, shed low-value events, switch mappings, or route the decision to a qualified dense fallback before queues silently corrupt timing.
+{% /process-step %}
+{% process-step number="3" title="Restore known state" label="Recover" %}
+Reset or reload bounded neuron and synapse state, replay a diagnostic event trace, and verify the readout before accepting live control.
+{% /process-step %}
+{% process-step number="4" title="Repair the envelope" label="Learn" %}
+Preserve the trace, update event and mapping tests, retrain or remap if necessary, and narrow the operating domain until evidence supports expansion.
+{% /process-step %}
+{% /process-flow %}
+
+### Production checklist
+
+- Version the sensor configuration and event schema with the model artifact.
+- Alert on burst and sustained routing utilization, not only average spike rate.
+- Keep a golden event trace for simulator-to-hardware regression tests.
+- Bound online plasticity by weight, rate, time, and rollback policy.
+- Define what state survives sleep, restart, failover, and device replacement.
+- Exercise the fallback under the same deadline and safety constraints as the primary path.
+- Requalify after compiler, mapper, firmware, sensor, or neuron-model changes.
+{% /section-card %}
+
+{% section-card %}
+## Primary references and maintained documentation
+
+- Intel's [Loihi 2 technology brief](https://www.intel.com/content/www/us/en/research/neuromorphic-computing-loihi-2-technology-brief.html) documents a research processor with programmable neuron models, graded event payloads, local learning support, and event-oriented interfaces.
+- The [Lava documentation](https://lava-nc.org/) describes an open software framework for mapping process models across conventional and neuromorphic execution resources.
+- [A Low Power, Fully Event-Based Gesture Recognition System](https://openaccess.thecvf.com/content_cvpr_2017/html/Amir_A_Low_Power_CVPR_2017_paper.html) reports a complete event-camera and TrueNorth gesture pipeline, illustrating why sensor, model, latency, accuracy, and system power must be reported together.
+- [Differentiable Spike](https://proceedings.neurips.cc/paper/2021/hash/c4ca4238a0b923820dcc509a6f75849b-Abstract.html) explains the non-differentiable spike problem and studies surrogate-gradient training.
+- [The NeuroBench framework](https://www.nature.com/articles/s41467-025-56739-4) defines algorithm and system tracks for more comparable neuromorphic workloads, metrics, and hardware measurements.
+- The maintained [NeuroBench documentation](https://neurobench.readthedocs.io/en/latest/) exposes benchmark tasks and workload metrics such as activation sparsity and synaptic operations.
+- The [SpiNNaker2 developer portal](https://spinnaker2.gitlab.io/external/documentation/software/) documents its available application software, lower-level libraries, and current production-readiness caveats.
+
+### Continue with the implementation ecosystem
+
+- [Intel Loihi](/technology/loihi) for research-chip architecture and Lava-based workflows.
+- [SpiNNaker](/technology/spinnaker) for massively parallel spiking-network simulation and execution.
+- [NEST Simulator](/technology/nest) and [Brian2](/technology/brian2) for spiking-network modeling and simulation.
+- [Nengo](/technology/nengo) for neural-engineering models and deployment tooling.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/neuromorphic-computing/quiz/neuromorphic-computing.json" lessonSlug="neuromorphic-computing" title="Neuromorphic System Design Check" /%}

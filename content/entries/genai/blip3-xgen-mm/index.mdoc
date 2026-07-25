@@ -1,0 +1,185 @@
+---
+registryId: blip3-xgen-mm
+---
+
+{% section-card tone="intro" %}
+## What is BLIP-3 (xGen-MM)?
+
+BLIP-3, also called xGen-MM, is Salesforce AI Research's open framework and model family for building large multimodal models that read images and text in one sequence. It combines a vision encoder, a vision token sampler, and a pretrained language model. The 2024 paper reports 4B and 14B model variants, base and instruction-tuned checkpoints, training recipes, and released datasets.
+
+The important idea is not simply "attach a camera to a language model." An image can produce far more features than a language model can afford to read. BLIP-3 preserves useful visual detail with image patches, compresses every patch into a bounded set of visual tokens, and places those tokens beside text in their natural interleaved order.
+
+### Core invariant
+
+Visual evidence must remain identifiable after compression and sequence assembly. If the sampler discards a small label, or image order is lost, the language model cannot recover that evidence by reasoning harder.
+{% /section-card %}
+
+{% section-card %}
+## Trace an image through the architecture
+
+BLIP-3 uses a self-attention design: visual and text tokens enter the language model's input sequence together. The vision encoder is frozen during the reported training recipe; the vision token sampler and language model are trained with one autoregressive objective over text tokens.
+
+{% system-flow title="From pixels to an interleaved response" caption="Each detailed crop is sampled independently, then visual and text tokens are assembled in source order for the language model." %}
+{% system-node title="Images and text" eyebrow="Interleaved input" icon="boxes" tone="blue" %}
+One prompt may contain a single image, several images, or alternating image-text examples.
+{% /system-node %}
+{% system-node title="SigLIP vision encoder" eyebrow="Perception" icon="search" tone="cyan" %}
+Encode a downsized global view and, for higher resolution inputs, multiple 384-pixel detail patches.
+{% /system-node %}
+{% system-node title="Perceiver resampler" eyebrow="Token sampling" icon="layers" tone="violet" %}
+Compress each encoded view into a fixed number of query tokens instead of forwarding every patch feature.
+{% /system-node %}
+{% system-node title="Sequence assembly" eyebrow="Alignment" icon="network" tone="amber" %}
+Concatenate sampled vision tokens with tokenized text while preserving the input's image-text order.
+{% /system-node %}
+{% system-node title="Pretrained language model" eyebrow="Generation" icon="server" tone="green" %}
+Use self-attention across both modalities and predict the next text token autoregressively.
+{% /system-node %}
+{% /system-flow %}
+
+### What changed from BLIP-2?
+
+{% concept-grid columns="4" %}
+{% concept-card title="Simpler connector" eyebrow="Architecture" icon="layers" tone="violet" %}
+BLIP-3 replaces BLIP-2's Q-Former with a Perceiver-style vision token sampler designed to scale across image patches.
+{% /concept-card %}
+{% concept-card title="One training objective" eyebrow="Optimization" icon="workflow" tone="blue" %}
+Every stage uses the language model's autoregressive text-token loss instead of combining contrastive, matching, and generation objectives.
+{% /concept-card %}
+{% concept-card title="Interleaved inputs" eyebrow="Sequence" icon="network" tone="cyan" %}
+Images and text can alternate in free form, enabling multi-image questions and multimodal demonstrations.
+{% /concept-card %}
+{% concept-card title="Data is the system" eyebrow="Recipe" icon="database" tone="amber" %}
+The framework emphasizes curated captions, OCR, grounding, and interleaved documents rather than architecture alone.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% interactive-block id="genai/blip3-xgen-mm-visual-token-budget-lab" dataFile="/api/content/genai/blip3-xgen-mm/data/visual-token-workloads.json" /%}
+
+{% section-card %}
+## Understand any-resolution token sampling
+
+Any-resolution encoding protects local detail without stretching every image into one fixed square. BLIP-3 keeps a downsized global view for scene context, divides the original into detailed 384 x 384 patches, and resamples each view independently. The paper's final Perceiver configuration uses 128 query tokens per view and reports at least a fivefold reduction in vision sequence length, depending on the configuration.
+
+### The trade-off is evidence versus sequence length
+
+- More patches preserve small text, chart marks, and spatial detail.
+- Every extra patch adds another sampled visual-token group to the language model sequence.
+- Multiple images multiply that cost, so a safe application policy needs both a patch cap and an input-budget check.
+- A global view helps retain whole-image context, but it does not replace detail patches for dense OCR.
+
+{% metric-strip %}
+{% metric value="384 x 384" label="Detail patch" detail="Stage-1 uses base-resolution images; later stages add any-resolution patches." tone="cyan" /%}
+{% metric value="12" label="Reported detail-patch cap" detail="The high-resolution stage supports grids up to 3 x 4 or 4 x 3, plus a downsized global image." tone="violet" /%}
+{% metric value="128" label="Query tokens per view" detail="The reported Perceiver resampler setting used in the sampler ablation." tone="amber" /%}
+{% metric value=">=5x" label="Sequence reduction" detail="Reported vision-token reduction varies with the number of sampler queries and patches." tone="green" /%}
+{% /metric-strip %}
+
+{% code-block file="/api/content/genai/blip3-xgen-mm/code/visual-token-budget.py" language="python" title="Estimate a BLIP-3 visual-token budget" /%}
+
+{% callout variant="warn" %}
+The lab and script are planning models, not latency or quality benchmarks. Validate the exact checkpoint, preprocessing code, image distribution, and hardware before setting production limits.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Follow the training curriculum
+
+BLIP-3 builds capabilities in stages. Each stage changes the evidence distribution, so skipping a stage or fine-tuning on a narrow format can remove behavior learned earlier.
+
+{% process-flow %}
+{% process-step number="1" title="Align at base resolution" label="Stage 1 pretraining" %}
+Train on about 100 billion multimodal tokens at 384 x 384 resolution using caption, OCR, grounding, and interleaved mixtures.
+{% /process-step %}
+{% process-step number="2" title="Recover high-resolution detail" label="Stage 2 pretraining" %}
+Add high-resolution and text-rich data with any-resolution sampling, up to 12 detail patches on the long-side grids reported in the paper.
+{% /process-step %}
+{% process-step number="3" title="Teach instruction following" label="Single-image SFT" %}
+Fine-tune on a three-million-example mixture for one epoch, including multimodal and pure-text instruction data.
+{% /process-step %}
+{% process-step number="4" title="Restore interleaved behavior" label="Multi-image SFT" %}
+Mix multi-image examples with a subset of single-image data so multi-image gains do not unnecessarily erase single-image ability.
+{% /process-step %}
+{% /process-flow %}
+
+### Curate by capability, not file format
+
+- **General image-language alignment:** diverse caption and interleaved web-document data.
+- **Reading text in images:** BLIP3-OCR-200M at base resolution and BLIP3-OCR-HD-30M for higher-resolution OCR.
+- **Spatial grounding:** BLIP3-GROUNDING-50M captions augmented with object locations.
+- **Multimodal in-context learning:** interleaved documents and image-text demonstrations in natural order.
+- **Instruction following:** task-diverse single-image, multi-image, and pure-text instruction examples.
+{% /section-card %}
+
+{% interactive-block id="genai/blip3-xgen-mm-checkpoint-fit-lab" dataFile="/api/content/genai/blip3-xgen-mm/data/checkpoint-scenarios.json" /%}
+
+{% section-card %}
+## Read benchmark results as design evidence
+
+A benchmark score answers a narrow question under one protocol. It does not establish latency, licensing fit, safety, or performance on your image distribution. Use the BLIP-3 paper's ablations to form hypotheses, then evaluate the exact checkpoint end to end.
+
+### Findings that affect system design
+
+- Increasing Stage-1 pretraining from 2B to 60B multimodal tokens produced substantial few-shot gains; the paper reports more moderate gains from 60B to 100B.
+- Adding high-resolution Stage-2 pretraining raised the reported aggregate OCR score from 64.6 to 67.2 at the largest tested grid while general VQA stayed roughly flat.
+- The Perceiver resampler's reported aggregate OCR score was slightly below the MLP-plus-pooling alternative, but it performed better overall and compressed multi-image sequences more effectively.
+- Multi-image instruction tuning improved every reported multi-image benchmark for both 4B and 14B variants compared with their single-image counterparts.
+
+{% code-block file="/api/content/genai/blip3-xgen-mm/code/checkpoint-selection.py" language="python" title="Choose a checkpoint from workload constraints" /%}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the evidence your product needs
+
+### Build a slice matrix
+
+- Image size and aspect ratio, including extreme portrait and landscape inputs.
+- Small text, dense tables, charts, diagrams, and low-contrast labels.
+- Single-image versus interleaved multi-image requests.
+- Number, order, and relevance of in-context demonstrations.
+- Language, geography, accessibility, and domain-specific visual conventions.
+- Corrupt files, unsupported formats, adversarial overlays, and empty or repeated images.
+
+### Measure failures separately
+
+- **Grounding:** does each claim correspond to visible evidence in the correct image?
+- **OCR fidelity:** are characters, numbers, units, and spatial relationships preserved?
+- **Cross-image identity:** does the model keep entities and image order distinct?
+- **Abstention:** does the system refuse to invent details when evidence is absent or unreadable?
+- **Task outcome:** does the final structured answer satisfy the product's own correctness contract?
+
+Do not collapse these into one average. A model can improve general VQA while still failing the small-text slice that controls your product risk.
+{% /section-card %}
+
+{% section-card %}
+## Operate an open multimodal checkpoint deliberately
+
+### Before release
+
+1. Pin the model revision, preprocessing code, tokenizer, prompt template, and dependency versions together.
+2. Inspect repositories that require `trust_remote_code=True`; that flag executes code supplied with the model repository.
+3. Verify the current model and dataset licenses for the intended use. The Salesforce model card lists CC BY-NC 4.0 for the referenced checkpoint and directs commercial users to consult Salesforce.
+4. Set explicit image-count, pixel, patch, prompt, and output limits before allocating accelerator memory.
+5. Evaluate privacy, consent, harmful-content, bias, and hallucination risks on representative visual slices.
+
+### In production
+
+- Log input shape, image count, selected preprocessing route, visual-token count, checkpoint revision, and output policy decision.
+- Track latency and memory by patch count rather than only by request count.
+- Sample grounded claims for human review and maintain labeled regression sets from incidents.
+- Fail closed for unreadable or unsupported evidence in high-impact workflows.
+- Keep a rollback path for model, preprocessing, prompt, and policy changes.
+{% /section-card %}
+
+{% section-card %}
+## Use the primary sources
+
+- [BLIP-3 paper](https://arxiv.org/abs/2408.08872) for the architecture, training stages, data recipe, ablations, and reported benchmark results.
+- [Salesforce xGen-MM instruction checkpoint model card](https://huggingface.co/Salesforce/xgen-mm-phi3-mini-instruct-r-v1) for checkpoint-specific loading guidance, risks, license, and reproducibility notes.
+- [Salesforce xGen-MM base checkpoint model card](https://huggingface.co/Salesforce/xgen-mm-phi3-mini-base-r-v1) for the base model's few-shot prompt format and checkpoint constraints.
+
+Treat model-card APIs, compatibility guidance, licenses, and available checkpoints as changeable. Recheck them before implementation or release.
+{% /section-card %}
+
+{% quiz title="BLIP-3 Architecture Check" quizId="blip3-xgen-mm" lessonSlug="blip3-xgen-mm" questionsFile="/api/content/genai/blip3-xgen-mm/quiz/blip3-xgen-mm.json" /%}

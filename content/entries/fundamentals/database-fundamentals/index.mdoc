@@ -1,0 +1,186 @@
+---
+registryId: database-fundamentals
+---
+
+{% section-card tone="intro" %}
+## What is a database?
+
+A **database** is a system that keeps application facts durable, queryable, and safe to change. A fact might be a customer's account, an order, a reservation, or a record that a user has already paid. The database is often the source of truth when an application restarts, a server fails, or two requests arrive at the same time.
+
+In plain language: choose a database by the work it must do, not by a product's popularity. The core invariant is simple: the authoritative store must preserve the business facts that cannot be reconstructed or allowed to disagree.
+
+{% callout variant="info" %}
+Start with the user action and its cost of being wrong. A catalog can show a slightly old description; accepting two purchases for one remaining item cannot. Those two paths deserve different data models and guarantees.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Four storage models, four useful shapes
+
+A storage model is the way a database organizes facts and the operations it makes cheap. Many systems use more than one model, but each additional store creates another ownership, consistency, backup, and on-call responsibility.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Relational" eyebrow="Rows + constraints" icon="database" tone="blue" %}
+Use tables and SQL when relationships, uniqueness, and multi-record transactions protect important facts such as orders, payments, and inventory.
+{% /concept-card %}
+{% concept-card title="Document" eyebrow="One evolving aggregate" icon="braces" tone="green" %}
+Use documents when one object is usually read and changed together, such as a product listing or profile with optional fields.
+{% /concept-card %}
+{% concept-card title="Key-value" eyebrow="Known key" icon="key" tone="violet" %}
+Use key-value access for predictable lookups such as sessions, idempotency records, carts, and cached derived data.
+{% /concept-card %}
+{% concept-card title="Graph" eyebrow="Paths + connections" icon="network" tone="amber" %}
+Use a graph when traversing changing relationships is the core query, such as fraud rings, permissions, or recommendation paths.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose from the workload outward
+
+The first database choice is a decision about access patterns. Write down the request that changes the authoritative fact, the read that must be fresh, and the query that would be expensive without an index or a different model.
+
+{% process-flow %}
+{% process-step number="1" title="Name the fact" label="Ownership" %}
+State what one store owns: for example, "an order has one payment status" or "available inventory never becomes negative."
+{% /process-step %}
+{% process-step number="2" title="Trace the access pattern" label="Read and write" %}
+Record how the application looks up, filters, joins, updates, and expires the fact. A query pattern is more useful than a vague scale claim.
+{% /process-step %}
+{% process-step number="3" title="Set the guarantee" label="Correctness" %}
+Decide where stale reads are acceptable and where a transaction, constraint, or conditional write must reject an invalid change.
+{% /process-step %}
+{% process-step number="4" title="Measure before splitting" label="Operations" %}
+Start with a recoverable default, inspect real query plans and saturation, then add replicas, partitions, or a specialized store for a measured constraint.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: match a workload to its data model
+
+Select a workload below. The active path shows the data model that makes its dominant operation natural, while the result explains the guarantee that choice does and does not provide. Select a node to inspect the responsibility it carries.
+
+{% topology-lab dataFile="/api/content/fundamentals/database-fundamentals/data/workload-model-decision-lab.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Estimate pressure before designing for it
+
+An estimate does not pick a database automatically. It tells you which question must be measured first. Suppose a marketplace receives `9,000` requests per second at peak and `92%` are catalog reads. That is about `8,280` reads per second and `720` writes per second before retries, background jobs, or search indexing.
+
+{% metric-strip %}
+{% metric value="9,000" label="Peak requests/s" detail="State the peak window, not only a daily average" tone="blue" /%}
+{% metric value="8,280" label="Read requests/s" detail="92% of the example workload" tone="green" /%}
+{% metric value="720" label="Write requests/s" detail="The path that creates authoritative facts" tone="amber" /%}
+{% metric value="3" label="Indexes to justify" detail="Each can reduce reads while adding write work" tone="violet" /%}
+{% /metric-strip %}
+
+For every estimate, record the assumptions beside it:
+
+- **Request mix:** a cache, replica, or search index changes where reads land, but the primary still owns the write.
+- **Object size and retention:** `720` writes per second of 1 KB events and 720 writes per second of 1 MB documents create very different storage and replication costs.
+- **Concurrency:** a small number of hot accounts, seats, or SKUs can cause lock waits long before total request rate looks large.
+- **Freshness window:** a replica may be appropriate for a seconds-old feed but not for a page that confirms a completed payment.
+
+{% callout variant="tip" %}
+Use a range when the workload is uncertain. A measured `500-1,000` writes per second with a stated burst assumption is more actionable than a precise but invented forecast.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Model data around the important write
+
+A data model turns a business fact into records, keys, and relationships. Start with the write that must be correct, then support its reads. Normalized relational tables reduce contradictory copies; a document may deliberately duplicate fields so one aggregate can be read without a join. Neither approach removes the need to declare an owner for each fact.
+
+### Use constraints to make invalid state difficult to store
+
+- A primary key identifies one record.
+- A unique key prevents duplicates such as two accounts with the same verified email.
+- A foreign key or application-owned reference expresses a relationship and its lifecycle.
+- A `CHECK` constraint or conditional update protects a simple invariant close to the write.
+
+An index is a separate lookup structure that helps the database avoid reading every row. Design it from the full query shape: equality filters first, then the range or sort that follows. Every index consumes memory and storage and must be maintained on inserts, updates, and deletes, so an unused index is a recurring write cost.
+
+{% tabs %}
+{% tab title="Order checkout" %}
+### Favor a relational transaction
+
+An order, payment authorization, inventory reservation, and idempotency record may need one consistent decision. Keep the short critical write in a transaction and put notifications or search updates in an outbox for later delivery.
+{% /tab %}
+{% tab title="Product catalog" %}
+### Favor an aggregate-shaped record
+
+A listing with variable attributes can be a document if it is normally updated and displayed as one object. Store the canonical SKU and price ownership clearly; do not let every consumer edit duplicated copies.
+{% /tab %}
+{% tab title="Session lookup" %}
+### Favor a key and an expiry
+
+When the application always knows the session ID, a key-value store can serve it with a TTL. Treat it as reconstructable state unless its loss would change an authoritative business result.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Transactions, indexes, and replicas change failure behavior
+
+A **transaction** groups related reads and writes so the database can commit them together or roll them back. An **index** speeds a query by maintaining an alternate access path. A **replica** copies data for read capacity or failover. Each solves a different problem, and each adds a different failure mode.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Transaction" eyebrow="Correct state" icon="shield" tone="green" %}
+Use a small transaction or guarded write when several changes must preserve one invariant. Be ready to retry conflicts with an idempotency key.
+{% /concept-card %}
+{% concept-card title="Index" eyebrow="Fast access" icon="search" tone="blue" %}
+Use an index for an observed filter, join, or ordering pattern. Verify the plan and remove indexes that do not earn their write cost.
+{% /concept-card %}
+{% concept-card title="Replica" eyebrow="Read scale" icon="repeat" tone="violet" %}
+Use replicas for reads that tolerate replication lag. Route read-after-write confirmation to the primary when freshness is required.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: trace the trade-off under pressure and failure
+
+Switch scenarios to see how a query plan, replica lag, transaction conflict, and a primary crash affect the request path. Each scenario changes the active route, component status, and operational consequence; select a node for its role in recovery.
+
+{% topology-lab dataFile="/api/content/fundamentals/database-fundamentals/data/transaction-index-failure-lab.json" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Scale the smallest responsible path
+
+Scale in an order that keeps ownership and recovery understandable:
+
+1. **Improve the query and index:** use `EXPLAIN` or the engine's query-plan tool to confirm the database reads fewer rows instead of guessing.
+2. **Cache reconstructable reads:** cache catalog pages or computed views, define invalidation and TTL behavior, and keep the authoritative write path independent of cache success.
+3. **Add read replicas:** send only lag-tolerant reads to them; measure replica lag and preserve a primary route for confirmation reads.
+4. **Partition only with an ownership key:** shard by a stable key such as tenant or account when one primary can no longer meet a measured capacity need. Plan cross-shard queries and rebalancing before moving data.
+
+Vertical scaling is often the simplest initial answer when one database is healthy but out of CPU, memory, or IOPS. Horizontal scaling buys capacity at the cost of routing, replication, reconciliation, and more failure cases. A replica is not a backup, and a backup is not a failover plan.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate the facts, not just the server
+
+The operational goal is to prove that the store can keep its promised facts through ordinary load and abnormal failure.
+
+- Monitor p50 and p99 query latency, connection-pool wait time, lock waits, deadlocks or serialization aborts, cache hit rate, replication lag, disk space, and backup age.
+- Alert on customer-facing symptoms and invariant risks, such as an idempotency failure rate or an inventory update affecting an unexpected number of rows.
+- Test restore from an independent backup, not only backup creation. Check that the recovered data has the required point-in-time and that the application can use it.
+- Rehearse failover: fence the old writer, promote one candidate, redirect clients, verify freshness, then rebuild redundancy.
+
+{% callout variant="warn" %}
+Avoid using a retry loop as a correctness strategy. Bound retries, preserve an idempotency key, and expose an unknown outcome for reconciliation when a client times out after a write may have committed.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## A practical default and its limits
+
+For many new applications, a relational database such as PostgreSQL or MySQL is a sound starting point: it supports transactions, constraints, indexes, and flexible querying while the data model is still changing. Add a cache for clearly reconstructable hot reads only when measurement shows it is needed. Add a specialist store when its access pattern is central and the team can operate its consistency and recovery model.
+
+The next useful foundation is [data modeling basics](/fundamentals/data-modeling), followed by [ACID properties](/fundamentals/acid-properties) for the mechanics behind transactional correctness.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/database-fundamentals/quiz/database-fundamentals.json" lessonSlug="database-fundamentals" title="Database Fundamentals Review" /%}

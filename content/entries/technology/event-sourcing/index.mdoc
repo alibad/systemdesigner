@@ -1,0 +1,283 @@
+---
+registryId: event-sourcing
+---
+
+{% section-card tone="intro" %}
+## What are event sourcing and CQRS?
+
+**Event sourcing** records the ordered business facts that changed one entity, such as
+`OrderPlaced` and `OrderCancelled`, instead of treating a mutable row as the only truth.
+The application reconstructs current state by folding those immutable events in stream
+order.
+
+**Command Query Responsibility Segregation (CQRS)** separates the model that accepts
+commands from the model that answers queries. CQRS can use an ordinary database, and
+event sourcing can exist without CQRS. They are often combined because event streams
+make a durable write model while projections turn the same facts into query-specific
+read models.
+
+The core invariant is: **the event stream is authoritative; aggregate state, snapshots,
+and read models are derived and replaceable.** This pattern earns its complexity only
+when preserving intent, history, or reconstruction matters to the domain.
+
+{% callout variant="info" %}
+**Do not confuse three different things.**
+
+An event-sourced stream owns an entity's authoritative history. An audit log observes
+operations but is not normally replayed to make business decisions. A message broker
+distributes records but does not automatically provide per-aggregate reads and
+compare-and-append concurrency.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Build the model from four explicit contracts
+
+{% concept-grid columns="4" %}
+{% concept-card title="Command" eyebrow="Requested intent" icon="terminal" tone="blue" %}
+`ReserveSeat` asks the aggregate to do something. A handler authorizes the actor,
+rehydrates current state, and decides whether the request is allowed.
+{% /concept-card %}
+{% concept-card title="Event" eyebrow="Accepted fact" icon="history" tone="violet" %}
+`SeatReserved` states what already happened. Give it stable identity, a past-tense
+business name, a versioned schema, and enough context to interpret later.
+{% /concept-card %}
+{% concept-card title="Aggregate stream" eyebrow="Consistency boundary" icon="database" tone="amber" %}
+One ordered stream contains the facts needed to enforce one aggregate's invariants.
+Its revision is the compare-and-append token for concurrent decisions.
+{% /concept-card %}
+{% concept-card title="Projection" eyebrow="Derived query model" icon="search" tone="green" %}
+An idempotent handler consumes events and writes a shape built for one query. It owns a
+checkpoint, freshness objective, rebuild path, and versioned release lifecycle.
+{% /concept-card %}
+{% /concept-grid %}
+
+An event envelope should separate identity and operational context from immutable
+domain data:
+
+- **Event identity:** a globally unique event ID, event type, and schema version.
+- **Stream position:** aggregate or subject ID plus its monotonically increasing
+  stream revision. Use this position, not wall-clock time, to order one stream.
+- **Domain payload:** the minimum data required to preserve the fact's meaning.
+- **Trace context:** command, correlation, and causation IDs for idempotency and
+  debugging.
+- **Time context:** distinguish when the business fact occurred from when the store
+  recorded it; clocks alone do not establish a global business order.
+- **Security classification:** identify sensitive fields before they become permanent
+  history and spread to projections, backups, and analytics.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Execute a command as one compare-and-append decision
+
+{% process-flow %}
+{% process-step number="1" title="Read one aggregate stream" label="Rehydrate" %}
+Load the stream and fold events in revision order, optionally starting from a verified
+snapshot.
+{% /process-step %}
+{% process-step number="2" title="Evaluate the command" label="Decide" %}
+Authorize the actor and run business rules against the rehydrated state. Invalid intent
+produces no event.
+{% /process-step %}
+{% process-step number="3" title="Append with expected revision" label="Commit" %}
+Atomically append the new event batch only if the stream still has the revision that
+the handler read.
+{% /process-step %}
+{% process-step number="4" title="Publish the committed facts" label="Propagate" %}
+Subscriptions and projectors observe only stored events. They must tolerate retries,
+duplicates, restarts, and independent lag.
+{% /process-step %}
+{% /process-flow %}
+
+Optimistic concurrency protects only the chosen stream. If an invariant spans many
+aggregates, redesign the ownership boundary or use an explicit process with
+reservations, compensation, and reconciliation rather than pretending one stream
+revision creates a distributed transaction.
+{% /section-card %}
+
+{% interactive-block id="technology/event-sourcing-calculator" dataFile="/api/content/technology/event-sourcing/data/command-race-scenarios.json" /%}
+
+{% section-card accent="cyan" %}
+## Separate the command path from query delivery
+
+{% system-flow title="An event-sourced CQRS request path" caption="Commands decide against authoritative stream state. Queries read disposable projections, so projection lag never changes which events are committed." %}
+{% system-node title="Command API" eyebrow="Authorize intent" icon="lock" tone="blue" %}
+Authenticates the caller, validates request shape, assigns command and correlation
+identity, and invokes the owning aggregate.
+{% /system-node %}
+{% system-node title="Aggregate" eyebrow="Enforce invariant" icon="shield" tone="violet" %}
+Folds one stream, evaluates the command, and emits zero or more domain events without
+performing query-model writes.
+{% /system-node %}
+{% system-node title="Event store" eyebrow="Authoritative append" icon="database" tone="amber" %}
+Atomically compares the expected stream revision and appends the accepted event batch
+in order.
+{% /system-node %}
+{% system-node title="Projectors" eyebrow="Consume idempotently" icon="workflow" tone="cyan" %}
+Read committed events, update independent materialized views, and advance each
+checkpoint with a defined failure contract.
+{% /system-node %}
+{% system-node title="Read API" eyebrow="Serve query shape" icon="search" tone="green" %}
+Answers product queries from a projection and exposes freshness, version, or pending
+state when the user's command is not visible yet.
+{% /system-node %}
+{% /system-flow %}
+
+CQRS does not require separate databases, asynchronous messaging, or event sourcing.
+Start with separate command and query code paths when that clarifies ownership. Add
+independent stores only when the product needs different schemas, scaling, security, or
+availability characteristics and can tolerate the resulting consistency window.
+
+For read-your-write behavior, return the committed stream revision or event position
+from the command. The client can show a pending state, poll until the projection reaches
+that position, or route a narrow confirmation read to authoritative state. A fixed
+sleep is not a consistency protocol.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make every projection deterministic and replaceable
+
+A projection is a materialized interpretation of history, not a second source of
+truth. Its handler should produce the same final rows when given the same ordered
+events, regardless of delivery retries or process restarts.
+
+Protect these boundaries:
+
+- **Idempotency:** record stable event identity or use deterministic replacement so a
+  duplicate delivery cannot double a counter or repeat a side effect.
+- **Checkpoint atomicity:** commit the read-model mutation and consumer checkpoint in
+  one transaction when they share a store. Otherwise design an explicit retry-safe
+  protocol.
+- **Ordering:** preserve order within each aggregate when the projection's fold depends
+  on it. Do not invent cross-stream order from timestamps.
+- **Freshness:** measure the event-store position and age of the oldest unprocessed
+  event, not merely handler throughput.
+- **Versioning:** build `projection-v2` beside `projection-v1`, reconcile it, then switch
+  a read alias. Avoid exposing a partially rebuilt table.
+- **Side effects:** keep email, payment, and webhook actions outside rebuildable
+  projectors, or gate them so historical replay cannot repeat them.
+{% /section-card %}
+
+{% interactive-block id="technology/event-sourcing-projection-recovery-lab" dataFile="/api/content/technology/event-sourcing/data/projection-recovery-scenarios.json" /%}
+
+{% section-card accent="amber" %}
+## Use snapshots only to bound rehydration work
+
+A snapshot is aggregate state at a specific stream revision. Rehydration loads the
+latest compatible snapshot, verifies its revision, then replays later events. The
+event stream remains authoritative and must still be able to rebuild the snapshot.
+
+Choose a snapshot policy from measurements:
+
+- record the p50, p95, and p99 events replayed per command;
+- measure rehydration time and event-store read pressure for long-lived streams;
+- snapshot only aggregates whose replay cost threatens the command latency objective;
+- version the snapshot serializer independently from event contracts;
+- discard and rebuild a snapshot when its checksum, schema, or revision is invalid.
+
+Do not calculate a universal "snapshot every N events" value from event rate alone.
+Event complexity, aggregate access patterns, serialization cost, cache behavior, and
+storage implementation all affect the useful interval.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Evolve history without changing what the past meant
+
+Prefer compatible additions and tolerant readers. When event meaning or required
+structure changes, publish a new event type or explicit schema version. An **upcaster**
+can transform an older serialized shape into the current in-memory representation
+during reads while leaving stored history unchanged.
+
+Use different remedies for different failures:
+
+- A **new business action** appends a new event.
+- A **reversal** appends a compensating event such as `ReservationCancelled`; it does
+  not delete the original fact.
+- A **serialization change** uses tolerant reading, a new event version, or an
+  upcaster.
+- A **bad historical decision** may require a compensating event, a documented
+  correction event, or a carefully governed migration. Fixing code alone does not fix
+  stored history.
+- A **bad projection handler** is repaired by rebuilding derived state from valid
+  events, not by editing the event stream.
+
+Keep direct personal data out of events when possible. Store a subject reference to an
+erasable system of record, minimize replication, document retention, and involve legal
+and security owners early. Per-subject encryption and key destruction can make data
+unreadable, but it introduces key-management and interpretation risks; it is not an
+automatic compliance guarantee.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement the write boundary and projector as separate programs
+
+The command example reloads and re-evaluates after a compare-and-append conflict. A
+conflict never causes a blind append retry.
+
+{% code-block file="/api/content/technology/event-sourcing/code/reserve-seat-command.ts" language="typescript" title="Reserve a seat with expected-revision concurrency" /%}
+
+The projection example records event receipts and its checkpoint in the same database
+transaction as the read-model mutation. The rebuild writes to a versioned target before
+the application switches its read alias.
+
+{% code-block file="/api/content/technology/event-sourcing/code/order-summary-projector.ts" language="typescript" title="Build and release an idempotent order-summary projection" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Operate the event store as a recovery system
+
+An append success is only one production signal. Monitor and rehearse the complete
+system:
+
+- append latency and failure rate by stream or partition;
+- optimistic-concurrency conflict rate by command type;
+- subscription position, oldest-unprocessed event age, retries, and poison events;
+- projection reconciliation failures and read-your-write wait time;
+- stream rehydration latency and snapshot hit or fallback behavior;
+- event-schema versions still present and every supported upcast path;
+- backup restoration, event-store integrity, full projection rebuild, and alias
+  rollback;
+- access to sensitive event payloads, exports, backups, and non-production copies.
+
+Purpose-built stores can provide per-stream reads, ordering, subscriptions, and
+expected-revision appends. A relational database can implement the pattern with an
+append table, unique `(stream_id, stream_revision)` constraint, and transactional
+outbox or subscription position. A broker such as Kafka can distribute committed
+events, but broker retention and partition ordering alone do not supply every event
+store contract.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Adopt event sourcing selectively
+
+Use it where event history is itself valuable:
+
+- ledgers, reservations, entitlements, and workflows with meaningful transitions;
+- domains that must explain how current state was reached;
+- temporal reconstruction, deterministic simulation, or multiple evolving read models;
+- boundaries where business commands and compensating actions are clearer than CRUD
+  updates.
+
+Prefer current-state storage with an audit trail or outbox when:
+
+- the domain is simple CRUD and only present state matters;
+- the team cannot own event schemas, projection lag, replay, and recovery;
+- product reads require immediate consistency with every write;
+- sensitive data cannot be minimized or governed safely in durable history;
+- the migration and long-term lock-in cost exceed the audit or reconstruction value.
+
+Apply the pattern to one justified bounded context rather than making it an
+organization-wide storage rule. Before adoption, prove a realistic stream replay,
+projection rebuild, schema-version upgrade, backup restore, and concurrency conflict.
+
+### Current primary references
+
+- [Microsoft: Event Sourcing pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing)
+- [Microsoft: CQRS pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs)
+- [KurrentDB: Event sourcing concepts](https://docs.kurrent.io/getting-started/concepts)
+- [EventSourcingDB: Modeling events](https://docs.eventsourcingdb.io/best-practices/modeling-events/)
+- [EventSourcingDB: Versioning events](https://docs.eventsourcingdb.io/best-practices/versioning-events/)
+- [EventSourcingDB: GDPR compliance](https://docs.eventsourcingdb.io/best-practices/gdpr-compliance/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/event-sourcing/quiz/event-sourcing-production-decisions.json" lessonSlug="event-sourcing" title="Event Sourcing Production Decisions" /%}

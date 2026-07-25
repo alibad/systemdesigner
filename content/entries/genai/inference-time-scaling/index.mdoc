@@ -1,0 +1,225 @@
+---
+title: "Inference-Time Scaling and Reasoning Budgets"
+section: genai
+level: advanced
+duration: 40 min
+description: "Allocate bounded runtime compute, choose evidence-producing strategies, and stop or escalate reasoning before latency and cost run away."
+registryId: inference-time-scaling
+---
+
+{% section-card tone="intro" %}
+## What is inference-time scaling?
+
+**Inference-time scaling** means spending additional computation while a model is answering a particular request. Instead of always making one model call, the system can let the model reason longer, generate several candidates, retrieve evidence, execute a test, ask a verifier, or escalate to a stronger model or a person.
+
+In plain language: training determines what a model can generally do; inference-time scaling decides how much effort this request deserves right now.
+
+The core invariant is a **bounded request budget**. Every candidate, tool call, verification pass, and escalation consumes from one deadline and cost envelope. More compute is useful only when it produces evidence that improves the final decision.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Difficulty" label="Estimate the work" detail="Use task features and observed outcomes, not prompt length alone" tone="blue" /%}
+{% metric value="Risk" label="Set the evidence floor" detail="Impact and reversibility determine what may be auto-accepted" tone="rose" /%}
+{% metric value="Budget" label="Bound the search" detail="Deadline, spend, attempts, and tool limits share one envelope" tone="amber" /%}
+{% metric value="Evidence" label="Choose the stop state" detail="Accept, continue, escalate, or fail explicitly" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Treat runtime reasoning as a controlled search
+
+A single generation returns one point from a model's output distribution. Inference-time scaling explores more of that distribution or checks the result against external evidence. The controller, not the model, owns the budget and stop condition.
+
+{% system-flow title="From request to bounded answer" caption="Each loop must turn compute into new evidence or stop. Repeating the same unsupported claim is not progress." %}
+{% system-node title="Classify the decision" eyebrow="Risk and difficulty" icon="search" tone="blue" %}
+Estimate impact, reversibility, ambiguity, and whether an objective checker exists.
+{% /system-node %}
+{% system-node title="Reserve the envelope" eyebrow="Deadline and spend" icon="gauge" tone="amber" %}
+Set hard limits for wall time, model tokens, candidates, tools, and verifier calls.
+{% /system-node %}
+{% system-node title="Generate evidence" eyebrow="Attempt" icon="workflow" tone="violet" %}
+Reason, branch, retrieve, execute, or test according to the selected policy.
+{% /system-node %}
+{% system-node title="Evaluate the state" eyebrow="Control" icon="shield" tone="cyan" %}
+Measure agreement, grounded support, deterministic checks, uncertainty, and remaining budget.
+{% /system-node %}
+{% system-node title="Stop explicitly" eyebrow="Outcome" icon="check" tone="green" %}
+Accept, continue, escalate, ask for clarification, or return a bounded failure.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate four signals before routing
+
+- **Difficulty:** How often does the baseline policy solve comparable requests, and which features predict failure?
+- **Impact:** What happens if the answer is wrong, late, or unavailable?
+- **Verifiability:** Can code, a calculator, a database, a source document, or a domain expert check the result?
+- **Recoverability:** Can the user cheaply notice and reverse an error, or would the answer trigger an irreversible action?
+
+Prompt length and model confidence are weak substitutes for this classification. Calibrate routing signals against held-out and production outcomes.
+{% /section-card %}
+
+{% section-card %}
+## Choose the scaling mechanism that produces the missing evidence
+
+{% concept-grid columns="3" %}
+{% concept-card title="Longer deliberation" eyebrow="One trajectory" icon="timer" tone="blue" %}
+Allow more reasoning tokens or steps. This can help when the model already has the needed information, but it does not independently check the conclusion.
+{% /concept-card %}
+{% concept-card title="Sample and select" eyebrow="Several trajectories" icon="workflow" tone="violet" %}
+Generate diverse candidates, then rank or vote. Coverage can improve, but the selector becomes the bottleneck.
+{% /concept-card %}
+{% concept-card title="Retrieve and verify" eyebrow="External evidence" icon="search" tone="green" %}
+Consult an authoritative source, execute tests, or run a task-specific verifier. Tool quality and provenance now matter.
+{% /concept-card %}
+{% concept-card title="Search over plans" eyebrow="Stateful exploration" icon="network" tone="cyan" %}
+Expand, score, and prune intermediate states. This fits decomposable problems with meaningful partial evaluations.
+{% /concept-card %}
+{% concept-card title="Escalate the model" eyebrow="Capability change" icon="route" tone="amber" %}
+Move a hard request to a stronger tier. The route helps only when the new tier's measured gain exceeds its extra latency and spend.
+{% /concept-card %}
+{% concept-card title="Escalate the owner" eyebrow="Authority change" icon="users" tone="rose" %}
+Send high-impact or non-verifiable decisions to a qualified person. More model compute cannot create missing authority.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Match mechanism to task shape
+
+- Use **deterministic verification** for executable code, calculations, schemas, and other outputs with objective checks.
+- Use **retrieval plus source checks** for factual claims whose truth lives outside the model.
+- Use **diverse candidates** when several solution paths exist and a reliable selector can distinguish them.
+- Use **human review** when values, policy, accountability, or irreversible consequences dominate the decision.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Fit the policy inside one request envelope
+
+The effective budget is not just a token limit. It includes wall-clock latency, model and tool spend, concurrency, evidence requirements, and any mandatory review path. Choose a task and policy, then tighten the deadline to see which constraint fails first.
+{% /section-card %}
+
+{% interactive-block id="genai/inference-time-scaling-budget-allocation-lab" dataFile="/api/content/genai/inference-time-scaling/data/reasoning-budget-scenarios.json" /%}
+
+{% section-card %}
+## Calculate marginal value instead of rewarding longer answers
+
+For policy `p` on task slice `s`, compare the extra successful outcomes with the extra runtime resources:
+
+- **Marginal quality:** `quality(p, s) - quality(baseline, s)`
+- **Marginal latency:** `p95_latency(p, s) - p95_latency(baseline, s)`
+- **Marginal cost:** `cost(p, s) - cost(baseline, s)`
+- **Decision value:** the value of corrected outcomes minus latency, spend, and failure costs
+
+Average quality alone can hide a bad router. Report each policy by task difficulty, risk class, model version, route, and stop reason. A high-budget route should earn its place on the slices that receive it.
+
+### Capacity changes when one request becomes many calls
+
+If a route generates `n` candidates, its token cost is roughly the sum of their input and output tokens plus selection overhead. Parallel candidates reduce wall time but do not remove compute cost; sequential candidates increase both cost and critical-path latency. Tool calls add their own queues, rate limits, and failure behavior.
+
+{% callout variant="warn" %}
+Averages are not a deadline. Enforce a request-level deadline and cancel outstanding work so a slow candidate or tool cannot continue spending after the user-facing request has ended.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Put the budget controller outside the model
+
+The model can propose another attempt, but a deterministic controller should decide whether budget and evidence allow it. This example routes from typed request signals, records every charge, and returns a terminal stop reason.
+
+{% code-block file="/api/content/genai/inference-time-scaling/code/bounded-reasoning-controller.py" language="python" title="Bounded reasoning controller" /%}
+
+### A production controller should persist
+
+- the policy and model versions selected for the request;
+- the original envelope and every latency, token, tool, and verifier charge;
+- candidate IDs, evidence references, verifier versions, and selection result;
+- the final stop reason: accepted, budget exhausted, deadline reached, escalated, or failed;
+- enough lineage to replay evaluation without storing unnecessary sensitive reasoning traces.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Stop when evidence clears the decision rule
+
+A stopping rule is a contract between evidence and action. Candidate agreement may support a closed-answer task, but agreement cannot prove an external fact. A deterministic test may validate code behavior, while a high-impact recommendation can still require accountable review.
+
+Use the lab to generate candidates, inspect the available checker, and decide whether to accept, continue, or escalate.
+{% /section-card %}
+
+{% interactive-block id="genai/inference-time-scaling-evidence-stopping-lab" dataFile="/api/content/genai/inference-time-scaling/data/evidence-stopping-scenarios.json" /%}
+
+{% section-card %}
+## Design the stop policy before serving traffic
+
+{% process-flow %}
+{% process-step number="1" title="State the acceptance rule" label="Before inference" %}
+Define required checks, agreement, source quality, review ownership, and the maximum acceptable residual risk.
+{% /process-step %}
+{% process-step number="2" title="Evaluate each new attempt" label="During inference" %}
+Measure whether the attempt adds independent evidence, repeats an existing path, or contradicts a trusted check.
+{% /process-step %}
+{% process-step number="3" title="Compare marginal gain" label="Controller" %}
+Continue only when the expected value of another step exceeds its latency, spend, and timeout risk.
+{% /process-step %}
+{% process-step number="4" title="Emit a terminal state" label="Contract" %}
+Accept with evidence, escalate with context, ask for clarification, or fail without silently returning an under-supported answer.
+{% /process-step %}
+{% /process-flow %}
+
+### Never treat these signals as interchangeable
+
+- **Model confidence** is a model output and may be miscalibrated.
+- **Candidate agreement** shows repeated outputs, not independent truth.
+- **Verifier score** is only as trustworthy as the verifier's training, coverage, and independence.
+- **Tool evidence** can be authoritative only when identity, freshness, permissions, and execution succeeded.
+- **Human approval** assigns accountability, but it still needs useful evidence and enough review time.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate a policy as a system, not a benchmark trick
+
+### Offline policy evaluation
+
+- Replay representative task slices through every candidate policy under fixed model, prompt, tool, and verifier versions.
+- Compare quality at matched latency or spend, and compare spend at matched quality.
+- Include easy requests to measure overthinking and hard requests to measure false confidence.
+- Test corrupted tools, unavailable verifiers, conflicting sources, timeouts, and shared generator-verifier blind spots.
+- Calibrate route and stop thresholds on separate data from the final evaluation set.
+
+### Online operating metrics
+
+- route volume, fallback volume, and acceptance rate by risk and difficulty slice;
+- p50, p95, and p99 end-to-end latency, including abandoned and timed-out work;
+- cost per request and cost per accepted, verified outcome;
+- verifier rejection, source-conflict, escalation, cancellation, and budget-exhaustion rates;
+- quality and incident rate by policy, model, tool, verifier, and stop reason.
+
+### Release and rollback guardrails
+
+- Cap exposure while a new router or verifier is in canary.
+- Keep a fast bounded fallback for dependency pressure and regional failure.
+- Version the entire policy bundle so rollback restores routing and evidence rules together.
+- Rate-limit branching routes separately; one user request can create many downstream calls.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recognize failure modes before they become cost incidents
+
+- **Overthinking easy requests:** extra tokens increase latency without changing the outcome. Route from measured slice difficulty and maintain a direct path.
+- **Correlated candidates:** several samples repeat the same reasoning and create false confidence. Increase meaningful diversity or use independent evidence.
+- **Verifier collusion:** generator and verifier share a blind spot. Add deterministic checks, source grounding, adversarial cases, or a separately designed reviewer.
+- **Best-of-many without a selector:** one candidate may be correct, but the system cannot identify it. Measure selected-answer quality, not oracle coverage.
+- **Unbounded fan-out:** retries, tools, and branches multiply downstream load. Reserve concurrency, propagate cancellation, and charge all work to the parent request.
+- **Deadline without cancellation:** the client times out while background work keeps spending. Use cooperative cancellation and idempotent cleanup.
+- **Risk-floor bypass:** a cheap route auto-accepts a sensitive decision. Apply policy and human-review floors before cost optimization.
+- **Unexplained delay:** the user sees a spinner with no control. Expose a truthful progress state, allow cancellation, and return a clear terminal outcome.
+{% /section-card %}
+
+{% section-card %}
+## Primary research behind the design
+
+- [Scaling LLM Test-Time Compute Optimally Can Be More Effective than Scaling Model Parameters](https://arxiv.org/abs/2408.03314) shows that the useful allocation depends on prompt difficulty and studies adaptive compute allocation rather than a single universal budget.
+- [Training Verifiers to Solve Math Word Problems](https://arxiv.org/abs/2110.14168) demonstrates candidate generation plus learned verification on GSM8K; it does not establish that one verifier transfers safely to every domain.
+- [Self-Consistency Improves Chain of Thought Reasoning in Language Models](https://arxiv.org/abs/2203.11171) studies sampling diverse reasoning paths and selecting by answer agreement on reasoning tasks.
+- [Large Language Monkeys: Scaling Inference Compute with Repeated Sampling](https://arxiv.org/abs/2407.21787) distinguishes candidate coverage from the harder problem of selecting a correct answer when no automatic verifier exists.
+
+These results motivate measurement, not a promise that more inference compute always improves an answer.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/inference-time-scaling/quiz/inference-time-scaling.json" lessonSlug="inference-time-scaling" /%}

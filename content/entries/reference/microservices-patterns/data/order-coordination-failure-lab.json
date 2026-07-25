@@ -1,0 +1,131 @@
+{
+  "title": "Trace order coordination when a dependency fails",
+  "description": "Choose a workflow state to see what remains durable, which route is active, and the customer-visible result. Select a component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "customer",
+      "label": "Customer",
+      "eyebrow": "Command sender",
+      "detail": "Submits checkout and may retry after a timeout. The idempotency key associates those retries with one intended business operation.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 7,
+      "y": 50
+    },
+    {
+      "id": "checkout",
+      "label": "Checkout API",
+      "eyebrow": "Workflow owner",
+      "detail": "Owns the customer-facing state transition and coordinates only the dependencies needed for that transition. It must return a result that matches the durable workflow state.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 27,
+      "y": 50
+    },
+    {
+      "id": "order-store",
+      "label": "Order store",
+      "eyebrow": "Local transaction",
+      "detail": "Durably records the order state and the outbox record in one local transaction. It cannot atomically commit a payment or stock reservation owned by another service.",
+      "kind": "database",
+      "tone": "green",
+      "x": 48,
+      "y": 24
+    },
+    {
+      "id": "outbox-relay",
+      "label": "Outbox relay",
+      "eyebrow": "Reliable publish",
+      "detail": "Reads committed outbox records and retries publication. A delay here means downstream work is pending; it must not make a committed order disappear.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 48,
+      "y": 78
+    },
+    {
+      "id": "broker",
+      "label": "Event broker",
+      "eyebrow": "At-least-once delivery",
+      "detail": "Carries durable events to consumers, possibly more than once. Producer acknowledgements, retention, lag, and replay behavior are operational contracts, not invisible plumbing.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 67,
+      "y": 78
+    },
+    {
+      "id": "payment",
+      "label": "Payment service",
+      "eyebrow": "Authorization owner",
+      "detail": "Records the payment authorization decision. A timeout from this API is unknown, not approved or declined; reconcile by idempotency key before another charge attempt.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 88,
+      "y": 25
+    },
+    {
+      "id": "inventory",
+      "label": "Inventory service",
+      "eyebrow": "Reservation owner",
+      "detail": "Consumes the order event and reserves stock idempotently. A rejection changes the workflow state; it may trigger cancellation, payment reversal, or a manual exception path.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 88,
+      "y": 68
+    }
+  ],
+  "edges": [
+    { "id": "customer-checkout", "from": "customer", "to": "checkout", "label": "checkout command" },
+    { "id": "checkout-payment", "from": "checkout", "to": "payment", "label": "authorize", "via": { "x": 60, "y": 8 } },
+    { "id": "checkout-order", "from": "checkout", "to": "order-store", "label": "commit order" },
+    { "id": "order-outbox", "from": "order-store", "to": "outbox-relay", "label": "outbox record", "mode": "async" },
+    { "id": "outbox-broker", "from": "outbox-relay", "to": "broker", "label": "publish", "mode": "async" },
+    { "id": "broker-inventory", "from": "broker", "to": "inventory", "label": "order paid", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "authorized-and-pending",
+      "label": "Authorized, reservation pending",
+      "summary": "Payment authorization succeeds. Checkout commits the paid order and its outbox record, then returns a receipt while inventory reservation continues asynchronously.",
+      "activeEdges": ["customer-checkout", "checkout-payment", "checkout-order", "order-outbox", "outbox-broker", "broker-inventory"],
+      "focusNode": "checkout",
+      "result": "The customer can see payment accepted and reservation pending. Checkout does not wait for inventory, but the workflow must later report reserved, rejected, or compensated rather than silently treating all events as complete."
+    },
+    {
+      "id": "payment-timeout",
+      "label": "Payment timeout",
+      "summary": "The payment API times out before checkout knows whether authorization was recorded. No paid order or event is committed until the authorization is reconciled by idempotency key.",
+      "activeEdges": ["customer-checkout", "checkout-payment"],
+      "degradedNodes": ["checkout"],
+      "failedNodes": ["payment"],
+      "focusNode": "payment",
+      "result": "Return a clear pending or retry-later state, then query or reconcile the payment owner using the idempotency key. Retrying a new charge blindly risks a duplicate authorization; claiming success risks an unpaid order."
+    },
+    {
+      "id": "broker-delay",
+      "label": "Broker delay",
+      "summary": "The order and outbox record are committed, but the relay cannot publish because the broker is delayed. Inventory has not yet received the event.",
+      "activeEdges": ["customer-checkout", "checkout-payment", "checkout-order", "order-outbox", "outbox-broker"],
+      "degradedNodes": ["outbox-relay", "broker"],
+      "focusNode": "outbox-relay",
+      "result": "The order remains durable and inventory remains pending. Alert on outbox age and publication lag, retry with bounded backoff, and avoid making the customer repeat checkout solely because a downstream event is late."
+    },
+    {
+      "id": "inventory-rejection",
+      "label": "Inventory rejects",
+      "summary": "Inventory consumes the paid-order event but cannot reserve stock. The payment and order are already owned by other services, so the workflow needs a defined compensating action.",
+      "activeEdges": ["customer-checkout", "checkout-payment", "checkout-order", "order-outbox", "outbox-broker", "broker-inventory"],
+      "failedNodes": ["inventory"],
+      "focusNode": "inventory",
+      "result": "Move the order to reservation rejected, then execute the stated compensation such as payment reversal, credit, or manual review. Do not delete the original event or overwrite the evidence of the rejected reservation."
+    },
+    {
+      "id": "duplicate-delivery",
+      "label": "Duplicate delivery",
+      "summary": "The broker redelivers an order-paid event after a consumer acknowledgement was lost. This is normal at-least-once behavior, not proof that the order was paid twice.",
+      "activeEdges": ["customer-checkout", "checkout-payment", "checkout-order", "order-outbox", "outbox-broker", "broker-inventory"],
+      "degradedNodes": ["broker", "inventory"],
+      "focusNode": "inventory",
+      "result": "Inventory records the processed event or uses a conditional reservation keyed by order ID, then returns the original outcome. Idempotency makes the second delivery converge instead of allocating stock twice."
+    }
+  ]
+}

@@ -1,0 +1,336 @@
+---
+registryId: postgresql
+---
+
+{% section-card tone="intro" %}
+## What is PostgreSQL?
+
+**PostgreSQL is an open-source relational database that stores structured state,
+enforces rules close to that state, and lets many transactions read and write safely
+at the same time.** Applications use SQL to define tables, connect records, query them,
+and commit changes as one logical unit.
+
+PostgreSQL matters when the database must be more than durable storage. Constraints,
+transactions, rich indexes, JSONB, full-text search, and extensions let it protect
+business invariants while supporting varied access paths.
+
+The core invariant is **every committed transaction must preserve declared data rules,
+and every acknowledged durable commit must survive recovery**. Query speed, replicas,
+caches, and extensions may change how work is performed, but they must not silently
+change the accepted state.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build the right PostgreSQL mental model
+
+PostgreSQL coordinates four systems. Treating it as only a set of tables hides the
+mechanisms that control correctness, latency, and recovery.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Relational state" eyebrow="Tables and constraints" icon="database" tone="blue" %}
+Typed columns, primary keys, foreign keys, checks, unique rules, and exclusion
+constraints describe which states are valid before application code reads them.
+{% /concept-card %}
+{% concept-card title="Transaction snapshots" eyebrow="MVCC" icon="layers" tone="violet" %}
+Each statement or transaction sees row versions allowed by its snapshot. Writers create
+new versions rather than overwriting bytes that active readers may still need.
+{% /concept-card %}
+{% concept-card title="Durable change log" eyebrow="WAL" icon="storage" tone="amber" %}
+Write-ahead log records reach durable storage before the corresponding dirty data pages.
+Recovery replays that ordered log after a crash.
+{% /concept-card %}
+{% concept-card title="Extensible engine" eyebrow="Types and extensions" icon="blocks" tone="green" %}
+Operators, index methods, procedural languages, and extensions add capabilities without
+moving every specialized workload into another datastore.
+{% /concept-card %}
+{% /concept-grid %}
+
+### ACID is an application-facing contract
+
+- **Atomicity:** either every change in the transaction commits or none does.
+- **Consistency:** constraints and transaction logic move the database between valid
+  states; the database cannot infer business rules that were never encoded.
+- **Isolation:** concurrent transactions behave according to the selected isolation
+  level, which may allow anomalies or reject work.
+- **Durability:** acknowledged commits survive the failures covered by the WAL,
+  replication, and storage policy.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow one transaction from request to durable commit
+
+A client transaction is a pipeline with explicit ownership boundaries. A slow or
+unsafe decision at any stage changes the behavior of the whole database.
+
+{% system-flow title="A PostgreSQL write crosses validation, concurrency, and durability boundaries" caption="The server acknowledges success only after the transaction is valid, conflict rules permit it, and the configured WAL durability boundary is satisfied." %}
+{% system-node title="Pool and backend" eyebrow="Admission" icon="network" tone="cyan" %}
+A pool maps many application clients onto a bounded number of PostgreSQL backends.
+Backpressure belongs here before excess sessions consume server memory.
+{% /system-node %}
+{% system-node title="Planner and executor" eyebrow="Work" icon="workflow" tone="blue" %}
+The planner chooses scans, joins, and indexes from statistics. The executor reads
+visible versions, locks changed rows, and creates new versions.
+{% /system-node %}
+{% system-node title="Constraints and conflicts" eyebrow="Correctness" icon="shield" tone="violet" %}
+Constraints reject invalid state. Locks, MVCC visibility, and the isolation level decide
+whether overlapping transactions wait, proceed, or abort.
+{% /system-node %}
+{% system-node title="WAL flush" eyebrow="Durability" icon="storage" tone="amber" %}
+Commit records enter WAL and satisfy the configured synchronous commit policy before
+the server reports durable success.
+{% /system-node %}
+{% system-node title="Pages, replicas, archive" eyebrow="Recovery" icon="repeat" tone="green" %}
+Checkpoints write dirty pages, replicas replay WAL, and archived segments support
+point-in-time recovery. None of these replace tested backups.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep transaction boundaries short and intentional
+
+- Begin a transaction immediately before the reads and writes that form one invariant.
+- Do not hold a transaction open across user input, remote API calls, or unbounded batch
+  processing.
+- Use statement and lock timeouts so abandoned work cannot occupy resources forever.
+- Treat deadlocks and serialization failures as expected outcomes with bounded,
+  idempotent retry behavior.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Use MVCC without confusing visibility with correctness
+
+Multi-Version Concurrency Control lets a reader use a snapshot while concurrent writers
+create newer row versions. Readers usually avoid blocking writers, but the snapshot
+rule alone does not protect every cross-row or multi-statement invariant.
+
+### Know what each PostgreSQL isolation level changes
+
+- **Read Committed:** each statement receives a fresh snapshot. It prevents dirty reads,
+  but two statements in one transaction may observe different committed states.
+- **Repeatable Read:** the transaction keeps one snapshot. PostgreSQL also prevents
+  phantom reads at this level, but snapshot isolation can still permit write skew.
+- **Serializable:** Serializable Snapshot Isolation detects dangerous dependency
+  structures and aborts one participant so committed results match some serial order.
+- **Read Uncommitted:** PostgreSQL treats it as Read Committed; dirty reads are not
+  exposed.
+
+Isolation and application guards solve different problems. A row lock can serialize a
+specific decision; a unique or exclusion constraint can make an invalid state
+uncommittable; Serializable can protect broader transaction behavior but requires
+whole-transaction retries.
+
+{% interactive-block id="technology/postgresql-isolation-lab" dataFile="/api/content/technology/postgresql/data/isolation-scenarios.json" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Encode the invariant in one atomic database decision
+
+The safest write path minimizes the time between checking a condition and changing the
+state it protects. A conditional `UPDATE`, constraint, or locked owner row often makes
+the decision clearer than a read followed by an unguarded write.
+
+{% code-block file="/api/content/technology/postgresql/code/atomic-inventory-reservation.sql" language="sql" title="Reserve inventory with an atomic capacity predicate" /%}
+
+### Review every transactional implementation for these properties
+
+1. The transaction names one business invariant and changes only the state needed to
+   preserve it.
+2. Repeated requests have an idempotency key or a naturally unique business identity.
+3. Locks are acquired in a stable order, and lock waits have a bounded timeout.
+4. Serialization or deadlock retries restart the complete transaction with a fresh
+   snapshot.
+5. The response is emitted only after commit succeeds; side effects outside PostgreSQL
+   use an outbox or another recoverable handoff.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Size connections and memory as one coupled envelope
+
+PostgreSQL creates a backend process for each server connection. Each backend has
+overhead, and active plans may allocate `work_mem` once for every sort, hash, or similar
+operator. The safe budget is therefore concurrency multiplied by plan shape, not one
+copy of each setting.
+
+{% metric-strip %}
+{% metric label="Active query memory" value="active x operators x work_mem" detail="Use peak active operators, not total clients alone" tone="amber" /%}
+{% metric label="Backend overhead" value="pool width x per-backend MB" detail="Pooling limits processes and scheduler pressure" tone="cyan" /%}
+{% metric label="Cache budget" value="shared_buffers + OS cache" detail="PostgreSQL and the operating system both cache pages" tone="blue" /%}
+{% metric label="Headroom" value="RAM - all commitments" detail="Reserve space for vacuum, index builds, bursts, and failover" tone="green" /%}
+{% /metric-strip %}
+
+For a 32 GB host with 8 GB of shared buffers, 80 backends, and 64 active queries that
+each run 1.2 memory operators at 16 MB, modeled query-operator memory is about 1.2 GB.
+The same host with 300 reporting backends, 4.5 operators each, and 64 MB `work_mem`
+could request more than 84 GB for query operators alone.
+
+{% interactive-block id="technology/postgresql-performance" dataFile="/api/content/technology/postgresql/data/connection-memory-envelope.json" /%}
+
+{% code-block file="/api/content/technology/postgresql/code/estimate-connection-envelope.py" language="python" title="Calculate a transparent PostgreSQL host envelope" /%}
+
+The calculator is a planning model, not a benchmark. Confirm active sessions, plan
+operators, temporary-file volume, resident memory, queue delay, and tail latency under
+production-like concurrency.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose indexes from predicates and ordering
+
+An index is a maintained access path. It can avoid reading most table pages, but every
+index also adds write work, WAL volume, storage, cache pressure, and vacuum work.
+
+{% concept-grid columns="4" %}
+{% concept-card title="B-tree" eyebrow="Ordered scalar values" icon="list-tree" tone="blue" %}
+Start here for equality, ranges, prefix ordering, and `ORDER BY` on numbers, timestamps,
+text, and other sortable scalar values.
+{% /concept-card %}
+{% concept-card title="GIN" eyebrow="Many values per row" icon="search" tone="violet" %}
+Use an inverted index for JSONB containment, arrays, and full-text tokens. Reads can be
+excellent while updates and index size become more expensive.
+{% /concept-card %}
+{% concept-card title="GiST" eyebrow="Extensible relationships" icon="scan-search" tone="amber" %}
+Use operator-class semantics for ranges, geometry, nearest-neighbor access, and other
+relationships that are not simple scalar ordering.
+{% /concept-card %}
+{% concept-card title="BRIN" eyebrow="Large ordered tables" icon="rows" tone="green" %}
+Summarize page ranges when physical order correlates with the indexed value. Tiny
+indexes can skip large regions, but they are not precise point-lookup maps.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Prove an index with evidence
+
+- Capture the real predicate, selected columns, ordering, row count, and latency target.
+- Run `EXPLAIN (ANALYZE, BUFFERS)` on representative parameters and data distribution.
+- Compare rows estimated with rows produced; large gaps usually indicate stale or
+  insufficient statistics.
+- Prefer a composite index whose leading columns match selective equality predicates,
+  followed by ranges or ordering used by the query.
+- Use partial indexes for a stable subset such as active rows, and expression indexes
+  only when the query uses the same expression.
+- Remove redundant indexes after measuring write and read impact; unused-index counters
+  need a full workload window before they are trusted.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Keep MVCC cleanup ahead of version debt
+
+An `UPDATE` creates a new tuple version and leaves the old version for active snapshots.
+Autovacuum marks obsolete versions reusable, updates visibility metadata, and protects
+against transaction-ID wraparound. It does not normally shrink the table file.
+
+### Watch the causes, not only the bloat symptom
+
+- Long-running or abandoned transactions hold old snapshots and delay tuple cleanup.
+- High update churn can create dead tuples faster than default autovacuum thresholds
+  trigger on a large table.
+- Missing indexes make cleanup and foreground queries compete for more page I/O.
+- Replication slots or lagging consumers can retain WAL until storage fills.
+- Emergency `VACUUM FULL` rewrites and locks a table; prevention is safer than relying
+  on it as routine maintenance.
+
+Measure dead tuples, vacuum age and duration, transaction age, table and index growth,
+temporary bytes, WAL retention, and the oldest active snapshot. Tune autovacuum per hot
+table when the global defaults do not match its change rate.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Recover from WAL, replicas, and verified backups
+
+High availability and recovery are separate promises. A replica can reduce failover
+time, but it also replays accidental deletes. A backup can restore old state, but only
+if its data files and WAL chain are complete and regularly tested.
+
+{% process-flow %}
+{% process-step number="1" title="Write and retain WAL" label="Durable history" %}
+Size WAL, archive throughput, and replication slots for peak generation. Alert on
+archive failures and retained bytes before the primary disk fills.
+{% /process-step %}
+{% process-step number="2" title="Stream and replay" label="Standby state" %}
+Replicas receive WAL and apply it in order. Track receive lag, replay lag, and the
+business staleness tolerated by replica reads.
+{% /process-step %}
+{% process-step number="3" title="Fence and promote" label="Writer authority" %}
+During failover, stop the old primary from accepting writes, select a sufficiently
+current standby, promote it, and redirect clients through one controlled authority.
+{% /process-step %}
+{% process-step number="4" title="Restore and verify" label="Disaster recovery" %}
+Restore a base backup, replay archived WAL to the target time, run integrity and
+application checks, and measure actual recovery time against the objective.
+{% /process-step %}
+{% /process-flow %}
+
+### Define recovery numerically
+
+- **RPO:** the maximum committed history the business can lose. Asynchronous replicas
+  and delayed archive shipping allow a nonzero loss window.
+- **RTO:** the time to detect, decide, restore or promote, verify, and return service.
+- **Read staleness:** the replay delay allowed for requests routed to a standby.
+- **Restore proof:** the latest successful restore test, recovered timestamp, checksum
+  evidence, and application-level validation.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Scale only after naming the pressure
+
+Different scaling patterns solve different bottlenecks. Adding a replica cannot repair
+a write hotspot, and partitioning cannot rescue an unbounded connection fleet.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Connection pooling" eyebrow="Session pressure" icon="network" tone="cyan" %}
+Multiplex application clients onto bounded database backends. Transaction pooling
+improves reuse but is incompatible with some session-scoped behavior.
+{% /concept-card %}
+{% concept-card title="Read replicas" eyebrow="Read and recovery pressure" icon="copy" tone="blue" %}
+Move explicitly stale-tolerant reads and improve failover options. Account for replay
+lag, read-after-write routing, and the operational cost of promotion.
+{% /concept-card %}
+{% concept-card title="Declarative partitioning" eyebrow="Data lifecycle pressure" icon="split" tone="violet" %}
+Prune time or tenant ranges and detach old data efficiently. Too many partitions raise
+planning and catalog costs; partition keys also constrain uniqueness.
+{% /concept-card %}
+{% concept-card title="Vertical resources" eyebrow="Single-node pressure" icon="server" tone="green" %}
+More memory, faster storage, and additional CPU can be the simplest reliable move when
+the working set and write path still fit one failure domain.
+{% /concept-card %}
+{% concept-card title="Sharding or distributed SQL" eyebrow="Write and ownership pressure" icon="boxes" tone="amber" %}
+Distribute ownership only when one primary cannot meet the write, storage, locality, or
+failure-domain requirement. Cross-shard transactions and rebalancing become system work.
+{% /concept-card %}
+{% concept-card title="Extensions" eyebrow="Capability pressure" icon="blocks" tone="rose" %}
+Add PostGIS, pgvector, logical decoding, or other extensions when their operators and
+operating model fit. Pin versions and test upgrades like application dependencies.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate PostgreSQL as a stateful security boundary
+
+Production safety combines least privilege, encrypted transport, observable change,
+and rehearsed recovery.
+
+### Protect access and data
+
+- Give applications dedicated roles with only required schema and table privileges;
+  keep ownership and migration roles separate from runtime roles.
+- Require TLS, rotate credentials, restrict network paths, and prefer short-lived or
+  centrally managed authentication where the platform supports it.
+- Use parameterized statements. Row-level security is defense in depth, not a substitute
+  for testing tenant predicates and privileged bypass roles.
+- Audit schema changes, role changes, extensions, failed authentication, and sensitive
+  data access according to the threat model.
+
+### Review the operating envelope before release
+
+- Query latency and throughput are measured by operation, plan, and percentile.
+- Pool saturation, wait time, active backends, lock waits, and deadlocks have owners and
+  thresholds.
+- Autovacuum keeps up with the hottest tables and the oldest transaction age is bounded.
+- Checkpoint duration, WAL generation, archive health, replica replay lag, and slot
+  retention remain inside tested limits.
+- Schema migrations are backward compatible, bounded, observable, and rehearsed on a
+  production-sized copy.
+- Backup restore and failover exercises prove RPO, RTO, fencing, and application
+  integrity rather than only command success.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/postgresql/quiz/postgresql-production-design.json" lessonSlug="postgresql" title="PostgreSQL Production Design Review" /%}

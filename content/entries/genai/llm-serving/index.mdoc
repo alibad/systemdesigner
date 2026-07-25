@@ -1,0 +1,150 @@
+---
+registryId: llm-serving
+---
+
+{% section-card tone="intro" %}
+## What is LLM serving?
+
+**LLM serving** is the production system that accepts a model request, decides whether and where to run it, generates tokens, and delivers a bounded response. It turns a trained or hosted model into a dependable product capability.
+
+This matters because a useful answer is more than a model call. A long prompt can exhaust memory before generation begins, a slow stream can hold capacity after the user leaves, and a fallback can change what the answer is allowed to claim.
+
+The core invariant is: **admission, scheduling, model execution, safety checks, and streaming must share one request identity and one deadline.** Every retry, token, cache entry, fallback, and cancellation should be attributable to that same request contract.
+{% /section-card %}
+
+{% section-card %}
+## Follow one request from admission to a streamed answer
+
+Serving begins at a control boundary, then moves into an accelerator-bound execution path. The control plane owns policy, while workers own model state and token generation.
+
+{% system-flow title="A deadline-bound LLM request" caption="The request ID and deadline travel with every hop so the system can cancel, account for, and explain one coherent attempt." %}
+{% system-node title="Admit and classify" eyebrow="Control" icon="shield-check" tone="blue" %}
+Authenticate the caller, estimate token demand, assign a tenant budget, and reject or queue work before scarce capacity is consumed.
+{% /system-node %}
+{% system-node title="Route and schedule" eyebrow="Choose" icon="route" tone="violet" %}
+Select a healthy region and model tier, then place compatible work into a fair, deadline-aware batch.
+{% /system-node %}
+{% system-node title="Prefill and cache" eyebrow="Read" icon="database" tone="cyan" %}
+Load model weights, process prompt tokens, and reserve the per-request KV cache required for the conversation state.
+{% /system-node %}
+{% system-node title="Decode and stream" eyebrow="Generate" icon="radio" tone="amber" %}
+Produce output tokens incrementally, stop at the deadline or token limit, and release cache on completion or cancellation.
+{% /system-node %}
+{% system-node title="Validate and record" eyebrow="Assure" icon="activity" tone="green" %}
+Apply output policy, preserve structured-output validity, and emit latency, token, route, and outcome telemetry.
+{% /system-node %}
+{% /system-flow %}
+
+### The request contract needs explicit fields
+
+- **Identity and ownership:** request ID, tenant or project, idempotency key where appropriate, trace context, and data-residency constraints.
+- **Budget:** absolute deadline, input and output token caps, queue-wait budget, cost limit, and chosen model tier.
+- **Execution state:** admitted route, batch and worker IDs, cache reservation, retry count, cancellation reason, and stream connection state.
+- **Product contract:** safety mode, structured schema, whether a degraded answer is allowed, and what fallback may claim.
+
+{% code-block file="/api/content/genai/llm-serving/code/api-gateway.py" language="python" title="Illustrative request contract, admission, and cancellation" /%}
+{% /section-card %}
+
+{% section-card %}
+## Why prefill and decode behave differently
+
+**Prefill** reads the prompt and builds the model's attention state. It is usually a large, parallel matrix operation, so prompt length and batch composition heavily affect time to first token (TTFT). **Decode** produces one new token at a time while reusing that state. It is a repeated, latency-sensitive loop, so output length and the number of active sequences shape throughput and tail latency.
+
+The **KV cache** stores each active sequence's attention keys and values. It avoids recomputing the full prompt for every generated token, but it grows with context length, model architecture, precision, and concurrent requests. Treat it as a schedulable memory resource, not as an invisible optimization.
+
+### Continuous batching is an admission policy, not a magic speed switch
+
+- A static batch waits for a group and advances it together. It is easier to reason about, but short requests can wait behind long ones.
+- Continuous batching admits and removes sequences between decode steps. It can keep accelerators busy across uneven output lengths, but it needs cache-aware placement, fair scheduling, and prompt-length limits.
+- Prefix caching can avoid repeat prefill work for approved shared prefixes. Cache keys must include the model version, tokenizer, system prompt, safety context, and any retrieval state that changes the answer.
+
+Use this lab to expose the coupled constraints. Its numbers are illustrative planning constants, not a benchmark for a specific model, runtime, or accelerator.
+
+{% interactive-block id="genai/llm-serving-capacity-lab" dataFile="/api/content/genai/llm-serving/data/serving-capacity-model.json" /%}
+
+### Read the pressure signals together
+
+- If memory exceeds the configured cache allocation, lowering arrival rate does not repair the request shape. Reduce context or concurrency, allocate more cache, change precision, or route to a larger worker.
+- If utilization approaches saturation, queue delay rises before accelerator utilization reaches a neat 100%. Protect interactive traffic with admission limits and separate service classes.
+- A lower-cost precision or model tier can increase headroom, but only after task-owned quality and structured-output tests show it still satisfies the product contract.
+{% /section-card %}
+
+{% section-card %}
+## Route by task contract, not by a provider label
+
+The durable decision is not which vendor had a particular price or quota at one point in time. Decide whether the workload needs a managed capability, a privately operated model pool, a local route, or a tiered combination, then compare the same request mix under the same reliability and data constraints.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Fast default tier" eyebrow="Interactive" icon="zap" tone="cyan" %}
+Short, low-risk tasks with strict latency budgets. Constrain output length and escalate only when the task needs more capability.
+{% /concept-card %}
+{% concept-card title="High-capability tier" eyebrow="Complex" icon="brain" tone="violet" %}
+Long-context or multi-step tasks that justify a larger cost and longer deadline. Keep admission explicit.
+{% /concept-card %}
+{% concept-card title="Private or local tier" eyebrow="Boundary" icon="lock-keyhole" tone="blue" %}
+Workloads with data locality, offline, or infrastructure-control requirements. The operator owns utilization and incident response.
+{% /concept-card %}
+{% concept-card title="Constrained fallback" eyebrow="Degraded" icon="shield-alert" tone="amber" %}
+Only a safe subset of work, with a response that labels its limits. A fallback must never silently weaken safety or schema guarantees.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Structured output and safety are on the request path
+
+For JSON, tools, or downstream actions, validate the generated result against the schema before treating it as an instruction. Constrain decoding when the runtime supports it, validate after generation in all cases, and return a typed failure rather than repairing unbounded text with retries.
+
+Safety placement depends on the risk: input policy can reject prohibited use before GPU time; output policy can block or transform an unsafe response; tool policy must approve the action before execution. Each decision needs the original request ID and deadline. A timeout in a safety dependency is a product decision: fail closed, return a limited safe response, or defer. It is not permission to bypass the control.
+{% /section-card %}
+
+{% section-card %}
+## Inject overload and failures before users do
+
+The capacity model asks how much a healthy pool can serve. This separate lab asks what the product does when the scheduler, workers, cache, safety dependency, or client stream is no longer healthy. Select a policy and inject pressure; the path, dropped or degraded work, latency, correctness risk, and recovery sequence update together.
+
+{% interactive-block id="genai/llm-serving-failure-routing-lab" dataFile="/api/content/genai/llm-serving/data/failure-routing-model.json" /%}
+
+### Failure behavior should be intentional
+
+- **Scheduler saturation:** stop accepting work before queueing consumes every deadline. Use tenant-aware limits and return retry guidance that does not cause a synchronized retry storm.
+- **Worker loss or cache pressure:** drain unhealthy workers, avoid placing new sequences on them, and route only requests whose model tier and data boundary allow it.
+- **Safety dependency failure:** fail closed for actions and high-risk content. A limited answer can be acceptable only if its contract is explicit and independently safe.
+- **Streaming disconnect:** normally cancel work when the client has gone away; keep it running only for an explicitly durable, idempotent job with a result store and separate deadline.
+{% /section-card %}
+
+{% section-card %}
+## Scale with measurements that match user experience
+
+Autoscaling from raw GPU utilization alone reacts too late for interactive generation. Scale on a combination of queue wait, active sequences, cache allocation, TTFT, decode throughput, and worker health. Keep a warm floor when cold loading or model initialization would violate the latency target, and use queue limits to preserve the remaining pool during scale-out.
+
+### Observe the complete lifecycle
+
+- **Latency:** queue wait, TTFT, per-token decode time, total request duration, stream duration, and deadline cancellations. Break them down by model tier, region, tenant class, prompt bucket, and output bucket.
+- **Capacity:** active sequences, cache bytes reserved and evicted, batch occupancy, model-load time, accelerator memory, worker count, and requests rejected before GPU admission.
+- **Correctness and safety:** schema-valid rate, policy outcomes, fallback rate, safety-dependency timeouts, tool-action approvals, and client-visible degraded responses.
+- **Cost:** input and output tokens, accelerator seconds, idle capacity, retry and abandoned-stream work, cache hit rate, and cost per successful task rather than only cost per token.
+
+### Common failure modes and useful countermeasures
+
+- **Long prompts monopolize prefill:** reserve a prompt budget, isolate large-context traffic, or use a separately measured route.
+- **Long generations monopolize decode:** cap output, use fair sequence scheduling, and offer asynchronous jobs when the user does not need a live stream.
+- **Retries multiply load:** retry only bounded, classified failures and preserve the idempotency key, attempt count, and remaining deadline.
+- **Silent model fallback changes behavior:** record the selected model and degraded capability; reject when the required schema, residency, or safety mode cannot be preserved.
+- **Canceled streams keep generating:** propagate disconnect and deadline cancellation to the scheduler and worker, then release the KV cache deterministically.
+{% /section-card %}
+
+{% section-card %}
+## Make the cost and trade-offs explicit
+
+Serving cost combines model or accelerator time, tokens, memory reserved for active cache, idle capacity, networking, policy checks, and engineering ownership. A model that appears inexpensive per token can be expensive per useful outcome when it needs retries, produces invalid schemas, or requires too much idle headroom.
+
+Choose the trade-off deliberately:
+
+- Favor **lower TTFT** with prompt caps, warm capacity, and shorter queues; accept some idle cost.
+- Favor **higher utilization** with continuous batching; accept more scheduler complexity and monitor tail latency closely.
+- Favor **stronger isolation** with separate pools and data boundaries; accept lower fleet-level packing efficiency.
+- Favor **availability** with constrained fallbacks; accept that some requests must be rejected rather than answered under a weaker contract.
+
+The next lesson, [LLM Inference Optimization](/genai/llm-inference-optimization), goes deeper into runtime techniques such as prefix caching, attention optimizations, and speculative decoding. Revisit [AI Safety](/genai/ai-safety) when defining which degraded paths are permissible for your product.
+{% /section-card %}
+
+{% quiz title="LLM Serving Review" questionsFile="/api/content/genai/llm-serving/quiz/llm-serving-review.json" lessonSlug="llm-serving" /%}

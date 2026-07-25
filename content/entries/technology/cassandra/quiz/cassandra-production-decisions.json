@@ -1,0 +1,88 @@
+{
+  "title": "Cassandra Production Design Review",
+  "questions": [
+    {
+      "question": "A telemetry table uses PRIMARY KEY ((tenant_id), event_time). One tenant produces most of the writes. What is the central risk?",
+      "options": [
+        "Clustering by event_time automatically spreads the tenant across token owners",
+        "All of that tenant's writes still target one logical partition and its replica set",
+        "Increasing the replication factor splits the partition into independent shards",
+        "The coordinator permanently becomes the primary for that tenant"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The partition key, not the clustering column, determines the token and replica set. Replication makes copies of the same hot partition; it does not subdivide the key."
+    },
+    {
+      "question": "Why is ((tenant_id, device_id, event_day), event_time, event_id) a useful key for a device telemetry read?",
+      "options": [
+        "It supports arbitrary joins across every device",
+        "It distributes active devices, bounds the partition by day, and orders rows inside that partition",
+        "It guarantees every tenant-wide query touches one partition",
+        "It removes the need to estimate skew and retention"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The composite partition key matches a device-by-day lookup and spreads concurrent device writes. Clustering columns provide deterministic order inside that bounded partition."
+    },
+    {
+      "question": "A keyspace has NetworkTopologyStrategy with RF=3 in us_east and RF=3 in eu_west. How many full replicas does one partition have across those datacenters?",
+      "options": ["3", "4", "6", "9"],
+      "correctAnswer": 2,
+      "explanation": "NetworkTopologyStrategy applies the replication factor independently in each datacenter. Three copies in each of two datacenters produce six full replicas."
+    },
+    {
+      "question": "In a single-datacenter RF=3 replica set, one replica is unavailable. Which pair can both complete and has R + W > RF?",
+      "options": [
+        "Write ONE and read ONE",
+        "Write QUORUM and read QUORUM",
+        "Write ALL and read ONE",
+        "Write ONE and read ALL"
+      ],
+      "correctAnswer": 1,
+      "explanation": "With two replicas available, QUORUM writes and reads can each collect two responses. Their thresholds sum to four, which is greater than RF 3, so the successful acknowledgement sets must overlap."
+    },
+    {
+      "question": "A QUORUM write times out. What may the client safely conclude?",
+      "options": [
+        "No replica applied the mutation",
+        "Every replica applied the mutation",
+        "The coordinator did not collect enough acknowledgements before the timeout, so retry handling must tolerate a partial application",
+        "The partition key was not hashed"
+      ],
+      "correctAnswer": 2,
+      "explanation": "A timeout is ambiguous. Some replicas may have applied the mutation even though the coordinator could not collect the required acknowledgements in time, so retries must be idempotent."
+    },
+    {
+      "question": "Why must repair complete before tombstones are purged from replicas that may have missed a delete?",
+      "options": [
+        "Repair converts every table to LeveledCompactionStrategy",
+        "A stale replica can later return an old live value after the deletion marker is gone",
+        "Tombstones are the only durable backup format",
+        "Compaction cannot read immutable SSTables"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A tombstone communicates a distributed delete. If it disappears before a stale replica learns the deletion, that replica's old value can become visible again."
+    },
+    {
+      "question": "Which statement correctly separates repair from compaction?",
+      "options": [
+        "Compaction compares replicas across nodes; repair only merges files on one node",
+        "Both are names for the same SSTable rewrite",
+        "Repair synchronizes divergent replicas, while compaction merges SSTables and manages amplification on one node",
+        "Repair is a complete substitute for tested backups"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Repair compares replicas for shared token ranges and streams differences. Compaction rewrites local SSTables to reconcile versions and control read, write, and space amplification; neither replaces backup recovery."
+    },
+    {
+      "question": "Why can TimeWindowCompactionStrategy fit TTL-based time-series data?",
+      "options": [
+        "It turns every query into a cross-partition join",
+        "It groups data by time window so SSTables whose contents expire together can be removed efficiently",
+        "It eliminates write amplification and repair",
+        "It makes out-of-order timestamps irrelevant"
+      ],
+      "correctAnswer": 1,
+      "explanation": "TWCS groups writes into time windows, which can align SSTable lifetime with TTL expiration. The workload must still test late writes, window sizing, repair, and I/O headroom."
+    }
+  ]
+}

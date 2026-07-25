@@ -1,0 +1,260 @@
+---
+registryId: case-study-key-value-store
+---
+
+{% section-card tone="intro" %}
+## What is a distributed key-value store?
+
+A distributed key-value store saves a value under a unique key and spreads those records across multiple machines. Applications use simple operations such as `PUT`, `GET`, and `DELETE`; the store decides which partition owns the key, where copies live, and how many replicas must agree before an operation succeeds.
+
+In plain language, it behaves like a very large dictionary that survives machine failures. The hard part is not looking up a key. It is preserving an honest consistency contract while partitions move, replicas lag, networks split, and demand grows.
+
+The core invariant for this design is: **every accepted operation satisfies the consistency level requested by the caller, or returns an explicit failure.** This case study turns a 10-billion-key workload into capacity, partitioning, replication, failover, repair, and operating decisions.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the data and consistency contract" %}
+
+## Define what the store promises before choosing a database
+
+A key-value API is intentionally small, but each operation still needs precise semantics. The design cannot choose quorums, retries, or conflict handling until callers state whether they need the newest acknowledged value, a highly available answer, or a conditional update.
+
+### Functional scope
+
+- `PUT(key, value, consistency)` creates or replaces an opaque value and returns its version.
+- `GET(key, consistency)` returns the value and version, or a clear not-found result.
+- `DELETE(key, consistency)` writes a versioned tombstone so an old replica cannot resurrect deleted data.
+- Conditional writes compare an expected version before replacing a value; they do not provide multi-key transactions.
+
+### Non-functional constraints
+
+- **Data:** 10 billion records, keys up to 256 bytes, values up to 10 KB, and a planning average near 5 KB.
+- **Traffic:** 10 million reads/s and 1 million writes/s at average load, with a two-times peak envelope.
+- **Latency:** p99 below 10 ms for reads and below 20 ms for writes inside the serving region.
+- **Availability:** at least 99.9% while one storage node is unavailable, with an explicit behavior for a network partition.
+- **Operations:** add nodes, rebalance partitions, replace failed replicas, and repair divergence without stopping the whole service.
+
+### Deliberate exclusions
+
+- No range scans, joins, secondary indexes, or arbitrary queries in the first version.
+- No atomic transaction across unrelated keys.
+- No promise of globally ordered writes across regions.
+
+{% callout variant="info" %}
+Consistency and durability answer different questions. Consistency determines which value a read may return; durability determines whether an acknowledged value survives failures. Replication helps both, but only when acknowledgement and repair rules are explicit.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Size logical data, replicas, and failure headroom" %}
+
+## Replication multiplies storage and write work
+
+Using decimal planning units, 10 billion values at a 5 KB average consume about 50 TB. Keys plus record metadata add roughly 3 TB, giving a **53 TB logical dataset** before replicas, indexes, compaction slack, or backups.
+
+With replication factor `N=3`, the serving fleet holds about `53 TB x 3 = 159 TB` of live copies. At 1 million writes/s, sending each write to three replicas creates up to 3 million replica-write operations/s and about 15 GB/s of value payload before protocol overhead. Reads contribute about 50 GB/s at the 5 KB average.
+
+{% metric-strip %}
+{% metric value="53 TB" label="Logical data" detail="Values, keys, and record metadata before replicas." tone="blue" /%}
+{% metric value="159 TB" label="RF=3 footprint" detail="Live serving copies before compaction and backup reserve." tone="violet" /%}
+{% metric value="36 nodes" label="Baseline fleet" detail="8 TB each; enough room for a modeled two-zone rebuild." tone="green" /%}
+{% metric value="15 GB/s" label="Replica write payload" detail="1M writes/s x 5 KB x three copies." tone="amber" /%}
+{% /metric-strip %}
+
+### Test the capacity and replication envelope
+
+Change the logical dataset, replica count, node count, and disk size. The model recomputes the physical footprint, normal utilization, two-zone rebuild pressure, and replica-write load. A configuration clears the case-study envelope only when it has steady headroom, RF=3 or greater placement, and room to rebuild after one of three zones is unavailable.
+
+{% interactive-block id="case-studies/key-value-store-capacity-replication-lab" /%}
+
+The model is an order-of-magnitude planner. A production estimate must add compaction amplification, tombstones, snapshots, filesystem reserve, hot-partition skew, and measured per-node throughput; disk space alone never proves that a node can sustain its assigned QPS.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Route each request to one versioned replica set" %}
+
+## Keep routing stateless and ownership explicit
+
+The coordinator may run on any gateway or storage node. It hashes the key, reads the current partition map, sends the operation to that partition's replica set, and applies the requested consistency policy. Membership and placement are control-plane concerns; the ordinary request path should not consult a central database.
+
+{% system-flow title="One key-value request" caption="The same ownership map drives reads, writes, repair, and rebalancing so each key has one current replica set." %}
+{% system-node title="Validate request" eyebrow="API boundary" icon="key-round" tone="blue" %}
+Check key and value limits, authenticate the caller, choose a deadline, and preserve one idempotency token across retries.
+{% /system-node %}
+{% system-node title="Locate partition" eyebrow="Routing" icon="route" tone="cyan" %}
+Hash the key into a token range and read the versioned replica placement from a locally cached map.
+{% /system-node %}
+{% system-node title="Coordinate replicas" eyebrow="Consistency" icon="network" tone="violet" %}
+Send the operation to all eligible replicas and wait only for the acknowledgement threshold requested by the caller.
+{% /system-node %}
+{% system-node title="Respond and repair" eyebrow="Outcome" icon="database" tone="green" %}
+Return the value or version after the contract is met; queue hints or read repair for lagging copies.
+{% /system-node %}
+{% /system-flow %}
+
+### Component boundaries
+
+| Component | Owns | Failure boundary | Important evidence |
+| --- | --- | --- | --- |
+| API gateway | Authentication, limits, deadlines, idempotency token | Caller or gateway instance | Request result and retry count |
+| Partition map | Token ranges, placement generation, node state | Membership control plane | Map version and ownership change |
+| Coordinator | Quorum collection, version comparison, timeout | One request | Replica acknowledgements and latency |
+| Storage node | WAL, memtable, immutable files, tombstones | Node or disk | Version, checksum, compaction state |
+
+The response contract must survive coordinator failure. A retry uses the same idempotency token and version rules; it cannot assume that a timed-out first attempt made no progress.
+
+{% /accordion-item %}
+
+{% accordion-item id="storage" title="4. Partition keys and persist versions for repair" %}
+
+## The data model must expose ownership and causality
+
+Consistent hashing maps a key hash into a token range. Each physical node owns many virtual ranges, which spreads load and lets the control plane move smaller units when nodes join, fail, or become hot. Placement then chooses replicas in different racks or zones rather than taking the next machines blindly.
+
+### Record shape
+
+| Field | Example | Purpose | Correctness rule |
+| --- | --- | --- | --- |
+| Key | `cart:user-42` | Stable partition input | Hash the complete canonical key |
+| Value | Opaque bytes | Caller-owned payload | Enforce the 10 KB limit before replication |
+| Version | Logical time plus writer identity | Orders or exposes concurrent updates | Never discard incomparable versions silently |
+| Tombstone | Delete version and expiry | Prevents stale-value resurrection | Retain until every replica can no longer return the old value |
+
+### Storage engine path
+
+1. Append an accepted mutation to a write-ahead log before acknowledging that replica.
+2. Apply the mutation to an in-memory sorted structure for low-latency reads.
+3. Flush immutable sorted files to disk and compact them in the background.
+4. Compare versions during reads; repair a stale replica only after selecting the winning or concurrent value correctly.
+
+### Rebalancing rules
+
+- Move token ranges with a versioned handoff rather than changing ownership in place.
+- Keep the old owner readable until the new replica has copied, verified, and announced the target generation.
+- Throttle streaming so repair does not consume foreground read and write capacity.
+- Change one bounded placement group at a time and preserve RF throughout the move.
+
+{% /accordion-item %}
+
+{% accordion-item id="failure-lab" title="5. Choose quorum behavior during failure and partition" %}
+
+## Failover is a consistency decision, not only a routing decision
+
+For `N=3`, a balanced policy uses write quorum `W=2` and read quorum `R=2`. The condition `W + R > N` means every successful read quorum overlaps the acknowledged write quorum, assuming the same replica set and correct version reconciliation. It does not remove concurrent writes, clocks, repair, or application conflict rules.
+
+Select each topology scenario and inspect the active path. A single failed replica can be bypassed without weakening `W=2`. A partition that leaves only one reachable replica forces a real choice: reject the write under the quorum contract, or accept it under an explicit `W=1` availability mode and reconcile later.
+
+{% topology-lab dataFile="/api/content/case-studies/key-value-store/data/partition-failover-consistency-topology.json" /%}
+
+### Coordinator behavior
+
+The coordinator sends writes concurrently and returns as soon as the selected quorum acknowledges. Slow attempts may still finish, while failed targets receive hints or anti-entropy repair. The example keeps the guarantee visible in code: success is impossible until the requested acknowledgement count is reached.
+
+{% code-block file="/api/content/case-studies/key-value-store/code/quorum-write-coordinator.ts" language="typescript" title="Return only after the requested write quorum" /%}
+
+### Repair mechanisms have different jobs
+
+- **Hinted handoff:** temporarily stores a missed mutation for one unavailable replica; it shortens divergence but is not a backup.
+- **Read repair:** updates stale copies discovered by a read that contacted multiple replicas.
+- **Anti-entropy:** compares partition summaries in the background and repairs keys that ordinary traffic may never read.
+- **Conflict resolution:** chooses or exposes concurrent versions using domain rules, not merely whichever wall clock appears largest.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Scale, rebalance, repair, and observe the fleet" %}
+
+## Reliability depends on controlled background work
+
+Adding nodes increases capacity only after token ranges and replicas move safely. Failure recovery, compaction, anti-entropy, backup, and rebalancing all compete with foreground traffic, so each background process needs a budget and a pause condition.
+
+{% process-flow %}
+{% process-step number="1" title="Admit" label="Control plane" %}
+Add a healthy node, assign empty virtual ranges, and publish a new placement generation without serving those ranges yet.
+{% /process-step %}
+{% process-step number="2" title="Stream" label="Data movement" %}
+Copy bounded ranges from current owners while checksums and mutation catch-up preserve a consistent handoff point.
+{% /process-step %}
+{% process-step number="3" title="Verify" label="Safety gate" %}
+Compare counts, hashes, replica versions, and foreground error rates before making the new owner authoritative.
+{% /process-step %}
+{% process-step number="4" title="Retire" label="Cleanup" %}
+Remove the old copy only after the placement generation is stable and rollback evidence is retained.
+{% /process-step %}
+{% /process-flow %}
+
+### Failure responses
+
+| Failure | Immediate behavior | Recovery | User-visible consequence |
+| --- | --- | --- | --- |
+| One replica down | Route to the other two replicas | Hinted handoff, then anti-entropy | `W=2` and `R=2` can still succeed |
+| Coordinator timeout | Retry with the same idempotency token | Read version state before replacing | Result may be unknown, never assumed absent |
+| Hot partition | Shed, cache, or split the affected token range | Move virtual ranges and investigate the key shape | Only the hot range should degrade |
+| Zone partition | Apply the configured CP or AP contract | Restore links, compare versions, repair divergence | Reject, or return explicitly weaker consistency |
+
+### Operating signals
+
+- **Page immediately:** quorum failure rate, checksum mismatch, lost placement generation, unavailable token ranges, or a drop below the intended replica count.
+- **Throttle background work:** p99 latency, disk queue depth, compaction debt, network saturation, or repair traffic exceeds its budget.
+- **Trend for planning:**
+  - storage and QPS skew by token range;
+  - replica lag and hint age;
+  - tombstone density and compaction amplification;
+  - rebalance bytes remaining and time to restore RF.
+
+Backups protect against operator error and correlated corruption that live replicas copy faithfully. Restore drills must prove the recovery point, recovery time, partition-map reconstruction, and ability to rejoin repaired data without overwriting newer versions.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare consistency and implementation choices" %}
+
+## Tune a guarantee per workflow, not per marketing label
+
+The same cluster can expose different consistency levels, but every level needs a product reason. A shopping cart may accept concurrent updates and merge them; an account ownership change may prefer a retryable failure over two accepted owners.
+
+| Choice | Behavior | Benefit | Cost |
+| --- | --- | --- | --- |
+| `W=3, R=1` | Every replica must acknowledge a write | Strong write durability before success | One slow replica blocks writes |
+| `W=2, R=2` | Read and write quorums overlap | Balanced default through one replica loss | More replica work and tail latency |
+| `W=1, R=1` | Any reachable replica may answer | Maximum partition availability | Stale reads and conflicts require repair |
+| Leader per partition | One owner orders writes | Simpler conflict model | Election and leader availability become critical |
+
+### Relate the design to real systems
+
+- **Redis Cluster** uses fixed hash slots and primary-replica failover. It is a strong fit for low-latency in-memory workloads, but it does not expose the leaderless quorum contract designed here.
+- **Cassandra-style systems** use token ownership, leaderless replicas, tunable quorums, hints, and anti-entropy, closely matching this case study.
+- **Managed key-value services** hide partition movement and replica repair, but callers still choose keys, capacity mode, conditional-write semantics, and sometimes read consistency.
+
+Choose a real product only after validating value limits, durability, regional behavior, conditional operations, hotspot handling, backup, observability, and the exact semantics of timeouts and failover. Similar APIs do not imply identical guarantees.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Ship an explicit contract and rehearse its failures" %}
+
+## Make the operating contract testable
+
+The durable design is not just a hash ring with three copies. It is a versioned ownership map, a storage engine that preserves mutation evidence, a quorum policy that never overclaims success, and repair work that is bounded so it cannot take down the serving path.
+
+### Launch checklist
+
+1. Recalculate logical data, physical copies, per-node QPS, and zone-loss headroom from measured key and value distributions.
+2. Prove every API consistency level with healthy, slow, failed, and partitioned replicas; test timeout retries with the same idempotency token.
+3. Rebalance a hot range and replace a failed node while foreground latency remains inside the stated objective.
+4. Age hints and tombstones beyond their limits in a test environment, then verify anti-entropy does not resurrect deleted or older data.
+5. Restore a backup into a fresh control plane and validate versions, partition ownership, checksums, RPO, and RTO.
+6. Publish runbooks for quorum loss, replica divergence, disk pressure, map rollback, hot keys, and a full-zone isolation.
+
+### Risks and extensions
+
+- Multi-region writes require a conflict and data-residency contract before adding another replica path.
+- Large values may belong in object storage with the key-value record holding an immutable reference and checksum.
+- Range queries or secondary indexes change partition locality and consistency assumptions; add them as separate indexed systems rather than hiding scans behind `GET`.
+- Encryption, tenant quotas, audit evidence, and key deletion must be designed into storage, backup, and repair paths together.
+
+Start with `N=3`, `W=2`, and `R=2` for workflows that need one-replica fault tolerance and overlapping quorums. Offer weaker availability modes only when the caller can detect, merge, or tolerate stale and concurrent values.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/key-value-store/quiz/key-value-store.json" lessonSlug="key-value-store" title="Review the distributed key-value store design" /%}

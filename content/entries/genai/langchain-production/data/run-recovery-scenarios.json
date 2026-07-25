@@ -1,0 +1,84 @@
+{
+  "title": "Recover the run, not just the process",
+  "description": "Inject a production failure, then choose state, retry, trace, and deployment controls. The incident tape shows what survives and what can safely resume.",
+  "defaults": {
+    "incidentId": "ambiguous-refund",
+    "stateId": "durable",
+    "retryId": "reconcile",
+    "observabilityId": "step-traces",
+    "deploymentId": "split-workers"
+  },
+  "stages": ["Admit", "Reason", "Call tool", "Checkpoint", "Deliver"],
+  "stateOptions": [
+    {"id": "volatile", "label": "Process memory", "detail": "State disappears with the worker."},
+    {"id": "durable", "label": "Durable checkpointer", "detail": "Thread state and pending writes survive worker replacement."}
+  ],
+  "retryOptions": [
+    {"id": "whole-run", "label": "Replay the whole run", "detail": "Start from admission and repeat every completed stage."},
+    {"id": "failed-boundary", "label": "Retry the failed boundary", "detail": "Resume at the failed model or tool call under the original deadline."},
+    {"id": "reconcile", "label": "Reconcile, then resume", "detail": "Read authoritative state before deciding whether a side effect needs another attempt."}
+  ],
+  "observabilityOptions": [
+    {"id": "root-log", "label": "Root request log", "detail": "One final status with no child-stage evidence."},
+    {"id": "step-traces", "label": "Nested step traces", "detail": "Correlated model, tool, checkpoint, release, and effect evidence."}
+  ],
+  "deploymentOptions": [
+    {"id": "scale-zero", "label": "Scale-to-zero function", "detail": "Request compute may disappear while background or waiting work remains."},
+    {"id": "single-host", "label": "Single application host", "detail": "API admission and execution share one scaling and restart boundary."},
+    {"id": "split-workers", "label": "API plus durable workers", "detail": "Admission and queued execution scale independently."}
+  ],
+  "incidents": [
+    {
+      "id": "ambiguous-refund",
+      "label": "Refund response lost",
+      "brief": "The payment service may have committed, but the worker dies before recording the response.",
+      "failureStage": 2,
+      "requiresDurableState": true,
+      "recommendedRetryId": "reconcile",
+      "recommendedDeploymentIds": ["single-host", "split-workers"],
+      "needsStepTraces": true,
+      "effect": "A refund may already exist",
+      "safeOutcome": "Lookup by operation key, record the existing refund, and resume without a second effect.",
+      "unsafeOutcome": "The refund is replayed as a new operation and the customer can receive two credits."
+    },
+    {
+      "id": "model-rate-limit",
+      "label": "Model rate limit",
+      "brief": "A transient 429 occurs before the model returns any output.",
+      "failureStage": 1,
+      "requiresDurableState": false,
+      "recommendedRetryId": "failed-boundary",
+      "recommendedDeploymentIds": ["single-host", "split-workers"],
+      "needsStepTraces": true,
+      "effect": "No external mutation occurred",
+      "safeOutcome": "Retry only the model call with jitter inside the original deadline and quota budget.",
+      "unsafeOutcome": "Whole-run replay repeats retrieval and admission work, amplifying load during a provider incident."
+    },
+    {
+      "id": "approval-deploy",
+      "label": "Deploy during approval",
+      "brief": "A run waits for human approval while a new application revision replaces its worker.",
+      "failureStage": 3,
+      "requiresDurableState": true,
+      "recommendedRetryId": "failed-boundary",
+      "recommendedDeploymentIds": ["split-workers"],
+      "needsStepTraces": true,
+      "effect": "The approved action has not run",
+      "safeOutcome": "Load the checkpoint with a compatible revision and resume after the approval boundary.",
+      "unsafeOutcome": "The waiting run is orphaned or restarted from admission, losing the original approval context."
+    },
+    {
+      "id": "stream-disconnect",
+      "label": "Client stream disconnect",
+      "brief": "The user disconnects while a long-running research run continues in the background.",
+      "failureStage": 4,
+      "requiresDurableState": true,
+      "recommendedRetryId": "failed-boundary",
+      "recommendedDeploymentIds": ["split-workers"],
+      "needsStepTraces": false,
+      "effect": "Work is still running after delivery fails",
+      "safeOutcome": "Keep the run durable, expose its status by run ID, and let the client reconnect without duplicating execution.",
+      "unsafeOutcome": "The request process is treated as the run owner, so disconnect causes lost work or a duplicate restart."
+    }
+  ]
+}

@@ -1,0 +1,383 @@
+---
+registryId: cassandra
+---
+
+{% section-card tone="intro" %}
+## What is Apache Cassandra?
+
+**Apache Cassandra is a distributed wide-column database built to keep
+partition-key reads and writes available across a peer cluster.** A client can
+send a request to any node. That node becomes the coordinator for the request,
+finds the replicas for the partition, and waits for the number of responses
+required by the chosen consistency level.
+
+Cassandra matters when a workload needs:
+
+- sustained write throughput across many machines;
+- replication across racks or datacenters without a permanent primary;
+- online growth by adding nodes;
+- predictable queries that can name a partition key;
+- an explicit choice between response availability and acknowledgement strength.
+
+It is not a relational database with transparent joins and arbitrary query
+plans. Cassandra moves important design work into the schema: every table is a
+query-specific projection, and its partition key determines placement,
+parallelism, failure exposure, and the unit that must remain bounded.
+
+{% callout variant="info" %}
+### Core invariant
+
+**A production Cassandra design succeeds only when each required query maps to
+a bounded partition and its replica, consistency, repair, and compaction
+policies agree with the same failure model.** Replication cannot rescue a hot
+partition, and a successful low-consistency write does not mean every replica
+is current.
+{% /callout %}
+
+Read [database fundamentals](/fundamentals/database-fundamentals) first if
+partitioning, replication, or indexes are new. Review
+[consistent hashing](/technology/consistent-hashing) for the broader placement
+idea that Cassandra applies with tokens.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start from a query, then choose the partition
+
+A CQL table always has a primary key. The primary key has two different jobs:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Partition key" eyebrow="Placement" icon="key" tone="blue" %}
+The partition key is hashed to a token. It chooses the logical partition and,
+through the keyspace replication strategy, the nodes that store copies of that
+partition.
+{% /concept-card %}
+{% concept-card title="Clustering columns" eyebrow="Order" icon="layers" tone="violet" %}
+Clustering columns order rows inside one partition. They support bounded slices
+after the query provides the partition key; they do not redistribute a hot
+partition.
+{% /concept-card %}
+{% concept-card title="Query projection" eyebrow="Access path" icon="search" tone="cyan" %}
+One business fact may be copied into several tables so each important query has
+a direct key path. The application owns the write fan-out and reconciliation
+between those projections.
+{% /concept-card %}
+{% /concept-grid %}
+
+Define the request before the table:
+
+1. Name the complete partition-key values the caller already knows.
+2. State the row order and bounded range the caller needs.
+3. Estimate writes per active partition, rows and bytes per partition, and the
+   retention or rollover rule.
+4. Identify skew: a tenant, device, account, or time bucket that can dominate
+   average traffic.
+5. Decide whether a broader query can fan out over a known small set of
+   partitions or needs a separate projection.
+
+The first telemetry table serves one concrete query: “read recent events for
+one device on one day.” The composite partition key spreads active devices and
+bounds each partition by a daily bucket. `event_time` and `event_id` preserve a
+deterministic order when timestamps collide.
+
+{% code-block file="/api/content/technology/cassandra/code/time-series-data-model.sql" language="sql" title="Device events by day" /%}
+
+The second projection supports a different access path: “find devices that
+emitted one status for a tenant on one day.” It duplicates source facts because
+the first table cannot serve that query without scanning many device
+partitions.
+
+{% code-block file="/api/content/technology/cassandra/code/composite-partition-key-model.sql" language="sql" title="Status projection by tenant and day" /%}
+
+The [CQL data-definition reference](https://cassandra.apache.org/doc/latest/cassandra/developing/cql/ddl.html)
+defines how partition and clustering columns form the primary key. Treat any
+partition-size target as a workload-specific test threshold, not a universal
+row or megabyte limit. Measure serialized bytes, cells, tombstones, read
+latency, repair work, and compaction behavior with production-shaped data.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: expose partition skew and replica placement
+
+Use the same modeled telemetry workload with three key shapes. Change the
+replication factor after selecting a key.
+
+- The partition metrics show why adding a time bucket can bound growth without
+  fixing a hot tenant.
+- The sampled distribution shows how more independent partition keys improve
+  spread across token owners.
+- The replica walk shows how `NetworkTopologyStrategy` can continue to
+  different racks while those failure domains exist.
+
+This is deterministic design arithmetic over a fixed sample, not a Cassandra
+throughput benchmark or an implementation of the Murmur3 hash function.
+
+{% interactive-block id="technology/cassandra-partition-placement-lab" dataFile="/api/content/technology/cassandra/data/partition-placement-model.json" /%}
+
+### What the lab does not let replication solve
+
+Every copy of one partition still receives that partition's writes. Increasing
+RF improves redundancy and can change read choices, but it increases storage,
+network, repair, and compaction work. It does not shard one hot logical
+partition into smaller write units.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Place replicas around real failure domains
+
+Cassandra's default partitioner hashes a partition key into a token. Token
+ranges are distributed across nodes, commonly with multiple virtual tokens per
+node. The keyspace replication strategy then chooses replicas for each range.
+
+For production, Apache's documentation recommends
+`NetworkTopologyStrategy`. It sets RF independently per datacenter and uses
+the snitch's datacenter and rack labels to spread replicas across failure
+domains when the topology permits. `SimpleStrategy` ignores those labels and
+is intended for simple test clusters.
+
+{% code-block file="/api/content/technology/cassandra/code/production-keyspace.cql" language="sql" title="Rack-aware production keyspace" /%}
+
+The names `us_east` and `eu_west` must exactly match the datacenter names
+reported by the cluster. RF 3 in each datacenter means six full copies in this
+example, not three copies split globally.
+
+{% process-flow %}
+{% process-step number="1" title="Hash the key" label="Partitioner" %}
+Hash the complete partition key to one token. Token-aware drivers can route
+toward a replica, but any contacted node can coordinate the request.
+{% /process-step %}
+{% process-step number="2" title="Find token owners" label="Ring metadata" %}
+Locate the range containing the token. Virtual tokens let each physical node
+own many ranges so growth and failure load can be distributed.
+{% /process-step %}
+{% process-step number="3" title="Choose replicas" label="Keyspace policy" %}
+Apply the datacenter RF and rack topology. Confirm that the infrastructure
+labels represent independent power, network, or availability-zone failures.
+{% /process-step %}
+{% process-step number="4" title="Wait for responses" label="Coordinator" %}
+Send the operation to replicas and return only after the selected consistency
+level's acknowledgement condition is met or the request times out.
+{% /process-step %}
+{% /process-flow %}
+
+The [Dynamo architecture guide](https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html)
+documents token ownership, replica selection, consistency levels, hints, and
+repair. The [snitch guide](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/snitch.html)
+explains how Cassandra learns datacenter and rack topology.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose consistency per operation
+
+Consistency level is an acknowledgement contract, not a background
+replication mode. For a normal write, Cassandra sends the mutation to all
+configured replicas; the write consistency level determines how many responses
+the coordinator needs before replying. A read typically contacts enough
+replicas to satisfy its read level, with possible extra work such as speculative
+retry.
+
+For one replica set:
+
+`W + R > RF`
+
+means every successful write acknowledgement set and successful read response
+set must share at least one replica. With RF 3, `QUORUM` requires two
+responses, so `QUORUM` writes plus `QUORUM` reads overlap.
+
+That arithmetic is useful but narrower than “strong consistency”:
+
+- it assumes the same replica set and completed operations;
+- it does not make multi-partition operations atomic;
+- concurrent mutations still resolve by Cassandra's timestamp and
+  last-write-wins rules;
+- a timeout is ambiguous because some replicas may have applied the mutation;
+- `LOCAL_QUORUM` applies the majority rule inside the coordinator's local
+  datacenter, not across every datacenter.
+
+### Lab 2: remove replicas and change the acknowledgement contract
+
+The lab uses a single-datacenter RF 3 replica set. Select `ONE`, `QUORUM`, or
+`ALL` independently for reads and writes, then make one or two replicas
+unavailable. Watch availability and quorum overlap change separately.
+
+{% interactive-block id="technology/cassandra-consistency-failure-lab" dataFile="/api/content/technology/cassandra/data/consistency-failure-model.json" /%}
+
+Choose levels from user-visible requirements:
+
+- Use an overlapping read/write pair when a completed write must be visible to
+  the next successful read against that replica set.
+- Lower a level only when stale or missing visibility is acceptable and the
+  application has a reconciliation path.
+- Raise a level only when the latency and replica-failure availability cost is
+  acceptable.
+- Make retries idempotent. A write timeout means “the coordinator did not
+  collect enough acknowledgements in time,” not “nothing was written.”
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Treat failure recovery as a convergence workflow
+
+Cassandra has no permanent leader to promote. When a replica is unavailable,
+another node can still coordinate requests if the selected consistency level
+can be satisfied. Remaining available is only the first half of the contract:
+missed mutations must still converge before old information becomes unsafe.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Hints" eyebrow="Best-effort handoff" icon="repeat" tone="amber" %}
+A coordinator can retain a hint for a missed replica and replay it after that
+replica returns. Hints shorten common outages, but they are best effort and are
+not a substitute for repair.
+{% /concept-card %}
+{% concept-card title="Repair" eyebrow="Replica synchronization" icon="shield" tone="blue" %}
+Repair compares replicas for common token ranges, uses Merkle trees to locate
+differences, and streams missing data. It consumes disk, CPU, and network I/O,
+so its schedule is part of capacity planning.
+{% /concept-card %}
+{% concept-card title="Tombstone safety" eyebrow="Deletion convergence" icon="warning" tone="rose" %}
+A delete writes a timestamped tombstone. Purging it before an old live value has
+been repaired can allow deleted data to reappear when that stale replica
+returns.
+{% /concept-card %}
+{% /concept-grid %}
+
+The operator must ensure every relevant replica and token range is repaired
+inside the table's tombstone safety window. Apache's
+[repair guide](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/repair.html)
+explains full and incremental repair, primary-range execution, preview and
+validation modes, and the relationship to `gc_grace_seconds`. It also makes
+clear that repair is not automatically equivalent to “run once on one node for
+the whole cluster.”
+
+Before changing RF or replacing topology, write down:
+
+1. Which ranges need streaming or a full repair?
+2. How will the change stay inside disk and network headroom?
+3. How will operators verify repaired replicas agree?
+4. What prevents tombstone expiry from outrunning repair?
+5. What backup restores data lost by application error or corruption? Repair
+   synchronizes replicas; it is not a backup.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Understand the storage engine before tuning compaction
+
+Cassandra's storage engine follows a log-structured merge design. A write is
+fast because a node appends to the commit log and updates an in-memory
+memtable; it does not rewrite an existing disk page in place.
+
+{% process-flow %}
+{% process-step number="1" title="Append for recovery" label="Commit log" %}
+Record the mutation in an append-oriented log according to the configured sync
+policy. After a crash, the node can replay accepted mutations not yet flushed.
+{% /process-step %}
+{% process-step number="2" title="Update memory" label="Memtable" %}
+Apply the mutation to the table's sorted in-memory structure so current data
+can participate in reads before flush.
+{% /process-step %}
+{% process-step number="3" title="Flush immutable files" label="SSTables" %}
+Write a memtable to immutable SSTable components. Updates and tombstones for
+one partition may now exist across several SSTables.
+{% /process-step %}
+{% process-step number="4" title="Merge in background" label="Compaction" %}
+Read and rewrite selected SSTables, reconcile versions, and discard data only
+when Cassandra can do so safely. This creates write amplification and consumes
+I/O headroom.
+{% /process-step %}
+{% /process-flow %}
+
+Compaction and repair solve different problems:
+
+- **Compaction** merges SSTables on one node. It controls read amplification,
+  write amplification, space amplification, and safe tombstone removal.
+- **Repair** compares replicas on different nodes and streams divergent data.
+  Local compaction cannot discover a mutation missing from the node.
+- **Cleanup** removes ranges a node no longer owns after topology changes. It
+  is not a replacement for either repair or regular compaction.
+
+Choose a strategy per table from measured workload behavior:
+
+- `UnifiedCompactionStrategy` is available in current Cassandra releases and
+  exposes a configurable balance among read, write, and space amplification.
+- `SizeTieredCompactionStrategy` groups similarly sized SSTables and can suit
+  write-oriented workloads with adequate temporary disk headroom.
+- `LeveledCompactionStrategy` limits overlapping SSTables to improve read
+  predictability at the cost of more rewrite work.
+- `TimeWindowCompactionStrategy` groups time-series and TTL data by time window
+  so fully expired SSTables can be removed efficiently. Avoid out-of-order
+  writes that mix old and new expiration horizons without testing the effect.
+
+Use the [storage-engine guide](https://cassandra.apache.org/doc/latest/cassandra/architecture/storage-engine.html)
+for the commit-log, memtable, and SSTable path. The
+[compaction overview](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/compaction/overview.html)
+and [tombstone guide](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/compaction/tombstones.html)
+cover background rewrites and deletion safety.
+
+Monitor pending compactions, SSTable counts, disk headroom, tombstones scanned,
+read latency, flush pressure, dropped mutations, and repair age together.
+{% /section-card %}
+
+{% section-card %}
+## Know where Cassandra is a strong fit
+
+### Strong fit
+
+- The application has high write volume and can distribute it across many
+  bounded partition keys.
+- Required reads are known in advance and can be served by query-specific
+  tables without cross-partition joins.
+- Multi-rack or multi-datacenter availability is valuable enough to justify
+  replica, repair, and operational cost.
+- The team can own capacity models, topology changes, rolling maintenance,
+  backup restore tests, repair scheduling, and compaction headroom.
+
+### Reconsider or isolate the workload
+
+- Product requirements depend on ad hoc relational joins, foreign keys, or
+  multi-partition serializable transactions.
+- One unavoidable logical key receives most traffic and cannot be safely
+  bucketed or sharded.
+- The application cannot tolerate denormalized projections becoming
+  temporarily inconsistent.
+- Operators cannot keep repair inside the deletion-safety window or reserve
+  disk and network capacity for maintenance.
+- Search, analytics, or global aggregation is the dominant access path rather
+  than bounded partition-key reads.
+
+Lightweight transactions provide compare-and-set semantics for narrow
+coordination needs, but they have a different latency and availability path.
+They do not turn Cassandra into a general relational transaction engine.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Run a production review before launch
+
+### Data and query contract
+
+- List every production query with exact partition-key inputs, clustering
+  bounds, sort order, limit, and timeout.
+- Load-test the hottest tenant or device, not only the average key.
+- Measure rows, bytes, cells, tombstones, and read latency per partition over
+  the full retention horizon.
+- Make every denormalized projection's write, retry, replay, and reconciliation
+  owner explicit.
+
+### Topology and consistency
+
+- Verify snitch labels match independent datacenter and rack failure domains.
+- Use `NetworkTopologyStrategy` and document RF per datacenter.
+- Test each read and write consistency level with one node, one rack, and one
+  datacenter unavailable as applicable.
+- Keep client retries bounded and idempotent; observe timeouts separately from
+  definite application rejections.
+
+### Operations and recovery
+
+- Schedule and verify repair before the relevant tombstone grace expires.
+- Capacity-test compaction, streaming, bootstrap, rebuild, and repair alongside
+  foreground traffic.
+- Alert on disk headroom, pending compactions, dropped mutations, repair age,
+  unavailable errors, latency tails, tombstone scans, and skewed ownership.
+- Restore backups into an isolated cluster and prove the application can read
+  them. Replication and repair do not protect against every destructive write.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/cassandra/quiz/cassandra-production-decisions.json" lessonSlug="cassandra" title="Cassandra Production Design Review" /%}

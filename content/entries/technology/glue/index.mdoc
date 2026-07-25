@@ -1,0 +1,307 @@
+---
+registryId: glue
+---
+
+{% section-card tone="intro" %}
+## What is AWS Glue?
+
+AWS Glue is a managed data-integration service. It can catalog data sources, infer
+metadata with crawlers, run Apache Spark or Python jobs, process streams, evaluate data
+quality, and coordinate jobs and triggers without a team managing its own Spark
+cluster.
+
+The service separates **metadata** from **data processing**. The Glue Data Catalog
+describes where a dataset lives, how it is shaped, and how engines may address it. Glue
+jobs read source data, transform records, and publish outputs. Crawlers can discover
+metadata, but they do not decide whether a schema change is compatible with downstream
+business contracts.
+
+The central production invariant is: **a successful run must have one reproducible
+input boundary and one idempotent publish boundary**. Managed compute removes cluster
+administration; it does not remove schema drift, duplicate output, late data, skew,
+small files, unsafe permissions, or ambiguous retries.
+{% /section-card %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Data Catalog" eyebrow="Describe assets" icon="book" tone="blue" %}
+Store databases, tables, columns, partitions, locations, formats, statistics, and
+governance metadata shared by Glue and compatible analytics engines.
+{% /concept-card %}
+{% concept-card title="Crawler" eyebrow="Discover metadata" icon="search" tone="cyan" %}
+Inspect configured data stores with built-in or custom classifiers, then create or
+update catalog tables under an explicit schema-change policy.
+{% /concept-card %}
+{% concept-card title="ETL job" eyebrow="Transform records" icon="workflow" tone="violet" %}
+Run managed Spark, streaming, Python-shell, or supported integration work with declared
+workers, code, connections, arguments, bookmarks, and observability.
+{% /concept-card %}
+{% concept-card title="Workflow and trigger" eyebrow="Coordinate runs" icon="git-branch" tone="green" %}
+Start jobs and crawlers on schedules, events, or predecessor outcomes while preserving
+run identity, dependencies, retries, and failure evidence.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="blue" %}
+## Trace data from landing zone to published table
+
+A Glue pipeline should keep raw input, metadata, transformation code, and published
+output independently identifiable. That makes a failed or incorrect run explainable
+and allows a repair to write a separate version before replacing a consumer-visible
+table.
+
+{% system-flow title="One governed batch pipeline" caption="Catalog metadata helps engines find data; the publish contract decides whether transformed output is correct, repeatable, and safe for consumers." %}
+{% system-node title="Landing zone" eyebrow="Immutable input" icon="archive" tone="blue" %}
+Store source objects or records with ingestion time, source identity, encryption,
+retention, and a stable batch or stream position.
+{% /system-node %}
+{% system-node title="Catalog contract" eyebrow="Metadata" icon="book" tone="cyan" %}
+Describe location, schema, partitions, format, ownership, classification, and access.
+Review incompatible changes before making them visible to shared readers.
+{% /system-node %}
+{% system-node title="Glue job" eyebrow="Bounded transform" icon="workflow" tone="violet" %}
+Read a reproducible input set, validate rows, transform with measured parallelism, and
+write to a versioned staging location.
+{% /system-node %}
+{% system-node title="Published dataset" eyebrow="Commit boundary" icon="check" tone="green" %}
+Atomically expose an approved version or stable manifest, then advance source progress
+and notify consumers with lineage and quality evidence.
+{% /system-node %}
+{% /system-flow %}
+
+### Name every boundary
+
+- Give each run a stable ID tied to code version, job arguments, source positions,
+  catalog version, and target version.
+- Keep raw or replayable input until the downstream recovery window closes.
+- Write rejected records to a restricted quarantine with reason codes; do not silently
+  drop or coerce them.
+- Publish through a manifest, table snapshot, partition swap, or merge contract that a
+  retry can repeat safely.
+- Advance a job bookmark or streaming checkpoint only after the intended output commit
+  is durable.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat catalog discovery as a proposal, not an approval
+
+Crawlers run classifiers, connect to a source, infer schema and partitions, and write
+metadata to the Data Catalog. When multiple S3 folders contain unrelated schemas, use
+separate include paths so one inferred table does not combine incompatible data.
+
+{% process-flow %}
+{% process-step number="1" title="Scope the source" label="Ownership" %}
+Give the crawler the narrowest include path, connection, role, and schedule that match
+one dataset owner and one schema family.
+{% /process-step %}
+{% process-step number="2" title="Classify samples" label="Inference" %}
+Run ordered custom classifiers where needed, then built-in classifiers. Record which
+classifier and source objects produced the proposed schema.
+{% /process-step %}
+{% process-step number="3" title="Compare compatibility" label="Governance" %}
+Detect additions, removals, type changes, partition changes, and classification changes
+against the consumer contract.
+{% /process-step %}
+{% process-step number="4" title="Publish metadata" label="Controlled change" %}
+Add partitions or compatible columns automatically only when policy allows. Log or
+quarantine breaking changes for owner review.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep metadata useful and safe
+
+- Use consistent database, table, column, partition, owner, and environment naming.
+- Prefer explicit table definitions for high-risk shared contracts; use crawlers for
+  discovery and partition maintenance where inference is appropriate.
+- Review crawler schema-change settings instead of accepting automatic catalog updates
+  everywhere.
+- Add partition indexes only for real partition-filter patterns and include their
+  catalog storage cost and lifecycle.
+- Apply Lake Formation and IAM permissions from data classification and consumer need,
+  not from a broad service-role template.
+
+AWS documents the current crawler flow in
+[Using crawlers to populate the Data Catalog](https://docs.aws.amazon.com/glue/latest/dg/add-crawler.html)
+and the current metadata recommendations in the
+[Data Catalog best-practices guide](https://docs.aws.amazon.com/glue/latest/dg/best-practice-catalog.html).
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size compute from input shape and completion targets
+
+Glue bills job compute from resource use and runtime. The useful planning question is
+not only how many gigabytes arrive; file count, compression, joins, shuffles, skew,
+worker memory, output shape, startup, and source/sink throughput all influence the run.
+
+{% metric-strip %}
+{% metric label="Parallel work" value="bytes + files + keys" detail="Object count and skew can dominate raw input size" tone="blue" /%}
+{% metric label="Completion time" value="startup + scan + shuffle + write" detail="Measure stage distributions in Spark UI and logs" tone="cyan" /%}
+{% metric label="DPU-hours" value="active DPUs x runtime" detail="Auto Scaling changes active resources across stages" tone="violet" /%}
+{% metric label="Monthly compute" value="per-run cost x run count" detail="Add catalog, crawler, S3, transfer, logs, and source costs" tone="amber" /%}
+{% /metric-strip %}
+
+The lab uses an explicit DPU-hour reference and benchmark throughput. Prices vary by
+region and feature, and benchmarks vary by data, code, Glue version, and worker type.
+Change the workload and worker plan, then replace every assumption with measured run
+evidence before approval.
+
+{% interactive-block id="technology/glue-cost" dataFile="/api/content/technology/glue/data/job-envelope.json" /%}
+
+{% code-block file="/api/content/technology/glue/code/plan-job-envelope.py" language="python" title="Estimate runtime and DPU-hours from explicit assumptions" /%}
+
+### Tune from stage evidence
+
+- Inspect Spark UI, event logs, CloudWatch metrics, and job-run DPU-seconds where the
+  selected Glue version and mode expose them.
+- Start with representative input size, object count, key distribution, compression,
+  and join cardinality; tiny test samples hide skew and file-open cost.
+- Use Auto Scaling where supported, but set a reasoned maximum and verify how worker
+  changes affect shuffle, source pressure, and completion time.
+- Choose memory-optimized workers for measured executor-memory pressure, not as a
+  universal fix for inefficient joins or unbounded state.
+- Compact tiny inputs or outputs according to downstream scan patterns instead of
+  adding workers to multiply file creation.
+
+The current [Auto Scaling guide](https://docs.aws.amazon.com/glue/latest/dg/auto-scaling.html)
+lists supported Glue versions and worker types. Use the deployed region's
+[Glue pricing page](https://aws.amazon.com/glue/pricing/) for current rates and adjacent
+charges.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make incremental state and replay semantics explicit
+
+Glue job bookmarks persist progress for supported sources and transformation contexts.
+They are not a transaction spanning every source, custom side effect, catalog mutation,
+and target. A correct incremental job still needs stable source identity and idempotent
+output.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Job bookmark" eyebrow="Scheduled batch" icon="bookmark" tone="blue" %}
+Track supported source progress by job and transformation context. Initialize the job,
+use stable contexts, and commit only after the intended run succeeds.
+{% /concept-card %}
+{% concept-card title="Streaming checkpoint" eyebrow="Continuous job" icon="activity" tone="violet" %}
+Track stream progress and state through checkpoints. Glue streaming jobs use
+checkpoints rather than batch job bookmarks.
+{% /concept-card %}
+{% concept-card title="Idempotent publish" eyebrow="Replay safety" icon="repeat" tone="green" %}
+Write a stable batch, partition, or record identity so a replay converges on the same
+logical output instead of appending another copy.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Plan repair before the first run
+
+- Define what happens when a source object changes at the same path after processing.
+- Rewind or reset bookmarks into a separate repair target until the result is compared
+  and approved.
+- Keep output keys or merge keys stable across retries and code releases.
+- Record late-arrival windows and whether old partitions are reopened, versioned, or
+  ignored.
+- Separate poison-record handling from infrastructure retries so one invalid row does
+  not create an endless job retry.
+
+AWS documents bookmark state and commit behavior in
+[Using job bookmarks](https://docs.aws.amazon.com/glue/latest/dg/programming-etl-connect-bookmarks.html)
+and streaming checkpoint behavior in
+[Streaming ETL jobs](https://docs.aws.amazon.com/glue/latest/dg/add-job-streaming.html).
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Observe schema drift, replay, and small-file failure
+
+The most expensive Glue incident is often a run that succeeds technically while
+publishing incorrect or operationally toxic output. Inject each failure and change the
+control that protects its real boundary.
+
+{% interactive-block id="technology/glue-correctness-lab" dataFile="/api/content/technology/glue/data/correctness-incidents.json" /%}
+
+{% code-block file="/api/content/technology/glue/code/publish-incremental-batch.py" language="python" title="Create a stable incremental publish identity" /%}
+
+### Rehearse production recovery
+
+- Add and remove columns, change a type, alter nullability, and introduce malformed
+  partitions; verify compatible publication and quarantine behavior.
+- Fail after output files are written but before progress commit, then retry the same
+  run and count duplicate logical records.
+- Reset a bookmark and confirm replay writes a separate target or converges on stable
+  output identities.
+- Feed one hot key, many tiny files, one huge compressed file, and slow source/sink
+  responses; inspect stage skew and memory behavior.
+- Stop and restart a streaming job around checkpoint creation and verify source and
+  sink semantics together.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Publish analytical formats for consumer queries
+
+Columnar formats and partitions reduce downstream scans only when they match real query
+predicates and file sizes. Partitioning every high-cardinality field creates metadata
+and small-file pressure rather than useful pruning.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Columnar files" eyebrow="Parquet or ORC" icon="columns" tone="blue" %}
+Use typed columns, compression, statistics, and predicate projection for analytical
+readers. Validate logical types and schema evolution across writers.
+{% /concept-card %}
+{% concept-card title="Useful partitions" eyebrow="Coarse pruning" icon="layers" tone="cyan" %}
+Partition by bounded dimensions frequently present in filters, such as event date and a
+small region set. Measure partition counts and listing behavior.
+{% /concept-card %}
+{% concept-card title="Table snapshots" eyebrow="Atomic publication" icon="git-branch" tone="violet" %}
+For supported lakehouse tables, publish a new snapshot or manifest so consumers see a
+coherent version instead of a directory while files are still arriving.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep readers and writers aligned
+
+- Define timestamp timezone, decimal precision, nullability, nested-field, and identifier
+  conventions before multiple jobs write the same table.
+- Estimate target file count from output bytes and desired file size, then verify with
+  the actual compression ratio.
+- Keep temporary and failed-run paths outside consumer-visible table locations.
+- Update catalog metadata only after files or a table snapshot are durable.
+- Test Athena, Redshift, EMR, and other intended readers against the exact published
+  schema and permissions.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Secure and operate the pipeline as a data product
+
+Glue jobs commonly bridge high-value stores. The service role, VPC connection, KMS
+keys, Secrets Manager access, S3 paths, Catalog permissions, and log contents together
+define the data-access boundary.
+
+### Apply least privilege to each path
+
+- Give crawlers read access only to their source scope and controlled catalog write
+  access.
+- Give jobs separate source-read, quarantine-write, staging-write, publish, log, and
+  connection permissions.
+- Use Secrets Manager or managed connections for credentials; never put credentials in
+  scripts, arguments, catalog properties, or logs.
+- Use VPC routing and security groups for private sources, and verify DNS plus egress
+  needed by dependencies.
+- Encrypt source, temporary, shuffle, output, catalog, bookmark, and log data according
+  to classification and key policy.
+
+### Monitor technical and business outcomes
+
+- Run duration, startup delay, DPU-seconds, worker changes, stage skew, executor loss,
+  retries, and failed tasks.
+- Input bytes and records, accepted rows, quarantined rows by reason, output rows,
+  duplicates, and reconciliation totals.
+- Source positions, bookmark or checkpoint progress, late data, replay windows, and
+  publish version.
+- Input and output file count, size distribution, partitions, catalog changes, and
+  downstream scan cost.
+- Access denials, unusual catalog changes, secret or connection failures, KMS errors,
+  and data-quality gate failures.
+
+The final design question is not “Can Glue run this script?” It is “Can the team prove
+which data the run read, which contract it applied, which version it published, and how
+a retry or repair changes the result?”
+{% /section-card %}
+
+{% quiz quizId="glue" lessonSlug="glue" title="AWS Glue Production Design Review" questionsFile="/api/content/technology/glue/quiz/glue-production-design.json" /%}

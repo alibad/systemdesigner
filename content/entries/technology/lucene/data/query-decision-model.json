@@ -1,0 +1,135 @@
+{
+  "title": "Match query construction to the request boundary",
+  "description": "Choose a product request and a Lucene query API. The lab traces the resulting query shape and exposes semantic mismatches before they become production surprises.",
+  "defaults": {
+    "intentId": "all-search-terms",
+    "planId": "analyzed-boolean"
+  },
+  "requirementLabels": {
+    "analysis": "Analyze human-language terms",
+    "exact": "Preserve an exact application value",
+    "positions": "Require ordered token positions",
+    "numeric": "Use typed numeric comparison",
+    "prefix": "Expand a bounded term prefix",
+    "humanSyntax": "Interpret user-entered query syntax",
+    "filter": "Match without contributing to relevance"
+  },
+  "intents": [
+    {
+      "id": "all-search-terms",
+      "label": "Require all search words",
+      "detail": "Analyze ordinary search text, then require every resulting term.",
+      "input": "distributed systems",
+      "fieldContract": "TextField",
+      "requirements": ["analysis"],
+      "recommendedPlanId": "analyzed-boolean"
+    },
+    {
+      "id": "exact-sku",
+      "label": "Filter by an exact SKU",
+      "detail": "The application already owns a structured identifier and needs no score.",
+      "input": "BOOK-042-QA",
+      "fieldContract": "StringField",
+      "requirements": ["exact", "filter"],
+      "recommendedPlanId": "term-filter"
+    },
+    {
+      "id": "exact-phrase",
+      "label": "Match an analyzed phrase",
+      "detail": "Require analyzed terms to occur in the requested order.",
+      "input": "near real time",
+      "fieldContract": "TextField + positions",
+      "requirements": ["analysis", "positions"],
+      "recommendedPlanId": "phrase-query"
+    },
+    {
+      "id": "price-window",
+      "label": "Filter a price range",
+      "detail": "Compare application-owned integer cents without text parsing or scoring.",
+      "input": "1000..2500",
+      "fieldContract": "IntField",
+      "requirements": ["numeric", "filter"],
+      "recommendedPlanId": "numeric-range"
+    },
+    {
+      "id": "sku-prefix",
+      "label": "Find a bounded SKU prefix",
+      "detail": "Expand a normalized prefix against an exact-value term dictionary.",
+      "input": "BOOK-04*",
+      "fieldContract": "StringField",
+      "requirements": ["exact", "prefix"],
+      "recommendedPlanId": "prefix-query"
+    },
+    {
+      "id": "advanced-search-box",
+      "label": "Accept human query syntax",
+      "detail": "Let a user enter fields, phrases, and Boolean operators in a search box.",
+      "input": "title:lucene AND \"near real time\"",
+      "fieldContract": "Analyzed text fields",
+      "requirements": ["analysis", "humanSyntax"],
+      "recommendedPlanId": "query-parser"
+    }
+  ],
+  "plans": [
+    {
+      "id": "analyzed-boolean",
+      "label": "QueryBuilder Boolean query",
+      "detail": "Analyze plain text and combine the produced term queries deliberately.",
+      "api": "queryBuilder.createBooleanQuery(field, text, BooleanClause.Occur.MUST)",
+      "supports": ["analysis"],
+      "rewrite": "The analyzer produces terms; QueryBuilder returns a TermQuery or BooleanQuery that requires the analyzed terms.",
+      "guardrail": "Use the same analysis policy as the indexed field and cap accepted input length before query construction.",
+      "trace": ["Receive plain search text", "Run the field analyzer", "Build required term clauses", "Search the postings lists"]
+    },
+    {
+      "id": "term-filter",
+      "label": "TermQuery in FILTER context",
+      "detail": "Match one exact indexed term and omit it from relevance scoring.",
+      "api": "builder.add(new TermQuery(new Term(field, value)), BooleanClause.Occur.FILTER)",
+      "supports": ["exact", "filter"],
+      "rewrite": "The exact term seeks its postings directly; FILTER requires a match without adding that clause to the score.",
+      "guardrail": "Normalize the application value exactly as it was indexed; do not pass identifiers through a human-language analyzer.",
+      "trace": ["Receive a structured value", "Construct one exact Term", "Apply the FILTER clause", "Intersect matching documents"]
+    },
+    {
+      "id": "phrase-query",
+      "label": "QueryBuilder phrase query",
+      "detail": "Analyze text and require the resulting terms at ordered positions.",
+      "api": "queryBuilder.createPhraseQuery(field, text, slop)",
+      "supports": ["analysis", "positions"],
+      "rewrite": "The analyzer creates phrase terms; PhraseQuery checks their indexed positions and optional slop.",
+      "guardrail": "Keep positions in the field type, test stop words and synonyms, and set slop from product meaning rather than guesswork.",
+      "trace": ["Receive phrase text", "Analyze into positioned terms", "Build a PhraseQuery", "Verify positions in postings"]
+    },
+    {
+      "id": "numeric-range",
+      "label": "IntField range query",
+      "detail": "Build a typed range against the numeric point representation.",
+      "api": "IntField.newRangeQuery(field, lowerCents, upperCents)",
+      "supports": ["numeric", "filter"],
+      "rewrite": "Typed integer bounds address the field's point index; the query can be placed in FILTER context when score is irrelevant.",
+      "guardrail": "Validate units, inclusivity, and integer overflow at the application boundary before constructing the query.",
+      "trace": ["Validate integer bounds", "Build a typed range query", "Apply it as a filter", "Visit matching point cells"]
+    },
+    {
+      "id": "prefix-query",
+      "label": "PrefixQuery",
+      "detail": "Match terms beginning with one normalized prefix through a multi-term query.",
+      "api": "new PrefixQuery(new Term(field, normalizedPrefix))",
+      "supports": ["exact", "prefix"],
+      "rewrite": "PrefixQuery builds an automaton for matching terms and uses Lucene's multi-term rewrite behavior.",
+      "guardrail": "Require a useful minimum prefix and a bounded input length; measure expansion against the real term dictionary.",
+      "trace": ["Normalize a bounded prefix", "Build the prefix automaton", "Enumerate matching terms", "Collect matching documents"]
+    },
+    {
+      "id": "query-parser",
+      "label": "Classic QueryParser",
+      "detail": "Interpret human-entered query language with an analyzer and explicit parser policy.",
+      "api": "new QueryParser(defaultField, analyzer).parse(userText)",
+      "supports": ["analysis", "positions", "prefix", "humanSyntax"],
+      "rewrite": "The parser converts syntax into a query tree; the analyzer transforms text terms and phrases during construction.",
+      "guardrail": "Reserve the parser for human-entered text. Bound syntax, fields, clauses, wildcards, and time; build program-generated filters with query APIs.",
+      "trace": ["Receive user query syntax", "Parse and analyze the text", "Build a query tree", "Rewrite and execute the tree"]
+    }
+  ]
+}

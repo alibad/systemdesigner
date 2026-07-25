@@ -1,0 +1,216 @@
+---
+registryId: circuit-breakers
+---
+
+{% section-card tone="intro" %}
+## What is a circuit breaker?
+
+A circuit breaker is a stateful policy around a remote call. It observes recent
+outcomes, temporarily blocks calls when failure or slowness crosses a boundary, and
+admits a limited set of probes before restoring normal traffic.
+
+The core invariant is: **when a dependency is unlikely to succeed, the caller must
+stop spending shared capacity on repeated doomed attempts**. The breaker contains the
+failure; it does not repair the dependency or make a fallback correct.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Closed" eyebrow="Measure normal calls" icon="activity" tone="green" %}
+Calls reach the dependency while the breaker records failures, timeouts, and slow
+responses in a bounded window.
+{% /concept-card %}
+{% concept-card title="Open" eyebrow="Fail fast" icon="shield" tone="rose" %}
+Calls do not reach the unhealthy dependency. The caller returns a controlled error or
+an explicitly designed degraded response.
+{% /concept-card %}
+{% concept-card title="Half-open" eyebrow="Probe recovery" icon="refresh" tone="cyan" %}
+Only a small number of representative calls pass. Their outcomes decide whether normal
+traffic returns or the circuit opens again.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="blue" %}
+## Put the breaker at the dependency boundary
+
+The breaker belongs around a specific remote operation or failure domain. It needs to
+see the same timeout, status, and exception semantics that the caller experiences.
+
+{% system-flow title="Protected synchronous request path" caption="The breaker changes whether the remote call is attempted; the caller still owns the user-visible result." %}
+{% system-node title="Caller" eyebrow="Owns the budget" icon="users" tone="blue" %}
+Starts with an end-to-end latency budget and decides whether a degraded response is
+acceptable for this operation.
+{% /system-node %}
+{% system-node title="Timeout and retry policy" eyebrow="Bounds attempts" icon="clock" tone="amber" %}
+Limits each wait and retries only classified transient failures with backoff, jitter,
+and an aggregate retry budget.
+{% /system-node %}
+{% system-node title="Circuit breaker" eyebrow="Contains repeated failure" icon="shield" tone="rose" %}
+Aggregates recent outcomes, fails fast while open, and controls the number of recovery
+probes.
+{% /system-node %}
+{% system-node title="Remote dependency" eyebrow="Independent failure domain" icon="server" tone="violet" %}
+May be healthy, slow, overloaded, throttling, partially available, or completely
+unreachable.
+{% /system-node %}
+{% /system-flow %}
+
+Create separate breakers when dependency instances, shards, regions, endpoints, or
+operations can fail independently. One global breaker can block healthy work because
+an unrelated path is failing.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Open from evidence, not from one alarming request
+
+A production breaker usually needs both a **measurement window** and a **minimum call
+count**. The minimum prevents a tiny sample from producing a mathematically correct but
+operationally bad decision. Slow calls deserve their own boundary because a dependency
+can return successful responses while exhausting caller threads or connections.
+
+Use the lab to compare a healthy dependency, a slow brownout, a hard outage, and a
+low-volume fluke. Then change the rates and window to see which signal opens the
+circuit.
+
+{% interactive-block id="technology/circuit-breaker-impact" dataFile="/api/content/technology/circuit-breakers/data/trip-decision-model.json" /%}
+
+### Decide which outcomes count
+
+- Count connection failures, timeouts, dependency `5xx` responses, and workload-specific
+  throttling only when the protected contract treats them as dependency failures.
+- Ignore business rejections such as an invalid payment method or a missing required
+  field. Retrying or opening a breaker cannot make those requests valid.
+- Treat slow successful calls separately from hard failures.
+- Record breaker rejections separately from dependency failures. An open breaker is a
+  caller policy state, not fresh evidence that the dependency failed again.
+
+[Resilience4j's CircuitBreaker documentation](https://resilience4j.readme.io/docs/circuitbreaker)
+describes count- and time-based sliding windows, a minimum number of calls, separate
+failure and slow-call rates, an open wait, and a bounded number of half-open calls.
+These are configurable policies, not universal defaults.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Implement one explicit state machine
+
+The state transition must be concurrency-safe: one observation opens the breaker once,
+later failures must not keep extending the open timer accidentally, and only the
+configured number of half-open probes may pass.
+
+{% code-block file="/api/content/technology/circuit-breakers/code/circuit-breaker-policy.ts" language="typescript" title="A compact rolling-window state machine" /%}
+
+The example separates three concerns:
+
+- `allow` decides whether a call may reach the dependency.
+- `record` classifies an actual dependency outcome.
+- the policy defines window size, evidence minimum, trip boundaries, open duration,
+  and probe count.
+
+Use a maintained library in production when one exists for the runtime. Confirm its
+exception predicates, concurrency model, metrics, and retry integration instead of
+assuming the defaults match the workload.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Recovery needs new evidence
+
+Time passing is permission to test, not proof that the dependency recovered.
+Half-open exists to prevent a recovering service from receiving the same traffic flood
+that contributed to its failure.
+
+Choose a dependency condition, probe count, and recovery contract. The lab evaluates
+failures, slow calls, and latency together before deciding whether to close.
+
+{% interactive-block id="technology/circuit-breaker-recovery-lab" dataFile="/api/content/technology/circuit-breakers/data/recovery-probe-model.json" /%}
+
+### Make probes representative and bounded
+
+- Exercise a safe operation with the same network path and dependency capacity as real
+  traffic; a shallow health endpoint can produce false confidence.
+- Keep probe concurrency small enough that a partial recovery is not overwhelmed.
+- Require enough evidence for the risk of the operation. Two successful reads may not
+  justify restoring a high-volume payment write path.
+- Reopen immediately when the recovery contract fails, then wait before another probe
+  cohort.
+- Watch the first restored traffic for a fresh breach instead of treating `closed` as
+  permanent health.
+
+Microsoft's
+[Circuit Breaker pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker)
+defines closed, open, and half-open behavior and emphasizes that half-open limits trial
+requests during recovery.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Compose four controls without duplicating work
+
+Each resilience control protects a different boundary. Ordering and ownership matter.
+
+{% process-flow %}
+{% process-step number="1" title="Bound one attempt" label="Timeout" %}
+Stop waiting before the caller's end-to-end latency budget is exhausted.
+{% /process-step %}
+{% process-step number="2" title="Retry only transient faults" label="Retry" %}
+Use a small attempt limit, backoff, jitter, idempotency, and one aggregate retry budget.
+{% /process-step %}
+{% process-step number="3" title="Stop repeated doomed calls" label="Breaker" %}
+Open after enough recent evidence and make retry logic stop when the breaker rejects.
+{% /process-step %}
+{% process-step number="4" title="Reserve independent capacity" label="Bulkhead" %}
+Keep one dependency, tenant, or operation from consuming every worker or connection.
+{% /process-step %}
+{% /process-flow %}
+
+Do not stack invisible retry policies in an SDK, service mesh, application client, and
+job runner. Three retries at two layers can create nine dependency attempts. Azure's
+[transient-fault guidance](https://learn.microsoft.com/en-us/azure/architecture/best-practices/transient-faults)
+recommends finite retries, per-attempt timeouts, backoff with jitter, and an aggregate
+retry budget.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## A fallback is a product contract
+
+Failing fast protects the system only if the caller handles the result deliberately.
+
+### Safe fallback candidates
+
+- Return a last-known-good catalog entry with its freshness visible.
+- Omit a noncritical recommendation panel while keeping checkout available.
+- Queue an idempotent, durable command when delayed completion is acceptable.
+- Return an explicit `503 Service Unavailable` with bounded retry guidance.
+
+### Dangerous fallback candidates
+
+- Report a payment as accepted when authorization never completed.
+- Return stale authorization, inventory, identity, or quota data as current.
+- Call another dependency chain that has the same failure cause or tighter capacity.
+- Hide degraded data from callers, telemetry, and customer support.
+
+A circuit breaker changes availability and latency; it cannot preserve correctness by
+itself. Name the freshness, durability, and feature loss of every degraded path.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the policy with evidence
+
+Monitor enough context to tell a contained incident from a badly tuned breaker:
+
+- state and every state transition, labeled by breaker and dependency;
+- permitted, failed, slow, rejected, and ignored calls;
+- fallback volume and fallback errors;
+- window volume, failure rate, slow-call rate, and dependency latency;
+- time spent open, probe outcomes, recovery attempts, and state flapping;
+- caller saturation, queueing, end-to-end success, and user-visible latency.
+
+Alert on a sustained open state, widespread fallback use, or repeated open/half-open
+flapping. Do not page on each rejected call: rejection is the intended behavior while
+the circuit is open.
+
+Test the policy with timeout, connection-reset, throttling, slow-success, partial
+recovery, and concurrent probe scenarios. The
+[AWS circuit breaker guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/circuit-breaker.html)
+also stresses fail-fast behavior, recovery detection, concurrency, manual override,
+and observability.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/circuit-breakers/quiz/circuit-breaker-production-decisions.json" lessonSlug="circuit-breakers" title="Circuit Breaker Production Review" /%}

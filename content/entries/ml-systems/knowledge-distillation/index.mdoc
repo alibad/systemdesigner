@@ -1,0 +1,190 @@
+---
+registryId: knowledge-distillation
+---
+
+{% section-card tone="intro" %}
+## What is Knowledge Distillation?
+
+Knowledge distillation trains a **student model** to learn from a qualified **teacher model**. The student usually has a smaller or cheaper inference path. Instead of learning only from one-hot labels, it can also learn from the teacher's output distribution or internal representations.
+
+In plain language, a label says "this example is a fox." A teacher can add "fox is most likely, dog is the closest alternative, and truck is very unlikely." That extra structure can guide the student, but it can also transfer the teacher's mistakes.
+
+{% callout variant="info" %}
+The core invariant is measurable: the deployed student must satisfy its own quality, slice, latency, memory, safety, and cost contract. Matching the teacher during training is evidence, not a production guarantee.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Follow the teacher-to-student path
+
+The teacher helps create the training signal, but the student normally serves requests by itself. Distillation changes training; it does not automatically add teacher work to student inference.
+
+{% process-flow %}
+{% process-step number="1" title="Qualify the teacher" label="Baseline" %}
+Freeze a version whose task quality, calibration, failure slices, and data lineage are understood.
+{% /process-step %}
+{% process-step number="2" title="Build transfer examples" label="Inputs" %}
+Use representative, permitted inputs that cover the workload the student must handle.
+{% /process-step %}
+{% process-step number="3" title="Train the student" label="Signals" %}
+Combine ground-truth loss with teacher outputs or compatible intermediate features.
+{% /process-step %}
+{% process-step number="4" title="Release independently" label="Evidence" %}
+Benchmark the exported student on target hardware and block promotion when any required gate fails.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="tip" %}
+Review [ML fundamentals](/ml-systems/ml-fundamentals), [model training](/ml-systems/model-training), and [model evaluation](/ml-systems/model-evaluation) first if logits, loss functions, holdout sets, or slice metrics are new.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Name the four moving parts
+
+{% concept-grid columns="2" %}
+{% concept-card title="Teacher" eyebrow="Knowledge source" icon="users" tone="blue" %}
+A trained model or ensemble that produces the behavior to transfer. It is kept in evaluation mode and is not updated by the student loss.
+{% /concept-card %}
+{% concept-card title="Student" eyebrow="Deployment candidate" icon="server" tone="green" %}
+A separately parameterized model that receives gradients. Its architecture can differ from the teacher as long as the selected transfer signals are compatible.
+{% /concept-card %}
+{% concept-card title="Soft targets" eyebrow="Teacher signal" icon="activity" tone="violet" %}
+A probability distribution made from teacher logits. It exposes relative preferences across classes instead of only the winning class.
+{% /concept-card %}
+{% concept-card title="Hard targets" eyebrow="Ground truth" icon="check" tone="amber" %}
+Labels or task outcomes that anchor training to observed truth. They matter because a teacher can be uncertain, biased, stale, or wrong.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## See what temperature and loss weight actually change
+
+For response distillation, divide teacher and student logits by temperature `T` before applying softmax. Larger `T` spreads probability across more classes. The soft loss is commonly multiplied by `T²` so its gradient scale remains comparable as temperature changes.
+
+A clear objective names the convention instead of relying on an ambiguous `alpha`:
+
+`total_loss = teacher_weight × soft_loss + (1 - teacher_weight) × label_loss`
+
+The right temperature and weight are empirical hyperparameters. They must be selected on validation evidence, not copied from a universal range.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/knowledge-distillation-calculator" dataFile="/api/content/ml-systems/knowledge-distillation/data/soft-target-scenarios.json" /%}
+
+{% section-card %}
+## Choose a transfer signal the architectures can support
+
+{% concept-grid columns="3" %}
+{% concept-card title="Response distillation" eyebrow="Match outputs" icon="route" tone="blue" %}
+Match teacher and student output distributions. This is the simplest fit when both models solve the same task and produce aligned output dimensions.
+{% /concept-card %}
+{% concept-card title="Feature distillation" eyebrow="Match representations" icon="layers" tone="green" %}
+Match selected hidden representations. Different feature shapes need an explicit projection or pooling rule, and the chosen layer pairing needs validation.
+{% /concept-card %}
+{% concept-card title="Relational distillation" eyebrow="Match structure" icon="network" tone="violet" %}
+Transfer relationships such as pairwise distances, attention maps, or similarity structure. This can preserve useful geometry without requiring component-wise feature equality.
+{% /concept-card %}
+{% /concept-grid %}
+
+No signal is automatically superior. Feature or attention matching can add memory, implementation, and architecture-coupling costs without improving the deployed student.
+{% /section-card %}
+
+{% section-card %}
+## Implement one correct response-distillation step
+
+The teacher runs in evaluation mode under `torch.no_grad()`. The student remains trainable. PyTorch's `KLDivLoss` contract expects the model input in log space, so the student branch uses `log_softmax`; `reduction="batchmean"` preserves the mathematical KL definition.
+
+{% code-block file="/api/content/ml-systems/knowledge-distillation/code/distillation-train-step.py" language="python" title="A model-agnostic PyTorch distillation step" /%}
+
+The function returns the differentiable total loss plus detached metrics. The caller still owns mixed precision, gradient accumulation, optimizer stepping, checkpointing, distributed reduction, and evaluation.
+{% /section-card %}
+
+{% section-card %}
+## Build a transfer set that represents deployment
+
+Distillation cannot transfer behavior the teacher never produces on the transfer inputs. Treat the transfer set as a versioned dataset with the same rigor as ordinary training data.
+
+- Cover important classes, cohorts, languages, sequence lengths, devices, and difficult examples.
+- Keep validation and test examples out of training, teacher-output caches, and hyperparameter selection.
+- Record the teacher artifact, preprocessing version, label mapping, and output schema with every cached signal.
+- Recompute teacher outputs when the teacher or preprocessing contract changes.
+- Confirm that data licenses, privacy rules, and retention policies allow teacher inference and output storage.
+
+For an online teacher, training spends teacher compute on every batch. For cached logits, training is cheaper and reproducible, but storage grows with examples and output width. Neither mode changes the need for an untouched evaluation set.
+{% /section-card %}
+
+{% section-card %}
+## Select a student using measured deployment evidence
+
+Parameter count and artifact size are useful inventory fields, but they do not determine end-to-end latency or peak memory. Kernel support, sequence shape, batching, preprocessing, data movement, and the target runtime all matter.
+
+The next lab uses an **illustrative benchmark snapshot**, not a universal model ranking. Change the target profile and candidate to see which constraint becomes the release blocker.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/knowledge-distillation-calculator" dataFile="/api/content/ml-systems/knowledge-distillation/data/deployment-candidates.json" /%}
+
+{% section-card %}
+## Encode the release contract beside the training recipe
+
+The release gate should compare the exact exported artifact against the approved baseline on identical inputs and target hardware. Aggregate quality alone is not enough when a required slice can regress.
+
+{% code-block file="/api/content/ml-systems/knowledge-distillation/code/distillation-release-gates.yaml" language="yaml" title="Versioned distillation and release-gate configuration" /%}
+
+Promotion should require all of the following:
+
+- Overall task quality meets the declared floor.
+- Every required slice meets its own floor or maximum regression budget.
+- Calibration, robustness, safety, and fairness checks match the product risk.
+- Target-runtime p50 and p95 latency, peak memory, throughput, and energy or cost are measured.
+- A bounded canary can roll back to the previous artifact.
+- Training lineage identifies the teacher, student initialization, transfer data, loss convention, and hyperparameters.
+{% /section-card %}
+
+{% section-card %}
+## Diagnose failures before adding complexity
+
+{% concept-grid columns="2" %}
+{% concept-card title="Teacher-label disagreement" eyebrow="Copied error" icon="warning" tone="rose" %}
+A high teacher weight can pull the student toward a wrong prediction. Inspect disagreement slices and preserve a ground-truth anchor.
+{% /concept-card %}
+{% concept-card title="Uninformative soft targets" eyebrow="Weak signal" icon="activity" tone="amber" %}
+Very sharp outputs resemble hard labels; very diffuse outputs can weaken class contrast. Sweep temperature and validate the resulting student.
+{% /concept-card %}
+{% concept-card title="Capacity gap" eyebrow="Underfitting" icon="boxes" tone="violet" %}
+The student may be too small or structurally mismatched to represent the teacher's behavior. Increase capacity, improve the transfer set, or change the signal.
+{% /concept-card %}
+{% concept-card title="Feature mismatch" eyebrow="Wrong alignment" icon="network" tone="blue" %}
+Hidden states can differ in shape and meaning. Add an explicit adapter and verify that the extra objective improves holdout behavior.
+{% /concept-card %}
+{% concept-card title="Aggregate-only evaluation" eyebrow="Hidden regression" icon="search" tone="rose" %}
+A small average change can hide concentrated harm. Gate the worst required slices and important task families separately.
+{% /concept-card %}
+{% concept-card title="Proxy deployment math" eyebrow="False speedup" icon="gauge" tone="green" %}
+Smaller parameter counts do not prove latency, memory, or cost gains. Benchmark the compiled or exported artifact in its actual runtime.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Combine compression techniques deliberately
+
+Distillation, quantization, and pruning change different parts of the system:
+
+- **Distillation** trains a separate student to reproduce selected behavior.
+- **Quantization** changes numeric representation and often depends on backend support and calibration.
+- **Pruning** removes weights or structures and only speeds inference when the runtime can exploit the resulting sparsity.
+
+They can be combined, but each additional transform creates a new artifact that needs the same quality and target-hardware evaluation. Learn the numeric trade-offs in [model quantization](/ml-systems/model-quantization) and the broader release discipline in [model compression techniques](/ml-systems/model-compression-techniques).
+{% /section-card %}
+
+{% section-card %}
+## Use primary references for the implementation contract
+
+- [Distilling the Knowledge in a Neural Network](https://arxiv.org/abs/1503.02531) introduces soft targets, temperature scaling, and the gradient-scaling rationale.
+- [PyTorch Knowledge Distillation Tutorial](https://docs.pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html) demonstrates a frozen teacher, trainable student, softened logits, label loss, and `T²` scaling.
+- [PyTorch KLDivLoss documentation](https://docs.pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html) defines the log-space input contract and recommends `batchmean` for the mathematical KL value.
+- [Keras Knowledge Distillation example](https://keras.io/examples/vision/knowledge_distillation/) provides an independent official implementation of the same teacher-student objective.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/knowledge-distillation/quiz/knowledge-distillation.json" lessonSlug="knowledge-distillation" title="Knowledge Distillation Check" /%}

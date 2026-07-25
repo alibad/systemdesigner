@@ -1,0 +1,151 @@
+---
+registryId: api-design
+---
+
+{% section-card tone="intro" %}
+## What is API design?
+
+An **API**, or application programming interface, is the agreement between a client and a service. It says which request represents an intent, what data the service accepts, what result it returns, and what a client should do when something goes wrong.
+
+In plain language: API design makes a request predictable even when the client, server, network, or product changes. The core invariant is that one client intent has one documented meaning. A retry must not accidentally create a second order, a list must not silently skip records, and a compatible client must not break because a response changed shape.
+
+{% callout variant="info" %}
+This lesson assumes basic HTTP vocabulary. If `GET`, `POST`, headers, and status codes are unfamiliar, start with [HTTP Protocol](/technology/http-protocol) before designing a public contract.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with intent, then make the contract observable
+
+A URL is not the API design by itself. A useful contract joins the resource, HTTP method, request representation, success response, error response, and compatibility promise. Write those pieces down before a handler is implemented.
+
+{% process-flow %}
+{% process-step number="1" title="Name the client intent" label="Outcome" %}
+State the result the client wants, such as "list orders," "create an order," or "record a cancellation." Avoid starting with a database table or a controller name.
+{% /process-step %}
+{% process-step number="2" title="Choose the resource" label="Address" %}
+Expose a stable noun and relationship. Use a collection for many records and an item path for one identified record. Model an important irreversible action as a resource with its own lifecycle.
+{% /process-step %}
+{% process-step number="3" title="Set request semantics" label="Safety" %}
+Define method, authentication, validation, pagination, retry behavior, and which fields a caller may provide. A caller should know whether repeating a request is safe.
+{% /process-step %}
+{% process-step number="4" title="Publish the response promise" label="Recovery" %}
+Document success and error shapes, status codes, fields that may be added, deprecation timing, and the support path when a client cannot migrate immediately.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: choose a resource contract for an order workflow
+
+Select an intent to trace the contract that best expresses it. The path changes with the chosen operation, and the result explains why the method and resource shape matter. Select any component in the map to inspect its responsibility.
+
+{% topology-lab dataFile="/api/content/fundamentals/api-design/data/order-resource-contract-lab.json" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Read resource paths as promises
+
+A **resource** is a stable thing the API exposes: an order, a collection of orders, or a cancellation record. Resource-oriented paths make the thing being addressed visible, while the method states what the caller wants to do with it.
+
+| Client intent | Contract shape | Why it is a useful promise |
+| --- | --- | --- |
+| Read one known order | `GET /v1/orders/{order_id}` | A `GET` is safe to repeat and names the exact record the client expects. |
+| Search a collection | `GET /v1/orders?status=open&limit=25&cursor=...` | Filters and page controls describe a read of the collection; they do not mutate it. |
+| Create an order | `POST /v1/orders` with `Idempotency-Key` | The service owns the new identifier, but the key lets a network retry refer to the same logical creation. |
+| Cancel an order | `POST /v1/orders/{order_id}/cancellations` | A cancellation may need an audit record, reason, timestamp, and policy checks; deleting the order would hide those facts. |
+
+Use a nested path when the parent relationship is part of the resource identity, such as `GET /v1/customers/{customer_id}/orders`. Do not build long paths merely because tables have foreign keys. If the caller already has an order ID, `GET /v1/orders/{order_id}` is usually the clearer contract.
+
+{% callout variant="tip" %}
+Verbs are not forbidden in API design. The question is whether the operation creates or changes a durable business fact. `cancellations` is a noun with its own audit trail; `/cancelOrder` hides that lifecycle in an action name.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Keep the request and response boringly consistent
+
+Consistency reduces client branches. Use one error envelope, field naming convention, timestamp format, authentication scheme, and pagination vocabulary across related endpoints. Then a client can handle a class of failures instead of memorizing every handler.
+
+{% code-block file="/api/content/fundamentals/api-design/code/orders-api-contract.http" language="http" title="A compact order API contract" /%}
+
+The example uses a response envelope with `data`, `meta`, and `error`. The exact envelope is a local choice; the important part is that it stays stable. Error responses should tell the client what happened, where it happened, and whether retrying is sensible without leaking internal stack traces or private data.
+
+Use status codes for the broad outcome and the body for details:
+
+- **`200 OK` or `201 Created`:** the requested read succeeded or a new resource was created. Include a stable resource ID and location when useful.
+- **`400 Bad Request` or `422 Unprocessable Content`:** the request is syntactically valid enough to read but does not meet the contract. Return field-level errors that a client can fix.
+- **`401 Unauthorized` or `403 Forbidden`:** authentication is missing or invalid, or the authenticated caller lacks the required permission. Do not use either as a substitute for validation.
+- **`404 Not Found`:** the target resource is absent or deliberately undiscoverable to this caller. Decide and document the privacy policy.
+- **`409 Conflict` or `429 Too Many Requests`:** a known state conflict or rate limit prevents progress. Include a retry or resolution rule when one exists.
+- **`5xx`:** the service failed to complete the request. The client may retry only when the operation and error policy make that safe.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Pagination is a continuation contract, not a UI detail
+
+Pagination divides a collection into bounded responses. It protects the service from unbounded scans and lets a client continue a long read. The difficult part is not adding `limit`; it is stating what happens while records are inserted, deleted, or reordered.
+
+For a changing ordered collection, a cursor usually carries the last observed sort position and a tie-breaker such as the order ID. The next request presents that opaque cursor; the server resumes after that position. The client must treat the cursor as a token, not parse or manufacture it.
+
+| Choice | Works well when | Failure to plan for |
+| --- | --- | --- |
+| Offset, such as `offset=50` | A small, mostly static admin list | Inserts before offset 50 can produce duplicates or skipped rows. Deep offsets can also become expensive. |
+| Cursor, such as `cursor=eyJ...` | A feed or large ordered collection that changes during reads | The sort must be deterministic, and cursor expiry or invalidation must have a documented response. |
+| Snapshot or export job | A user needs a complete, reconcilable dataset | Holding a snapshot indefinitely can cost storage and delay freshness. Give the job an expiry and retrieval policy. |
+
+Set a maximum page size even when the client asks for more. Return the effective `limit`, a `next_cursor` only when another page exists, and a consistent ordering rule such as `created_at DESC, order_id DESC`.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make ambiguous writes safe to retry
+
+A timeout does not reveal whether the server completed a write. Retrying a plain `POST` can therefore create two orders or charge twice. **Idempotency** means repeated delivery of the same logical operation has the same externally visible result as delivering it once.
+
+For a retriable create or command:
+
+1. The client generates a high-entropy `Idempotency-Key` for one logical operation and reuses it only for retries of that operation.
+2. The service stores the key, authenticated caller, request fingerprint, processing state, and final response together with the authoritative write.
+3. A repeat with the same key and matching request returns the saved result. A repeat with different parameters is rejected as a conflict rather than silently applying a second intent.
+4. The service expires records only after the documented retry window, then measures replay, conflict, and in-progress rates.
+
+Idempotency does not make every side effect disappear. If a payment provider or email system is involved, carry a stable operation identifier downstream, use an outbox or reconciliation process, and document what happens when a side effect completes after the original client timed out.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab: inject pagination, retry, and versioning failures
+
+Switch scenarios to see what the client can observe when a collection moves during paging, a write times out, or a response changes incompatibly. Each scenario changes the request path, component status, and recovery rule; select a node for its operational role.
+
+{% topology-lab dataFile="/api/content/fundamentals/api-design/data/pagination-idempotency-versioning-failure-lab.json" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Evolve the contract without surprising clients
+
+An API change is compatible only if existing clients can keep interpreting the response and behavior they rely on. Adding an optional field is often compatible; renaming a required field, changing units, narrowing an accepted enum, or changing an ordering guarantee may not be.
+
+Use an evolution policy that clients can act on:
+
+- **Add before remove:** introduce a new optional field or endpoint, document its semantics, and observe adoption before retiring the old one.
+- **Version a real break:** choose a documented versioning mechanism, such as a media type or path version, when old and new contracts cannot safely coexist under one representation.
+- **Deprecate with evidence:** announce the replacement, migration deadline, owners, and support channel. Emit `Deprecation` and `Sunset` headers where the contract supports them, and measure callers still using the old behavior.
+- **Test consumers:** run contract tests against representative client expectations. A server test that only proves its own response serializes cannot detect a client that assumes an enum is closed.
+
+Versioning is not an excuse to leave every old endpoint forever. It is a controlled migration: publish the replacement, give a time-bound path, help important clients move, and remove the old path only after the stated policy.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the contract you published
+
+API reliability includes whether callers can understand and recover from failures. Review these signals by endpoint, version, client type, and authenticated tenant where appropriate:
+
+- **Traffic and outcomes:** request volume, latency percentiles, `2xx`/`4xx`/`5xx` rates, and the top machine-readable error codes.
+- **Pagination health:** requested versus capped page size, cursor decode failures, continuation latency, duplicate reports, and cursor-expiry responses.
+- **Write safety:** idempotency replay count, key/request-fingerprint conflicts, in-progress wait time, and reconciliation backlog for downstream effects.
+- **Compatibility:** active client versions, deprecated-route traffic, schema-validation failures after a release, and time remaining before a sunset date.
+
+Treat documentation, examples, and an OpenAPI or equivalent machine-readable description as production artifacts. Change them in the same review as the handler and contract tests. When an incident happens, preserve the request ID and a safe error code so a caller and on-call engineer can discuss the same failed operation.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/api-design/quiz/api-design.json" lessonSlug="api-design" title="API Contract Review" /%}

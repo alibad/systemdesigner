@@ -1,0 +1,87 @@
+{
+  "title": "Fit a production replica inside the fleet envelope",
+  "description": "Change topology, scheduler, context, and concurrency, then remove a GPU. The model exposes why sharding can improve memory fit while reducing independent failure domains.",
+  "notice": "This is a planning model, not a hardware benchmark. Validate weight, workspace, cache, collective, and latency assumptions on the exact release bundle.",
+  "model": {
+    "label": "8B dense decoder",
+    "parametersBillions": 8,
+    "layers": 32,
+    "queryHeads": 32,
+    "kvHeads": 8,
+    "headDimension": 128,
+    "bytesPerWeight": 2,
+    "bytesPerCacheElement": 2
+  },
+  "fleet": {
+    "totalGpus": 8,
+    "hbmGiBPerGpu": 80,
+    "runtimeReserveGiBPerGpu": 8
+  },
+  "defaults": {
+    "topologyId": "replica",
+    "schedulerId": "continuous",
+    "contextTokens": 8192,
+    "concurrency": 48,
+    "maxSequencesPerReplica": 24,
+    "failureInjected": false
+  },
+  "ranges": {
+    "contextTokens": { "min": 2048, "max": 32768, "step": 2048 },
+    "concurrency": { "min": 8, "max": 128, "step": 8 },
+    "maxSequencesPerReplica": { "min": 4, "max": 64, "step": 4 }
+  },
+  "topologies": [
+    {
+      "id": "replica",
+      "label": "Independent replicas",
+      "shortLabel": "DP replicas",
+      "gpusPerReplica": 1,
+      "shardFactor": 1,
+      "communicationPenalty": 0,
+      "detail": "A complete model runs on each GPU. The fleet has the most independent serving groups when weights and live state fit."
+    },
+    {
+      "id": "tp2",
+      "label": "Two-way tensor parallel",
+      "shortLabel": "TP2",
+      "gpusPerReplica": 2,
+      "shardFactor": 2,
+      "communicationPenalty": 0.08,
+      "detail": "Each layer is split across two GPUs. Per-device memory falls, but collectives enter every token step."
+    },
+    {
+      "id": "pp2",
+      "label": "Two-stage pipeline",
+      "shortLabel": "PP2",
+      "gpusPerReplica": 2,
+      "shardFactor": 2,
+      "communicationPenalty": 0.12,
+      "detail": "Layer ranges are split across two stages. Per-device memory falls, while stage balance and bubbles matter."
+    },
+    {
+      "id": "tp2-pp2",
+      "label": "Tensor plus pipeline",
+      "shortLabel": "TP2 x PP2",
+      "gpusPerReplica": 4,
+      "shardFactor": 4,
+      "communicationPenalty": 0.2,
+      "detail": "Four GPUs form one serving group. The largest memory partition also creates the fewest independent groups."
+    }
+  ],
+  "schedulers": [
+    {
+      "id": "static",
+      "label": "Static request batches",
+      "turnoverFactor": 0.72,
+      "waitPenalty": "High under mixed output lengths",
+      "detail": "A batch holds its slots until the grouped execution completes, so early-finishing sequences can strand capacity."
+    },
+    {
+      "id": "continuous",
+      "label": "Continuous batching",
+      "turnoverFactor": 1,
+      "waitPenalty": "Bounded by iteration policy",
+      "detail": "Completed sequences release slots and compatible queued work can join at the next iteration boundary."
+    }
+  ]
+}

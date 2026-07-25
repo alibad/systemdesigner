@@ -1,0 +1,315 @@
+---
+registryId: kafka
+---
+
+{% section-card tone="intro" %}
+## What is Apache Kafka?
+
+**Apache Kafka is a distributed, durable log for moving ordered streams of events
+between systems.** Producers append records to named topics. Kafka keeps those records
+for a configured retention period, and independent consumers read them at their own
+pace by tracking offsets.
+
+Kafka matters when several applications need the same event history, when a consumer
+must recover by replaying old data, or when one machine cannot sustain the required
+throughput. It is more than a task queue: consuming a record does not delete it, and a
+second consumer group can read the same history independently.
+
+{% callout variant="info" %}
+The core invariant is **ordered, append-only history within one partition**. Kafka does
+not provide one global order across a topic. A record key chooses the partition, so key
+design chooses the scope of ordering, parallelism, and hotspot risk.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one event from publish to replay
+
+A producer fetches topic metadata, chooses a partition, and sends a batch to that
+partition's leader broker. Followers copy the leader's log. A consumer group assigns
+each partition to at most one group member at a time, while another group can read the
+same partitions for a different purpose.
+
+{% system-flow title="Kafka data path" caption="The partition log is the durable handoff. Producers and consumers can scale independently as long as partition ownership remains explicit." %}
+{% system-node title="Producer" eyebrow="Serialize + key" icon="activity" tone="blue" %}
+Build a record with a key, value, timestamp, and optional headers. Batch and compress
+records before sending them to a partition leader.
+{% /system-node %}
+{% system-node title="Partition leader" eyebrow="Append" icon="database" tone="violet" %}
+Assign the next offset and append the batch to one ordered log. The leader serves reads
+and coordinates replication for that partition.
+{% /system-node %}
+{% system-node title="Follower replicas" eyebrow="Copy" icon="repeat" tone="cyan" %}
+Replicate the partition so another broker can become leader after a failure. The
+in-sync replica set determines which copies are sufficiently caught up.
+{% /system-node %}
+{% system-node title="Consumer group" eyebrow="Read + commit" icon="users" tone="green" %}
+Poll assigned partitions, process records, and commit offsets that describe completed
+progress. Lag is the distance between the latest and committed offsets.
+{% /system-node %}
+{% /system-flow %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Topic" eyebrow="Named stream" icon="layers" tone="blue" %}
+A logical event category such as `orders.v1`. Topic configuration controls partitions,
+replication, retention, compaction, and record limits.
+{% /concept-card %}
+{% concept-card title="Partition" eyebrow="Order + scale" icon="route" tone="violet" %}
+One ordered log with offsets `0, 1, 2...`. More partitions allow more broker and
+consumer parallelism but do not create global ordering.
+{% /concept-card %}
+{% concept-card title="Record key" eyebrow="Placement contract" icon="key" tone="amber" %}
+Records with the same stable key normally reach the same partition. That preserves
+per-key order but can create a hotspot when one key dominates traffic.
+{% /concept-card %}
+{% concept-card title="Offset" eyebrow="Read position" icon="workflow" tone="green" %}
+An offset identifies a record's position inside one partition. Committed offsets are
+consumer progress, not proof that an external side effect succeeded exactly once.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size the topic from workload, not folklore
+
+Start with logical ingress, then account for retention, replication, broker headroom,
+partition load, and consumer capacity. The model below is deliberately transparent:
+its broker and consumer limits are planning assumptions, not universal Kafka limits.
+
+- **Logical ingress:** `events/sec x average encoded bytes`.
+- **Retained replica bytes:** `logical ingress x retention seconds x replication factor`.
+- **Active consumers:** the smaller of consumer instances and partition count.
+- **Per-consumer demand:** `events/sec / active consumers`.
+- **Operational reserve:** keep disk, network, and partition leadership below measured
+  saturation so a broker can fail without turning recovery into overload.
+
+{% interactive-block id="technology/kafka-cluster" dataFile="/api/content/technology/kafka/data/topic-capacity-model.json" /%}
+
+{% code-block file="/api/content/technology/kafka/code/estimate-topic-capacity.py" language="python" title="Estimate retained bytes and consumer demand" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Partition by the ordering boundary
+
+Partition count is both a capacity decision and an API contract. Increasing it later
+can change the key-to-partition mapping for future records, so consumers must not rely
+on accidental ordering between unrelated keys.
+
+{% process-flow %}
+{% process-step number="1" title="Name the ordered entity" label="Invariant" %}
+Choose the smallest business identity whose events must stay ordered, such as
+`order_id`, `account_id`, or `device_id`.
+{% /process-step %}
+{% process-step number="2" title="Estimate the hottest key" label="Skew" %}
+Average traffic hides celebrity accounts, large tenants, and noisy devices. Measure
+the largest key's share and decide how that entity can be isolated or subdivided.
+{% /process-step %}
+{% process-step number="3" title="Budget partition load" label="Capacity" %}
+Benchmark encoded event size, compression, acknowledgement policy, and storage on the
+target hardware. Divide peak load by a conservative per-partition envelope.
+{% /process-step %}
+{% process-step number="4" title="Preserve routing evolution" label="Change" %}
+Version custom partitioning rules and schema contracts. Treat a partition-count change
+as an ordering and replay review, not a harmless scaling toggle.
+{% /process-step %}
+{% /process-flow %}
+
+### Avoid the two partitioning extremes
+
+- **Too few partitions** cap broker distribution and consumer-group parallelism.
+- **Too many partitions** increase metadata, open files, leader elections, replication
+  work, and rebalance coordination.
+- **Random or missing keys** spread writes but discard per-entity ordering.
+- **One dominant key** preserves order while concentrating traffic on one partition.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Compose durability from acknowledgements and replication
+
+Replication factor says how many broker copies should exist. Producer `acks` says what
+must happen before a send completes. `min.insync.replicas` can reject a write when too
+few replicas are caught up, converting a possible durability loss into visible
+unavailability.
+
+{% concept-grid columns="3" %}
+{% concept-card title="acks=0" eyebrow="No broker confirmation" icon="speed" tone="rose" %}
+The client does not wait for a broker response. This can reduce waiting but cannot tell
+the application whether the broker accepted the batch.
+{% /concept-card %}
+{% concept-card title="acks=1" eyebrow="Leader confirmation" icon="server" tone="amber" %}
+The leader acknowledges after its local append. A leader failure before followers copy
+the record can lose an acknowledged write.
+{% /concept-card %}
+{% concept-card title="acks=all" eyebrow="In-sync confirmation" icon="shield" tone="green" %}
+The leader waits for the required in-sync replicas. Pair this with a meaningful minimum
+ISR and enough replicas across independent failure domains.
+{% /concept-card %}
+{% /concept-grid %}
+
+Producer idempotence prevents broker retries from appending duplicate records within
+the producer protocol. It requires compatible acknowledgement and in-flight settings.
+It does **not** deduplicate a new application-level send with a new identity, nor does
+it make an external database write exactly once.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Trace delivery failures before choosing a guarantee
+
+Terms such as *at least once* and *exactly once* are incomplete until the side-effect
+boundary is named. Inject a failure, then change producer and consumer contracts. The
+trace distinguishes records in Kafka, committed progress, and business side effects.
+
+{% interactive-block id="technology/kafka-delivery-semantics-lab" dataFile="/api/content/technology/kafka/data/delivery-failure-model.json" /%}
+
+{% callout variant="warn" %}
+Kafka transactions can atomically consume records, produce Kafka output, and commit
+source offsets when all participants use the transaction and consumers read committed
+data. They do not automatically include an unrelated database, email provider, or
+payment API. Use an idempotency key, inbox/outbox pattern, or reconciliation at that
+external boundary.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make consumer progress match completed work
+
+A consumer repeatedly polls assigned partitions, processes records, and commits an
+offset representing the next record to read. Rebalances move partition ownership when
+group membership or subscribed partitions change. Slow handlers can therefore create
+lag, missed poll deadlines, and repeated work.
+
+{% process-flow %}
+{% process-step number="1" title="Poll a bounded batch" label="Fetch" %}
+Keep the batch small enough to finish inside the poll interval, or move long work to a
+bounded worker pool while preserving per-partition completion order.
+{% /process-step %}
+{% process-step number="2" title="Validate the event" label="Contract" %}
+Reject malformed or unsupported schemas deliberately. Preserve the original record and
+failure reason for quarantine instead of retrying permanent errors forever.
+{% /process-step %}
+{% process-step number="3" title="Apply idempotently" label="Side effect" %}
+Use a stable event or operation ID at the destination. A replay should return the first
+result or become a no-op rather than charge, email, or mutate twice.
+{% /process-step %}
+{% process-step number="4" title="Commit completed offsets" label="Progress" %}
+Advance progress only after the owned side effect is durable. Track completion per
+partition when work runs concurrently.
+{% /process-step %}
+{% process-step number="5" title="Bound poison records" label="Recovery" %}
+Retry transient failures with backoff and jitter, then quarantine after a finite
+attempt budget. Alert on quarantine volume and age.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/kafka/code/process-order-events.py" language="python" title="An idempotent consumer boundary" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose retention and compaction for the recovery job
+
+Kafka retains records independently of whether a consumer read them. The cleanup
+policy should match why the history exists.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Delete retention" eyebrow="Time or size window" icon="clock" tone="blue" %}
+Keep every record until old log segments cross the configured time or size boundary.
+Use it for replay windows, event history, and bounded recovery.
+{% /concept-card %}
+{% concept-card title="Log compaction" eyebrow="Latest value per key" icon="archive" tone="violet" %}
+Retain the latest known value for each key over time. Compaction is asynchronous and
+does not turn Kafka into an immediate key-value lookup service.
+{% /concept-card %}
+{% concept-card title="Delete + compact" eyebrow="State plus bounded history" icon="layers" tone="green" %}
+Apply both policies when consumers need recent event history and a compacted latest
+state beyond that window. Tombstone and compaction timing still require planning.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Treat schemas as long-lived contracts
+
+- Add fields with compatible defaults when older consumers must keep reading.
+- Do not silently change a field's meaning, unit, or identity semantics.
+- Version breaking contracts with an explicit migration and dual-read or dual-write
+  window.
+- Keep personally identifiable or secret data out of broad event streams unless the
+  retention, deletion, encryption, and access model is intentional.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design for failures that preserve the log but break the application
+
+{% concept-grid columns="4" %}
+{% concept-card title="Broker or disk failure" eyebrow="Replica loss" icon="server" tone="rose" %}
+Leadership moves only to an eligible replica. Alert on under-replicated partitions,
+offline partitions, shrinking ISR, disk errors, and recovery traffic.
+{% /concept-card %}
+{% concept-card title="Consumer lag" eyebrow="Work exceeds capacity" icon="gauge" tone="amber" %}
+Lag can grow because of slow dependencies, partition skew, poison records, rebalances,
+or insufficient consumers. Measure lag age as well as offset count.
+{% /concept-card %}
+{% concept-card title="Rebalance churn" eyebrow="Ownership keeps moving" icon="repeat" tone="violet" %}
+Unstable membership pauses useful work and can repeat in-flight processing. Use stable
+member identity where appropriate and keep poll behavior healthy.
+{% /concept-card %}
+{% concept-card title="Schema poison" eyebrow="Permanent incompatibility" icon="warning" tone="blue" %}
+A deterministic parse error will not heal through retries. Quarantine it with context,
+protect later records from starvation, and repair through a controlled replay.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Monitor the user-visible contract
+
+- Produce request latency, error rate, timeouts, and throttling.
+- Consumer lag by partition, lag age, processing latency, and retry or quarantine rate.
+- Under-replicated and offline partitions, ISR changes, controller health, and leader
+  imbalance.
+- Disk usage, retention headroom, network saturation, page-cache pressure, and
+  replication recovery load.
+- End-to-end event age from source timestamp to completed business effect.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Secure and operate Kafka as shared infrastructure
+
+Kafka often connects many trust domains, so a permissive cluster can become a broad
+data-exfiltration and lateral-movement path.
+
+- Encrypt client and inter-broker traffic with TLS and rotate credentials without a
+  cluster-wide outage.
+- Authenticate producers, consumers, brokers, and operators with a managed mechanism
+  appropriate to the environment.
+- Grant topic, group, transactional ID, and cluster permissions by workload identity;
+  avoid one credential shared by unrelated services.
+- Apply quotas and record-size limits so one producer or consumer cannot exhaust broker
+  network, memory, request threads, or disk.
+- Separate sensitive workloads or tenants when authorization alone cannot provide the
+  required blast-radius and compliance boundary.
+- Test broker loss, rolling upgrades, consumer rebalances, replay, and restore of
+  dependent schema and connector services before an incident.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Know when Kafka is the wrong primitive
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Replayable fan-out" icon="check" tone="green" %}
+Use Kafka for durable event distribution, change-data streams, event-driven integration,
+stream processing inputs, and high-throughput pipelines with independent consumers.
+{% /concept-card %}
+{% concept-card title="Use a task queue" eyebrow="Per-message work dispatch" icon="route" tone="blue" %}
+A conventional queue can be simpler when one worker should own each task, priority and
+per-message routing dominate, and retained replay is not a requirement.
+{% /concept-card %}
+{% concept-card title="Use a database or object store" eyebrow="Query or archive" icon="database" tone="amber" %}
+Kafka is not a replacement for transactional queries, arbitrary historical analytics,
+large object storage, or a permanent backup. Sink durable history into the system built
+for that access pattern.
+{% /concept-card %}
+{% /concept-grid %}
+
+The operational cost is real: partition planning, schema governance, security,
+connectors, capacity, upgrades, and incident response need explicit ownership. Adopt
+Kafka when replayable streams and independent consumers justify that control plane.
+{% /section-card %}
+
+{% quiz quizId="kafka" lessonSlug="kafka" title="Kafka Production Design Review" questionsFile="/api/content/technology/kafka/quiz/kafka-production-design.json" /%}

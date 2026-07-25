@@ -1,0 +1,203 @@
+---
+registryId: websocket
+---
+
+{% section-card tone="intro" %}
+## What is WebSocket?
+
+**WebSocket is a protocol for a long-lived, full-duplex, framed connection between a client and server.** It begins as an HTTP upgrade request, then both sides exchange text, binary, continuation, ping, pong, and close frames over one underlying connection.
+
+WebSocket matters for chat, collaboration, live markets, games, device control, and other products where either side must send low-latency events without opening a new HTTP request for each message. Persistent connections create new obligations: connection admission, per-peer memory, fan-out, backpressure, liveness, reconnect, resume, authorization, deployment drain, and regional recovery.
+
+The core invariant is **every accepted connection and application message belongs to one authenticated identity, schema, subscription version, and delivery state**. An open socket does not prove a message was processed, and a reconnect must not silently hide missed or duplicated events.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Decide whether a persistent bidirectional channel is justified
+
+{% concept-grid columns="3" %}
+{% concept-card title="WebSocket" eyebrow="Bidirectional + framed" icon="messages" tone="violet" %}
+Use when client and server both send independent events, binary frames matter, or low-latency interaction cannot wait for repeated requests.
+{% /concept-card %}
+{% concept-card title="Server-Sent Events" eyebrow="Server to browser" icon="activity" tone="cyan" %}
+Use when the browser sends ordinary HTTP requests but receives one ordered text event stream with built-in event IDs and reconnection support.
+{% /concept-card %}
+{% concept-card title="Polling or long polling" eyebrow="Request driven" icon="refresh" tone="blue" %}
+Use when update frequency is low, cache and stateless infrastructure matter, or simple retry semantics outweigh immediate push.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not choose WebSocket only to reduce headers. Measure product freshness, message direction, client support, intermediary behavior, stateful capacity, and the recovery contract.
+{% /section-card %}
+
+{% section-card %}
+## Establish a trusted connection
+
+{% process-flow %}
+{% process-step number="1" title="Secure the HTTP request" label="TLS" %}
+Use `wss`, validate host and transport policy, and bound header size, handshake time, and connection attempts.
+{% /process-step %}
+{% process-step number="2" title="Authenticate and check origin" label="Identity" %}
+Bind user, tenant, device, session, and browser origin where relevant without placing long-lived secrets in logged query strings.
+{% /process-step %}
+{% process-step number="3" title="Negotiate capability" label="Subprotocol" %}
+Accept only supported WebSocket version, application subprotocol, compression policy, and message-schema family.
+{% /process-step %}
+{% process-step number="4" title="Admit into a gateway shard" label="Capacity" %}
+Enforce account, IP, tenant, region, subscription, and total connection quotas before allocating persistent state.
+{% /process-step %}
+{% process-step number="5" title="Return the upgrade" label="101" %}
+Complete the protocol acceptance and attach one traceable connection ID used across broker, gateway, and client telemetry.
+{% /process-step %}
+{% /process-flow %}
+
+Reauthorize sensitive operations during the connection. Identity, role, membership, and resource policy can change after the handshake.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size connection state and fan-out independently
+
+{% interactive-block id="technology/websocket-performance" /%}
+
+### Budget each gateway resource
+
+- Sockets, file descriptors, TLS state, parser state, subscriptions, send queues, timers, and application session data
+- Inbound messages, validation CPU, broker publishes, channel lookups, and authorization checks
+- Outbound fan-out, serialization, compression, encryption, network bandwidth, retransmission, and slow-client queues
+- Connection churn, handshake CPU, authentication dependencies, broker resubscription, and reconnect admission
+
+Partition channels and broker traffic so one popular topic does not traverse every gateway. Measure skew and keep durable user or room state outside one connection process.
+{% /section-card %}
+
+{% section-card %}
+## Define a versioned application message envelope
+
+WebSocket frames are not business messages. A logical message can span continuation frames, and one frame can contain any application-defined bytes. Use a bounded schema with message ID, type and version, payload, trace context, and any sequence or acknowledgement fields required by the protocol.
+
+{% code-block file="/api/content/technology/websocket/code/validate-message.js" language="javascript" title="Validate message type, identity, and bounded payload" /%}
+
+### Validate before routing
+
+- Reject unknown types, versions, fields, encodings, oversized payloads, and invalid tenant or resource identifiers.
+- Bound decompression ratio, nesting, arrays, strings, message rate, and expensive authorization checks.
+- Keep transport ping/pong separate from application acknowledgement and business commit.
+- Use idempotency keys and durable deduplication for messages that can trigger external effects.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Apply backpressure per connection and topic
+
+An open TCP connection can keep accepting application work faster than one client can render or one gateway can send. Unbounded queues convert a slow client into memory exhaustion and stale delivery.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Coalesce" icon="layers" tone="cyan" %}
+Replace queued presence, cursor, price, or position state with the newest version when intermediate values have no lasting meaning.
+{% /concept-card %}
+{% concept-card title="Drop" icon="alert" tone="amber" %}
+Discard explicitly replaceable events with counters and a resync signal; never silently drop durable commands or chat messages.
+{% /concept-card %}
+{% concept-card title="Disconnect" icon="x" tone="rose" %}
+Close a persistently slow peer with a typed reason and retry guidance before its queue threatens other tenants.
+{% /concept-card %}
+{% concept-card title="Resync" icon="refresh" tone="green" %}
+Send a compact snapshot pointer or require the client to fetch current authority before resuming live events.
+{% /concept-card %}
+{% /concept-grid %}
+
+Set queue limits by messages, bytes, and age. Feed broker demand from admitted downstream capacity rather than treating the gateway as an infinite sink.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Reconnect without gaps or a retry storm
+
+{% interactive-block id="technology/websocket-reconnect-lab" dataFile="/api/content/technology/websocket/data/reconnect-scenarios.json" /%}
+
+### Make resume a protocol feature
+
+1. Give every replayable event a stable stream or channel sequence and event ID.
+2. Persist the last application-acknowledged cursor at the boundary that must survive restart.
+3. Reconnect with exponential backoff, jitter, cancellation of superseded attempts, and server retry hints.
+4. Authenticate again, restore authorized subscriptions, and request replay after the cursor.
+5. Detect cursor expiry; load an authoritative versioned snapshot before joining later live events.
+6. Deduplicate the overlap between replay and current traffic, then mark the client current.
+
+{% code-block file="/api/content/technology/websocket/code/plan-reconnect.js" language="javascript" title="Plan bounded reconnect delay and cursor resume" /%}
+{% /section-card %}
+
+{% section-card %}
+## Scale gateways, broker, and state as separate planes
+
+{% system-flow title="One durable event reaches connected clients" caption="The durable stream owns replay; gateways own current connection delivery and bounded queues." %}
+{% system-node title="Authoritative service" eyebrow="Commit" icon="database" tone="blue" %}
+Commit the business result and a stable event or outbox record once.
+{% /system-node %}
+{% system-node title="Partitioned broker" eyebrow="Retain" icon="layers" tone="violet" %}
+Order and retain events by channel or entity so replay and lag remain measurable.
+{% /system-node %}
+{% system-node title="Gateway shard" eyebrow="Fan out" icon="server" tone="cyan" %}
+Consume assigned partitions, map authorized subscribers, and enforce per-peer queues.
+{% /system-node %}
+{% system-node title="Client" eyebrow="Acknowledge" icon="check" tone="green" %}
+Apply the event, advance its cursor durably, and expose whether the local view is current.
+{% /system-node %}
+{% /system-flow %}
+
+Sticky routing can reduce movement but cannot become the only copy of durable session, subscription, or cursor state. Rebalancing, gateway loss, and regional failover must reconstruct delivery from independent evidence.
+{% /section-card %}
+
+{% section-card %}
+## Deploy and drain without synchronized reconnect
+
+### Rolling gateway procedure
+
+- Start replacements, warm broker subscriptions and caches, and prove handshake capacity before draining old nodes.
+- Stop new admission to one small cohort while existing connections continue.
+- Send a typed close reason and randomized retry window; retain cursor and subscription state.
+- Watch reconnect rate, handshake latency, authentication load, broker lag, queue depth, and error rate before continuing.
+- Force-close only after the drain deadline, and retain a rollback path that does not disconnect the whole fleet again.
+
+Regional recovery additionally requires global routing, independent gateway and broker capacity, replicated or rebuildable subscription state, event-retention review, and cursor semantics across the authority change.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Secure the long-lived channel
+
+{% concept-grid columns="4" %}
+{% concept-card title="Handshake abuse" icon="shield" tone="blue" %}
+Rate-limit attempts, bound authentication work, validate origin and subprotocol, and avoid resource allocation before admission succeeds.
+{% /concept-card %}
+{% concept-card title="Message abuse" icon="alert" tone="rose" %}
+Validate schema and authorization per action, cap message size and rate, and isolate expensive handlers from the gateway event loop.
+{% /concept-card %}
+{% concept-card title="Cross-tenant fan-out" icon="users" tone="amber" %}
+Partition subscription indexes by tenant and recheck room or resource membership before publishing sensitive data.
+{% /concept-card %}
+{% concept-card title="Compression risk" icon="gauge" tone="violet" %}
+Bound decompression, CPU, and memory; disable or scope compression for secrets or untrusted high-ratio payloads where appropriate.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Operate from connection and delivery evidence
+
+### Monitor gateways
+
+- Connections by region, zone, gateway, tenant, subprotocol, version, age, churn, and close code
+- Handshake attempts, authentication latency, rejection reason, origin, rate limit, and admission saturation
+- Inbound/outbound messages and bytes, parse failure, authorization denial, handler latency, and per-type rate
+- Send queue messages, bytes, age, coalesced and dropped events, disconnects, and slow-client distribution
+- Broker partition lag, hot topics, fan-out amplification, replay rate, cursor gaps, duplicate events, and resyncs
+
+### Test the recovery path
+
+- Slow readers, paused clients, half-open connections, missed pong, oversized and fragmented frames, and invalid compression
+- Gateway crash, broker pause, partition rebalance, authentication dependency failure, and session-store loss
+- Rolling deploy, mass network flap, reconnect storm, cursor expiry, snapshot mismatch, regional failover, and failback
+
+{% callout variant="tip" %}
+A production WebSocket system does not promise that a socket stays open forever. It promises bounded connection state, honest message outcomes, controlled fan-out, and a tested path back to a coherent client view.
+{% /callout %}
+{% /section-card %}
+
+{% quiz quizId="websocket" lessonSlug="websocket" title="WebSocket Production Review" questionsFile="/api/content/technology/websocket/quiz/websocket-production.json" /%}

@@ -1,0 +1,181 @@
+---
+registryId: distributed-training-advanced
+---
+
+{% section-card tone="intro" %}
+## What is advanced distributed training?
+
+**Advanced distributed training coordinates multiple accelerators so one model-training job can exceed the memory or throughput of a single device.** It partitions the batch, model state, layers, sequence, or experts, then uses communication collectives to keep those partitions consistent.
+
+In plain language, more GPUs do not automatically mean faster training. Every device must receive useful work, fit its part of the model, exchange the right tensors, and agree on the next optimizer step. A slow input shard, misplaced tensor-parallel group, missing collective, or incomplete checkpoint can stall or invalidate the whole run.
+
+{% callout variant="info" %}
+The core invariant is one coherent global step: every participating rank must derive its update from the intended batch and synchronization contract, or the job must fail and recover without publishing a partial step.
+{% /callout %}
+
+This lesson assumes familiarity with [model training](/ml-systems/model-training) and [data pipelines](/ml-systems/data-pipelines). It focuses on choosing a partition, estimating memory, diagnosing communication, and recovering a long-running job.
+{% /section-card %}
+
+{% section-card %}
+## Trace one distributed optimizer step
+
+{% process-flow %}
+{% process-step number="1" title="Assign deterministic work" label="Input" %}
+Partition examples or tokens by data-parallel rank. Every sample should have an intentional owner, including the final uneven batch.
+{% /process-step %}
+{% process-step number="2" title="Compute local tensors" label="Forward + backward" %}
+Run the local model partition and produce activations, losses, and gradients for the rank's assigned work.
+{% /process-step %}
+{% process-step number="3" title="Exchange required state" label="Collectives" %}
+All-reduce gradients, all-gather parameters, reduce-scatter shards, or send activations between pipeline stages according to the chosen layout.
+{% /process-step %}
+{% process-step number="4" title="Update and commit progress" label="State" %}
+Apply a logically consistent optimizer step, advance the data position, and periodically publish a recoverable checkpoint.
+{% /process-step %}
+{% /process-flow %}
+
+The end-to-end step time is constrained by the slowest required path:
+
+- **Input delivery:** one rank waits for data decoding, remote reads, or an imbalanced shard.
+- **Compute:** one stage has more work, slower kernels, or a different tensor shape.
+- **Communication:** collectives cross a slower link or cannot overlap enough with backward compute.
+- **Recovery storage:** synchronous checkpoint writes pause training or saturate the storage path.
+
+Synchronous workers meet at communication boundaries. A single straggler therefore raises tail step time for the group even when average device utilization looks acceptable.
+{% /section-card %}
+
+{% section-card %}
+## Choose the dimension that removes the real constraint
+
+{% concept-grid columns="2" %}
+{% concept-card title="Data parallelism" eyebrow="Partition the batch" icon="users" tone="blue" %}
+Replicate the model, assign different examples to each rank, and synchronize gradients. It is the simplest option when one complete training replica fits on every device.
+{% /concept-card %}
+{% concept-card title="Sharded data parallelism" eyebrow="Partition model state" icon="database" tone="green" %}
+Shard optimizer state, gradients, and eventually parameters across data-parallel ranks. FSDP and ZeRO reduce persistent memory at the cost of all-gather and reduce-scatter traffic.
+{% /concept-card %}
+{% concept-card title="Tensor parallelism" eyebrow="Partition each layer" icon="layers" tone="violet" %}
+Split matrix operations across a tightly connected group. It helps when an individual layer is too large, but introduces communication within the layer's critical path.
+{% /concept-card %}
+{% concept-card title="Pipeline parallelism" eyebrow="Partition model depth" icon="workflow" tone="cyan" %}
+Place groups of layers on stages and stream micro-batches through them. It reduces per-stage state but creates bubbles when the pipeline fills, drains, or becomes imbalanced.
+{% /concept-card %}
+{% /concept-grid %}
+
+Additional dimensions solve narrower shapes:
+
+- **Context parallelism** partitions long sequences when activation memory grows with context length.
+- **Expert parallelism** distributes mixture-of-experts modules and routes tokens to the owning experts.
+- **Hybrid or 3D parallelism** composes data, tensor, and pipeline groups so each expensive communication pattern stays on an appropriate link.
+
+{% callout variant="warn" %}
+Parallelism degrees are a topology contract. For a dense hybrid job, `world size = data-parallel degree x tensor-parallel degree x pipeline-parallel degree x context-parallel degree`. The factors must match the launched ranks, and the most communication-heavy groups should stay on the fastest links.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Fit the training state before estimating speed
+
+Use the planner to change model size, accelerator memory, reserve for activations, GPU count, and state-sharding stage. It intentionally estimates **capacity**, not tokens per second: throughput requires measured kernel, input, and collective performance from the target hardware.
+
+{% interactive-block id="ml-systems/distributed-training-advanced-calculator" dataFile="/api/content/ml-systems/distributed-training-advanced/data/parallelism-capacity-model.json" /%}
+
+The planner uses a transparent mixed-precision Adam proxy:
+
+- 2 bytes per parameter for low-precision parameters;
+- 2 bytes per parameter for gradients;
+- 4 bytes per parameter for an FP32 master copy;
+- 8 bytes per parameter for the two FP32 Adam moments.
+
+That is 16 GB of persistent model state per billion parameters before sharding. The selected strategy divides only the states its contract owns, then adds a user-controlled reserve for activations and temporary collective buffers. Real allocations vary with optimizer, precision, tied parameters, allocator fragmentation, activation checkpointing, framework internals, and maximum live all-gathers, so confirm the result with a measured peak-memory profile.
+
+{% code-block file="/api/content/ml-systems/distributed-training-advanced/code/estimate-training-memory.py" language="python" title="Reproduce the planner's model-state estimate" /%}
+{% /section-card %}
+
+{% section-card %}
+## Read communication as part of the algorithm
+
+The communication primitive determines what every rank owns before and after an operation.
+
+{% concept-grid columns="2" %}
+{% concept-card title="All-reduce" eyebrow="Same result on every rank" icon="network" tone="blue" %}
+Reduce corresponding values from all ranks and return the reduced result to every rank. DDP commonly uses it to synchronize gradient buckets.
+{% /concept-card %}
+{% concept-card title="Reduce-scatter" eyebrow="Reduced shard per rank" icon="split" tone="green" %}
+Reduce values across ranks while leaving each rank with only its assigned shard. Fully sharded training uses it for gradients.
+{% /concept-card %}
+{% concept-card title="All-gather" eyebrow="Reconstruct from shards" icon="layers" tone="violet" %}
+Collect each rank's shard so participants can temporarily reconstruct the parameters required for a module's computation.
+{% /concept-card %}
+{% concept-card title="Point-to-point send" eyebrow="Neighboring stages" icon="arrow-right" tone="cyan" %}
+Move activations and gradients between pipeline stages. Stage imbalance and too few micro-batches leave visible idle bubbles.
+{% /concept-card %}
+{% /concept-grid %}
+
+Diagnose a scaling regression in this order:
+
+1. **Measure one rank and the full group.** Compare input time, forward time, backward time, collective time, and checkpoint time by rank.
+2. **Find the maximum, not only the mean.** One slow rank determines a synchronous boundary.
+3. **Separate bandwidth from latency.** Large collectives stress bytes per second; many small collectives stress launch and network latency.
+4. **Inspect placement.** Keep tensor-parallel and sharding groups on high-bandwidth links before sending their traffic across nodes.
+5. **Change one variable.** Test bucket size, micro-batch count, activation checkpointing, or group layout against the same measured workload.
+
+All ranks in an NCCL collective must call compatible operations in the same order. If one rank skips or reorders a collective, peers can wait indefinitely rather than producing a partial answer.
+{% /section-card %}
+
+{% section-card %}
+## Design recovery as a distributed state transition
+
+A checkpoint is useful only if the training process can reconstruct a valid continuation. Switch scenarios, inspect the active path, and predict what the scheduler may safely do.
+
+{% topology-lab dataFile="/api/content/ml-systems/distributed-training-advanced/data/training-recovery-topology.json" /%}
+
+A resumable training checkpoint normally preserves the state that influences the next update:
+
+- model parameters or recoverable parameter shards;
+- optimizer moments and parameter-group configuration;
+- learning-rate scheduler and gradient-scaler state;
+- completed global step, epoch, and data-sampler position;
+- random-number-generator state when exact continuation matters;
+- parallelism layout, software version, and manifest metadata needed to interpret the shards.
+
+Publish checkpoints atomically: write immutable shards, validate expected files and metadata, then commit a small manifest that makes the checkpoint discoverable. Keep at least one previously validated checkpoint until the new one has been restored successfully. PyTorch Distributed Checkpoint can save and load from multiple ranks and supports load-time resharding, but the application still owns its complete training-state contract.
+
+{% code-block file="/api/content/ml-systems/distributed-training-advanced/code/simulate-resumable-training.py" language="python" title="Verify interruption and resume against an uninterrupted run" /%}
+{% /section-card %}
+
+{% section-card %}
+## Review the design with explicit invariants
+
+### Build these habits
+
+- Start with the least complex strategy that fits, then add dimensions only for a measured memory or throughput constraint.
+- Keep communication-heavy groups inside a node or fabric island when the hardware topology allows it.
+- Calculate `global batch = micro-batch per rank x gradient accumulation steps x data-parallel degree`; tensor and pipeline ranks collaborate on the same examples and do not multiply the batch.
+- Track useful throughput, step-time percentiles, per-rank idle time, collective duration, input stalls, memory high-water mark, and checkpoint age.
+- Exercise rank loss, storage interruption, and restore under the intended world size before a long or expensive run.
+- Revalidate convergence when changing global batch, optimizer, precision, loss scaling, or communication compression.
+
+### Avoid these traps
+
+- Do not choose a topology from GPU count alone; model shape, link hierarchy, batch constraints, and failure domains determine the layout.
+- Do not report theoretical FLOPS as training throughput without measuring useful tokens or examples completed.
+- Do not let a new checkpoint replace the last good checkpoint before its manifest and restore path are validated.
+- Do not treat elastic worker replacement as exact recovery unless data ownership, optimizer state, and collective membership are reconstructed coherently.
+- Do not hide stragglers behind cluster averages; inspect distributions and the slowest rank at every synchronization boundary.
+{% /section-card %}
+
+{% section-card %}
+## Use current primary references
+
+- [PyTorch DDP design note](https://docs.pytorch.org/docs/stable/notes/ddp.html): gradient buckets, all-reduce ordering, and synchronization behavior.
+- [PyTorch FSDP2 documentation](https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html): parameter all-gathers, gradient reduce-scatters, and sharded state ownership.
+- [PyTorch Distributed Checkpoint](https://docs.pytorch.org/docs/stable/distributed.checkpoint.html): multi-rank save/load and load-time resharding.
+- [DeepSpeed configuration reference](https://www.deepspeed.ai/docs/config-json/): the current ZeRO stage definitions and offload controls.
+- [NVIDIA Megatron Core parallelism guide](https://docs.nvidia.com/megatron-core/developer-guide/latest/user-guide/parallelism-guide.html): data, tensor, pipeline, context, expert, and fully sharded parallelism.
+- [NVIDIA NCCL collective operations](https://docs.nvidia.com/deeplearning/nccl/archives/nccl_2162/user-guide/docs/usage/collectives.html): collective participation and result semantics.
+
+Framework APIs and supported strategy combinations change. Recheck the versioned documentation for the exact PyTorch, DeepSpeed, Megatron Core, accelerator, and communication-library versions used by the training environment.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/distributed-training-advanced/quiz/distributed-training-advanced.json" lessonSlug="distributed-training-advanced" title="Distributed Training Design Check" /%}

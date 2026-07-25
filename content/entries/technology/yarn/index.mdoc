@@ -1,0 +1,372 @@
+---
+registryId: yarn
+---
+
+{% section-card tone="intro" %}
+## What is Apache YARN?
+
+**Apache YARN is the resource-management and application-scheduling layer of Hadoop.**
+It turns a pool of worker machines into shared allocations called containers, then lets
+processing frameworks such as MapReduce and Spark decide what work runs inside those
+allocations.
+
+YARN matters when many applications must share one data cluster without one framework
+owning every machine. The cluster-wide **ResourceManager** decides where resources may
+go; one **ApplicationMaster** per application decides which tasks it needs; a
+**NodeManager** on each worker launches and watches the resulting containers.
+
+The core invariant is **every running container must fit an authorized resource
+allocation on one healthy node and belong to an application and queue that the
+scheduler admitted**. YARN can replace failed allocations, but the application remains
+responsible for task semantics, checkpoints, output commits, and duplicate-safe retries.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with the platform fit
+
+YARN is not a general synonym for Hadoop and it does not store data. HDFS provides
+distributed storage; YARN provides a shared compute control plane. Review
+[Hadoop and HDFS](/technology/hadoop-hdfs) first if blocks, replication, NameNodes, or
+data locality are unfamiliar.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Shared Hadoop estate" icon="server" tone="blue" %}
+Multiple YARN-aware engines share long-lived workers, HDFS locality matters, and
+operators need explicit queue guarantees, tenant limits, and cluster-wide visibility.
+{% /concept-card %}
+{% concept-card title="Conditional fit" eyebrow="Mixed platform" icon="layers" tone="amber" %}
+Batch engines still depend on YARN, while new services run elsewhere. Keep ownership,
+identity, observability, and capacity boundaries explicit instead of forcing one
+orchestrator to host every workload.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Net-new service platform" icon="cloud" tone="rose" %}
+Independent containerized services, ephemeral cloud workers, or fully managed batch
+jobs may gain little from operating a Hadoop control plane only to schedule compute.
+{% /concept-card %}
+{% /concept-grid %}
+
+YARN remains actively documented in Apache Hadoop 3.5.0. Current does not mean universal:
+choose it because its queue model, framework integrations, and data placement match the
+workload, not because an existing cluster makes every new job a natural fit.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate the four runtime responsibilities
+
+{% concept-grid columns="4" %}
+{% concept-card title="ResourceManager" eyebrow="Cluster authority" icon="gauge" tone="blue" %}
+Accepts applications and arbitrates cluster resources. Its scheduler applies queue,
+capacity, placement, and resource constraints; it does not understand task correctness.
+{% /concept-card %}
+{% concept-card title="NodeManager" eyebrow="One per worker" icon="server" tone="cyan" %}
+Heartbeats node resources and health, localizes files, launches containers, monitors
+their use, collects logs, and reports exits.
+{% /concept-card %}
+{% concept-card title="ApplicationMaster" eyebrow="One per attempt" icon="workflow" tone="violet" %}
+Registers the application, requests containers, assigns framework-specific tasks,
+tracks progress, and decides which failed work can be retried.
+{% /concept-card %}
+{% concept-card title="Container" eyebrow="Resource allocation" icon="box" tone="amber" %}
+A time-bounded grant on one node. It includes memory, vcores, and any configured custom
+resources plus the launch context needed to run a process.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Follow one application from submission to work
+
+{% process-flow %}
+{% process-step number="1" title="Submit" label="Client to RM" %}
+The client sends an application definition, credentials, local resources, launch
+command, queue, and the resource request for its first ApplicationMaster.
+{% /process-step %}
+{% process-step number="2" title="Start the AM" label="First container" %}
+The ResourceManager admits the application, allocates an AM container, and asks the
+selected NodeManager to localize and launch it.
+{% /process-step %}
+{% process-step number="3" title="Negotiate work" label="AM to scheduler" %}
+The AM registers, then requests more containers with memory, vcores, priority, and
+node or rack preferences appropriate to the framework's pending tasks.
+{% /process-step %}
+{% process-step number="4" title="Run and reconcile" label="NM + AM" %}
+NodeManagers launch and monitor containers. Completion and failure events return to the
+AM, which advances progress, retries safe work, releases resources, and finishes.
+{% /process-step %}
+{% /process-flow %}
+
+The scheduler allocates resources, not tasks. If a task writes twice after a retry or
+cannot restore a checkpoint, that is an application or framework contract failure, not
+a decision the ResourceManager can repair.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make memory, vcores, queues, and locality fit together
+
+YARN tracks memory and CPU by default. An application asks for a **resource capability**
+for each container, and the scheduler finds a single node where every requested
+dimension fits. A 16 GiB request cannot be assembled from 8 GiB fragments on two nodes.
+
+- **Memory** is usually the first hard process boundary. Include heap, off-heap memory,
+  native libraries, direct buffers, Python workers, and framework overhead.
+- **vcores** are scheduler units. CPU enforcement depends on the NodeManager runtime and
+  controls such as cgroups; one vcore is not automatically one dedicated physical core.
+- **Minimum and maximum allocation** bound accepted request sizes. Coarse increments can
+  waste capacity, while tiny increments make sizing and policy harder to reason about.
+- **Custom resources** can add countable dimensions such as GPUs. Every node,
+  ResourceManager, application, and queue must agree on the resource definition.
+
+Locality adds a placement preference. A node-local container reads nearby HDFS blocks;
+rack-local placement crosses fewer network boundaries than an off-switch placement.
+Waiting for locality can reduce network traffic, but waiting indefinitely can leave
+available compute idle.
+
+{% interactive-block id="technology/yarn-cluster" dataFile="/api/content/technology/yarn/data/resource-request-model.json" /%}
+
+Treat the displayed runtime as a comparison model, not a benchmark. Real stages also
+depend on startup time, shuffle, skew, speculative attempts, garbage collection,
+storage throughput, and the framework's own concurrency limits.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Use queues to express multi-tenant policy
+
+A queue is a policy boundary, not a separate cluster. It controls which users can
+submit, how much resource they can expect under contention, how far they may borrow
+when neighbors are idle, and how many applications or ApplicationMasters can be active.
+
+{% concept-grid columns="3" %}
+{% concept-card title="CapacityScheduler" eyebrow="Guarantees + elasticity" icon="pie-chart" tone="green" %}
+Hierarchical queues receive configured capacities and optional maximums. Idle capacity
+can be borrowed; preemption can later reclaim selected containers to restore guarantees.
+{% /concept-card %}
+{% concept-card title="FairScheduler" eyebrow="Shares over time" icon="scale" tone="blue" %}
+Resources move toward fair shares across applications and queues. Dominant Resource
+Fairness can account for memory and CPU instead of comparing only one resource.
+{% /concept-card %}
+{% concept-card title="FIFO ordering" eyebrow="Simple, narrow use" icon="list" tone="neutral" %}
+Older work is considered first within its policy scope. It is easy to understand but
+does not by itself provide useful isolation for unrelated tenants.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Read queue pressure as a state transition
+
+- An application in `ACCEPTED` may be waiting for AM capacity, a parallel-application
+  limit, queue headroom, placement constraints, or a user limit. More worker CPU does
+  not fix every admission gate.
+- A running AM with pending requests may be blocked by its queue share, a resource shape
+  that cannot fit current nodes, locality delay, node labels, or another scarce resource.
+- Borrowed capacity improves utilization but is not guaranteed. Preemption stops work;
+  applications must tolerate killed containers and operators must cap how aggressively
+  guarantees are restored.
+- Fairness is measured over time. A short snapshot can look unequal while the scheduler
+  is waiting for containers to finish, locality to relax, or preemption policy to act.
+
+Capacity and fairness are policy goals, not substitutes for capacity planning. If
+aggregate demand remains above the cluster envelope, the scheduler decides who waits;
+it does not create throughput.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Recover the component that actually failed
+
+YARN has several recovery loops. They preserve different state and must not be treated
+as interchangeable.
+
+- ResourceManager HA restores cluster-wide scheduling authority from persisted state.
+- NodeManager recovery can reattach supervised containers after an agent restart, but
+  it depends on local state, a stable RPC address, and recoverable auxiliary services.
+- The ResourceManager can relaunch a failed ApplicationMaster within the application's
+  attempt policy; the framework decides how progress and live containers are reconciled.
+- A lost node or killed container is reported to the ApplicationMaster, which decides
+  which task attempt to retry and how to protect already committed output.
+
+{% interactive-block id="technology/yarn-recovery-boundary-lab" dataFile="/api/content/technology/yarn/data/failure-recovery-scenarios.json" /%}
+
+Recovery availability and result correctness are separate. A replacement container may
+start quickly and still duplicate an external side effect. Use stable work identities,
+idempotent destinations, framework output committers, and checkpoints that make replay
+behavior explicit.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate YARN from evidence
+
+### Watch the control plane and queue together
+
+- **ResourceManager:** active and standby state, state-store health, scheduler latency,
+  active, lost, and unhealthy nodes, running and pending applications, allocated and
+  available memory and vcores.
+- **Queue:** guaranteed, maximum, used, and pending resources; active users and apps;
+  AM resource usage; admission limits; allocation delay; and preempted containers.
+- **NodeManager:** heartbeat age, disk health, local and log directory utilization,
+  launch failures, running containers, resource violations, and unhealthy transitions.
+- **Application:** attempt state, progress age, pending resource requests, container
+  exits, locality ratio, retries, task skew, checkpoint age, and framework-specific
+  shuffle, garbage-collection, or executor metrics.
+
+Do not alert on utilization alone. Pair saturation with its consequence: rising pending
+resources, longer allocation delay, older applications in `ACCEPTED`, growing preemption,
+or applications that have stopped making progress.
+
+### Preserve logs beyond the worker
+
+Container stdout, stderr, and syslog begin on NodeManager-local storage. Enable log
+aggregation so diagnostics remain available after containers finish or a worker is
+lost, then set retention and access controls for the remote log store. Use application,
+attempt, and container IDs as the join keys across ResourceManager state, framework
+history, metrics, and logs.
+
+### Secure every handoff
+
+- Enable Hadoop secure mode with Kerberos for users and daemons; use delegation tokens
+  for the filesystems and services an application must reach.
+- Restrict queue submission and administration with ACLs and user limits. A queue share
+  is not an authorization policy by itself.
+- Run containers under the submitting user's intended identity with a hardened
+  container executor. Use filesystem permissions, cgroups, and node isolation according
+  to the threat model.
+- Protect web and RPC surfaces, rotate keytabs and tokens, keep secrets out of localized
+  public resources, and test long-lived token renewal before production.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size from measured workloads
+
+{% process-flow %}
+{% process-step number="1" title="Reserve the host" label="Outside YARN" %}
+Budget memory and CPU for the operating system, NodeManager, DataNode and other daemons,
+page cache, monitoring, security agents, and failure-time spikes.
+{% /process-step %}
+{% process-step number="2" title="Shape containers" label="Per framework" %}
+Measure peak heap, native memory, CPU, and task duration by workload class. Define a
+small set of justified request profiles instead of one oversized default.
+{% /process-step %}
+{% process-step number="3" title="Model contention" label="Queue envelope" %}
+Replay concurrent tenant demand, AM limits, locality, node labels, preemption, and the
+largest resource shape. A cluster-wide average hides fragmented capacity.
+{% /process-step %}
+{% process-step number="4" title="Keep recovery margin" label="N-1 and bursts" %}
+Verify that priority queues still progress after a worker or rack loss and that retries,
+log aggregation, shuffle, and recovery traffic do not consume the final headroom.
+{% /process-step %}
+{% /process-flow %}
+
+Use p95 and worst-reasonable resource measurements, not only averages. Container kills
+clustered around one task or input partition point to skew or a leak; broad kills across
+unrelated applications point more strongly to a bad node envelope or host pressure.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Troubleshoot from state to constraint
+
+1. **Confirm the application state.** `SUBMITTED` and `ACCEPTED` point first to
+   admission, AM capacity, queue, user, and placement limits. `RUNNING` with stale
+   progress points toward the AM, task graph, external dependency, or blocked containers.
+2. **Inspect requested versus available shapes.** Compare memory, vcores, custom
+   resources, labels, locality, and per-queue maximums. Free aggregate memory is
+   irrelevant when no single eligible node can fit the request.
+3. **Read the exit diagnostics before raising limits.** Distinguish memory enforcement,
+   process exit, preemption, node loss, disk failure, framework cancellation, and an
+   operator kill.
+4. **Check node and queue timelines.** Correlate heartbeat gaps, unhealthy disks,
+   preemption, queue reconfiguration, bursts of AM admission, and the moment allocation
+   delay changed.
+5. **Verify recovery progress.** A green ResourceManager is insufficient if nodes did
+   not re-register, requests were not reconstructed, AM attempts are exhausted, or the
+   framework is replaying unsafe work.
+
+{% code-block file="/api/content/technology/yarn/code/inspect-application.sh" language="bash" title="Collect application, attempt, log, node, and queue evidence" /%}
+
+Capture the command output with timestamps during the incident. The CLI is a starting
+point; production diagnosis should retain metrics and history after live application
+records age out.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Keep production configuration small and reviewable
+
+The following files show the boundary between cluster resources, recovery, log
+aggregation, and queue policy. Hostnames, state-store topology, resource values, ACLs,
+remote log storage, retention, and security settings must come from the real
+environment.
+
+{% code-block file="/api/content/technology/yarn/code/yarn-site-production.xml" language="xml" title="Core scheduler, HA, NodeManager recovery, and log aggregation settings" /%}
+
+{% code-block file="/api/content/technology/yarn/code/capacity-scheduler-queues.xml" language="xml" title="Two CapacityScheduler queues with guarantees and borrowing limits" /%}
+
+Validate every property against the exact Hadoop release being deployed. Configuration
+names, defaults, scheduler modes, and safe combinations can change; a file that parses
+is not proof that failover, preemption, security, or recovery works.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Roll out at the boundary the change can affect
+
+- **Queue-only change:** snapshot the scheduler configuration, validate capacities and
+  ACLs, apply to a test queue, refresh through the supported administration path, and
+  watch pending resources, allocation delay, AM admission, and preemption before wider
+  use.
+- **Container-size change:** can alter packing for every tenant. Test minimum and maximum
+  allocation, framework overhead, memory enforcement, and the largest request on each
+  node class before changing defaults.
+- **Node resource change:** drain a small worker cohort, verify daemon and OS headroom,
+  restart the NodeManager where required, and confirm the ResourceManager sees the new
+  envelope before expanding.
+- **RM HA or state-store change:** exercise planned failover under load and verify
+  applications, credentials, queue usage, requests, and live containers reconstruct.
+  A healthy standby process alone is not recovery evidence.
+- **NodeManager recovery change:** test fixed RPC addressing, state-directory durability,
+  process supervision, container reattachment, log continuity, and every configured
+  auxiliary service on one node class.
+- **Scheduler or preemption-policy change:** treat it as cluster-wide. Stage with
+  representative competing queues, bound reclamation, communicate that containers may
+  be stopped, and retain a tested path back to the prior configuration.
+
+YARN's rollout boundary ends at resource allocation. It does not validate business
+side effects, HDFS durability, framework checkpoint compatibility, schema migrations,
+or downstream service capacity. Those need their own release and rollback plans.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Decide whether to keep, extend, or retire YARN
+
+Keep or extend YARN when the organization already operates a healthy Hadoop estate,
+major workloads are YARN-native, HDFS locality materially improves them, queue policy
+matches funding and tenancy, and the team can test HA, recovery, security, and upgrades.
+
+Prefer another execution platform for a net-new workload when it primarily needs a
+service orchestrator, per-job ephemeral infrastructure, managed serverless execution,
+or an ecosystem that does not integrate with YARN. Migration value must exceed the cost
+of moving data, rebuilding identity and policy, revalidating performance, and replacing
+history, logs, and operational procedures.
+
+A staged coexistence is often safer than a platform-wide rewrite:
+
+1. Classify workloads by data locality, framework dependency, queue SLA, security
+   boundary, and recovery behavior.
+2. Move one low-coupling class with representative scale and failure tests.
+3. Compare total operating cost, queue delay, runtime, data movement, recovery time,
+   and operator effort.
+4. Keep rollback until output correctness, observability, and access controls match the
+   existing contract.
+{% /section-card %}
+
+{% section-card %}
+## Read the current Apache documentation
+
+These references point to the current Apache Hadoop 3.5.0 documentation published in
+March 2026:
+
+- [Apache Hadoop YARN architecture](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YARN.html)
+- [YARN resource configuration](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/ResourceModel.html)
+- [CapacityScheduler](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html)
+- [FairScheduler](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/FairScheduler.html)
+- [ResourceManager restart and work-preserving recovery](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/ResourceManagerRestart.html)
+- [NodeManager health and restart recovery](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/NodeManager.html)
+- [YARN application security](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YarnApplicationSecurity.html)
+- [YARN commands](https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YarnCommands.html)
+- [Hadoop metrics reference](https://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-common/Metrics.html)
+- [Hadoop secure mode](https://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-common/SecureMode.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/yarn/quiz/yarn-production-operations.json" lessonSlug="yarn" title="Apache YARN Production Operations Review" /%}

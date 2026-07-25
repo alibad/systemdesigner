@@ -1,0 +1,145 @@
+---
+registryId: model-serving
+---
+
+{% section-card tone="intro" %}
+## What is model serving?
+
+Model serving is the production system that accepts an input, builds compatible features, runs a specific model version, applies decision logic, and returns or records the result. It turns a trained artifact into a reliable product capability.
+
+Serving design starts from the workload: freshness, request volume, latency, batchability, model size, hardware, error cost, and fallback behavior. Optimizing the model kernel alone is insufficient when feature lookup, queueing, transfer, or post-processing dominates the request.
+
+{% callout variant="info" %}
+The core invariant is version compatibility: the request schema, feature definitions, preprocessing, model artifact, and post-processing thresholds must describe one tested serving contract.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Allocate an end-to-end latency budget
+
+The following is an example budget for a 100 ms P95 product target, not a universal recommendation.
+
+{% metric-strip %}
+{% metric value="20 ms" label="Feature retrieval" detail="Online store, transforms, and validation" tone="blue" /%}
+{% metric value="50 ms" label="Queue + inference" detail="Batch wait, transfer, and model execution" tone="violet" /%}
+{% metric value="15 ms" label="Decision + network" detail="Post-processing, policy, and serialization" tone="green" /%}
+{% metric value="15 ms" label="Failure headroom" detail="Jitter, retries, and dependency variance" tone="amber" /%}
+{% /metric-strip %}
+
+Budget percentiles for the complete path. Adding several individually measured P95 values does not produce the request P95 because slow stages may occur on different requests.
+{% /section-card %}
+
+{% section-card %}
+## Which serving architecture fits the decision?
+
+{% concept-grid columns="4" %}
+{% concept-card title="Online" eyebrow="Request/response" icon="speed" tone="blue" %}
+Use for interactive decisions that need fresh features and bounded latency. Capacity, timeout, fallback, and overload behavior are part of correctness.
+{% /concept-card %}
+{% concept-card title="Batch" eyebrow="Scheduled bulk work" icon="database" tone="green" %}
+Use when predictions can be precomputed. Large batches improve throughput and simplify recovery, but outputs are only as fresh as the schedule.
+{% /concept-card %}
+{% concept-card title="Streaming" eyebrow="Continuous events" icon="activity" tone="violet" %}
+Use when each event needs prompt scoring outside a synchronous user request. Ordering, replay, checkpoints, and idempotent outputs matter.
+{% /concept-card %}
+{% concept-card title="Edge" eyebrow="Near the device" icon="globe" tone="amber" %}
+Use for privacy, offline operation, or very low network latency. Artifacts must fit device memory, power, update, and compatibility constraints.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/ml-systems/model-serving/code/serving-architectures-code-code-01.py" language="python" title="Online model endpoint" /%}
+{% code-block file="/api/content/ml-systems/model-serving/code/serving-architectures-code-code-02.py" language="python" title="Batch inference engine" /%}
+{% /section-card %}
+
+{% section-card %}
+## Trace one online prediction
+
+{% system-flow title="Bounded online inference path" caption="Every dependency consumes the same request deadline. The fallback must avoid calling the failing dependency again." %}
+{% system-node title="Gateway" eyebrow="Admission" icon="shield" tone="blue" %}
+Authenticates, validates size and schema, rate-limits abuse, and attaches the remaining deadline.
+{% /system-node %}
+{% system-node title="Feature service" eyebrow="Context" icon="database" tone="violet" %}
+Returns point-in-time-compatible online features or an explicit missing/stale status.
+{% /system-node %}
+{% system-node title="Model runtime" eyebrow="Inference" icon="server" tone="green" %}
+Batches within a bounded wait, executes the pinned artifact, and records model-level latency and errors.
+{% /system-node %}
+{% system-node title="Decision policy" eyebrow="Action" icon="scale" tone="amber" %}
+Applies thresholds, business constraints, uncertainty handling, and human-review or fallback rules.
+{% /system-node %}
+{% system-node title="Outcome log" eyebrow="Feedback" icon="repeat" tone="cyan" %}
+Records exposure, prediction, action, and join keys for delayed outcomes without blocking the response.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Optimize the bottleneck that measurement reveals
+
+{% concept-grid columns="4" %}
+{% concept-card title="Batching" eyebrow="Amortize compute" icon="boxes" tone="blue" %}
+Combine compatible requests to improve accelerator utilization. Bound the wait so throughput gains do not violate tail latency.
+{% /concept-card %}
+{% concept-card title="Quantization" eyebrow="Reduce precision" icon="storage" tone="violet" %}
+Lower weight or activation precision only when the runtime has efficient kernels and the exported model passes quality checks.
+{% /concept-card %}
+{% concept-card title="Caching" eyebrow="Avoid repeat work" icon="cache" tone="green" %}
+Cache only when inputs, model version, policy, freshness, and privacy permit safe reuse. Include all behavior-changing values in the key.
+{% /concept-card %}
+{% concept-card title="Routing" eyebrow="Match work to capacity" icon="route" tone="amber" %}
+Send requests by model, hardware, region, or quality tier. Keep overload shedding and fallback deterministic and observable.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Deploy a model as a reversible change
+
+{% process-flow %}
+{% process-step number="1" title="Package one contract" label="Build" %}
+Bundle the artifact, runtime, preprocessing, schemas, dependency versions, and metadata required to reproduce inference.
+{% /process-step %}
+{% process-step number="2" title="Benchmark representative load" label="Verify" %}
+Measure quality, latency percentiles, throughput, memory, cold starts, saturation, and failure behavior on target hardware.
+{% /process-step %}
+{% process-step number="3" title="Shadow production inputs" label="Observe" %}
+Compare candidate outputs and resource use without changing decisions. Investigate disagreements by important slice.
+{% /process-step %}
+{% process-step number="4" title="Canary bounded traffic" label="Limit risk" %}
+Expose a representative fraction with automatic rollback on service, model, safety, and business guardrails.
+{% /process-step %}
+{% process-step number="5" title="Promote and retain rollback" label="Operate" %}
+Scale gradually, keep the previous compatible version warm enough to recover, and monitor delayed outcomes after full rollout.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/ml-systems/model-serving/code/serving-architectures-code-code-03.py" language="python" title="Streaming model consumer" /%}
+{% code-block file="/api/content/ml-systems/model-serving/code/serving-architectures-code-code-04.py" language="python" title="Prepare an edge artifact" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Design degradation before an incident
+
+- Reject malformed or over-budget requests before expensive model work begins.
+- Propagate deadlines and cancel abandoned work so queues do not grow from timed-out requests.
+- Shed low-priority traffic when saturation threatens the critical path.
+- Fall back to a cached result, heuristic, smaller model, or human review only when that behavior is safe for the decision.
+- Make retries bounded and idempotent; a retry storm must not amplify a dependency failure.
+- Separate outcome logging from the response so analytics loss does not take inference down.
+{% /section-card %}
+
+{% section-card %}
+## Explore failure containment
+
+{% topology-lab dataFile="/api/content/ml-systems/model-serving/data/serving-failure-topology.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Production serving readiness
+
+{% interactive-checklist
+   checklistId="model-serving-readiness"
+   dataFile="/api/content/ml-systems/model-serving/data/serving-readiness.json" /%}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/model-serving/quiz/model-serving.json" lessonSlug="model-serving" /%}

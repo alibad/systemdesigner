@@ -1,0 +1,226 @@
+{
+  "title": "Pooling mode and session-state compatibility",
+  "description": "Choose a release boundary and a PostgreSQL feature. The trace shows whether the next operation can rely on the same backend session and what contract the application must adopt.",
+  "defaults": {
+    "modeId": "transaction",
+    "featureId": "session-set",
+    "maxPreparedStatements": 200
+  },
+  "preparedStatementCache": {
+    "min": 0,
+    "max": 400,
+    "step": 50
+  },
+  "modes": [
+    {
+      "id": "session",
+      "label": "Session pooling",
+      "detail": "Hold one server connection until the client disconnects.",
+      "releaseBoundary": "Client disconnect",
+      "backendContinuity": "Same backend for the client session",
+      "multiStatementTransactions": true,
+      "trace": [
+        {
+          "label": "Operation 1",
+          "server": "Backend A",
+          "event": "Client state is created"
+        },
+        {
+          "label": "Between operations",
+          "server": "Backend A",
+          "event": "Server remains pinned to the client"
+        },
+        {
+          "label": "Operation 2",
+          "server": "Backend A",
+          "event": "The same session state is visible"
+        }
+      ]
+    },
+    {
+      "id": "transaction",
+      "label": "Transaction pooling",
+      "detail": "Return the server connection after COMMIT or ROLLBACK.",
+      "releaseBoundary": "Transaction end",
+      "backendContinuity": "Stable only inside one transaction",
+      "multiStatementTransactions": true,
+      "trace": [
+        {
+          "label": "Transaction 1",
+          "server": "Backend A",
+          "event": "State exists on Backend A"
+        },
+        {
+          "label": "COMMIT",
+          "server": "Pool",
+          "event": "Backend A is released for another client"
+        },
+        {
+          "label": "Transaction 2",
+          "server": "Backend B",
+          "event": "A different session may be assigned"
+        }
+      ]
+    },
+    {
+      "id": "statement",
+      "label": "Statement pooling",
+      "detail": "Return the server connection after every statement.",
+      "releaseBoundary": "Statement end",
+      "backendContinuity": "No continuity across statements",
+      "multiStatementTransactions": false,
+      "trace": [
+        {
+          "label": "Statement 1",
+          "server": "Backend A",
+          "event": "One autocommit statement executes"
+        },
+        {
+          "label": "Statement end",
+          "server": "Pool",
+          "event": "Backend A is released immediately"
+        },
+        {
+          "label": "Statement 2",
+          "server": "Backend B",
+          "event": "Explicit multi-statement transactions are rejected"
+        }
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "session-set",
+      "label": "Session SET then later query",
+      "detail": "Run SET search_path, commit, and expect a later transaction to inherit it.",
+      "compatibility": {
+        "session": {
+          "status": "supported",
+          "explanation": "The client keeps one backend, so session settings remain available until disconnect.",
+          "alternative": "Keep DISCARD ALL as the session-pool reset query before this backend is reused by another client."
+        },
+        "transaction": {
+          "status": "broken",
+          "explanation": "The next transaction can use another backend, while the old SET value may remain on the previous backend.",
+          "alternative": "Use SET LOCAL inside each explicit transaction, or use a PgBouncer-tracked startup parameter when appropriate."
+        },
+        "statement": {
+          "status": "broken",
+          "explanation": "The setting statement and dependent query need not use the same backend.",
+          "alternative": "Make the operation one self-contained statement or choose a less aggressive pooling mode."
+        }
+      }
+    },
+    {
+      "id": "protocol-prepared",
+      "label": "Protocol-level named prepared statement",
+      "detail": "A driver uses PostgreSQL extended-protocol Parse, Bind, and Execute messages.",
+      "preparedStatementBehavior": true,
+      "compatibility": {
+        "session": {
+          "status": "supported",
+          "explanation": "The prepared plan belongs to the backend pinned to this client session.",
+          "alternative": "Test schema migration behavior and clear stale plans during controlled connection rotation."
+        },
+        "transaction": {
+          "status": "supported",
+          "explanation": "PgBouncer can track, rename, and prepare the statement on whichever backend is assigned.",
+          "alternative": "Set max_prepared_statements above zero explicitly and test the exact driver and PgBouncer versions."
+        },
+        "statement": {
+          "status": "supported",
+          "explanation": "PgBouncer can track protocol-level prepared statements even though each statement may use another backend.",
+          "alternative": "The complete operation must still fit statement-pooling autocommit semantics."
+        }
+      }
+    },
+    {
+      "id": "sql-prepare",
+      "label": "SQL PREPARE and EXECUTE",
+      "detail": "The application sends PREPARE in one command and EXECUTE in a later command.",
+      "compatibility": {
+        "session": {
+          "status": "supported",
+          "explanation": "Both SQL commands reach the same pinned PostgreSQL session.",
+          "alternative": "Reset prepared state before the backend is assigned to another client."
+        },
+        "transaction": {
+          "status": "broken",
+          "explanation": "PgBouncer's prepared-statement tracking does not rewrite SQL PREPARE, EXECUTE, or DEALLOCATE.",
+          "alternative": "Use a tested driver's protocol-level prepared statements or disable server-side preparation."
+        },
+        "statement": {
+          "status": "broken",
+          "explanation": "The later EXECUTE can reach a backend that never received PREPARE.",
+          "alternative": "Use protocol-level tracking with a non-zero cache or send an ordinary parameterized statement."
+        }
+      }
+    },
+    {
+      "id": "listen",
+      "label": "LISTEN for notifications",
+      "detail": "A client expects a long-lived session to keep a notification subscription.",
+      "compatibility": {
+        "session": {
+          "status": "supported",
+          "explanation": "The subscription remains attached to the backend pinned to the client.",
+          "alternative": "Use a dedicated connection and reconnect-resubscribe logic."
+        },
+        "transaction": {
+          "status": "broken",
+          "explanation": "The listening backend returns to the pool and later notifications are not tied to the original client.",
+          "alternative": "Route notification listeners through session pooling or a direct PostgreSQL connection."
+        },
+        "statement": {
+          "status": "broken",
+          "explanation": "A statement-scoped assignment cannot preserve a notification subscription.",
+          "alternative": "Use a dedicated session outside the statement-pooled path."
+        }
+      }
+    },
+    {
+      "id": "transaction-local",
+      "label": "SET LOCAL inside a transaction",
+      "detail": "Set request-specific state and consume it before COMMIT.",
+      "compatibility": {
+        "session": {
+          "status": "supported",
+          "explanation": "Transaction-local state is valid and automatically disappears when the transaction ends.",
+          "alternative": "Keep request state transaction-scoped even when session pooling is available."
+        },
+        "transaction": {
+          "status": "supported",
+          "explanation": "Every statement in the transaction uses one assigned backend, and SET LOCAL ends at COMMIT or ROLLBACK.",
+          "alternative": "Make transaction boundaries explicit and never return a connection mid-transaction."
+        },
+        "statement": {
+          "status": "broken",
+          "explanation": "Statement pooling rejects the multi-statement transaction needed to set and later consume transaction-local state.",
+          "alternative": "Use transaction pooling for multi-statement units of work."
+        }
+      }
+    },
+    {
+      "id": "session-lock",
+      "label": "Session-level advisory lock",
+      "detail": "Acquire a lock and expect to release it from a later transaction.",
+      "compatibility": {
+        "session": {
+          "status": "caution",
+          "explanation": "The same backend is retained, but disconnects and reset behavior still define lock lifetime and recovery.",
+          "alternative": "Prefer transaction-level advisory locks when the critical section fits one transaction."
+        },
+        "transaction": {
+          "status": "broken",
+          "explanation": "The unlock can reach another backend while the original session continues holding the lock.",
+          "alternative": "Use pg_advisory_xact_lock so PostgreSQL releases the lock at transaction end."
+        },
+        "statement": {
+          "status": "broken",
+          "explanation": "There is no stable backend session across lock and unlock statements.",
+          "alternative": "Move the critical section to one transaction on a transaction- or session-pooled path."
+        }
+      }
+    }
+  ]
+}

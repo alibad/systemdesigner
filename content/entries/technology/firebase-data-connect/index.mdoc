@@ -1,0 +1,316 @@
+---
+registryId: firebase-data-connect
+---
+
+{% section-card tone="intro" %}
+## What is Firebase Data Connect?
+
+**Firebase Data Connect is a managed relational application backend built on Cloud SQL
+for PostgreSQL.** You describe relational tables with a GraphQL-based application
+schema, define the exact queries and mutations that clients may call in connectors,
+then generate typed SDKs from those deployed operations.
+
+The database remains PostgreSQL. Data Connect supplies the managed API contract between
+client code and that database; it does not erase relational modeling, query planning,
+migrations, backups, or capacity work.
+
+{% callout variant="info" %}
+### Product naming
+
+Current Firebase documentation calls the evolved product **Firebase SQL Connect**.
+This lesson keeps the established Data Connect route and title, but follows the current
+SQL Connect architecture and operational guidance.
+{% /callout %}
+
+### The invariant
+
+A client may execute only a named connector operation whose selection set,
+authorization, and variable contract were reviewed and deployed. Generated SDK types
+describe that contract; they do not replace server-side authorization or PostgreSQL
+constraints.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate the three data contracts
+
+A Data Connect service has three different sources of truth. Treating them as one file
+causes unsafe schema changes and broken clients.
+
+{% concept-grid columns="3" %}
+{% concept-card title="PostgreSQL SQL schema" eyebrow="Stored truth" icon="database" tone="blue" %}
+Tables, columns, constraints, indexes, and rows live in Cloud SQL. Database migrations
+change this durable layer.
+{% /concept-card %}
+{% concept-card title="Application schema" eyebrow="Mapped model" icon="braces" tone="cyan" %}
+GraphQL types in `.gql` files map application entities and relationships to the SQL
+schema.
+{% /concept-card %}
+{% concept-card title="Connectors" eyebrow="Client API" icon="code" tone="violet" %}
+Named queries and mutations define what clients can execute. `connector.yaml` groups
+the operation sources used to generate SDKs.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [current schema and connector deployment guide](https://firebase.google.com/docs/sql-connect/manage-schemas-and-connectors)
+defines the deployment order: migrate the SQL schema, update the application schema,
+then update connectors. A connector deployment can break an existing app even when no
+row changes.
+
+{% system-flow title="One generated SDK request" caption="The client calls a deployed operation; it does not submit an arbitrary selection set to PostgreSQL." %}
+{% system-node title="Generated client method" eyebrow="App" icon="code" tone="cyan" %}
+Typed variables and response data come from the connector operation at SDK-generation
+time.
+{% /system-node %}
+{% system-node title="Deployed connector" eyebrow="API contract" icon="shield" tone="violet" %}
+Data Connect authenticates the request, applies `@auth`, and executes the named query
+or mutation.
+{% /system-node %}
+{% system-node title="Application schema" eyebrow="Mapping" icon="braces" tone="blue" %}
+Generated relational fields and directives map the operation to PostgreSQL tables and
+columns.
+{% /system-node %}
+{% system-node title="Cloud SQL for PostgreSQL" eyebrow="Durable state" icon="database" tone="green" %}
+The database executes SQL and enforces keys, constraints, transactions, storage, and
+recovery behavior.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Design schema and operations together
+
+GraphQL nesting makes a response readable, but it does not make the underlying work
+free. A useful connector operation starts with one client task, selects only the needed
+fields, bounds list sizes, and makes ownership visible.
+
+Use the workbench to compare three workloads. The row-work and payload figures are
+teaching estimates, not Firebase latency or pricing predictions.
+
+{% interactive-block id="technology/firebase-data-connect-query-schema-lab" dataFile="/api/content/technology/firebase-data-connect/data/query-schema-model.json" /%}
+
+### Model relationships in PostgreSQL
+
+This compact catalog schema uses a real join table. Data Connect infers the foreign-key
+fields from the `User` and `Product` references, while the compound key prevents a user
+from saving the same product twice.
+
+{% code-block file="/api/content/technology/firebase-data-connect/code/dataconnect-schema-gql.gql" language="graphql" title="A relational Data Connect application schema" /%}
+
+Important schema rules:
+
+- define a relationship on one side and let Data Connect generate the reverse access
+  fields;
+- use PostgreSQL keys and constraints for durable invariants;
+- use server expressions such as `uuidV4()`, `request.time`, and `auth.uid` instead of
+  trusting equivalent client values;
+- keep indexes and query plans aligned with the filters and ordering used by deployed
+  operations;
+- remember that application field names cannot contain underscores because generated
+  supplemental fields use them.
+
+The [schema design guide](https://firebase.google.com/docs/sql-connect/schemas-guide)
+documents table mapping, inferred relationships, compound keys, and server values.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Put the API contract in connectors
+
+Client applications do not send arbitrary GraphQL documents for server execution.
+Queries and mutations are authored in connector source, deployed, and converted into
+platform-specific SDK methods.
+
+The example exposes an intentionally public catalog read and two owner-scoped favorite
+operations. Notice where authority comes from:
+
+- `ListCatalog` is `PUBLIC`, bounded, and carries an explicit public-data rationale;
+- `ListMyFavorites` filters `userId` with `eq_expr: "auth.uid"`;
+- `AddFavorite` writes `userId_expr: "auth.uid"` instead of accepting a user ID from
+  the caller;
+- every list has an explicit limit and narrow selection set.
+
+{% code-block file="/api/content/technology/firebase-data-connect/code/app-connector.gql" language="graphql" title="Reviewed connector operations" /%}
+
+{% callout variant="warn" %}
+### Authentication is only the starting point
+
+`@auth(level: USER)` proves that a non-anonymous Firebase user signed in. By itself, it
+does not prove that a requested row belongs to that user. Bind ownership with
+server-evaluated `auth.uid` filters or expressions. An operation without `@auth`
+defaults to `NO_ACCESS` for clients.
+{% /callout %}
+
+Data Connect uses operation directives such as `@auth`, `@check`, `@redact`, and
+`@transaction`; it does not use Firestore Security Rules for these connector
+operations. The [authorization guide](https://firebase.google.com/docs/sql-connect/authorization-and-security)
+also explains Firebase App Check and the separate IAM boundary for administrators.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make authorization and deployment one release decision
+
+An operation can be logically correct and still be unsafe to release. The SQL migration
+may drop data, the connector may break deployed SDK clients, or an authorization
+directive may expose another user's rows.
+
+Change all three decisions in the release lab. A healthy result requires a resource
+boundary, a production-safe migration plan, and a connector contract that old clients
+can still execute.
+
+{% interactive-block id="technology/firebase-data-connect-authorization-deployment-lab" dataFile="/api/content/technology/firebase-data-connect/data/authorization-deployment-model.json" /%}
+
+The Admin SDK is a privileged server boundary. Current Admin SDK operations run with
+administrative authority unless authentication impersonation is supplied, so a missing
+client `@auth` check must never be treated as protection from trusted server code.
+Keep server credentials and Cloud SQL roles narrowly scoped.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Generate SDKs from the reviewed connector
+
+SDK generation turns connector operations into typed functions, references, variables,
+and result data for web, Android, iOS, and Flutter clients. Regenerate SDKs whenever the
+connector contract changes, and fail CI when generated output is stale.
+
+{% code-block file="/api/content/technology/firebase-data-connect/code/generated-sdk-ts.ts" language="typescript" title="Calling generated web SDK references" /%}
+
+Generated types catch contract drift during development, but they do not:
+
+- authorize a request on the server;
+- prevent an old mobile app from calling an incompatible deployed connector;
+- add a missing PostgreSQL index;
+- make a multi-step business workflow atomic unless the mutation and database
+  transaction express that boundary;
+- turn broad nested reads into inexpensive queries.
+
+Use the Data Connect emulator for local connector behavior and authorization tests.
+The [generated web SDK guide](https://firebase.google.com/docs/sql-connect/web-sdk)
+documents SDK initialization, generation in CI, emulator connection, and query or
+mutation execution.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Deploy schema changes without gambling with data
+
+Schema and connector releases are coupled but recover differently. An earlier connector
+revision can restore an API shape; it cannot recreate a column or rows removed by a
+destructive migration.
+
+{% process-flow %}
+{% process-step number="1" title="Inventory deployed contracts" label="Observe" %}
+List the current services and connectors. Identify client versions still in use,
+operation error rates, Cloud SQL backup state, and the owner of the release.
+{% /process-step %}
+{% process-step number="2" title="Review the SQL diff" label="Migrate" %}
+Run `firebase dataconnect:sql:diff`. Use `COMPATIBLE` validation for production data
+unless every optional drop is explicitly planned, backed up, and recoverable.
+{% /process-step %}
+{% process-step number="3" title="Deploy compatible connectors" label="Release" %}
+Let CLI breaking-change assessments stop non-interactive deployment. Do not use
+`--force` as a routine way around client-contract review.
+{% /process-step %}
+{% process-step number="4" title="Regenerate and observe" label="Verify" %}
+Generate SDKs, run client contract tests, deploy clients in stages, and monitor
+per-operation requests and errors together with PostgreSQL health.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/firebase-data-connect/code/production-deploy.sh" language="bash" title="A reviewable CLI deployment sequence" /%}
+
+For a field removal, split the change:
+
+1. remove the field from connector selections while keeping the database column;
+2. regenerate SDKs and move deployed clients to the compatible contract;
+3. verify old client traffic has drained;
+4. remove the application-schema field and apply the reviewed SQL migration.
+
+Firebase recommends `COMPATIBLE` schema validation for databases with production data.
+In that mode, optional `DROP SCHEMA`, `DROP TABLE`, and `DROP COLUMN` actions are not
+applied.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the API and database as separate systems
+
+Data Connect and Cloud SQL share a request path, but they have different failure,
+security, observability, and cost boundaries.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Connector boundary" eyebrow="Contract" icon="code" tone="violet" %}
+Breaking operation variables or selected fields can fail old generated clients even
+when PostgreSQL is healthy.
+{% /concept-card %}
+{% concept-card title="Authorization boundary" eyebrow="Access" icon="shield" tone="rose" %}
+Firebase Auth identifies a caller. `@auth`, filters, server expressions, App Check, IAM,
+and PostgreSQL roles govern different layers.
+{% /concept-card %}
+{% concept-card title="Service boundary" eyebrow="API" icon="workflow" tone="cyan" %}
+Watch requests, errors, and operation rates globally and per operation in the Firebase
+console. Quota or service errors can block a healthy database.
+{% /concept-card %}
+{% concept-card title="Database boundary" eyebrow="State" icon="database" tone="green" %}
+Cloud SQL owns compute, storage, connections, query behavior, backups, maintenance,
+replicas, and regional database availability.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Observe both layers
+
+For Data Connect, monitor:
+
+- request rate, error rate, and latency by named operation;
+- authorization denials and App Check enforcement failures;
+- connector revision and client SDK version during a release;
+- operation quota consumption and network egress.
+
+For Cloud SQL for PostgreSQL, monitor:
+
+- CPU, memory, storage headroom, active connections, and transaction pressure;
+- slow or high-load SQL using Query Insights and PostgreSQL evidence;
+- replication lag where replicas exist;
+- backup success, point-in-time recovery configuration, and restore rehearsal;
+- maintenance events and instance availability.
+
+The [service management guide](https://firebase.google.com/docs/sql-connect/manage-services-and-databases)
+documents per-operation monitoring, the Data Connect request quota, same-location
+requirements, and the separate Cloud SQL administration boundary.
+
+### Budget the whole path
+
+Current billing has at least two independent components:
+
+1. Data Connect service operations and network egress;
+2. the Cloud SQL for PostgreSQL instance, including its compute, storage, backup,
+   networking, and replica choices.
+
+Vertex AI integration adds its own embedding charges. Pricing thresholds can change, so
+use the [current pricing page](https://firebase.google.com/docs/sql-connect/pricing),
+Cloud SQL pricing, a billing budget, and workload measurements instead of a hard-coded
+per-request calculator.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Know when Data Connect is the right boundary
+
+Choose Data Connect when the application benefits from:
+
+- relational constraints, joins, and PostgreSQL transactions;
+- a reviewed set of client operations rather than an open-ended API;
+- generated SDKs for web or mobile clients;
+- Firebase Authentication and App Check at the connector boundary;
+- managed Cloud SQL integration while retaining SQL administration options.
+
+Reconsider or add other services when the workload needs:
+
+- globally active-active writes with no application-level conflict design;
+- unbounded analytical scans on an operational database;
+- binary object storage;
+- arbitrary public GraphQL documents rather than deployed operations;
+- a claim that Firebase management removes backup, migration, indexing, or incident
+  ownership.
+
+The architectural question is not “Can GraphQL express this response?” It is “Can one
+deployed operation preserve authorization, relational invariants, a bounded query
+envelope, client compatibility, and a recoverable release?”
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/firebase-data-connect/quiz/firebase-data-connect-production-design.json" lessonSlug="firebase-data-connect" title="Firebase Data Connect Production Design Review" /%}

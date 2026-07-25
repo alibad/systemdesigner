@@ -1,0 +1,273 @@
+---
+registryId: case-study-mlops-production-pipeline
+---
+
+{% section-card tone="intro" %}
+## What is an MLOps production pipeline?
+
+An MLOps production pipeline is the system that turns a trained model into a
+repeatable, observable production decision. It connects versioned data and feature
+definitions to training, evaluation, approval, gradual deployment, monitoring,
+rollback, and retraining.
+
+In plain language: software delivery ships code; MLOps delivery ships a **tested
+decision contract**. The contract includes the model weights, but also the data
+snapshot, feature definitions, preprocessing, thresholds, serving configuration, and
+evidence used to approve the release.
+
+{% callout variant="info" %}
+### Core invariant
+
+Never route a request to a model unless its request schema, feature values,
+preprocessing, artifact, and decision policy are compatible and traceable to one
+approved release. A fast prediction with the wrong features is not a successful
+prediction.
+{% /callout %}
+{% /section-card %}
+
+This case study designs an enterprise pipeline for **100+ production models**, up to
+**1M predictions per second**, **10 TB of source data per day**, and a **four-hour**
+daily retraining window. For serving foundations, review
+[model serving](/ml-systems/model-serving) before treating inference as an isolated
+model-runtime problem.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the product contract and its failure cost" %}
+
+## The pipeline exists to make production changes reversible
+
+The platform serves fraud, ranking, forecasting, and operations models. These models
+have different quality metrics, but every team needs the same platform guarantees:
+an approved artifact can be reproduced, released in a bounded cohort, observed with
+versioned telemetry, and replaced quickly when its contract no longer holds.
+
+### Functional requirements
+
+- Trigger training from approved data arrivals, schedules, or a reviewed manual request.
+- Validate raw inputs and feature definitions before they are used for training or online inference.
+- Register model artifacts with owners, lineage, evaluation evidence, and approval state.
+- Support shadow, canary, and full deployment for real-time and batch consumers.
+- Detect data drift, quality regression, bias regressions, and serving failures.
+- Roll back to a compatible prior release and create a retraining work item when evidence fails.
+
+### Non-functional requirements
+
+- Keep the critical online path below **100 ms P99** and available at **99.9%** or better.
+- Retain complete release lineage for audits and incident investigation.
+- Complete the standard daily training workload within **four hours** without starving online serving.
+- Keep online features fresh enough for their product contract, with an explicit stale or missing state.
+- Isolate tenants, models, experiments, and rollout cohorts so one failure cannot consume shared capacity.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+The platform automates evidence collection and safe mechanical actions. It does not
+silently decide that a new objective, a changed label definition, or a material
+fairness trade-off is acceptable; those remain accountable human decisions.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="scale" title="2. Convert the workload into capacity and evidence budgets" %}
+
+## Average load is not the operating envelope
+
+At one million predictions per second, a one-percent canary still serves **10,000
+requests per second**. The initial cohort must be large enough to produce useful
+evidence and small enough that an incorrect model, feature, or policy cannot affect
+the entire product.
+
+{% metric-strip %}
+{% metric value="10 TB/day" label="Raw source data" detail="Validated before feature and training jobs consume it" tone="blue" /%}
+{% metric value="1M/s" label="Peak predictions" detail="The request path needs bounded dependencies and headroom" tone="violet" /%}
+{% metric value="50/day" label="Training jobs" detail="Scheduled across shared accelerators and data windows" tone="amber" /%}
+{% metric value="2 min" label="Rollback target" detail="A compatible prior release stays immediately deployable" tone="green" /%}
+{% /metric-strip %}
+
+### Capacity implications
+
+- **Data plane:** 10 TB per day becomes larger after validation, intermediate features, replicas, and retained training snapshots. Partition data by time and tenant; do not make a daily retrain depend on one mutable table.
+- **Training plane:** reserve or queue approximately 500 GPU-hours per day for normal work, then protect the four-hour service-level objective with priority and per-team quotas.
+- **Serving plane:** size for the peak, not the daily average. Feature lookups, queueing, serialization, and policy evaluation all consume the same 100 ms deadline as model execution.
+- **Evidence plane:** monitor by model version, cohort, feature version, region, and important population slice. An aggregate accuracy metric cannot prove a canary is safe.
+
+{% callout variant="tip" %}
+### Useful release math
+
+At 1M requests per second, a 5% canary receives 50K requests per second. That is a
+large operational load, so guardrails must be evaluated continuously and be able to
+pause traffic before the analysis window closes.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate the data, control, and decision planes" %}
+
+## Keep the synchronous decision path small
+
+The data and control planes can retry, queue, and recompute. The online decision
+path cannot: it has one caller deadline. Separating the planes prevents a slow
+backfill, dashboard, or experiment from becoming a user-facing outage.
+
+{% system-flow title="MLOps production pipeline" caption="Offline jobs create approved releases; the online path serves one compatible decision and records evidence asynchronously." %}
+{% system-node title="Versioned data and features" eyebrow="Data plane" icon="database" tone="blue" %}
+Validate schemas, retain point-in-time snapshots, and publish immutable feature definitions for offline and online use.
+{% /system-node %}
+{% system-node title="Train and evaluate" eyebrow="Build plane" icon="cpu" tone="violet" %}
+Run isolated jobs, compare the candidate with a baseline, and produce evaluation evidence by important slice.
+{% /system-node %}
+{% system-node title="Approve and orchestrate" eyebrow="Control plane" icon="shield" tone="amber" %}
+Store lineage, approvals, rollout state, policies, and the compatible rollback release.
+{% /system-node %}
+{% system-node title="Serve and observe" eyebrow="Decision plane" icon="activity" tone="green" %}
+Fetch compatible online features, execute the pinned artifact, apply policy, and emit non-blocking telemetry.
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership boundaries
+
+- **Data producers** own source semantics, freshness commitments, and schema-change notices.
+- **Feature owners** own transformations, point-in-time correctness, online/offline compatibility, and deprecation plans.
+- **Model teams** own objectives, evaluation slices, acceptance thresholds, and interpretation of business outcomes.
+- **Platform operators** own isolation, artifact integrity, rollout mechanics, observability, and the reliability of the shared controls.
+
+{% /accordion-item %}
+
+{% accordion-item id="feature-contract" title="4. Make data and features reproducible" %}
+
+## A feature is a versioned production dependency
+
+Training-serving skew occurs when the model was trained with feature logic or values
+that cannot be reproduced at prediction time. The usual symptoms look like a model
+regression, but the underlying fault may be a changed join, a missing default, a
+timezone conversion, or a freshness violation.
+
+### Require this feature contract
+
+- **Point-in-time training data:** create each training row using only values that existed at that event time. This prevents future information from leaking into evaluation.
+- **One definition, two stores:** use the same versioned transformation for offline training data and online retrieval. The storage engines may differ; the semantic definition may not.
+- **Explicit freshness and null policy:** record whether a feature is fresh, delayed, unavailable, or defaulted. Do not turn missing context into an unmarked zero.
+- **Compatibility checks:** reject an incompatible feature schema before it reaches a serving model or a retraining job.
+
+{% callout variant="info" %}
+### Example failure
+
+If a fraud model trained on a seven-day purchase total receives an online value built
+with a rolling calendar week, the request may be fast and schema-valid while the
+meaning has changed. The platform must block that release or return a declared
+fallback; it must not call this a model-quality issue after the fact.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="release" title="5. Release a model only after layered evidence" %}
+
+## A registry is a governed state machine, not a file bucket
+
+An experiment becomes deployable only after the platform binds it to its inputs and
+evidence. The registry entry should identify the artifact digest, code revision,
+feature version, training snapshot, evaluation report, owner, approval, and the
+prior compatible version.
+
+{% process-flow %}
+{% process-step number="1" title="Validate inputs" label="Data and code" %}
+Check schema, freshness, feature compatibility, dependency locks, and reproducible training inputs before costly work begins.
+{% /process-step %}
+{% process-step number="2" title="Train and compare" label="Offline evidence" %}
+Compare the candidate to the baseline on holdout data, critical slices, calibration, fairness checks, cost, and latency on target hardware.
+{% /process-step %}
+{% process-step number="3" title="Shadow then canary" label="Online evidence" %}
+Observe production-shaped inputs without changing outcomes, then shift a representative cohort while service and model guardrails remain active.
+{% /process-step %}
+{% process-step number="4" title="Promote or roll back" label="Controlled change" %}
+Promote only when evidence holds; otherwise freeze the candidate, retain its diagnostics, and restore the previously approved compatible release.
+{% /process-step %}
+{% /process-flow %}
+
+### Release gates that must all pass
+
+1. **Artifact gate:** image, dependencies, schemas, feature version, and signatures are verified.
+2. **Offline quality gate:** the candidate meets absolute floors and does not regress important slices beyond agreed bounds.
+3. **Serving gate:** latency, error rate, saturation, memory, and feature freshness meet the deployment envelope.
+4. **Online outcome gate:** delayed labels, user behavior, safety signals, and business metrics stay within the canary policy.
+
+{% callout variant="warn" %}
+Do not promote because the overall offline metric improved. A candidate that raises
+aggregate AUC while harming a protected or high-value slice can be a regression.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="serving" title="6. Protect the feature-serving path at peak traffic" %}
+
+## Verify the release contract before traffic moves
+
+Production readiness is a decision across evidence, not a deployment button. Work
+through the release record below as if this were a candidate about to receive its
+first canary cohort. Each check changes the visible verification total and persists
+locally, so an unchecked item is an explicit reason to hold the release.
+
+{% interactive-checklist
+   checklistId="mlops-production-release-gates"
+   dataFile="/api/content/case-studies/mlops-production-pipeline/data/release-readiness.json" /%}
+
+### Keep feature fallback bounded
+
+- Coalesce identical cache misses so a hot entity does not stampede the authoritative feature store.
+- Cap fallback concurrency and shed low-priority requests before the store queues become unbounded.
+- Return an explicit stale, default, smaller-model, abstention, or review result only when the product policy permits it.
+- Record the fallback reason with the model and feature versions so degraded behavior is measurable.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Turn monitoring into a reversible operating loop" %}
+
+## Observe the model, not just the servers
+
+Healthy CPU and HTTP metrics do not prove that a model is still making useful
+decisions. The operating loop joins versioned predictions and exposures to delayed
+outcomes, while separately watching data quality, feature freshness, service health,
+and business guardrails.
+
+Use the topology to compare a healthy release, a feature-drift signal, a quality
+regression, a monitoring backlog, and a registry failure. Selecting a scenario
+changes the active path and result; selecting a component reveals its responsibility.
+
+{% topology-lab dataFile="/api/content/case-studies/mlops-production-pipeline/data/release-operations-topology.json" /%}
+
+### Alert policy
+
+- **Page immediately:** invalid artifact signature, incompatible schema, critical fairness or safety breach, or an automatic rollback trigger.
+- **Freeze promotion and investigate:** drift, calibration loss, delayed-label regression, elevated fallback rate, or weak cohort representation.
+- **Ticket and trend:** a low-severity feature-quality change with no current decision impact, capacity cost growth, or a documentation gap.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Choose explicit trade-offs and define the next maturity step" %}
+
+## The platform makes choices visible; it cannot remove them
+
+| Decision | Default for this case | Cost of the choice | Mitigation |
+| --- | --- | --- | --- |
+| Feature freshness | Hybrid online and batch features | More stores and consistency checks | Version definitions and declare stale states |
+| Deployment | Shadow then canary | Slower promotion and more telemetry | Automate evidence collection and rollback |
+| Governance | Central platform with team-owned models | Platform can become a bottleneck | Self-service templates, quotas, and clear ownership |
+| Retraining | Evidence-triggered with human review | Some regressions need manual response | Predefine triggers, runbooks, and rollback authority |
+
+### First 90 days
+
+1. Establish the release record: artifact digest, feature version, data snapshot, evaluation report, owner, approval, and rollback target.
+2. Make one critical model safe end to end: point-in-time data, online/offline feature checks, a shadow run, canary guardrails, and a tested rollback.
+3. Add versioned outcome logging and slice dashboards before expanding to more model teams.
+4. Productize the repeated controls only after teams have exercised them in incidents and can explain the remaining failure modes.
+
+{% callout variant="tip" %}
+### Case-study conclusion
+
+MLOps maturity is not the number of tools in the platform. It is the ability to
+answer, during an incident, which release served a decision, what inputs it used,
+which guardrail failed, who owns the next action, and how to restore a compatible
+state quickly.
+{% /callout %}
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/mlops-production-pipeline/quiz/mlops-production-pipeline.json" lessonSlug="mlops-production-pipeline" title="Review the MLOps Pipeline" /%}

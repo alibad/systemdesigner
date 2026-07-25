@@ -1,0 +1,191 @@
+---
+registryId: api-patterns
+---
+
+{% section-card tone="intro" %}
+## What is an API design pattern?
+
+An API design pattern is a repeatable way to make one piece of software ask another piece of software for data or work. It defines the request shape, the response shape, who is allowed to call it, and what a caller can rely on when the network is slow or uncertain.
+
+It matters because an API is a long-lived agreement between teams. A fast endpoint that returns ambiguous failures, changes without notice, or lets a caller repeat a charge is not a reliable integration.
+
+The core contract invariant is: **for the same valid request and documented preconditions, the caller can predict the meaning of success, failure, and a retry.** Transport, endpoint naming, authentication, versioning, and operations must all preserve that meaning.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with the interaction shape
+
+Before choosing REST, RPC, GraphQL, or events, describe what crosses the boundary. An API style is a tool for a particular interaction, not an identity for the whole system.
+
+{% process-flow %}
+{% process-step number="1" title="Name the caller's goal" label="Intent" %}
+Is the caller reading or changing a stable resource, issuing a command, composing a graph of related data, or reacting to a fact that already happened?
+{% /process-step %}
+{% process-step number="2" title="State the delivery need" label="Timing" %}
+Decide whether one response is enough, the server must stream updates, or both sides need a live typed stream. Set a deadline even for streaming calls.
+{% /process-step %}
+{% process-step number="3" title="Write the observable result" label="Contract" %}
+Document the success representation, expected status or outcome, ownership of pagination and caching, and the failure a caller can recover from.
+{% /process-step %}
+{% process-step number="4" title="Choose a fitting boundary" label="Pattern" %}
+Use the simplest style that makes the interaction, compatibility, and operational evidence clear. One product can expose more than one style at different boundaries.
+{% /process-step %}
+{% /process-flow %}
+
+### The four common shapes
+
+{% concept-grid columns="2" %}
+{% concept-card title="Resource API" eyebrow="REST" icon="route" tone="blue" %}
+Model durable things such as orders, accounts, or documents. HTTP methods and cache controls give clients and intermediaries familiar semantics.
+{% /concept-card %}
+{% concept-card title="Operation API" eyebrow="RPC" icon="zap" tone="violet" %}
+Model a named action such as `ApproveInvoice` or `CalculateQuote`. Generated schemas and explicit method contracts work well when both sides are controlled.
+{% /concept-card %}
+{% concept-card title="Read graph" eyebrow="GraphQL" icon="network" tone="green" %}
+Let a client request a bounded projection across related objects. The server still owns authorization, query-cost limits, and cache behavior.
+{% /concept-card %}
+{% concept-card title="Published fact" eyebrow="Event" icon="radio" tone="amber" %}
+Announce that something happened, such as `invoice.paid`. Consumers react asynchronously, so ordering, replay, and deduplication are part of the contract.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab: choose a style and see the contract it creates
+
+Change the workflow, latency, streaming, caching, compatibility, and team constraints. The ranking is a starting hypothesis, not a universal winner. Read the selected pattern's concrete request shape, cache behavior, and responsibility before accepting it.
+
+{% interactive-block id="reference/api-patterns-contract-selector-lab" dataFile="/api/content/reference/api-patterns/data/api-style-selection-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Model resources and actions deliberately
+
+A resource is something with a stable identity and lifecycle. An action is work whose name carries important domain meaning. Do not hide either behind vague endpoints.
+
+### Resource-oriented paths
+
+Use a resource path when the caller is retrieving, creating, replacing, or deleting an identified thing.
+
+- `GET /orders/ord_123` reads one order and can return cache validators such as `ETag` when stale reads are acceptable.
+- `POST /orders` creates an order under the collection. The server chooses the new identity and returns a representation or location.
+- `PATCH /orders/ord_123` changes named fields. Document which fields can change and whether omitted fields stay unchanged.
+- `DELETE /orders/ord_123` requests deletion. Explain whether it is immediate, soft, asynchronous, or impossible after a retention window.
+
+### Domain actions
+
+Use an explicit action when the operation is not ordinary CRUD or has an outcome that deserves its own contract.
+
+- `POST /invoices/inv_123:approve` names an approval command and makes authorization, audit, and state preconditions visible.
+- `POST /exports` can accept a long-running export request and return an operation resource that the caller can inspect.
+- An `invoice.paid` event tells subscribers a completed fact; it is not a request for another service to perform the payment.
+
+{% callout variant="tip" %}
+Prefer nouns for resource paths and meaningful verbs for commands. The goal is not to ban verbs; it is to make the caller's intent, state transition, and retry rule unmistakable.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Put identity and authority at the boundary
+
+Authentication answers **who is calling**. Authorization answers **which action or data that identity may use**. They are separate checks and neither should be delegated to a client-provided role field.
+
+### A practical boundary sequence
+
+1. Authenticate a workload, user, or delegated application with a credential appropriate to that caller.
+2. Resolve the tenant, subject, and token audience from trusted claims or credential lookup.
+3. Authorize the exact resource and action, including ownership and policy conditions such as `invoice:approve`.
+4. Apply rate, quota, and abuse controls to the authenticated principal and the expensive operation.
+5. Audit sensitive grants and denials with a correlation ID, but never log raw secrets or full tokens.
+
+### Choose a credential for the relationship
+
+- **OAuth 2.0 authorization code with PKCE** fits user-delegated third-party access because consent and redirect handling are part of the relationship.
+- **Short-lived workload credentials** fit service-to-service calls because rotation, audience restriction, and machine identity matter more than a user session.
+- **API keys** can identify an integration for low-risk access and quota, but they are bearer secrets. Scope them narrowly, rotate them, and do not treat them as user authorization.
+
+Authorization must run for every GraphQL field or resolver that exposes protected data, every REST or RPC operation, and every event subscription. A gateway can centralize coarse checks; it cannot infer all resource-level policy from a URL alone.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: trace a timeout, duplicate, and recovery decision
+
+A timeout means the caller did not receive a result. It does **not** prove the server did nothing. Change the method semantics, idempotency key, timeout point, duplicate arrival, and completion model to see how the client-visible status, server state, and next recovery step change.
+
+{% interactive-block id="reference/api-patterns-retry-state-lab" dataFile="/api/content/reference/api-patterns/data/retry-idempotency-model.json" /%}
+
+### The retry rule
+
+Retry only when the operation's documented semantics make repetition safe, or when an idempotency key lets the server recognize one logical request. Bound retries by both a deadline and an attempt limit. Add jitter so a shared failure does not create a synchronized retry wave.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Version without silently changing meaning
+
+Versioning is a compatibility practice, not a path-prefix habit. Additive changes are usually easier to adopt than changing a field's type, narrowing its meaning, removing an enum value a client uses, or changing an error from retryable to final.
+
+### Make compatibility explicit
+
+- Publish a schema for requests, responses, events, and error objects. Generate clients where that reduces drift, but keep human-readable examples and migration notes.
+- Add optional fields and new endpoints or methods before removing old behavior. Consumers must ignore fields they do not understand.
+- Version events with a stable event type and schema evolution policy. Keep replay compatibility for the retention period consumers rely on.
+- Announce deprecation with a deadline, usage evidence, migration path, and support owner. Measure remaining traffic before disabling a version.
+- Avoid a flag day for public clients. Run compatible versions in parallel when release timing is outside your control.
+
+### Define a failure contract
+
+Every failure response needs a machine-readable category, a stable code, a safe human message, a correlation ID, and guidance on whether and when to retry. HTTP APIs can use a consistent problem-details representation; RPC APIs can use a typed status and details; event consumers need a dead-letter or retry policy with the same clarity.
+
+| Failure kind | Caller-facing meaning | Typical recovery |
+| --- | --- | --- |
+| Invalid input | The request cannot succeed as sent. | Correct the request; do not retry unchanged. |
+| Authentication or authorization | Identity is missing, expired, or lacks permission. | Refresh credentials or request access; do not brute-force retries. |
+| Conflict or failed precondition | Current server state does not permit the requested transition. | Read current state, resolve the conflict, then issue a new request. |
+| Capacity or rate limit | The service did not accept work now. | Honor retry guidance and use backoff with jitter. |
+| Timeout or unavailable dependency | Completion may be unknown or temporarily impossible. | Query operation state or retry only with safe semantics. |
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the contract, not just the endpoint
+
+An API is healthy only when callers receive its documented behavior under load, partial failure, rollout, and misuse. Measure the boundary with labels that identify the operation, version, caller class, and outcome without creating unbounded metric cardinality.
+
+### Minimum operational evidence
+
+- **Latency and availability:** p50, p95, and p99 latency; timeout rate; status or error-code families; and accepted versus completed asynchronous work.
+- **Correctness:** idempotency-key replays, duplicate-event suppression, conflict rate, schema-validation failures, and operation-state reconciliation.
+- **Protection:** authorization denials, rate-limit outcomes, payload-size rejections, query-cost limits, and suspicious credential use.
+- **Capacity:** concurrent requests or streams, queue depth and age, downstream saturation, cache hit rate, and event-consumer lag.
+- **Change safety:** version adoption, deprecated-client traffic, contract-test results, rollout error deltas, and rollback time.
+
+Use correlation IDs from the first request through downstream calls and asynchronous jobs. Sample high-volume success logs, retain complete security and mutation audit trails where policy requires them, and practice how an operator finds the state of a timed-out request.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Read trade-offs as responsibilities
+
+No API pattern removes hard work; it moves responsibility.
+
+{% concept-grid columns="2" %}
+{% concept-card title="REST" eyebrow="Interoperability" icon="globe" tone="blue" %}
+Gains familiar HTTP semantics, broad client support, and cache tooling. The team still designs resource boundaries, pagination, conditional writes, and compatibility.
+{% /concept-card %}
+{% concept-card title="RPC" eyebrow="Explicit operations" icon="zap" tone="violet" %}
+Gains strongly named methods, generated contracts, and efficient internal streaming. The team owns gateway compatibility, deadlines, and careful public-client support.
+{% /concept-card %}
+{% concept-card title="GraphQL" eyebrow="Client projections" icon="network" tone="green" %}
+Gains flexible reads and one graph boundary. The team owns authorization at resolver granularity, query limits, observability, and cache normalization.
+{% /concept-card %}
+{% concept-card title="Events" eyebrow="Asynchronous decoupling" icon="radio" tone="amber" %}
+Gains independent consumers and resilient fan-out. The team owns delivery semantics, duplicate handling, ordering scope, replay, and consumer recovery.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A small write contract with a safe retry path
+
+The example below returns the original result for a repeated idempotency key. The key is scoped to the caller and request intent, has a retention window, and does not replace authorization or validation.
+
+{% code-block file="/api/content/reference/api-patterns/code/idempotent-payment-contract.http" language="http" title="Idempotent payment creation contract" /%}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/api-patterns/quiz/api-patterns-contracts.json" title="API Contract Check" /%}

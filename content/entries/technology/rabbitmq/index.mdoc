@@ -1,0 +1,384 @@
+---
+registryId: rabbitmq
+---
+
+{% section-card tone="intro" %}
+## What is RabbitMQ?
+
+**RabbitMQ is a message broker that accepts messages from publishers, routes
+them through exchanges, stores routed copies in queues, and delivers those
+copies to consumers.** It lets one service hand work to another without both
+services being available at the same moment.
+
+RabbitMQ matters when an application needs:
+
+- asynchronous commands such as `generate.invoice`;
+- work queues that spread jobs across a consumer group;
+- selective event delivery to several independent queues;
+- bounded retries and dead-letter recovery;
+- explicit delivery acknowledgments and publisher confirmations.
+
+Its core invariant is:
+
+> A successful publish, a routed queue copy, a consumer delivery, and a
+> completed business effect are four different facts. Design and observe each
+> boundary separately.
+
+RabbitMQ implements AMQP 0-9-1 for its main messaging model. It is not a
+database transaction coordinator and does not make a non-idempotent consumer
+exactly once. If queues, acknowledgments, and backpressure are new, first review
+[message queue fundamentals](/fundamentals/message-queues).
+{% /section-card %}
+
+{% section-card %}
+## Build the broker mental model
+
+Five entities explain the normal message path:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Publisher" eyebrow="Creates intent" icon="send" tone="blue" %}
+The publishing application chooses an exchange, routing key, message body,
+headers, and durability options. It owns the event contract and publish error
+handling.
+{% /concept-card %}
+{% concept-card title="Exchange" eyebrow="Evaluates bindings" icon="route" tone="violet" %}
+An exchange does not hold a backlog. It applies its type-specific routing rule
+and sends a copy to every matching queue.
+{% /concept-card %}
+{% concept-card title="Binding" eyebrow="Declares interest" icon="link" tone="cyan" %}
+A binding connects an exchange to a queue. Its key or arguments express which
+publishes that queue wants to receive.
+{% /concept-card %}
+{% concept-card title="Queue" eyebrow="Owns delivery state" icon="inbox" tone="green" %}
+A queue stores ready messages, tracks unacknowledged deliveries, and dispatches
+work to its consumers according to broker policy.
+{% /concept-card %}
+{% concept-card title="Consumer" eyebrow="Commits the effect" icon="server" tone="amber" %}
+A consumer validates the message, applies one business operation, and
+acknowledges only when the selected completion contract is satisfied.
+{% /concept-card %}
+{% concept-card title="Virtual host" eyebrow="Isolation boundary" icon="shield" tone="neutral" %}
+A virtual host contains exchanges, queues, bindings, policies, and permissions.
+Use it as a deliberate tenancy and operational boundary, not as a naming prefix.
+{% /concept-card %}
+{% /concept-grid %}
+
+Messages do not go directly from a publisher to a named queue in the normal
+AMQP model. The publisher targets an exchange; declared bindings decide which
+queues receive independent copies.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow a confirmed publish into a queue
+
+{% system-flow title="A publish crosses three separate reliability boundaries" caption="Publisher confirms cover broker acceptance; consumer acknowledgments cover delivery completion." %}
+{% system-node title="Publisher" eyebrow="Application intent" icon="send" tone="blue" %}
+Serializes a versioned message with a stable ID, selects the exchange and
+routing key, and handles connection or channel errors.
+{% /system-node %}
+{% system-node title="Exchange and bindings" eyebrow="Routing contract" icon="route" tone="violet" %}
+Evaluate the publish. Zero, one, or many queues can match. A mandatory publish
+is returned when no queue accepts it.
+{% /system-node %}
+{% system-node title="Durable queue" eyebrow="Broker responsibility" icon="inbox" tone="cyan" %}
+Stores its copy according to queue type, message persistence, replication, and
+the broker's configured confirmation contract.
+{% /system-node %}
+{% system-node title="Consumer" eyebrow="Business completion" icon="check" tone="green" %}
+Receives a delivery, commits or rejects the business operation, then
+acknowledges, negatively acknowledges, or rejects the delivery.
+{% /system-node %}
+{% /system-flow %}
+
+### Name the evidence at each boundary
+
+- **Publisher confirm:** the broker accepted responsibility for the publish
+  under the active queue and durability configuration.
+- **Returned message:** a mandatory publish was valid at the protocol layer but
+  matched no queue.
+- **Ready message:** a queue copy is waiting for a consumer.
+- **Unacknowledged delivery:** a consumer owns an attempt, but the broker can
+  redeliver it if the channel closes.
+- **Consumer acknowledgment:** that consumer declares its attempt complete; it
+  does not prove what another queue's consumer did.
+
+{% callout variant="warn" %}
+Publisher confirms are not consumer receipts. A confirm can arrive before any
+consumer sees the message, and a consumer acknowledgment can never repair an
+unconfirmed or unroutable publish.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose routing semantics before naming exchanges
+
+Exchange types encode different contracts:
+
+{% concept-grid columns="2" %}
+{% concept-card title="Direct" eyebrow="Exact key" icon="target" tone="blue" %}
+A binding key must equal the publish routing key. Use it when the event has one
+stable category such as `payment.failed.us`.
+{% /concept-card %}
+{% concept-card title="Topic" eyebrow="Word pattern" icon="git-branch" tone="violet" %}
+Bindings match dot-separated words. `*` matches exactly one word and `#`
+matches zero or more. Use stable semantic words, not database table names.
+{% /concept-card %}
+{% concept-card title="Fanout" eyebrow="Broadcast" icon="radio" tone="cyan" %}
+Every bound queue receives a copy and the routing key is ignored. Use it when
+all current subscribers intentionally receive every publish.
+{% /concept-card %}
+{% concept-card title="Headers" eyebrow="Attribute match" icon="filter" tone="amber" %}
+Bindings inspect headers instead of the routing key. It can express compound
+conditions, but topic keys are usually easier to discover and operate.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Lab 1: find routing gaps and accidental fanout
+
+Switch the exchange type and publish different events. Inspect every queue
+binding, the number of stored copies, and the mandatory-return state.
+
+{% interactive-block id="technology/rabbitmq-routing-contract-lab" dataFile="/api/content/technology/rabbitmq/data/routing-contract-model.json" /%}
+
+Treat exchange names, routing keys, and binding patterns as versioned APIs:
+
+- document the publisher and every queue owner;
+- use a bounded vocabulary such as `<domain>.<event>.<region>`;
+- test representative keys against bindings before deployment;
+- enable mandatory publishing when unroutable messages are failures;
+- alert on returned messages and unexpected routing rates;
+- remove bindings only after dependent queues have migrated.
+{% /section-card %}
+
+{% section-card %}
+## Make durability a complete contract
+
+Durability is not one checkbox. A recoverable publish requires compatible
+choices across the publisher, queue, broker topology, and consumer.
+
+{% metric-strip %}
+{% metric value="Durable" label="Queue metadata" detail="The queue definition survives a broker restart." tone="blue" /%}
+{% metric value="Persistent" label="Message intent" detail="The publisher requests durable storage for the message." tone="violet" /%}
+{% metric value="Confirmed" label="Broker acceptance" detail="The publisher observes the broker's asynchronous confirm." tone="green" /%}
+{% metric value="Replicated" label="Node failure" detail="A quorum queue can retain availability and data across eligible node failures." tone="amber" /%}
+{% /metric-strip %}
+
+### Prefer quorum queues for replicated work
+
+For new replicated, durable queues, RabbitMQ quorum queues provide a
+Raft-based replicated log. A majority of members must be available for the
+queue to make progress.
+
+- Use an odd replica count placed across independent failure domains.
+- Size disk and network for the replicated write rate, not only the payload
+  retained at one node.
+- Keep queue leaders distributed so one node does not own every hot path.
+- Test node and zone loss while publishers wait for confirms.
+- Define queue length, age, and overflow policies before disks fill.
+
+Classic queues can still fit transient or explicitly single-node workloads.
+Do not describe a queue as highly available merely because the RabbitMQ cluster
+has several nodes; the queue type and replica placement determine its data path.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Acknowledge the business outcome, not message receipt
+
+With manual acknowledgments, RabbitMQ keeps a delivery unacknowledged until the
+consumer sends `ack`, `nack`, or `reject`. If the channel closes first, the
+broker can make that message available again.
+
+{% process-flow %}
+{% process-step number="1" title="Receive and validate" label="Contract" %}
+Parse the envelope, require a stable message ID and schema version, and reject
+permanently invalid data without entering an infinite requeue loop.
+{% /process-step %}
+{% process-step number="2" title="Commit one effect" label="Business state" %}
+Apply the domain mutation and record the message ID in the same transactional
+boundary when duplicate effects would be harmful.
+{% /process-step %}
+{% process-step number="3" title="Acknowledge success" label="Delivery state" %}
+Send the acknowledgment only after the completion rule is true. A channel
+failure before this point makes redelivery possible.
+{% /process-step %}
+{% process-step number="4" title="Bound recovery" label="Retry or dead letter" %}
+Retry transient failures with delay and limits. Dead-letter permanently invalid
+or exhausted messages with their diagnostic context.
+{% /process-step %}
+{% /process-flow %}
+
+### Lab 2: inject an ambiguous consumer failure
+
+Choose the crash point, acknowledgment strategy, delivery budget, and
+dead-letter policy. Compare delivery attempts with committed business effects.
+
+{% interactive-block id="technology/rabbitmq-delivery-recovery-lab" dataFile="/api/content/technology/rabbitmq/data/delivery-recovery-model.json" /%}
+
+The practical target is **at-least-once delivery with idempotent effects**:
+RabbitMQ can redeliver an attempt whose acknowledgment is unknown, while the
+application makes the repeated message harmless.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Control concurrency with prefetch and queue age
+
+Prefetch limits how many unacknowledged deliveries a consumer can hold. It is a
+credit window, not a throughput target.
+
+For `C` consumers and prefetch `P`, the group can hold up to approximately:
+
+`in-flight deliveries = C × P`
+
+For 24 consumers with prefetch 20, as many as `480` messages can be outside the
+ready queue but not yet complete.
+
+### Choose prefetch from the work shape
+
+- **CPU-heavy or long jobs**
+  - Start with low prefetch so one consumer does not reserve a large backlog.
+  - Scale workers from queue age and resource saturation.
+- **Short, uniform operations**
+  - Increase prefetch gradually while measuring throughput and tail latency.
+  - Stop when additional in-flight work raises contention without useful gain.
+- **Large payloads**
+  - Budget memory as `payload size × unacknowledged deliveries` plus protocol
+    and application overhead.
+  - Store large blobs in object storage and send a bounded reference.
+- **Mixed-duration jobs**
+  - Separate workloads into queues or use priorities carefully.
+  - Avoid one slow delivery blocking many unrelated messages behind local
+    consumer concurrency.
+
+Monitor **oldest ready message age** alongside queue depth. Depth can look stable
+while a low-volume critical message waits far beyond its service target.
+{% /section-card %}
+
+{% section-card %}
+## Isolate failures with bounded topology
+
+One giant queue couples unrelated producers, consumers, retention needs, and
+failure modes. Prefer queues whose owners and service targets are explicit.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Work queue" eyebrow="Competing consumers" icon="users" tone="blue" %}
+Several equivalent consumers share one queue. Each queue copy is delivered to
+one consumer at a time, subject to acknowledgment and redelivery.
+{% /concept-card %}
+{% concept-card title="Subscriber queue" eyebrow="Independent copy" icon="copy" tone="violet" %}
+Each subscriber owns a separate queue bound to the exchange. A slow analytics
+consumer does not hold notification messages in the same backlog.
+{% /concept-card %}
+{% concept-card title="Dead-letter queue" eyebrow="Recovery boundary" icon="alert-triangle" tone="amber" %}
+Rejected, expired, or overflowed messages enter a separate queue for diagnosis.
+It needs an owner, retention limit, alert, and controlled replay path.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Prevent retry storms
+
+Immediate `nack(requeue=true)` can create a hot loop that consumes CPU and
+network while healthy messages wait. A safer recovery path:
+
+1. Classifies the error as transient, permanent, or unknown.
+2. Increments a trustworthy attempt count outside mutable user payload fields.
+3. Sends transient failures through a delayed retry stage.
+4. Adds jitter so many consumers do not retry together.
+5. Dead-letters after a finite attempt or time budget.
+6. Replays only after the cause is fixed and idempotency is verified.
+
+Never turn the dead-letter queue into permanent storage. Track its depth and
+oldest age, retain enough context to diagnose the failure, and provide an
+auditable replay command.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement both ends of the reliability contract
+
+### Publish with confirms and mandatory routing
+
+The publisher below uses a confirm channel, persistent message intent, a stable
+message ID, a semantic topic key, and the mandatory flag.
+
+{% code-block file="/api/content/technology/rabbitmq/code/publish-confirmed-order.ts" language="typescript" title="Confirmed RabbitMQ publisher" /%}
+
+The application's connection wrapper should also handle returned messages and
+reconnect with bounded backoff. Reusing a long-lived connection is normal;
+opening a new connection per message, as this focused example does, is not.
+
+### Consume with an idempotency boundary
+
+The consumer records the message ID with the business mutation before
+acknowledging. Transient failures requeue; invalid JSON is rejected without
+requeue.
+
+{% code-block file="/api/content/technology/rabbitmq/code/consume-idempotent-payment.py" language="python" title="Idempotent manual-ack consumer" /%}
+
+In production, replace the callback abstraction with a real database
+transaction whose uniqueness constraint rejects a repeated `message_id`.
+{% /section-card %}
+
+{% section-card %}
+## Operate RabbitMQ from user-visible symptoms
+
+### Watch the whole path
+
+- **Publisher**
+  - confirm latency, negative acknowledgments, returned messages, reconnects;
+  - publish rate by exchange and routing-key family.
+- **Queue**
+  - ready depth, unacknowledged count, oldest ready age, ingress and delivery
+    rates;
+  - memory, disk, replica availability, leader placement, and flow control.
+- **Consumer**
+  - handler latency, success rate, redelivery rate, rejection reasons;
+  - idempotency conflicts, downstream saturation, and active consumer count.
+- **Recovery**
+  - retry-stage depth, dead-letter depth and age, replay volume;
+  - messages exceeding the business delivery service target.
+
+### Respond to common symptoms
+
+{% tabs %}
+{% tab title="Growing ready queue" %}
+Compare ingress with acknowledged delivery rate. Check consumer availability,
+downstream latency, prefetch, and hot routing keys before adding workers.
+{% /tab %}
+{% tab title="High unacknowledged count" %}
+Inspect slow handlers, blocked dependencies, oversized prefetch, and consumers
+that stopped acknowledging while their connections remain open.
+{% /tab %}
+{% tab title="Returned publishes" %}
+Treat this as a routing-contract failure. Capture the returned exchange and key,
+identify the missing binding or deployment ordering issue, and replay safely.
+{% /tab %}
+{% tab title="Redelivery spike" %}
+Look for consumer restarts, channel closures, acknowledgment timeouts, or a
+poison message loop. Verify idempotency before increasing retry volume.
+{% /tab %}
+{% /tabs %}
+
+Backups and exported definitions do not replace a tested recovery exercise.
+Practice restoring definitions, credentials, policies, and business messages
+under the queue types and durability guarantees the service actually uses.
+{% /section-card %}
+
+{% section-card %}
+## Review the production contract
+
+Before launch, confirm that:
+
+- every exchange, queue, binding, virtual host, and policy has an owner;
+- routing keys and message schemas are versioned and compatibility-tested;
+- publishers observe confirms, returned messages, backpressure, and reconnects;
+- durable workloads use a queue type and replica placement that match failure
+  goals;
+- consumers acknowledge after the selected business completion boundary;
+- harmful effects are idempotent under redelivery and controlled replay;
+- prefetch and worker concurrency have resource budgets;
+- retries are delayed and finite, with an owned dead-letter path;
+- queue age, unacknowledged deliveries, redeliveries, and disk pressure alert
+  before users notice;
+- node, zone, consumer, dependency, and poison-message failures are exercised.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/rabbitmq/quiz/rabbitmq-production-decisions.json" lessonSlug="rabbitmq" title="RabbitMQ Production Decisions" /%}

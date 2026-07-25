@@ -1,0 +1,298 @@
+---
+registryId: gmail-smart-compose-architecture
+---
+
+{% section-card tone="intro" %}
+## What is a Smart Compose architecture?
+
+A **Smart Compose architecture** predicts a short continuation while a person is actively typing. The system observes the current prefix, generates candidate text, and shows ghost text only when the candidate is timely, relevant, safe, and still belongs to the draft on screen.
+
+This is different from asking a chatbot for a complete answer. A compose assistant runs inside a human editing loop: every new keystroke can make an in-flight prediction obsolete, and showing a weak suggestion consumes attention even when the user ignores it.
+
+The system matters because it combines three difficult engineering problems on one path:
+
+- **Interactive latency:** the response must feel immediate rather than merely fast on average.
+- **Selective generation:** returning no suggestion is better than interrupting the writer with weak or inappropriate text.
+- **Private context:** richer message and style signals can improve relevance, but each signal needs a clear purpose, scope, retention rule, and user control.
+
+**Core invariant: typing never waits for inference. A late, stale, unsafe, or low-value prediction is discarded and the editor continues normally.**
+
+Review [Production Transformer Architecture](/genai/production-transformer-architecture) first if model serving, decoding, and accelerator inference are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Treat the feature as a speculative side path
+
+The compose client owns the draft. The suggestion service may propose text, but it cannot block a keystroke, mutate the message, or assume that a response is still current.
+
+{% system-flow title="One suggestion request, two independent timelines" caption="The user keeps typing while the service performs bounded speculative work. The client joins the timelines only if the request still matches the active prefix." %}
+{% system-node title="Active draft" eyebrow="Authoritative state" icon="users" tone="blue" %}
+The client assigns a monotonically increasing request version to the prefix at the cursor.
+{% /system-node %}
+{% system-node title="Minimal context" eyebrow="Bounded input" icon="shield" tone="cyan" %}
+The gateway authenticates the account, applies feature consent, and includes only approved context fields.
+{% /system-node %}
+{% system-node title="Candidate generation" eyebrow="Speculative work" icon="server" tone="violet" %}
+A region-local model produces a small candidate set under a hard compute and queue deadline.
+{% /system-node %}
+{% system-node title="Release gate" eyebrow="Deterministic checks" icon="gauge" tone="amber" %}
+Code checks confidence, freshness, prefix identity, policy, language, and account scope.
+{% /system-node %}
+{% system-node title="Ghost text or nothing" eyebrow="Client decision" icon="check" tone="green" %}
+The matching candidate is drawn as optional text. Every other outcome leaves the editor unchanged.
+{% /system-node %}
+{% /system-flow %}
+
+### Three identifiers prevent response races
+
+- **Compose session ID:** binds work to one open editor rather than only an account.
+- **Draft version:** changes when the prefix, cursor, recipient set, or relevant context changes.
+- **Request ID:** correlates one attempt across the client, gateway, inference service, and telemetry.
+
+The client accepts a response only when all three still match. Cancellation saves capacity when possible; version checking preserves correctness even when cancellation arrives too late.
+{% /section-card %}
+
+{% section-card %}
+## Start from the observed product constraint
+
+The 2019 [Gmail Smart Compose paper](https://research.google/pubs/gmail-smart-compose-real-time-assisted-writing/) reports a p90 end-to-end latency requirement below **60 ms**. It describes a streaming RPC design in which new keystrokes produce new requests, prefix encoding and beam-search work generate candidates, and host logic handles application work around accelerator inference.
+
+Those details document the published system at that time; they are not a claim that Gmail's current private implementation is unchanged. The durable lesson is to budget the complete interactive path and make abstention cheap.
+
+{% metric-strip %}
+{% metric value="60 ms" label="Published p90 target" tone="cyan" /%}
+{% metric value="1 draft" label="Client is authoritative" tone="blue" /%}
+{% metric value="0 blocks" label="Typing waits for nothing" tone="green" /%}
+{% metric value="Many" label="Valid reasons to abstain" tone="amber" /%}
+{% /metric-strip %}
+
+### Budget more than model inference
+
+End-to-end latency includes:
+
+1. client debounce, serialization, and request correlation;
+2. network round trip to the selected serving region;
+3. authentication, consent, language, and context preparation;
+4. queue or dynamic-batch wait;
+5. prefix encoding and candidate decoding;
+6. ranking, policy, and response serialization;
+7. the final client freshness check and render.
+
+Optimizing only step 5 can leave the product slow because network distance, long context, or batching already consumed the deadline.
+{% /section-card %}
+
+{% interactive-block id="genai/gmail-smart-compose-architecture-latency-budget-lab" dataFile="/api/content/genai/gmail-smart-compose-architecture/data/latency-budget-model.json" /%}
+
+{% section-card %}
+## Estimate demand from eligible typing events
+
+Do not multiply total users by every keystroke. Define when the client is eligible to request a suggestion, then measure the resulting event rate.
+
+### Worked design envelope
+
+Assume a hypothetical busy period with 12 million active compose sessions. If client-side eligibility and debouncing produce an average of two requests per minute per active session:
+
+`12,000,000 sessions x 2 eligible requests / 60 seconds = 400,000 requests/second`
+
+This is an interview design assumption, not a published Gmail traffic figure. Test the architecture at normal load, regional skew, and burst load rather than hiding all three inside one global average.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Eligibility rate" eyebrow="Client" icon="route" tone="blue" %}
+Measure requests after debounce, minimum-prefix, feature consent, and local suppression. Raw keydown events are not server demand.
+{% /concept-card %}
+{% concept-card title="Concurrent work" eyebrow="Serving" icon="workflow" tone="violet" %}
+Estimate request rate multiplied by service time, then add headroom for skew, retries, deployments, and failed capacity.
+{% /concept-card %}
+{% concept-card title="Accelerator batches" eyebrow="Efficiency" icon="server" tone="amber" %}
+Longer batch windows improve device utilization but spend freshness budget and increase tail latency.
+{% /concept-card %}
+{% concept-card title="Suggestion coverage" eyebrow="Product" icon="gauge" tone="green" %}
+Only a fraction of eligible requests should render. Suppression is expected, not an availability failure.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Capacity questions to answer explicitly
+
+- How many regions can serve a user's data and language under policy?
+- What percentage of traffic can one region absorb after another region is removed?
+- How much queue time is allowed before the batch is dispatched partially filled?
+- Which model tier and context size remain viable during degraded capacity?
+- Can the client reduce request frequency before the service starts rejecting work?
+{% /section-card %}
+
+{% section-card %}
+## Separate the synchronous path from the learning loop
+
+Keep only the work required to produce and release the current suggestion on the keystroke path. Training, aggregate analytics, evaluation, and model rollout use separate asynchronous systems.
+
+{% process-flow %}
+{% process-step number="1" title="Qualify locally" label="Client" %}
+Check feature consent, minimum prefix, composition state, recent request timing, and whether the user is still actively editing.
+{% /process-step %}
+{% process-step number="2" title="Build bounded context" label="Gateway" %}
+Authenticate the account, choose the region, detect the cursor language, and produce a versioned context envelope.
+{% /process-step %}
+{% process-step number="3" title="Generate candidates" label="Serving" %}
+Use deadline-aware batching, a resident model, bounded decoding, and overload admission control.
+{% /process-step %}
+{% process-step number="4" title="Gate and correlate" label="Release" %}
+Rank candidates, apply deterministic policy, return request metadata, and let the client reject stale work.
+{% /process-step %}
+{% /process-flow %}
+
+### Asynchronous systems own slower feedback
+
+- **Training pipeline:** prepares governed examples, trains candidate models, and records dataset and model lineage.
+- **Offline evaluation:** measures exact continuation quality, safety, fairness, language slices, and regression sets.
+- **Online experimentation:** assigns stable cohorts, limits blast radius, and compares product outcomes against a control.
+- **Aggregate telemetry:** joins request, render, accept, dismiss, and suppression events without placing analytics on the typing path.
+- **Rollout control:** promotes, pauses, or rolls back model and policy versions independently.
+
+{% code-block file="/api/content/genai/gmail-smart-compose-architecture/code/deadline-aware-suggestion.py" language="python" title="Deadline and draft-version checks" /%}
+{% /section-card %}
+
+{% section-card %}
+## Context is a product contract, not a data grab
+
+The model needs enough context to continue the current thought, but more context increases compute, privacy exposure, and the chance of learning the wrong signal. Define a typed context envelope and justify every field.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Current prefix" eyebrow="Required" icon="braces" tone="blue" %}
+Use the bounded text before the cursor plus structural markers. Preserve the exact version that candidate generation observed.
+{% /concept-card %}
+{% concept-card title="Conversation context" eyebrow="Conditional" icon="network" tone="violet" %}
+Include a bounded subject or thread representation only when consent, region, retention, and quality evidence justify it.
+{% /concept-card %}
+{% concept-card title="Account style" eyebrow="Scoped" icon="shield" tone="amber" %}
+Keep personalized style signals account-scoped, disableable, and separate from other users and tenants. Always retain a generic fallback.
+{% /concept-card %}
+{% /concept-grid %}
+
+The published paper compares multiple ways to combine the current body, subject, and previous message context, and documents a personalized model blended with a global model. Current [Gmail Smart Compose help](https://support.google.com/mail/answer/9116836) also distinguishes generic suggestions from account-level personalized suggestions that users can turn off.
+
+### A context envelope needs explicit fields
+
+- value and token limit;
+- purpose in generation or gating;
+- account and tenant scope;
+- residency and transport rules;
+- retention duration and log treatment;
+- consent or administrator control;
+- fallback behavior when the field is unavailable.
+
+{% callout variant="info" %}
+Do not cache raw cross-user prefixes or complete messages as reusable candidate results. Cache model state or non-sensitive artifacts only when the key, scope, lifetime, and invalidation rule prevent one account's context from reaching another.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Confidence is not permission to render
+
+Candidate confidence estimates model preference under its own scoring method. It does not prove that the candidate is current, policy-safe, in the right language, or appropriate for this account.
+
+### Apply independent release gates
+
+- **Confidence:** does the candidate clear the product threshold for this language and length?
+- **Freshness:** did it arrive within the client-visible deadline?
+- **Prefix identity:** does the response match the current draft version and cursor state?
+- **Safety:** does deterministic policy allow the content and context class?
+- **Language:** does the continuation follow the language and script at the cursor?
+- **Repetition and quality:** does it avoid duplicated text, malformed spacing, or a trivial echo of the prefix?
+
+A candidate renders only when every required gate passes. The system should record the first suppression reason and enough secondary reasons for aggregate diagnosis without logging unnecessary message content.
+{% /section-card %}
+
+{% interactive-block id="genai/gmail-smart-compose-architecture-suggestion-release-lab" dataFile="/api/content/genai/gmail-smart-compose-architecture/data/suggestion-release-scenarios.json" /%}
+
+{% section-card %}
+## Design overload as graceful abstention
+
+The suggestion service is not the email editor. When dependencies fail, the user must still be able to write and send a message normally.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Queue pressure" eyebrow="Shed work" icon="gauge" tone="amber" %}
+Cap queue age, dispatch partial batches, reject work that cannot meet its deadline, and ask clients to reduce request frequency.
+{% /concept-card %}
+{% concept-card title="Region loss" eyebrow="Contain" icon="network" tone="rose" %}
+Route only to policy-compatible regions. If failover would miss the deadline or violate residency, disable suggestions for that cohort.
+{% /concept-card %}
+{% concept-card title="Model failure" eyebrow="Fallback" icon="server" tone="violet" %}
+Use a smaller compatible model or generic candidate path only when its release policy and evaluation contract are already approved.
+{% /concept-card %}
+{% concept-card title="Policy outage" eyebrow="Fail closed" icon="shield" tone="blue" %}
+Suppress candidates when a required safety or account-scope decision cannot be made. Do not bypass the gate to protect coverage.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Protect the dependency graph
+
+- Enforce a request deadline at the first server hop and propagate the remaining budget.
+- Bound per-account, per-region, and global concurrency before accelerator queues grow without limit.
+- Cancel superseded requests, but still make every response safe to discard by version.
+- Warm model replicas before adding them to load balancing.
+- Keep deployment, model, tokenizer, feature, and policy versions in every trace.
+- Make the client back off during overload instead of retrying each abandoned prefix.
+{% /section-card %}
+
+{% section-card %}
+## Measure usefulness, interruption, and safety together
+
+No single metric proves that the feature is healthy. Latency and availability can improve while suggestions become less useful or more intrusive.
+
+{% metric-strip %}
+{% metric value="p50/p90/p99" label="Complete-path latency" tone="cyan" /%}
+{% metric value="Coverage" label="Eligible requests rendered" tone="blue" /%}
+{% metric value="Accepted chars" label="Useful work saved" tone="green" /%}
+{% metric value="Suppressions" label="Reason and policy slice" tone="amber" /%}
+{% /metric-strip %}
+
+### Service and capacity signals
+
+- request rate after client eligibility, split by region and language;
+- queue age, batch fullness, inference time, and deadline-abandon rate;
+- model load failures, fallback rate, saturation, and regional headroom;
+- stale-response discard rate at the client.
+
+### Product and quality signals
+
+- render, accept, partial-accept, dismiss, and overwrite behavior;
+- accepted characters or keystrokes saved, not only suggestion click-through;
+- repetition, formatting breakage, language mismatch, and factual-risk evaluation;
+- offline continuation quality correlated with controlled online outcomes.
+
+### Privacy, safety, and fairness signals
+
+- policy suppression by reason without raw sensitive content in labels;
+- consent state, personalization mode, region, language, and accessibility slices;
+- cross-account isolation tests and canary records that must never appear elsewhere;
+- deletion, retention, access-audit, and model-lineage evidence.
+
+{% code-block file="/api/content/genai/gmail-smart-compose-architecture/code/suggestion-release-policy.py" language="python" title="Independent candidate release gates" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production readiness checklist
+
+- The editor remains fully usable when every suggestion dependency is unavailable.
+- The client versions drafts and discards stale, mismatched, and late responses.
+- The end-to-end deadline covers network, context, queue, inference, gates, and render.
+- Context fields have explicit purpose, scope, token limit, residency, retention, and consent rules.
+- Personalized state is account-scoped, user-controlled, and backed by a generic fallback.
+- Required safety and privacy policy failures suppress rather than bypass suggestions.
+- Capacity tests include regional skew, burst load, lost replicas, and a complete region outage.
+- Evaluation is sliced by language, locale, device, network condition, and relevant user cohorts.
+- Model, tokenizer, context schema, ranking policy, and release policy can roll back independently.
+- Logs preserve correlation and decision evidence without retaining unnecessary message content.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [Gmail Smart Compose: Real-Time Assisted Writing](https://research.google/pubs/gmail-smart-compose-real-time-assisted-writing/) documents the published 2019 model, latency target, production serving design, personalization, multilingual work, evaluation, fairness, and privacy constraints.
+- [Use Smart Compose in Gmail](https://support.google.com/mail/answer/9116836) documents current user-facing behavior, acceptance, personalization controls, and the warning that suggestions are not guaranteed to be factually correct.
+- [Smart features and controls for Google Workspace](https://support.google.com/mail/answer/15604322) documents current consent and personalization controls for Workspace content and smart features.
+
+Treat product-help details as current documentation that may change. The architecture patterns in this lesson are design recommendations unless explicitly attributed to the published Smart Compose paper.
+{% /section-card %}
+
+{% quiz title="Smart Compose Architecture Check" questionsFile="/api/content/genai/gmail-smart-compose-architecture/quiz/smart-compose-architecture-review.json" lessonSlug="gmail-smart-compose-architecture" /%}

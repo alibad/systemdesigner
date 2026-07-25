@@ -1,0 +1,487 @@
+---
+registryId: riak
+---
+
+{% section-card tone="intro" %}
+## What is Riak?
+
+**Riak KV is a distributed key/value database designed to keep individual
+object reads and writes available while machines or network paths fail.** A
+client addresses one opaque value by bucket type, bucket, and key. Any cluster
+node can coordinate the request, find the object's replica positions, and wait
+for the acknowledgement policy chosen by the application.
+
+Riak matters when a workload needs:
+
+- direct key lookups with no permanent primary node;
+- replication across several failure domains;
+- online node addition, removal, and replacement;
+- explicit control over read and write acknowledgement thresholds;
+- application-owned conflict handling for concurrent updates.
+
+The availability is not free. A successful response can leave temporary
+fallback copies, divergent replicas, or sibling values that must later
+converge.
+
+{% callout variant="info" %}
+### Core invariant
+
+**Riak stays available by separating request success from final convergence.**
+`N`, `R`, and `W` decide when a client may receive success. Causal context,
+sibling resolution, hinted handoff, read repair, and active anti-entropy decide
+whether every replica eventually stores an acceptable descendant.
+{% /callout %}
+
+This lesson focuses on Riak's Dynamo-style, eventually consistent key/value
+behavior. Riak KV 2.x also supports strongly consistent bucket types, which use
+a different coordination and availability path.
+
+Read [database fundamentals](/fundamentals/database-fundamentals) first if
+keys, replication, or consistency models are new. Review
+[consistent hashing](/technology/consistent-hashing) for the broader placement
+technique that Riak applies with a ring and virtual nodes.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Model one access path as one key
+
+Riak's data model is a hierarchy that attaches policy to a direct lookup:
+
+{% concept-grid columns="4" %}
+{% concept-card title="Bucket type" eyebrow="Shared policy" icon="settings" tone="blue" %}
+A bucket type groups properties such as `n_val`, quorum defaults, sibling
+behavior, and data type. Create and activate it deliberately before using it.
+{% /concept-card %}
+{% concept-card title="Bucket" eyebrow="Namespace" icon="folder" tone="cyan" %}
+A bucket groups keys inside a type. It is closer to a named keyspace than a
+relational table with columns, joins, and constraints.
+{% /concept-card %}
+{% concept-card title="Key" eyebrow="Direct address" icon="key" tone="violet" %}
+The key identifies one object inside the bucket. The bucket-and-key location is
+hashed to find its ring partition and preference list.
+{% /concept-card %}
+{% concept-card title="Object" eyebrow="Value plus context" icon="database" tone="amber" %}
+Riak stores opaque bytes with metadata and causal context. The application
+owns the value schema, validation, and merge meaning.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow %}
+{% system-node title="Business request" eyebrow="Known identifier" icon="send" tone="blue" %}
+The caller already knows a stable identifier such as `cart-1842` or
+`customer-73`.
+{% /system-node %}
+{% system-node title="Bucket policy" eyebrow="Type and bucket" icon="settings" tone="cyan" %}
+The selected bucket type supplies replication, quorum, and sibling behavior.
+{% /system-node %}
+{% system-node title="One key lookup" eyebrow="Primary access path" icon="key" tone="violet" %}
+Riak hashes the location and routes directly to the object's replica
+preference list.
+{% /system-node %}
+{% system-node title="Opaque value" eyebrow="Application schema" icon="file" tone="amber" %}
+The client decodes, validates, and, when necessary, resolves the returned
+object versions.
+{% /system-node %}
+{% /system-flow %}
+
+### Strong production fits
+
+- **Shopping cart:** `carts/active/cart-1842`, with an add-only item merge and
+  an explicit rule for single-choice fields such as delivery method.
+- **Customer preferences:** `profiles/customers/customer-73`, with a schema
+  version and named authority for billing-owned versus user-owned fields.
+- **Device snapshot:** `devices/latest/device-991`, with a monotonic device
+  sequence that rejects older telemetry retries.
+
+### Reconsider the model
+
+- The main request needs joins, range scans, or ad hoc predicates instead of a
+  known key.
+- Several keys must change atomically as one business transaction.
+- One unavoidable hot key receives more traffic than a single replica set can
+  absorb.
+- Values are large blobs whose transfer, repair, and sibling amplification
+  dominate request latency.
+
+The [Riak key/value modeling guide](https://docs.riak.com/riak/kv/latest/developing/key-value-modeling/)
+describes the type, bucket, and key address. Treat secondary indexes and search
+as separate access paths with their own failure and coverage behavior, not as a
+replacement for a primary-key model.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Follow a key from hash to vnode
+
+Riak maps the hash space onto a fixed ring of partitions. A **virtual node
+(vnode)** is the process responsible for one partition. Each physical Riak
+node runs many vnodes, so ownership and transfer work can be spread more evenly
+than a one-token-per-machine design.
+
+{% process-flow %}
+{% process-step number="1" title="Hash the location" label="Bucket and key" %}
+Hash the object's bucket-and-key location into the ring's ordered key space.
+The same location maps to the same initial partition while the ring definition
+is unchanged.
+{% /process-step %}
+{% process-step number="2" title="Find the partition" label="Ring metadata" %}
+Locate the partition that owns the hash position. Its vnode performs storage
+work for that part of the key space.
+{% /process-step %}
+{% process-step number="3" title="Build the preference list" label="Replica placement" %}
+Walk later ring positions to identify the primary replica positions required
+by the bucket's `N` value.
+{% /process-step %}
+{% process-step number="4" title="Coordinate the request" label="Any Riak node" %}
+The contacted node routes work to the preference list and waits for the
+selected read or write acknowledgement condition.
+{% /process-step %}
+{% /process-flow %}
+
+Vnodes provide movement units as well as storage units:
+
+- Adding or removing a physical node reassigns a subset of partitions rather
+  than every key.
+- A node owns several separated partitions, which spreads its keys and lets
+  several peers participate in transfers.
+- A vnode is not an extra durable machine. Several vnodes can share one host,
+  disk, power supply, and network failure.
+- The ring size is chosen when the cluster is created. It affects balancing
+  granularity, process overhead, and future cluster growth.
+
+The [vnode guide](https://docs.riak.com/riak/kv/latest/learn/concepts/vnodes/)
+and [cluster guide](https://docs.riak.com/riak/kv/latest/learn/concepts/clusters/)
+describe the ring, partition ownership, and request coordination.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate replica count from acknowledgement count
+
+Riak exposes three central values for eventually consistent objects:
+
+{% concept-grid columns="3" %}
+{% concept-card title="N" eyebrow="Replica positions" icon="copy" tone="blue" %}
+`N`, stored as `n_val`, is the number of primary ring positions responsible
+for each object. Raising it increases copy, storage, network, repair, and
+handoff work.
+{% /concept-card %}
+{% concept-card title="R" eyebrow="Read responses" icon="search" tone="cyan" %}
+`R` is the number of replica responses required before a read can succeed.
+Lower values can answer through more failures but can provide less overlap with
+the latest acknowledged write.
+{% /concept-card %}
+{% concept-card title="W" eyebrow="Write acknowledgements" icon="check" tone="violet" %}
+`W` is the number of receipt acknowledgements required before a write can
+succeed. `DW` can separately require durable-storage acknowledgements.
+{% /concept-card %}
+{% /concept-grid %}
+
+For completed operations against the same logical `N` replica set:
+
+`R + W > N`
+
+means every successful read response set and successful write
+acknowledgement set must overlap at least one position. With `N=3`, `R=2`,
+and `W=2`, the two sets overlap.
+
+That arithmetic is useful but narrower than "strong consistency":
+
+- concurrent writers can create siblings because neither version causally
+  descends from the other;
+- sloppy quorum can involve fallback vnodes outside the original primary
+  positions;
+- a timeout is ambiguous because some replicas may already hold the write;
+- overlap does not create multi-key transactions or serialize all clients.
+
+`PR` and `PW` add primary-vnode requirements. They can reduce the chance that a
+request succeeds entirely through fallback positions, but they also reduce
+availability when primary vnodes are unreachable.
+
+### How sloppy quorum creates recovery work
+
+{% process-flow %}
+{% process-step number="1" title="Try primary positions" label="Preference list" %}
+The coordinator contacts the first `N` vnode positions responsible for the
+object.
+{% /process-step %}
+{% process-step number="2" title="Walk to fallbacks" label="Sloppy quorum" %}
+If a primary is unavailable and policy permits, later reachable vnodes can
+count toward `R` or `W`.
+{% /process-step %}
+{% process-step number="3" title="Return by threshold" label="Client contract" %}
+The coordinator returns when the selected acknowledgement conditions are met,
+even though a temporary placement may remain.
+{% /process-step %}
+{% process-step number="4" title="Hand data back" label="Hinted handoff" %}
+When the primary owner returns, the fallback vnode transfers its temporary
+responsibility and operators verify that handoff drains.
+{% /process-step %}
+{% /process-flow %}
+
+The [replication guide](https://docs.riak.com/riak/kv/latest/developing/usage/replication/)
+documents `N`, `R`, `W`, `PR`, `PW`, and sloppy quorum. Choose them per
+request contract instead of treating one cluster-wide tuple as universally
+correct.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 1: tune quorum behavior under replica loss
+
+Use the workbench to change two independent properties:
+
+1. Set how many copies exist and how many responses a read or write requires.
+2. Decide whether fallback vnodes may satisfy the request when primaries are
+   unavailable.
+
+Watch client availability, response-set overlap, temporary placements, and
+handoff debt change together. The model counts reachable vnode positions; it
+does not estimate real network latency or prove that every physical failure
+domain is independent.
+
+{% interactive-block id="technology/riak-performance" dataFile="/api/content/technology/riak/data/quorum-envelope.json" /%}
+
+Use the result to write a concrete contract:
+
+- which completed write must be visible to which later read;
+- how many primary failures the operation must tolerate;
+- whether temporary fallback placement is acceptable;
+- what makes a timeout safe to retry;
+- which handoff evidence closes the incident.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Preserve concurrency with causal context
+
+Causal context records whether one object version descends from another.
+Riak versions use vector clocks or, with suitable bucket types, dotted version
+vectors. The metadata helps Riak distinguish a causal update from concurrent
+branches; it does not decide which business value is correct.
+
+{% process-flow %}
+{% process-step number="1" title="Read value and context" label="Observe" %}
+The client fetches the object, validates every returned sibling, and retains
+the opaque causal context from the response.
+{% /process-step %}
+{% process-step number="2" title="Apply one domain change" label="Modify" %}
+Change the value according to its schema and authority rules. Avoid rebuilding
+the object from an old cache without the observed context.
+{% /process-step %}
+{% process-step number="3" title="Write with context" label="Descend" %}
+Send the updated value with the returned context so Riak can recognize it as a
+causal descendant of what the client observed.
+{% /process-step %}
+{% process-step number="4" title="Resolve siblings explicitly" label="Converge" %}
+If the read returns concurrent siblings, merge or choose by a documented
+business rule, then write the result with the combined response context.
+{% /process-step %}
+{% /process-flow %}
+
+With sibling creation enabled, two clients that write from the same base
+context can produce two stored values for one key. This is safer than silently
+discarding a concurrent change, but the application must bound and observe the
+resolution path.
+
+Avoid using wall-clock "last write wins" as a universal resolver:
+
+- clocks can be skewed;
+- arrival order does not encode user intent;
+- selecting one whole object can drop independent fields from another sibling;
+- a lossy choice can converge perfectly and still be wrong.
+
+The [causal context guide](https://docs.riak.com/riak/kv/latest/learn/concepts/causal-context/)
+explains vector clocks, dotted version vectors, and siblings. Riak's data types
+can provide built-in convergent semantics for supported structures, but an
+ordinary opaque object still needs an application rule.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: resolve meaning before repairing replicas
+
+Choose an update history, a resolution policy, and a convergence action.
+Observe three separate outcomes:
+
+- whether the policy preserves valid concurrent changes;
+- whether it can produce one defensible value;
+- whether the application writes a causal descendant or leaves siblings for
+  the next reader.
+
+{% interactive-block id="technology/riak-convergence-lab" dataFile="/api/content/technology/riak/data/conflict-convergence-model.json" /%}
+
+The key distinction is operational: **repair synchronizes stored versions;
+application resolution decides their meaning.** Waiting for read repair or
+active anti-entropy cannot turn two valid delivery choices into one correct
+customer decision.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement a causal read-modify-write boundary
+
+A production client should keep quorum policy, causal context, schema
+validation, and conflict handling visible in code.
+
+The HTTP example reads `X-Riak-Vclock`, stops if context is missing, and sends
+that context with the update. Its `R`, `PR`, `W`, `PW`, and `DW` values are an
+example request contract, not a universal recommendation.
+
+{% code-block file="/api/content/technology/riak/code/causal-http-update.sh" language="bash" title="Causal HTTP update with explicit quorum policy" /%}
+
+The merge example uses an add-only union for cart item identifiers but refuses
+to invent a winner when concurrent siblings disagree on delivery method. The
+caller must store the resolved value with the response context after the
+function returns.
+
+{% code-block file="/api/content/technology/riak/code/merge-cart-siblings.py" language="python" title="Domain merge for cart siblings" /%}
+
+Production code also needs:
+
+- bounded deadlines and idempotent retry identifiers;
+- schema and size validation for every sibling;
+- a maximum sibling count that triggers isolation or review;
+- metrics for resolution rate, failures, lost-change prevention, and write-back;
+- a dead-letter or operator workflow for conflicts without an automatic rule.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Use three different convergence mechanisms
+
+Replica recovery is not one generic "repair" operation:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Hinted handoff" eyebrow="Temporary ownership" icon="repeat" tone="amber" %}
+A fallback vnode temporarily accepts responsibility for an unavailable primary
+position, then transfers that responsibility back when the owner returns. It
+addresses short-lived placement failure.
+{% /concept-card %}
+{% concept-card title="Read repair" eyebrow="Access-triggered repair" icon="search" tone="cyan" %}
+A read can discover missing or divergent stored versions among replicas and
+repair what it observes. Cold keys may not be read often enough for this path
+to cover the full data set.
+{% /concept-card %}
+{% concept-card title="Active anti-entropy" eyebrow="Background comparison" icon="shield" tone="blue" %}
+AAE exchanges Merkle-tree hashes between replicas, narrows differences to
+specific objects, and repairs missing or divergent copies without waiting for
+application traffic.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Recover a failed node as a measured workflow
+
+{% process-flow %}
+{% process-step number="1" title="Identify the actual boundary" label="Detect" %}
+Confirm which physical nodes, vnodes, primary positions, disks, and network
+paths are unavailable. A process heartbeat alone is not enough.
+{% /process-step %}
+{% process-step number="2" title="Protect foreground traffic" label="Contain" %}
+Use the documented quorum and retry contract. Reduce nonessential load so
+handoff, repair, and client requests do not exhaust the same disk or network.
+{% /process-step %}
+{% process-step number="3" title="Return or replace ownership" label="Recover" %}
+Bring the original node back only when its storage is trustworthy, or follow
+the planned cluster-change and partition-repair procedure for a replacement.
+{% /process-step %}
+{% process-step number="4" title="Prove convergence" label="Verify" %}
+Check ring ownership, pending handoff, AAE status, sibling trends, read/write
+latency, errors, and disk headroom before closing the incident.
+{% /process-step %}
+{% /process-flow %}
+
+The [handoff reference](https://docs.riak.com/riak/kv/latest/using/reference/handoff/)
+separates temporary hinted handoff from permanent ownership transfer. The
+[AAE guide](https://docs.riak.com/riak/kv/latest/learn/concepts/active-anti-entropy/)
+explains background hash-tree exchange.
+
+Do not treat replication as backup. A valid but destructive application write
+can replicate and repair successfully. Keep tested backups or an independent
+recovery source for corruption, operator error, and application mistakes.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Plan capacity for copies and maintenance
+
+Capacity starts with live logical values, not request rate alone. For a simple
+baseline:
+
+`logical bytes = live keys x average stored object bytes`
+
+`replica bytes = logical bytes x N`
+
+An example with 200 million live objects averaging 2 KB and `N=3` gives:
+
+{% metric-strip %}
+{% metric value="400 GB" label="Logical values" detail="200M x 2 KB in decimal units" tone="blue" /%}
+{% metric value="1.2 TB" label="Replica baseline" detail="400 GB x N=3" tone="violet" /%}
+{% metric value="1.72 TB+" label="At a 70% ceiling" detail="Example policy before other overhead" tone="amber" /%}
+{% /metric-strip %}
+
+The 70% ceiling is an example operator policy, not a Riak constant. Add measured
+allowances for metadata, indexes, storage-engine amplification, AAE trees,
+temporary fallback copies, handoff, ownership transfer, backup staging, and
+growth during the recovery window.
+
+### Capacity questions
+
+- **Object shape**
+  - What are p50, p95, p99, and maximum serialized object sizes?
+  - How many siblings can one hot key accumulate before reads become unsafe?
+- **Distribution**
+  - Are vnode ownership, bytes, operations, and latency balanced by physical
+    node?
+  - Does one key or bucket dominate a replica set even when the ring is balanced?
+- **Maintenance**
+  - Can handoff and AAE run beside peak traffic without exhausting disk I/O,
+    network, or vnode mailboxes?
+  - How long does adding, replacing, or restoring a node take at current data
+    volume?
+- **Failure headroom**
+  - Can the remaining nodes accept foreground traffic plus temporary copies
+    after the largest planned failure?
+  - At what disk or latency threshold must operators stop topology changes?
+
+Monitor request latency percentiles and errors with ring ownership, handoff
+queues, AAE exchanges, object size, sibling counts, backend disk behavior,
+memory, open files, and network saturation. A healthy average can hide one
+overloaded vnode or replica set.
+{% /section-card %}
+
+{% section-card %}
+## Choose Riak for the trade-off it actually makes
+
+{% concept-grid columns="2" %}
+{% concept-card title="Riak is a strong fit" eyebrow="Available key/value service" icon="check" tone="green" %}
+- Requests address one bounded object by a known key.
+- Serving through replica and network failure is more important than immediate
+  global agreement.
+- The domain has deterministic merge rules or can use supported convergent
+  data types.
+- The team can operate ring changes, handoff, AAE, backup, and restore.
+{% /concept-card %}
+{% concept-card title="Use another primary store" eyebrow="Different contract" icon="x" tone="rose" %}
+- The workload depends on relational joins, broad scans, or ad hoc analytics.
+- Multi-key serializable transactions are the central correctness boundary.
+- Concurrent values cannot be reconciled or safely escalated.
+- The team cannot reserve and monitor capacity for continuous convergence work.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Production review
+
+Before launch, require evidence for each area:
+
+1. **Data contract:** every object has a schema version, size bound, ownership
+   rule, and primary-key access path.
+2. **Replica contract:** `N`, `R`, `W`, `PR`, `PW`, and `DW` are documented per
+   important operation, including timeout and retry semantics.
+3. **Conflict contract:** concurrent and stale-context writes have automated
+   tests, bounded sibling behavior, write-back, and escalation.
+4. **Topology contract:** physical nodes, vnodes, racks, power, network, and
+   storage volumes represent the failure domains assumed by the quorum model.
+5. **Recovery contract:** handoff, AAE, node replacement, backup restore, and
+   force-removal decisions are rehearsed with production-shaped data.
+6. **Capacity contract:** foreground load and the largest maintenance flow fit
+   together under the agreed disk, network, latency, and time ceilings.
+
+Riak is not "set and forget." Its masterless request path removes a permanent
+leader, but it makes placement, causal resolution, background repair, and
+failure headroom first-class application and operations responsibilities.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/riak/quiz/riak-production-decisions.json" lessonSlug="riak" title="Riak Production Decisions" /%}

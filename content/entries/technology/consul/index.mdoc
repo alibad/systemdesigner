@@ -1,0 +1,497 @@
+---
+registryId: consul
+---
+
+{% section-card tone="intro" %}
+## What is Consul?
+
+**HashiCorp Consul is a distributed control plane for finding, securing, and
+connecting network services.** A workload registers a stable service identity instead
+of publishing an address directly to every caller. Consul records each instance in a
+service catalog, tracks health observations, and exposes discovery through DNS, HTTP,
+and service-mesh proxies.
+
+This matters because service locations change during deploys, scaling, and failures.
+Without discovery, every caller needs a separate mechanism for finding current
+addresses. Consul centralizes that control-plane state while application traffic still
+flows directly or through a data-plane proxy.
+
+{% callout variant="info" %}
+The core invariant is **catalog state is evidence, not traffic**. Registration says an
+instance exists, a health check says what was last observed, a discovery interface
+returns a view with a specific freshness contract, and the caller or proxy still owns
+connection, timeout, retry, and load-balancing behavior.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Service catalog" eyebrow="Identity and location" icon="database" tone="blue" %}
+Stores nodes, service instances, tags, metadata, and health observations. Catalog
+writes are authoritative control-plane changes replicated by the server cluster.
+{% /concept-card %}
+{% concept-card title="Discovery interface" eyebrow="Read contract" icon="search" tone="cyan" %}
+DNS and HTTP expose catalog results with different consistency, caching, filtering, and
+failure behavior. The interface is part of the application contract.
+{% /concept-card %}
+{% concept-card title="Service mesh" eyebrow="Traffic policy" icon="shield" tone="violet" %}
+Connect adds workload identity, mutual TLS, proxy-mediated routing, and intentions that
+authorize new service connections or requests.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Place agents and servers according to their responsibilities
+
+Every Consul process runs as an **agent**, but agents have two modes:
+
+- A **client agent** runs near workloads. It registers local services, executes local
+  health checks, answers local DNS or HTTP requests, participates in LAN gossip, and
+  forwards authoritative operations to servers.
+- A **server agent** does the same agent work and also stores replicated state,
+  participates in Raft consensus, handles catalog and ACL writes, and can lead the
+  datacenter's control plane.
+- A **service workload** is not a Consul voter. It talks to the local agent or a
+  configured proxy and remains responsible for its business protocol.
+- A **sidecar or gateway proxy** is part of the data plane when service mesh is used.
+  It receives configuration and identity from Consul but forwards application traffic
+  without sending each request through the Consul servers.
+
+{% system-flow title="One service registration and discovery path" caption="The local agent is the workload-facing boundary; server agents own authoritative datacenter state." %}
+{% system-node title="Payments workload" eyebrow="Service process" icon="activity" tone="cyan" %}
+Registers `payments`, owns a readiness endpoint, and sends application traffic to
+selected downstream addresses.
+{% /system-node %}
+{% system-node title="Local client agent" eyebrow="Node boundary" icon="server" tone="blue" %}
+Runs the check, serves local DNS and HTTP, caches supported reads, and forwards catalog
+changes to a server.
+{% /system-node %}
+{% system-node title="Consul server cluster" eyebrow="Control plane" icon="database" tone="violet" %}
+Commits registration, health, ACL, and configuration state through a Raft quorum.
+{% /system-node %}
+{% system-node title="Healthy service instance" eyebrow="Data plane" icon="network" tone="green" %}
+Receives application traffic directly or through a service-mesh proxy after discovery
+and authorization succeed.
+{% /system-node %}
+{% /system-flow %}
+
+Run three or five dedicated server agents for a normal production datacenter. Three
+voters tolerate one failure; five tolerate two. More voting servers increase quorum
+size and write coordination, so they are not a generic read-scaling mechanism. Client
+agents can scale independently because they are outside the Raft peer set.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat registration and discovery as separate contracts
+
+Service registration creates a catalog record with a stable name and a changing
+instance location. A normal discovery cycle is:
+
+{% process-flow %}
+{% process-step number="1" title="Register locally" label="Desired presence" %}
+The workload, scheduler, or deployment system registers one service instance with the
+client agent on its node.
+{% /process-step %}
+{% process-step number="2" title="Observe health" label="Measured state" %}
+The local agent runs active checks or receives a TTL update, then reports the resulting
+status to the server cluster.
+{% /process-step %}
+{% process-step number="3" title="Query by identity" label="Read contract" %}
+A caller asks for `payments`, optionally restricts results to passing checks, and
+chooses DNS, HTTP consistency, or agent caching semantics.
+{% /process-step %}
+{% process-step number="4" title="Connect with bounds" label="Application policy" %}
+The caller or proxy selects an address and applies connection deadlines, retry limits,
+load balancing, and circuit breaking.
+{% /process-step %}
+{% /process-flow %}
+
+The catalog is not a load balancer by itself. DNS returns records for the resolver or
+client to choose from. The HTTP API returns structured instances, leaving selection to
+application code. Service mesh proxies can apply routing configuration in the data
+plane, but Consul does not make a failed business operation idempotent.
+
+{% interactive-block id="technology/consul-discovery-contract-lab" dataFile="/api/content/technology/consul/data/discovery-health-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design health checks around what traffic needs
+
+A Consul check reports `passing`, `warning`, or `critical`. That status is useful only
+when its probe matches the traffic contract:
+
+{% concept-grid columns="3" %}
+{% concept-card title="HTTP or gRPC readiness" eyebrow="Application-aware" icon="activity" tone="green" %}
+Best when the endpoint can answer whether this instance should receive new work. Keep
+the probe bounded and avoid making every optional dependency a hard requirement.
+{% /concept-card %}
+{% concept-card title="TCP reachability" eyebrow="Transport-only" icon="network" tone="blue" %}
+Confirms that a socket can be opened. It is cheap and useful for simple services, but a
+hung process may still accept connections.
+{% /concept-card %}
+{% concept-card title="TTL heartbeat" eyebrow="Push-based" icon="timer" tone="amber" %}
+Requires a trusted process to renew status before a deadline. Missing renewals become
+critical, so the updater and its failure boundary must be explicit.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Bound transitions and cleanup
+
+- `interval` and `timeout` bound each active probe. The user-visible removal delay also
+  includes network scheduling and `failures_before_critical`.
+- `success_before_passing` prevents one transient success from immediately returning a
+  recovering instance to traffic.
+- `deregister_critical_service_after` deletes a service that stays critical for the
+  configured duration. Use it as orphan cleanup, not as the first failure detector.
+- An **alias check** mirrors another node or service's health. It couples failure
+  domains deliberately and can hide the actual dependency if overused.
+- Script checks execute local commands and expand the agent's attack surface. Prefer
+  protocol checks when they can express the same contract.
+
+{% code-block file="/api/content/technology/consul/code/payments-service.json" language="json" title="Service registration with bounded readiness transitions" /%}
+
+{% callout variant="warn" %}
+Health status is not instantaneous truth. During a network partition, agent restart, or
+server outage, a caller may see a last-observed state. Pair passing-only lookup with
+short connection deadlines and bounded retries so stale discovery does not become a
+retry storm.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Keep gossip membership and Raft consensus separate
+
+Consul uses two distributed protocols because they answer different questions:
+
+{% concept-grid columns="2" %}
+{% concept-card title="Serf gossip" eyebrow="Who appears reachable?" icon="network" tone="cyan" %}
+The LAN pool shares agent membership and distributes failure suspicion within one
+datacenter. The WAN pool connects server agents across federated datacenters. Gossip is
+fast and decentralized, but membership alone cannot commit catalog state.
+{% /concept-card %}
+{% concept-card title="Raft consensus" eyebrow="What state is committed?" icon="database" tone="violet" %}
+Server agents in one datacenter elect a leader and replicate an ordered log. Catalog,
+ACL, configuration, and other writes require a majority of the configured voters.
+{% /concept-card %}
+{% /concept-grid %}
+
+A node can appear `alive` in `consul members` while the server peer set has no quorum.
+Conversely, a transient gossip suspicion can occur while Raft remains healthy. Use
+`consul operator raft list-peers` and a controlled read/write probe to establish
+consensus state instead of inferring it from membership.
+
+{% metric-strip %}
+{% metric label="3 servers" value="2 quorum" detail="Tolerates 1 failed voter" tone="blue" /%}
+{% metric label="5 servers" value="3 quorum" detail="Tolerates 2 failed voters" tone="violet" /%}
+{% metric label="Client agents" value="0 votes" detail="Scale outside the Raft peer set" tone="cyan" /%}
+{% metric label="Catalog writes" value="Need leader" detail="And a majority acknowledgement" tone="amber" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/consul-quorum-federation-lab" dataFile="/api/content/technology/consul/data/quorum-federation-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose freshness, latency, and outage behavior explicitly
+
+Consul's read modes trade freshness for scalability and availability:
+
+### DNS
+
+Consul DNS uses stale reads by default. Any reachable server can answer from its
+replicated state, which spreads load and can preserve lookup during leader loss. The
+trade-off is an unbounded stale window. Set non-zero DNS TTLs only after measuring how
+the application's resolver caches records; many language and operating-system
+resolvers add their own behavior.
+
+### HTTP API
+
+- **Default** reads use the leader-lease path and fit most API lookups.
+- **Consistent** reads require the leader to verify authority with a quorum. They add a
+  round trip and should be reserved for decisions that cannot tolerate the default
+  read window.
+- **Stale** reads allow a follower to answer. They scale reads and can work without a
+  leader, but the caller must accept potentially old state.
+- **Blocking queries** use an index or hash to wait for change. A returned request does
+  not prove the value changed, and clients must handle timeouts and an index that moves
+  backward after recovery.
+
+### Agent cache
+
+Supported HTTP endpoints can use `?cached`. Simple caches honor `Cache-Control`
+freshness directives; `stale-if-error` can deliberately return old data when servers
+are unreachable. Background-refresh caches consolidate many local blocking queries
+into one server watch. Inspect `X-Cache`, `Age`, `X-Consul-KnownLeader`,
+`X-Consul-LastContact`, and `X-Consul-Effective-Consistency` where available.
+
+{% callout variant="warn" %}
+A tight `dns_config.max_stale` or `discovery_max_stale` can worsen an overloaded
+cluster. Followers that exceed the bound forward cheap stale reads to the leader,
+increasing the pressure that caused the lag. Prefer explicit client freshness policy,
+agent caching, caller rate limits, and server telemetry.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Secure the control plane before onboarding services
+
+A production deployment needs encrypted gossip, authenticated RPC and HTTP, and ACLs
+with a deny-by-default policy. Treat these as separate boundaries:
+
+- **Gossip encryption** protects LAN and WAN gossip messages with a shared key. Rotate
+  the key through the keyring workflow; do not confuse it with TLS identity.
+- **TLS** authenticates and encrypts agent RPC and HTTP connections. Verify server
+  hostnames and maintain a certificate rotation runbook.
+- **ACLs** authorize control-plane operations. Bootstrap once to obtain a
+  global-management token, secure that token, and create scoped identities for agents,
+  services, DNS readers, automation, and operators.
+- **Agent tokens** authorize an agent's internal node operations. Service registration
+  and application queries should use identities scoped to their own resources.
+- **The anonymous token** applies to requests without a token. Keep it minimal when
+  unauthenticated DNS must be supported.
+
+{% code-block file="/api/content/technology/consul/code/server-agent.json" language="json" title="Server baseline with explicit encryption and ACL boundaries" /%}
+
+The example makes trust boundaries visible but is not a drop-in deployment. Replace
+discovery, certificates, and secrets through the platform's secret and identity
+systems. Validate with `consul validate`, stage certificate rotation, and never commit
+the bootstrap or agent token into a configuration repository.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Add service mesh only for a clear traffic-policy need
+
+Consul service mesh, historically called **Connect**, adds an identity-aware data
+plane. A sidecar or gateway proxy receives certificates, upstream discovery, and
+traffic configuration from the local Consul boundary.
+
+{% system-flow title="Service-mesh authorization path" caption="Consul distributes identity and policy; proxies enforce new traffic in the data plane." %}
+{% system-node title="Payments proxy" eyebrow="Source identity" icon="shield" tone="cyan" %}
+Presents a short-lived workload certificate and verifies the destination's trust
+domain before establishing mutual TLS.
+{% /system-node %}
+{% system-node title="Consul control plane" eyebrow="Configuration" icon="database" tone="violet" %}
+Publishes CA roots, leaf identity, discovery results, and matching intentions through
+local agent caches and blocking updates.
+{% /system-node %}
+{% system-node title="Ledger proxy" eyebrow="Destination policy" icon="lock" tone="blue" %}
+Authenticates the source certificate and enforces the destination's L4 connection or
+L7 request intention.
+{% /system-node %}
+{% system-node title="Ledger workload" eyebrow="Application" icon="activity" tone="green" %}
+Receives only proxy-authorized traffic, while still enforcing business authorization
+and request validity.
+{% /system-node %}
+{% /system-flow %}
+
+{% code-block file="/api/content/technology/consul/code/ledger-intention.json" language="json" title="Allow payments to open new traffic to ledger" /%}
+
+Intentions authorize by source and destination service identity. L4 intentions govern
+new TCP connections; L7 intentions can govern new HTTP requests when the protocol is
+configured appropriately. Changing an intention does not terminate an existing
+connection. Cached intention data can continue authorizing during a control-plane
+disconnect, so revocation expectations must include connection lifetime and cache
+behavior.
+
+Service mesh adds proxies, certificate authority operations, xDS configuration,
+gateways, and another debugging surface. Use it when identity-aware encryption,
+authorization, or traffic policy justifies that cost. Ordinary DNS or HTTP discovery
+is often enough for a trusted network with simpler requirements.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Federate datacenters without building one global quorum
+
+Each Consul datacenter has its own server cluster and its own Raft quorum. WAN
+federation connects server agents so Consul can support cross-datacenter queries,
+service-mesh communication, and replicated global control-plane data.
+
+### Traditional WAN federation
+
+Server agents communicate directly across the WAN. This requires routing and firewall
+exposure between servers and makes the server network boundary part of the
+cross-datacenter design.
+
+### Federation through mesh gateways
+
+Mesh gateways provide an explicit path between datacenters and reduce the need for
+every remote service or server address to be directly routable. They do not merge two
+Raft clusters, provide application data replication, or automatically move user
+traffic during an outage.
+
+Design these behaviors explicitly:
+
+- which datacenter is primary for ACL, intention, and service-mesh CA replication;
+- which tokens authorize replication into secondary datacenters;
+- whether remote service lookup is permitted and how local-first behavior works;
+- what happens when the WAN path is partitioned but both local datacenters retain
+  quorum;
+- how application data and user traffic fail over independently of Consul; and
+- how the primary datacenter is recovered without overwriting healthy secondary state.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Recover quorum with evidence, not membership guesses
+
+Loss of quorum blocks new Raft log entries and peer-set changes. The safe response
+depends on whether a majority still exists:
+
+{% process-flow %}
+{% process-step number="1" title="Establish the peer set" label="Observe" %}
+Capture `raft list-peers`, current leader state, server logs, network reachability,
+Autopilot state, disk health, and the last successful snapshot.
+{% /process-step %}
+{% process-step number="2" title="Contain the cause" label="Stabilize" %}
+Stop automated restarts and scale actions that churn voters. Remove request overload,
+repair network reachability, or replace failed infrastructure one node at a time.
+{% /process-step %}
+{% process-step number="3" title="Choose recovery" label="Decide" %}
+If quorum remains, use the normal peer lifecycle. If it is lost, follow HashiCorp's
+documented outage-recovery procedure or restore a tested snapshot into a controlled
+replacement cluster.
+{% /process-step %}
+{% process-step number="4" title="Prove service" label="Validate" %}
+Verify leader stability, applied-index progress, catalog writes, ACL resolution,
+discovery freshness, health transitions, federation, and application connectivity.
+{% /process-step %}
+{% /process-flow %}
+
+Take automated Consul snapshots, copy them outside the failure domain, protect them as
+sensitive artifacts because they include ACL state, and rehearse restoration. A
+snapshot is not useful until its recovery point, encryption, access policy, and restore
+time have been measured.
+
+{% callout variant="warn" %}
+Do not enable bootstrap mode on multiple servers to force progress. Do not delete Raft
+data or add random replacement peers while the surviving peer set is unknown. Those
+actions can create divergent state and destroy the best recovery source.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate from control-plane and user-path evidence
+
+Monitor Consul as a dependency with separate service-level indicators:
+
+{% metric-strip %}
+{% metric label="Consensus" value="Leader + quorum" detail="Election stability, peer health, applied index" tone="violet" /%}
+{% metric label="Discovery" value="Fresh + bounded" detail="DNS/API latency, errors, cache age, result count" tone="cyan" /%}
+{% metric label="Health" value="Truthful state" detail="Transition delay, flapping, critical age, check load" tone="green" /%}
+{% metric label="Mesh" value="Authorized path" detail="xDS freshness, certificate expiry, denied traffic" tone="amber" /%}
+{% /metric-strip %}
+
+Correlate at least these signals:
+
+- **Servers:** CPU, memory, disk latency and capacity, RPC rate limits, request latency,
+  Raft commit/apply latency, leader last-contact, elections, snapshots, and Autopilot
+  health.
+- **Agents:** LAN membership churn, failed joins, check execution duration, DNS and
+  HTTP latency, cache age, blocked-query count, and server reconnects.
+- **Catalog:** registration churn, flapping checks, orphaned critical services,
+  unexpected tags or metadata, and passing-instance count by service and zone.
+- **Security:** ACL denials, token expiry or rotation failure, gossip key state, TLS
+  expiry, CA rotation, intention changes, and privileged operator actions.
+- **User path:** service connection errors, stale-address failures, retry rate, proxy
+  configuration age, remote-datacenter latency, and time to remove or restore an
+  endpoint.
+
+{% code-block file="/api/content/technology/consul/code/inspect-control-plane.sh" language="bash" title="Inspect membership, consensus, and one cached discovery path" /%}
+
+Run synthetic probes for DNS, default HTTP reads, stale or cached reads, a controlled
+catalog write, and service-mesh connectivity. A single green `/v1/status/leader` probe
+does not prove the discovery and data paths are usable.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Roll out Consul with an explicit rollback path
+
+{% process-flow %}
+{% process-step number="1" title="Secure servers first" label="Foundation" %}
+Deploy three or five dedicated servers, TLS, gossip encryption, ACL bootstrap,
+snapshots, telemetry, and tested quorum recovery before registering production
+services.
+{% /process-step %}
+{% process-step number="2" title="Canary local discovery" label="Compatibility" %}
+Register one non-critical service, compare Consul DNS and HTTP answers with the current
+registry, and measure resolver caching, health transitions, and stale-address behavior.
+{% /process-step %}
+{% process-step number="3" title="Move callers in slices" label="Containment" %}
+Route a bounded caller cohort to Consul, hold on discovery errors or retry growth, and
+keep the former endpoint current until peak traffic and a server failure pass.
+{% /process-step %}
+{% process-step number="4" title="Add mesh selectively" label="Policy" %}
+Onboard one service edge, establish deny-by-default intentions, verify certificate and
+proxy failure behavior, then expand by dependency rather than by namespace.
+{% /process-step %}
+{% /process-flow %}
+
+Rollback must restore a known service address or prior resolver path, drain or refresh
+client caches, and prevent connection retries from amplifying the event. During a
+registry migration, dual registration creates two sources of truth; define which
+system is authoritative and continuously compare membership and health before cutting
+over.
+{% /section-card %}
+
+{% section-card %}
+## Know when Consul is the wrong trade-off
+
+Consul is a strong fit when heterogeneous runtimes need one service catalog, VM-centric
+DNS discovery, cross-platform service identity, or service-mesh policy beyond one
+orchestrator. It may be unnecessary when:
+
+- one Kubernetes cluster's native services and network policy already satisfy the
+  discovery and authorization contract;
+- a cloud load balancer or managed registry provides the required health, routing, and
+  regional behavior with less operational ownership;
+- the team cannot staff quorum recovery, ACL and certificate lifecycle, upgrades,
+  snapshots, and proxy debugging; or
+- the use case is application configuration distribution rather than service
+  networking, and a purpose-built configuration system has a clearer ownership model.
+
+The service catalog, KV store, and mesh share one operational control plane. Adding
+features increases coupling to that plane. Start with the smallest Consul capability
+that closes a real requirement and add mesh, federation, or dynamic configuration only
+after the previous boundary is observable and recoverable.
+{% /section-card %}
+
+{% section-card %}
+## Read the current primary documentation
+
+- [Consul architecture](https://developer.hashicorp.com/consul/docs/architecture)
+  distinguishes the control plane, data plane, persistence, and network coordinates.
+- [Consul agents](https://developer.hashicorp.com/consul/docs/fundamentals/agent)
+  defines client and server responsibilities and the recommended server count.
+- [Gossip](https://developer.hashicorp.com/consul/docs/concept/gossip) and
+  [consensus](https://developer.hashicorp.com/consul/docs/concept/consensus) explain
+  membership, the Raft peer set, quorum, and failure tolerance.
+- [DNS discovery](https://developer.hashicorp.com/consul/docs/discover/dns),
+  [consistency modes](https://developer.hashicorp.com/consul/api-docs/features/consistency),
+  [agent caching](https://developer.hashicorp.com/consul/api-docs/features/caching),
+  and [blocking queries](https://developer.hashicorp.com/consul/api-docs/features/blocking)
+  define the read contracts and response evidence.
+- [Health check configuration](https://developer.hashicorp.com/consul/docs/reference/service/health-check)
+  defines supported checks, thresholds, TTLs, and critical-service cleanup.
+- [ACL bootstrap](https://developer.hashicorp.com/consul/docs/secure/acl/bootstrap)
+  and [ACL tokens](https://developer.hashicorp.com/consul/docs/secure/acl/token) define
+  the initial management boundary and scoped agent or service identities.
+- [Consul service mesh](https://developer.hashicorp.com/consul/docs/connect) and
+  [service intentions](https://developer.hashicorp.com/consul/docs/connect/intentions)
+  define mTLS identity, proxy caching, and L4 or L7 authorization behavior.
+- [WAN federation](https://developer.hashicorp.com/consul/docs/east-west/wan-federation)
+  and [disaster recovery](https://developer.hashicorp.com/consul/docs/manage/disaster-recovery)
+  define multi-datacenter and snapshot-recovery boundaries.
+- [Server resource requirements](https://developer.hashicorp.com/consul/docs/install/performance)
+  explains leader-path pressure, Raft timing, stale-read scaling, and request limits.
+
+Check the exact documentation and release notes for the Consul version and deployment
+runtime you operate. Defaults, supported integrations, and Enterprise-only features
+change across releases.
+{% /section-card %}
+
+{% section-card %}
+## Test the production decisions
+
+The assessment checks agent roles, gossip versus Raft, health semantics, read
+consistency, quorum arithmetic, service-mesh authorization, ACL handling, and overload
+response.
+
+{% quiz questionsFile="/api/content/technology/consul/quiz/consul-production-design.json" lessonSlug="consul" title="Consul Production Design Quiz" /%}
+{% /section-card %}

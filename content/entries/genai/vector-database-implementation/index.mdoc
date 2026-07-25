@@ -1,0 +1,289 @@
+---
+registryId: vector-database-implementation
+---
+
+{% section-card tone="intro" %}
+## What is a vector database?
+
+A **vector database** stores records alongside numeric embeddings and retrieves records whose vectors are near a query vector. The embedding represents learned features; the database owns identity, metadata, indexing, filtering, updates, replication, and the query contract around those numbers.
+
+In plain language: an embedding model decides how items are represented, while the vector database decides how those representations become searchable production state.
+
+The core invariant is **return authorized, version-compatible evidence within a measured recall, freshness, and latency contract**. A fast nearest-neighbor response is wrong if it searches a mixed embedding space, drops relevant items, exposes another tenant's record, or serves a deleted chunk.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Recall@k" label="Recover the right neighbors" detail="Compare approximate results with exact top-k results on representative queries" tone="cyan" /%}
+{% metric value="P95/P99" label="Bound retrieval latency" detail="Measure embedding, queueing, filtering, ANN traversal, fetch, and reranking separately" tone="blue" /%}
+{% metric value="Freshness" label="Prove writes are visible" detail="Expose ingestion checkpoints instead of guessing how long indexing takes" tone="violet" /%}
+{% metric value="Isolation" label="Authorize every result" detail="Tenant and permission predicates belong inside the retrieval contract" tone="rose" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Follow one query through the complete retrieval path
+
+Vector search is one stage in a retrieval system. The request must preserve the same representation contract from query embedding through candidate scoring, then keep authorization and evidence metadata attached through reranking.
+
+{% system-flow title="A production vector-search request" caption="Approximate search creates candidates. Filters, exact evidence, and observability decide whether those candidates are safe and useful." %}
+{% system-node title="Validate the query" eyebrow="Contract" icon="shield" tone="rose" %}
+Resolve tenant, permissions, embedding version, dimensions, normalization, distance metric, top-k, and deadline.
+{% /system-node %}
+{% system-node title="Embed the query" eyebrow="Represent" icon="braces" tone="blue" %}
+Use the model and preprocessing version that produced the target index; reject vectors that do not match its schema.
+{% /system-node %}
+{% system-node title="Build candidates" eyebrow="Approximate" icon="search" tone="violet" %}
+Traverse a graph, probe inverted lists, or scan an eligible set with a bounded search-effort policy.
+{% /system-node %}
+{% system-node title="Filter and rerank" eyebrow="Decide" icon="scale" tone="amber" %}
+Enforce metadata predicates, fetch source fields, combine dense and sparse signals, and rerank a bounded set.
+{% /system-node %}
+{% system-node title="Return evidence" eyebrow="Observe" icon="check" tone="green" %}
+Return stable IDs, source versions, scores, index checkpoints, and timing spans so quality and incidents are reproducible.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep stage ownership explicit
+
+- The **embedding service** owns tokenization, preprocessing, vector dimensions, normalization, and model version.
+- The **write path** owns stable point identity, source version ordering, tombstones, retry deduplication, and the accepted-write sequence.
+- The **index** owns candidate generation and publishes which write sequence is searchable.
+- The **query service** owns authorization, deadline, search effort, fallback, reranking, and response shaping.
+- The **evaluation system** owns exact ground truth, labeled queries, slice metrics, release thresholds, and regression history.
+{% /section-card %}
+
+{% section-card %}
+## Define the vector-space contract before selecting an index
+
+Similarity scores are meaningful only when the stored vectors and query vectors share one representation contract. Record that contract in the collection or index version, not only in deployment configuration.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Cosine similarity" eyebrow="Direction" icon="compass" tone="cyan" %}
+Compares vector direction after accounting for magnitude. If vectors are normalized to unit length, cosine ranking and inner-product ranking are closely related.
+{% /concept-card %}
+{% concept-card title="Inner product" eyebrow="Direction and magnitude" icon="activity" tone="violet" %}
+Rewards alignment and vector magnitude. Use it when the embedding model was trained and evaluated for dot-product retrieval.
+{% /concept-card %}
+{% concept-card title="Euclidean distance" eyebrow="Geometric distance" icon="ruler" tone="blue" %}
+Ranks points by straight-line distance. Its scale depends directly on preprocessing and the geometry produced by the embedding model.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Version these fields as one unit
+
+- embedding model and revision;
+- preprocessing and chunking policy;
+- vector dimension and numeric type;
+- normalization rule and distance metric;
+- metadata schema and indexed filter fields;
+- source version, point ID derivation, and deletion semantics.
+
+Changing any field can require a new index. Use a shadow index and a reversible traffic shift rather than mutating the active space in place.
+{% /section-card %}
+
+{% section-card %}
+## Choose an index from the workload, not a product label
+
+An approximate nearest-neighbor (ANN) index reduces distance work by accepting a measurable chance of missing exact neighbors. The right family depends on corpus size, memory, update rate, filter selectivity, target recall, and the hardware serving path.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Exact flat search" eyebrow="Ground truth and small corpora" icon="database" tone="blue" %}
+Scores every eligible vector. It provides exact top-k references and can be practical for small collections, highly selective pre-filters, or accelerated batch evaluation.
+{% /concept-card %}
+{% concept-card title="HNSW graph" eyebrow="High-recall memory index" icon="network" tone="cyan" %}
+Traverses a multilayer proximity graph. Build connectivity affects memory and indexing cost; query-time search effort controls the recall-latency operating point.
+{% /concept-card %}
+{% concept-card title="IVF and product quantization" eyebrow="Partition and compress" icon="boxes" tone="violet" %}
+Probes selected partitions and can score compressed codes before exact reranking. Training data, probes, code size, and rerank depth shape quality.
+{% /concept-card %}
+{% concept-card title="Disk-oriented graph search" eyebrow="Larger-than-memory corpora" icon="hard-drive" tone="amber" %}
+Keeps a compact routing structure in memory and reads candidate neighborhoods from SSD. Storage layout and IO behavior become part of the latency model.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Benchmark the complete operating curve
+
+- Compare recall@k with p50, p95, and p99 latency as search effort changes.
+- Include index build time, update amplification, compaction, memory, SSD footprint, and restart recovery.
+- Test the real distribution of dimensions, norms, tenants, languages, filters, and top-k values.
+- Separate warm-cache, cold-cache, steady-ingestion, rebuild, and dependency-degraded runs.
+- Keep exact search available for evaluation samples even when the serving path uses ANN.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Tune recall, filtering, latency, and memory together
+
+A single latency number cannot select an ANN configuration. Increase search effort to recover more exact neighbors, tighten the metadata predicate to shrink the authorized corpus, and compare exact, graph, and compressed plans at the workload's release thresholds.
+
+The lab uses synthetic coefficients so every relationship is visible. Replace them with measurements from the chosen engine, hardware, corpus, and filter distribution.
+{% /section-card %}
+
+{% interactive-block id="genai/vector-database-implementation-search-quality-lab" dataFile="/api/content/genai/vector-database-implementation/data/search-quality-model.json" /%}
+
+{% section-card %}
+## Put filters inside the retrieval and security boundary
+
+Metadata is not decorative context. It carries the exact predicates that embeddings should not approximate: tenant, access policy, publication state, region, language, time, inventory, and source version.
+
+### Prefer indexed pre-filtering when predicates are selective
+
+- Create typed metadata indexes for fields used in normal query predicates.
+- Apply authorization before any record content leaves the trusted retrieval boundary.
+- Measure filter cardinality and result-fill rate by tenant and predicate combination.
+- Reject or constrain unindexed predicates that can trigger an accidental full scan.
+- Treat empty results as a valid authorization outcome, not a reason to retry without filters.
+
+### Understand why fixed post-filtering fails
+
+If a service retrieves 40 global candidates and only 5% are eligible, about two candidates survive on average. A request for top-10 cannot be repaired by reranking those two results. The query planner must filter during candidate generation, adapt search depth with a hard bound, or route to an exact search over the eligible set.
+
+Never enlarge a global candidate set so far that unauthorized metadata or content crosses the isolation boundary.
+{% /section-card %}
+
+{% section-card %}
+## Build an exact reference before tuning ANN
+
+This dependency-free example defines cosine similarity, filters the eligible corpus before ranking, and calculates recall@k between exact and approximate results. A production harness should run many labeled queries, retain per-slice results, and store the index configuration with every evaluation.
+
+{% code-block file="/api/content/genai/vector-database-implementation/code/ann-evaluation.py" language="python" title="Exact ground truth and recall@k" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat ingestion as an ordered state transition
+
+Embedding generation, metadata writes, vector upserts, and ANN maintenance rarely finish in one atomic operation. The system therefore needs stable identity, explicit ordering, and a searchable checkpoint.
+
+{% process-flow %}
+{% process-step number="1" title="Canonicalize the source" label="Identity" %}
+Derive a stable source and chunk ID. Record content hash, source version, tenant, permissions, and deletion state.
+{% /process-step %}
+{% process-step number="2" title="Create the representation" label="Embed" %}
+Run the versioned chunker and embedding model. Validate dimensions, finite values, normalization, and payload size.
+{% /process-step %}
+{% process-step number="3" title="Commit a versioned mutation" label="Order" %}
+Write an idempotency key and monotonically comparable source version. Reject stale delivery and retain tombstones for deletes.
+{% /process-step %}
+{% process-step number="4" title="Advance the serving checkpoint" label="Publish" %}
+Expose the highest mutation sequence included in search so readers and monitors can prove freshness.
+{% /process-step %}
+{% /process-flow %}
+
+### Define each mutation precisely
+
+- **Insert:** one source chunk maps to one deterministic point ID within a tenant and collection version.
+- **Update:** text, metadata, and vector advance under one source version; an older retry cannot overwrite the new state.
+- **Delete:** a versioned tombstone prevents delayed upserts from resurrecting revoked evidence.
+- **Retry:** at-least-once delivery reapplies the same logical mutation rather than creating another record.
+- **Re-embed:** a new embedding version writes to a shadow index so old and new spaces never mix.
+- **Reconcile:** a source-of-truth scan repairs missing, duplicate, stale, or unexpectedly visible records.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make read-after-write behavior an API choice
+
+An acknowledged write and a searchable write may be different states. Let the product choose whether an immediate read can observe older state, waits for a serving checkpoint, or merges a bounded transactional overlay while indexing catches up.
+
+Inject retries and indexing pressure in the lab. A healthy API makes the resulting wait, stale window, or fallback explicit rather than hiding it behind an arbitrary sleep.
+{% /section-card %}
+
+{% interactive-block id="genai/vector-database-implementation-ingestion-consistency-lab" dataFile="/api/content/genai/vector-database-implementation/data/ingestion-consistency-model.json" /%}
+
+{% section-card %}
+## Implement idempotency, ordering, and tombstones together
+
+Stable point IDs deduplicate retries, source versions reject delayed writes, and tombstones keep deletions authoritative until every consumer and index has advanced beyond them. Omitting any one of these controls leaves a different resurrection or duplication path.
+
+{% code-block file="/api/content/genai/vector-database-implementation/code/idempotent-vector-ingestion.py" language="python" title="Versioned idempotent vector mutations" /%}
+{% /section-card %}
+
+{% section-card %}
+## Estimate capacity before load testing
+
+Start with transparent first-order estimates, then replace every coefficient with measurements. For uncompressed float32 vectors:
+
+`raw vector bytes = vector count x dimensions x 4`
+
+A 10-million-vector, 768-dimension corpus contains about 28.6 GiB of raw vector values before graph edges, IDs, metadata, allocator overhead, replicas, write buffers, or filesystem caches.
+
+### Budget every resource boundary
+
+- **Memory:** raw or compressed vectors, graph links, partition centroids, metadata indexes, active segments, and runtime overhead.
+- **Storage:** primary records, replicas, write-ahead state, snapshots, shadow indexes, compaction headroom, and temporary rebuild files.
+- **Query compute:** distance operations, filter planning, fetch, reranking, serialization, and network transfer.
+- **Write compute:** embedding, validation, index maintenance, replication, compaction, and delete reclamation.
+- **Availability:** replica placement, quorum or consistency mode, recovery point, recovery time, and region-failure capacity.
+- **Cost:** provisioned memory and disk, request or compute units, data transfer, backup retention, and duplicate shadow capacity during migrations.
+
+Size for p95 and burst distributions, not only daily averages. A collection that fits at rest can still fail when a rebuild, compaction, or replica recovery temporarily duplicates index state.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate retrieval at quality and system layers
+
+{% concept-grid columns="3" %}
+{% concept-card title="Candidate quality" eyebrow="ANN behavior" icon="search" tone="cyan" %}
+Measure recall@k against exact neighbors, result-fill rate after filters, score distribution, duplicate IDs, and stability across index rebuilds.
+{% /concept-card %}
+{% concept-card title="Task quality" eyebrow="Product behavior" icon="check" tone="green" %}
+Measure labeled relevance, nDCG or MRR where appropriate, answer support, citation correctness, abstention, and failures by query slice.
+{% /concept-card %}
+{% concept-card title="System quality" eyebrow="Operating behavior" icon="activity" tone="amber" %}
+Measure queueing, p95 and p99 latency, throughput, timeout rate, checkpoint lag, update loss, replica divergence, and recovery time.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Build a representative evaluation set
+
+- Include easy lexical matches, paraphrases, ambiguous queries, rare entities, and no-answer cases.
+- Slice by tenant size, language, source type, document age, filter selectivity, and query intent.
+- Preserve adversarial authorization cases in which the semantically closest record is not permitted.
+- Evaluate fresh inserts, updates, deletes, and full re-embedding migrations.
+- Store exact neighbors and relevance judgments independently from the ANN index under test.
+- Gate releases on regression limits, not only a higher average score.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recognize production failures before users do
+
+- **Mixed embedding spaces:** a query or record uses the wrong model, dimensions, normalization, or metric. Reject mismatches and route by explicit index version.
+- **Filter starvation:** a fixed global candidate set produces too few authorized results. Monitor fill rate and plan selective predicates inside search.
+- **Recall drift after data growth:** an index setting that passed on one distribution misses the target after corpus composition changes. Re-run exact evaluation continuously.
+- **Freshness hidden by availability:** the query endpoint returns `200` while its serving checkpoint is far behind. Alert on accepted-to-searchable lag.
+- **Retry duplication:** request-generated IDs create multiple points for one source chunk. Derive stable IDs and make mutations idempotent.
+- **Delete resurrection:** a delayed upsert arrives after an unversioned delete. Compare source versions and retain tombstones through the retry horizon.
+- **Rebuild without headroom:** a shadow index, compaction, or recovery exhausts memory or disk. Reserve migration capacity before starting.
+- **Backup without restore evidence:** snapshots exist but omit metadata indexes, collection configuration, or a consistent checkpoint. Test point-in-time restore into an isolated environment.
+{% /section-card %}
+
+{% section-card %}
+## Operate the index as a versioned service
+
+### Before release
+
+- Freeze the embedding, preprocessing, vector schema, metadata schema, index family, build settings, and query defaults.
+- Run exact-vs-ANN evaluation at representative filter selectivity, concurrency, update rate, and top-k values.
+- Load test healthy, burst, indexing-backlog, replica-loss, cold-cache, and rebuild scenarios.
+- Verify tenant isolation, stale-write rejection, delete propagation, snapshot restore, and rollback to the previous index.
+
+### During production
+
+- Track query count, stage latency, timeout rate, recall samples, result-fill rate, and reranker changes by index version.
+- Track accepted writes, failed writes, retry deliveries, backlog, searchable checkpoint, tombstone age, and reconciliation drift.
+- Track memory, disk, cache behavior, graph or partition growth, compaction, replication, and recovery progress.
+- Canary new indexes with a reversible traffic split and compare identical queries against the current serving version.
+- Keep product fallbacks explicit: exact search over a small eligible set, lexical retrieval, previous index, delayed response, or a clear unavailable result.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources behind the design
+
+- [Efficient and robust approximate nearest neighbor search using HNSW](https://arxiv.org/abs/1603.09320) introduces the hierarchical proximity-graph structure and its search behavior.
+- [The Faiss library](https://arxiv.org/abs/2401.08281) describes vector-search index families, compression, transformation, and the broader recall, speed, memory, training, and update trade-off space.
+- [DiskANN](https://www.microsoft.com/en-us/research/publication/diskann-fast-accurate-billion-point-nearest-neighbor-search-on-a-single-node/) demonstrates a graph-based ANN design that uses SSD storage for billion-point search under the paper's measured hardware and datasets.
+- The maintained [pgvector documentation](https://github.com/pgvector/pgvector) documents exact search, HNSW, IVFFlat, filtering, and iterative scans in PostgreSQL.
+- The maintained [Qdrant indexing documentation](https://qdrant.tech/documentation/manage-data/indexing/) explains why vector and payload indexes solve different parts of filtered retrieval and why index-build order can affect filter-aware graph behavior.
+- The maintained [Pinecone data-freshness documentation](https://docs.pinecone.io/guides/index-data/check-data-freshness) provides one concrete example of exposing write sequence information so clients can reason about searchable freshness.
+
+Research results and vendor defaults describe specific implementations and test conditions. Benchmark the selected engine on the actual corpus, filters, hardware, update rate, and quality target before making a production claim.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/vector-database-implementation/quiz/vector-database-implementation-review.json" lessonSlug="vector-database-implementation" /%}

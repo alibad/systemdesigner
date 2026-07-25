@@ -1,0 +1,293 @@
+---
+registryId: quantum-as-a-service-architecture
+---
+
+{% section-card tone="intro" %}
+## What is Quantum-as-a-Service architecture?
+
+**Quantum-as-a-Service (QaaS) architecture lets an application submit quantum circuits to simulators or shared quantum processors through a managed cloud interface.** The provider operates scarce hardware, compilers, calibration, queues, and result delivery. The customer still owns the problem definition, classical baseline, experiment contract, orchestration, evidence, and decision.
+
+In plain language, a QaaS workflow is mostly classical:
+
+1. Classical code prepares data, chooses a circuit, and defines what would count as a useful result.
+2. A managed control plane validates, compiles, queues, and schedules a quantum job.
+3. A simulator or quantum processing unit (QPU) executes the circuit many times.
+4. Classical code verifies the execution evidence, aggregates measurements, and decides whether to iterate, stop, or fall back.
+
+{% callout variant="warn" %}
+### Core invariant
+
+Use quantum execution only for a bounded subproblem with a measurable reason to try it. A circuit result is not a business result, and access to more qubits does not prove speedup, lower cost, or better solution quality.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Start with a service contract, not a qubit count
+
+A QaaS architecture is useful when it makes an uncertain experiment controlled and repeatable. Before selecting a provider, name four contracts.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Problem contract" eyebrow="Why this workload?" icon="target" tone="blue" %}
+Define the objective, input size, constraints, acceptable approximation, and strongest classical baseline. A vague desire to "use quantum" is not a workload.
+{% /concept-card %}
+{% concept-card title="Circuit contract" eyebrow="What will run?" icon="workflow" tone="violet" %}
+Version the circuit, parameters, observables, compiler settings, shot count, mitigation plan, and backend constraints. Logical qubits and circuit depth both matter.
+{% /concept-card %}
+{% concept-card title="Execution contract" eyebrow="What may the service do?" icon="server" tone="cyan" %}
+Set queue deadline, budget, retry rules, idempotency key, cancellation behavior, backend policy, and required calibration window.
+{% /concept-card %}
+{% concept-card title="Evidence contract" eyebrow="What can be trusted?" icon="check" tone="green" %}
+Require completed shots, result digest, circuit hash, compiler version, backend identity, calibration evidence, and uncertainty appropriate to the decision.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Three honest reasons to use the service
+
+- **Learn and validate a workflow.** A simulator can test circuit construction, orchestration, and result handling before scarce hardware is involved.
+- **Characterize a specific processor.** Hardware runs can measure how one compiled circuit behaves under a named backend and calibration context.
+- **Benchmark a bounded candidate algorithm.** A QPU may be compared with a strong classical method on the same objective, data, quality target, and end-to-end budget.
+
+### Three reasons to stay classical
+
+- the input-loading or output-reading cost dominates the proposed quantum step
+- a classical algorithm already meets the quality, latency, and cost objective
+- the circuit needs more logical fidelity, depth, or scale than the available service can support credibly
+
+Do not treat a provider's processor size, marketing benchmark, or laboratory result as evidence for an unrelated workload.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate the customer plane from the provider plane
+
+The boundary is an architectural tool. It identifies who owns each decision and which evidence must cross the API.
+
+{% system-flow title="A hybrid QaaS request path" caption="Classical orchestration surrounds the managed quantum execution. Each boundary returns evidence, not just a success flag." %}
+{% system-node title="Frame and benchmark" eyebrow="Customer control plane" icon="target" tone="blue" %}
+Prepare the input, run a strong classical baseline, define the objective and stopping rule, and create an immutable experiment ID.
+{% /system-node %}
+{% system-node title="Compile and admit" eyebrow="Provider control plane" icon="workflow" tone="violet" %}
+Validate the circuit, map it to a backend topology, estimate resources, enforce quotas, bind an idempotency key, and either queue or reject.
+{% /system-node %}
+{% system-node title="Execute and measure" eyebrow="Managed execution plane" icon="activity" tone="cyan" %}
+Run the compiled circuit for the requested shots against a named backend and calibration context. Partial completion and interruption are normal terminal states.
+{% /system-node %}
+{% system-node title="Verify and decide" eyebrow="Customer evidence plane" icon="check" tone="green" %}
+Check provenance and shot accounting, compute uncertainty, compare with the baseline, and record why the result was accepted, rejected, or rerun.
+{% /system-node %}
+{% /system-flow %}
+
+### The API needs durable identities
+
+- **Experiment ID:** one logical scientific or optimization attempt
+- **Circuit hash:** the exact logical circuit and parameter payload
+- **Idempotency key:** the stable submission identity used across retries
+- **Provider job ID:** the physical execution record returned by the service
+- **Execution manifest:** backend, compiler, calibration, shot, timing, and result-digest evidence
+
+One experiment may contain many provider tasks, but a timeout must not silently create a second logical experiment.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 1: budget the experiment before submitting
+
+One circuit drawing hides the real multiplier. A variational or mitigation-heavy experiment submits many circuits across optimizer iterations, noise-scale variants, and retries; every task then executes many measurement shots.
+
+{% interactive-block id="fundamentals/quantum-as-a-service-architecture-experiment-budget-calculator" dataFile="/api/content/fundamentals/quantum-as-a-service-architecture/data/experiment-budget-model.json" /%}
+
+### Read the model from left to right
+
+1. **Circuit variants multiply work.** If one iteration evaluates 24 circuits for 40 iterations, the base plan already contains 960 tasks.
+2. **Mitigation is not free.** Three noise-scale variants turn 960 tasks into 2,880 before retries.
+3. **Shots trade cost for sampling precision.** For a bounded plus-or-minus-one observable, a rough worst-case 95% sampling margin scales as `1.96 / sqrt(shots)`.
+4. **Parallelism is provider-bounded.** Requesting 32 concurrent tasks does not help when the reservation permits four.
+5. **Queue time belongs in the deadline.** Fast gate execution can still produce a slow user-visible experiment.
+
+{% callout variant="info" %}
+### Model boundary
+
+The calculator uses explicit teaching fixtures for price, queue time, task overhead, and shot duration. Real execution time depends on compiled circuit shape, reset and readout, batching, provider scheduling, calibration, and hardware. Replace every fixture with measured values before making a capacity or purchasing decision.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Select a backend with constraints, not a universal score
+
+No single number captures fitness for every circuit. Filter on hard requirements first, then benchmark the surviving choices.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Simulator" eyebrow="Develop and debug" icon="cpu" tone="blue" %}
+Use an ideal or noisy simulator for unit tests, small-instance validation, orchestration tests, and controlled noise studies. Exponential state-space growth limits exact simulation, and simulator success is not hardware evidence.
+{% /concept-card %}
+{% concept-card title="Fast local gates" eyebrow="Shallow repeated circuits" icon="activity" tone="violet" %}
+A platform with short gate and reset cycles may suit large shot counts, but routing overhead, connectivity, crosstalk, and queue policy can erase that advantage after compilation.
+{% /concept-card %}
+{% concept-card title="High connectivity" eyebrow="Reduce routing expansion" icon="network" tone="cyan" %}
+Richer connectivity can reduce inserted swap operations for some circuits. The trade-off may be slower operations, different noise, lower capacity, or a longer queue.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Hard filters
+
+- enough physical qubits for the compiled circuit, including routing and ancilla requirements
+- supported gates, dynamic-circuit features, measurement behavior, and parameter-binding model
+- circuit depth and two-qubit operation count compatible with measured error and coherence behavior
+- region, data handling, identity, audit, and contractual requirements
+- quota, queue, cancellation, budget, and result-retention behavior compatible with the experiment
+
+### Benchmark after compilation
+
+- compare compiled depth, two-qubit gate count, and routing expansion
+- run calibration-aware pilot circuits and record when the calibration was observed
+- measure queue delay, execution time, partial-result behavior, and retry outcomes
+- compare solution quality and total cost with the classical baseline
+
+A backend can be the best hardware fit and still be the wrong service fit.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat measurement as an estimate with a stopping rule
+
+Quantum measurements produce samples. A result must state what was estimated and how uncertainty affects the decision.
+
+{% metric-strip %}
+{% metric value="N shots" label="Samples per circuit" detail="Each shot produces one measured outcome from the prepared circuit." tone="blue" /%}
+{% metric value="1 / sqrt(N)" label="Sampling scale" detail="Uncertainty shrinks slowly; 4x as many shots gives roughly 2x tighter sampling error." tone="violet" /%}
+{% metric value="Requested = completed" label="Strict shot contract" detail="A partial histogram must not masquerade as the planned experiment." tone="green" /%}
+{% metric value="Baseline delta" label="Decision quantity" detail="Compare end-to-end quality, time, and cost rather than reporting a circuit score alone." tone="amber" /%}
+{% /metric-strip %}
+
+### A useful stopping rule names all four limits
+
+- stop when the confidence interval is narrow enough for the decision
+- stop when improvement over the classical baseline is too small to matter
+- stop when the cost, task, or wall-clock budget is exhausted
+- stop when calibration drift or failure changes the experiment being measured
+
+Adding shots cannot repair a biased circuit, stale calibration, a weak baseline, or the wrong objective.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: inject a control-plane failure
+
+Quantum jobs are long-lived external operations. Network timeouts, at-least-once callbacks, queue delays, partial results, and corrupt payloads can break the surrounding classical workflow even when the QPU behaves as designed.
+
+{% interactive-block id="fundamentals/quantum-as-a-service-architecture-job-lifecycle-lab" dataFile="/api/content/fundamentals/quantum-as-a-service-architecture/data/job-lifecycle-model.json" /%}
+
+Try these decisions:
+
+- Select **Acceptance response lost** with **Blind resubmit**. One logical experiment becomes two physical jobs and two bills.
+- Keep the timeout but choose **Idempotent submit and resume**. The workflow reconciles the accepted provider job instead of guessing.
+- Select **Duplicate completion callback** and compare the recovery policies. Callback deduplication protects downstream state even though delivery remains at least once.
+- Select **Calibration window expired** under a comparative benchmark. A complete histogram is still outside the evidence contract.
+- Select **Partial result returned** and switch between exploratory and benchmark contracts. The same bytes can be retained for exploration yet rejected as benchmark evidence.
+- Select **Result checksum mismatch**. More provenance is useful only when the verifier actually checks it.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement one logical experiment across retries
+
+The submission boundary should reserve a stable experiment identity before calling the provider. On a retry, reconcile by idempotency key or recorded provider job ID; do not create a fresh request simply because the response was lost.
+
+{% code-block file="/api/content/fundamentals/quantum-as-a-service-architecture/code/submit-idempotent-experiment.ts" language="typescript" title="Submit once, reconcile, and require complete execution evidence" /%}
+
+The result boundary should fail closed when the circuit, backend, shot total, calibration age, or digest differs from the contract. It can retain rejected evidence for diagnosis without promoting it to an accepted result.
+
+{% code-block file="/api/content/fundamentals/quantum-as-a-service-architecture/code/verify-execution-evidence.py" language="python" title="Verify shot accounting, calibration age, identity, and integrity" /%}
+
+### Keep provider-specific behavior behind an adapter
+
+- map provider states into a small internal lifecycle: queued, running, succeeded, failed, or cancelled
+- document whether submission idempotency is native, emulated, or unavailable
+- map cancellation to a concrete outcome; "cancel requested" is not the same as "execution stopped"
+- preserve raw provider evidence for audit while exposing a stable internal manifest
+- version compiler options and backend-selection policy with the experiment
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design failure behavior before the first hardware run
+
+{% process-flow %}
+{% process-step number="1" title="Admit" label="Before spend" %}
+Validate circuit size, backend compatibility, quota, estimated work, deadline, and evidence requirements. Reject impossible contracts early.
+{% /process-step %}
+{% process-step number="2" title="Reconcile" label="During uncertainty" %}
+After a timeout, discover whether the provider accepted the stable request. Resume the known job or hold for review; never infer absence from a lost response.
+{% /process-step %}
+{% process-step number="3" title="Verify" label="Before interpretation" %}
+Check terminal state, completed shots, calibration age, circuit and compiler identity, backend, and result digest before statistical analysis.
+{% /process-step %}
+{% process-step number="4" title="Compare" label="Before a claim" %}
+Compare the accepted result with the classical baseline on solution quality, total wall time, total cost, and reproducibility. Record negative results too.
+{% /process-step %}
+{% /process-flow %}
+
+### Expected failure modes
+
+- **Queue deadline exceeded:** cancel if supported, reconcile the final provider state, and do not assume the job stopped immediately.
+- **Backend becomes unavailable:** route only if the experiment permits a different backend; otherwise preserve comparability and fail.
+- **Compilation changes the circuit materially:** record the compiled artifact and reject if depth, routing, or gate constraints exceed the contract.
+- **Partial shots:** label or reject according to the evidence contract; never report the requested count as completed.
+- **Calibration changes while queued:** recompile, rerun, or mark the result non-comparable according to the experiment plan.
+- **Provider callback repeats:** deduplicate the terminal transition and every billable or user-visible side effect.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate QaaS as an evidence-producing platform
+
+### Reliability and cost signals
+
+- queue delay by provider, backend, priority, and reservation class
+- admitted, rejected, cancelled, failed, partial, and completed jobs
+- provider tasks and shots per logical experiment
+- duplicate-submit reconciliation and duplicate-callback suppression
+- estimated versus actual task count, shots, cost, and wall time
+- deadline misses separated into queue, compile, execution, and customer-processing time
+
+### Scientific and engineering evidence
+
+- source data and preprocessing version
+- logical and compiled circuit hashes
+- parameters, observables, shot allocation, and random seeds where applicable
+- compiler version, options, target backend, and calibration identifier
+- raw counts, result digest, uncertainty method, mitigation steps, and stopping reason
+- classical baseline implementation, hardware, runtime, quality, and cost
+
+### Security and tenancy controls
+
+- least-privilege service identities and short-lived credentials
+- tenant-scoped experiment, job, result, and object-store authorization
+- encryption and retention rules for source data, circuit metadata, and results
+- signed callbacks or authenticated polling with replay protection
+- quotas and budget limits enforced before provider submission
+
+Observability should correlate one logical experiment across every provider task without exposing credentials or sensitive input data in logs.
+{% /section-card %}
+
+{% section-card %}
+## Make claims at the level the evidence supports
+
+{% concept-grid columns="3" %}
+{% concept-card title="Workflow works" eyebrow="Engineering claim" icon="check" tone="blue" %}
+The system can submit, reconcile, verify, and reproduce an experiment. This validates the platform path, not a quantum advantage.
+{% /concept-card %}
+{% concept-card title="Hardware behavior measured" eyebrow="Experimental claim" icon="activity" tone="violet" %}
+A named compiled circuit produced measured outcomes on a named backend under recorded conditions. The claim is bounded to that experiment.
+{% /concept-card %}
+{% concept-card title="Application value demonstrated" eyebrow="Decision claim" icon="target" tone="green" %}
+Against a strong baseline and complete end-to-end accounting, the quantum-assisted workflow improved a decision-relevant objective at useful scale.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A practical readiness ladder
+
+1. Reproduce the circuit on a local or managed simulator.
+2. Validate idempotency, evidence, quotas, cancellation, and partial-result handling.
+3. Run a small hardware pilot with a frozen experiment contract.
+4. Compare against the strongest practical classical baseline.
+5. Repeat across calibrations and problem instances.
+6. Scale only after the advantage claim, operational envelope, and cost model survive review.
+
+The most valuable early outcome may be a well-supported decision not to use quantum execution for this workload.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/quantum-as-a-service-architecture/quiz/quantum-as-a-service-architecture.json" lessonSlug="quantum-as-a-service-architecture" title="Quantum-as-a-Service Architecture Decisions" /%}

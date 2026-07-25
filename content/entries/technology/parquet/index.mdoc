@@ -1,0 +1,264 @@
+---
+registryId: parquet
+---
+
+{% section-card tone="intro" %}
+## What is Apache Parquet?
+
+**Apache Parquet is an open, column-oriented file format for storing typed tabular
+data.** Within each horizontal batch of rows, it keeps the values for each column in a
+separate contiguous chunk. An analytical reader can therefore fetch `revenue` and
+`event_day` without also reading a large `payload` column.
+
+Parquet matters because analytical systems usually scan many rows but only some
+columns. Its core invariant is: **a reader uses file metadata to locate the requested
+column chunks, then decodes only the data it cannot rule out.** The SQL engine, object
+layout, sort order, statistics, and reader implementation determine how much can
+actually be skipped.
+
+Parquet is a file format, not a database or table manager. It defines how one file
+stores schema, pages, encodings, compression, and metadata. Transactions, snapshots,
+partition discovery, and safe multi-file schema changes belong to an engine, catalog,
+or table format around those files.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Scan and aggregate" icon="search" tone="green" %}
+Use Parquet for data-lake tables, warehouse staging, logs, feature data, and other
+batch-oriented datasets read by analytical engines.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Mutate one row" icon="warning" tone="rose" %}
+Do not treat a Parquet file as an update-heavy OLTP table. Changing one record normally
+means writing new file data and publishing that change through another metadata layer.
+{% /concept-card %}
+{% concept-card title="Compatibility rule" eyebrow="Test the fleet" icon="shield" tone="blue" %}
+The specification evolves, but implementations support different encodings, logical
+types, indexes, and encryption features. Test every production reader and writer.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read the footer before the data
+
+A Parquet file begins and ends with the four-byte magic value `PAR1`. The file metadata
+is written near the end, followed by its four-byte length and the closing magic value.
+A reader can fetch that tail first, parse the schema and byte offsets, and then request
+only relevant column chunks.
+
+{% system-flow title="Parquet physical layout" caption="Data is written before the file metadata so a writer can stream the file in one pass. A reader starts its plan at the tail, then follows offsets to selected chunks." %}
+{% system-node title="Opening PAR1" eyebrow="Identify" icon="storage" tone="blue" %}
+Marks the beginning of a standard Parquet file.
+{% /system-node %}
+{% system-node title="Row groups" eyebrow="Store" icon="layers" tone="violet" %}
+Each horizontal row partition contains one contiguous column chunk for every leaf
+column. Each chunk contains one or more pages.
+{% /system-node %}
+{% system-node title="File metadata" eyebrow="Plan" icon="braces" tone="cyan" %}
+Records the schema, row groups, column-chunk locations, encodings, compression codecs,
+statistics, and other available metadata.
+{% /system-node %}
+{% system-node title="Length + PAR1" eyebrow="Locate" icon="search" tone="green" %}
+The final eight bytes let a reader validate the file and locate the metadata block.
+{% /system-node %}
+{% /system-flow %}
+
+The hierarchy is precise:
+
+- **File:** contains one or more row groups plus file metadata.
+- **Row group:** a horizontal partition of rows and a common unit of parallel work.
+- **Column chunk:** one column's values within one row group; it is contiguous in the
+  file.
+- **Page:** the encoding and compression unit inside a column chunk.
+
+Row-group statistics can support coarse skipping. An optional page index can provide
+page locations and min/max information for finer skipping without first reading every
+page header. Neither kind of metadata guarantees that a reader will use it, and a
+range overlap only means "possibly matches."
+
+See the official [file layout](https://parquet.apache.org/docs/file-format/),
+[concept glossary](https://parquet.apache.org/docs/concepts/), and
+[page-index specification](https://parquet.apache.org/docs/file-format/pageindex/).
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Make projection and pruning visible
+
+Two independent decisions reduce a scan:
+
+1. **Column projection** removes chunks for fields the query does not request.
+2. **Predicate pruning** removes row groups whose valid statistics cannot overlap a
+   filter.
+
+The effects multiply. A narrow query over well-clustered row groups may read only a
+small set of chunks. A full export receives no such benefit. A selective query over
+poorly ordered data can still project columns, but broad min/max ranges may prevent
+row-group pruning.
+
+The model below uses compressed chunk sizes as fixed teaching inputs. It estimates
+bytes fetched from column chunks, not query latency, billing, decompression CPU, page
+skipping, or storage request overhead.
+
+{% interactive-block id="technology/parquet-performance" dataFile="/api/content/technology/parquet/data/scan-planning-model.json" /%}
+
+### Conditions that must hold for a skip
+
+- The query exposes a predicate that the engine can push into its Parquet reader.
+- The relevant statistics exist, are valid for the type and sort order, and are not
+  hidden from the planning path.
+- The row group's minimum and maximum prove there is no possible match.
+- The implementation supports and enables the relevant pruning feature.
+
+{% callout variant="warn" %}
+Statistics are planning hints, not an authorization boundary. They may reveal ranges,
+null counts, and schema information, and they must never be used to enforce row-level
+security.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Encode values, then compress page bytes
+
+Encoding and compression solve different problems. An **encoding** changes the
+representation of typed values so repeated or correlated data needs fewer bits. A
+**compression codec** then compresses the encoded page bytes. Both choices are stored
+in page or column metadata so the reader knows how to reconstruct values.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Dictionary" eyebrow="Repeated values" icon="boxes" tone="blue" %}
+Store distinct values once in a dictionary page and represent data values with compact
+dictionary indexes. Writers can fall back to plain encoding when a dictionary becomes
+too large.
+{% /concept-card %}
+{% concept-card title="RLE + bit packing" eyebrow="Small repeated IDs" icon="repeat" tone="green" %}
+Represent repeated runs efficiently and pack small integers into fewer bits. Parquet
+uses this hybrid for dictionary indexes and definition or repetition levels.
+{% /concept-card %}
+{% concept-card title="Delta encodings" eyebrow="Correlated sequences" icon="activity" tone="violet" %}
+Represent integer differences, byte-array lengths, or shared string prefixes instead
+of storing each full value independently.
+{% /concept-card %}
+{% concept-card title="Byte stream split" eyebrow="Numeric compression" icon="layers" tone="amber" %}
+Rearrange bytes from fixed-width numeric values into streams. This does not reduce size
+by itself, but can improve a following compression codec.
+{% /concept-card %}
+{% /concept-grid %}
+
+The format specification defines codecs including uncompressed, Snappy, Gzip, Brotli,
+Zstandard, and LZ4 variants. Codec availability and speed depend on the implementation.
+The older `LZ4` codec entry is deprecated; `LZ4_RAW` is a separate current definition.
+Do not select a codec from a universal ratio chart. Compare representative data on
+write CPU, read CPU, output size, and support across the reader fleet.
+
+Use the official [encoding definitions](https://parquet.apache.org/docs/file-format/data-pages/encodings/),
+[compression definitions](https://parquet.apache.org/docs/file-format/data-pages/compression/),
+and [implementation status](https://parquet.apache.org/docs/file-format/implementationstatus/)
+as the compatibility baseline.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat schema evolution as a dataset contract
+
+Every Parquet file records its own schema. A directory containing old and new files
+does not automatically become one safely evolved table. The dataset reader or table
+layer must decide how to merge fields, handle missing values, reconcile logical and
+physical types, and reject incompatible files.
+
+Adding an optional field is usually easier to model than renaming a field, changing a
+physical type, or tightening nullability. Even an apparently safe change is only safe
+after every engine that reads the dataset agrees on the result.
+
+{% interactive-block id="technology/parquet-schema-evolution-lab" dataFile="/api/content/technology/parquet/data/schema-evolution-scenarios.json" /%}
+
+### Keep three schemas separate
+
+- **File schema:** the physical and logical types recorded in one Parquet footer.
+- **Dataset schema:** the contract used to read many files as one logical collection.
+- **Application schema:** the names, types, units, and null rules expected by a query or
+  service.
+
+A catalog or table format can manage mappings and snapshots, but it cannot make an
+ambiguous conversion correct. Version semantic changes, preserve units and logical
+types, and validate mixed old/new reads before publishing new files.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design files from the read path
+
+File size, row-group size, page size, sorting, partitioning, and codec choice form one
+system. Larger row groups can improve sequential I/O and compression while increasing
+writer buffering and the minimum candidate set for a coarse scan. Smaller groups may
+prune more finely but create more metadata and scheduling work.
+
+Partitioning is a dataset layout convention rather than part of one Parquet file. It
+can skip complete files before the Parquet reader opens them, but very high-cardinality
+partition keys often create many tiny objects and expensive listings.
+
+{% process-flow %}
+{% process-step number="1" title="Capture query shapes" label="Observe" %}
+Record projected columns, filter fields, time windows, scan frequency, concurrency,
+and the engines that must read the output.
+{% /process-step %}
+{% process-step number="2" title="Choose physical boundaries" label="Layout" %}
+Select partition, file, and row-group boundaries that provide enough parallel work
+without fragmenting the dataset into tiny pieces.
+{% /process-step %}
+{% process-step number="3" title="Cluster and encode" label="Write" %}
+Order data by useful filter dimensions when the write cost is justified. Choose types,
+encodings, and codecs from observed cardinality and value distribution.
+{% /process-step %}
+{% process-step number="4" title="Measure every reader" label="Verify" %}
+Inspect plans, bytes read, skipped groups, CPU, memory, and result correctness on
+representative old and new files across the production fleet.
+{% /process-step %}
+{% /process-flow %}
+
+The Parquet specification's [configuration notes](https://parquet.apache.org/docs/file-format/configurations/)
+explain the trade-offs and give HDFS-oriented starting points. Treat them as context,
+not universal object-store defaults. Writer libraries also express row-group controls
+in different units, such as rows rather than bytes.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Model a footer-driven scan in executable code
+
+The example is deliberately dependency-free: it models the decision a capable reader
+can make from projected columns and row-group date statistics. It does not parse a
+Parquet binary. Six row groups are rejected because their ranges cannot overlap the
+filter; only the three selected chunks in each remaining group contribute modeled
+read bytes.
+
+{% code-block file="/api/content/technology/parquet/code/plan-footer-scan.mjs" language="javascript" title="Plan selected chunks from footer-like metadata" /%}
+
+Run it with `node plan-footer-scan.mjs`. A real reader obtains this information from
+the footer and may also use page indexes, Bloom filters, partition metadata, or engine
+specific filters.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Review the production contract
+
+- Layout and performance
+  - Compact tiny outputs before they become a permanent listing and scheduling cost.
+  - Keep enough files and row groups for useful parallelism; do not optimize only for
+    the largest sequential scan.
+  - Sort or cluster only when representative predicates gain enough pruning to repay
+    the write and maintenance cost.
+- Schema and compatibility
+  - Store units and semantic types explicitly, including timestamps, dates, decimals,
+    and nullability.
+  - Test files written by every producer against every supported reader.
+  - Roll out schema changes through a versioned dataset contract with mixed-file tests
+    and a documented rollback path.
+- Correctness and operations
+  - Validate row counts, null counts, bounds, and checksums across conversions.
+  - Publish files atomically through a manifest, snapshot, or table layer so readers do
+    not observe partial rewrites.
+  - Monitor file counts, size distribution, compression ratio, bytes read, groups
+    skipped, decode failures, and incompatible-schema errors.
+- Security
+  - Treat footer metadata and statistics as potentially sensitive.
+  - Use storage access controls and encryption appropriate to the threat model; verify
+    that every reader supports any Parquet modular-encryption features you enable.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/parquet/quiz/parquet-read-design.json" lessonSlug="parquet" title="Apache Parquet Read Design Review" /%}

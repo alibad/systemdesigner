@@ -1,0 +1,146 @@
+{
+  "title": "Trace ownership through a live shard move",
+  "description": "Select a migration state to see the active read, copy, catch-up, verification, and cutover paths. The ownership epoch prevents stale components from accepting writes at the wrong owner.",
+  "nodes": [
+    {
+      "id": "application",
+      "label": "Application",
+      "eyebrow": "Carries shard key",
+      "detail": "Sends the logical partition key and a request ID. A retried write keeps the same idempotency identity while ownership changes.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 20
+    },
+    {
+      "id": "router",
+      "label": "Shard router",
+      "eyebrow": "Caches owner + epoch",
+      "detail": "Resolves a logical bucket to one physical owner. It refreshes stale entries after an epoch rejection or moved response.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 27,
+      "y": 20
+    },
+    {
+      "id": "directory",
+      "label": "Ownership directory",
+      "eyebrow": "Versioned control plane",
+      "detail": "Stores the current owner and monotonically increasing epoch for each logical shard. Cutover changes this record atomically.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 48,
+      "y": 20
+    },
+    {
+      "id": "source",
+      "label": "Source shard",
+      "eyebrow": "Epoch 41 owner",
+      "detail": "Serves reads and writes until cutover. During migration it exposes a consistent snapshot and an ordered stream of later changes, including deletes.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 73,
+      "y": 20
+    },
+    {
+      "id": "migration-worker",
+      "label": "Migration worker",
+      "eyebrow": "Checkpointed copy",
+      "detail": "Copies bounded batches from a snapshot, persists progress, and retries idempotently without changing the authoritative owner.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 27,
+      "y": 74
+    },
+    {
+      "id": "target",
+      "label": "Target shard",
+      "eyebrow": "Candidate owner",
+      "detail": "Receives backfill and ordered changes but does not accept authoritative traffic until verification passes and the directory advances the epoch.",
+      "kind": "database",
+      "tone": "green",
+      "x": 51,
+      "y": 74
+    },
+    {
+      "id": "verifier",
+      "label": "Verifier",
+      "eyebrow": "Counts + checksums",
+      "detail": "Compares row counts, checksums, sampled records, tombstones, and change-stream lag before approving cutover or rollback.",
+      "kind": "security",
+      "tone": "cyan",
+      "x": 75,
+      "y": 74
+    },
+    {
+      "id": "audit-stream",
+      "label": "Migration audit",
+      "eyebrow": "Durable evidence",
+      "detail": "Records checkpoints, verification results, epoch changes, stale-route rejections, rollback decisions, and final source deletion.",
+      "kind": "stream",
+      "tone": "rose",
+      "x": 92,
+      "y": 48
+    }
+  ],
+  "edges": [
+    { "id": "application-router", "from": "application", "to": "router", "label": "key + request ID" },
+    { "id": "router-directory", "from": "router", "to": "directory", "label": "owner + epoch" },
+    { "id": "directory-source", "from": "directory", "to": "source", "label": "route epoch 41" },
+    { "id": "directory-target", "from": "directory", "to": "target", "label": "route epoch 42", "via": { "x": 58, "y": 47 } },
+    { "id": "source-worker", "from": "source", "to": "migration-worker", "label": "snapshot batches", "via": { "x": 48, "y": 48 } },
+    { "id": "worker-target", "from": "migration-worker", "to": "target", "label": "idempotent copy" },
+    { "id": "source-target", "from": "source", "to": "target", "label": "ordered changes", "mode": "async" },
+    { "id": "target-verifier", "from": "target", "to": "verifier", "label": "candidate data" },
+    { "id": "source-verifier", "from": "source", "to": "verifier", "label": "source evidence", "via": { "x": 86, "y": 48 } },
+    { "id": "verifier-audit", "from": "verifier", "to": "audit-stream", "label": "verification", "mode": "async" },
+    { "id": "directory-audit", "from": "directory", "to": "audit-stream", "label": "epoch change", "mode": "async", "via": { "x": 70, "y": 4 } },
+    { "id": "router-stale-source", "from": "router", "to": "source", "label": "stale epoch 41", "via": { "x": 50, "y": 4 } }
+  ],
+  "scenarios": [
+    {
+      "id": "steady-state",
+      "label": "Steady state",
+      "summary": "The directory identifies the source as owner at epoch 41. Requests follow one route, and the target is not yet authoritative.",
+      "activeEdges": ["application-router", "router-directory", "directory-source"],
+      "focusNode": "directory",
+      "result": "The source is the only writer for this logical shard. Every on-call tool should be able to resolve the same owner and epoch from the shard key."
+    },
+    {
+      "id": "copy-and-catch-up",
+      "label": "Copy + catch up",
+      "summary": "User traffic still reaches the source while a checkpointed snapshot copy and ordered change stream bring the target up to date.",
+      "activeEdges": ["application-router", "router-directory", "directory-source", "source-worker", "worker-target", "source-target", "target-verifier", "source-verifier", "verifier-audit"],
+      "focusNode": "migration-worker",
+      "result": "The source remains authoritative. The target may be incomplete, so a worker restart resumes from a durable checkpoint instead of changing routing."
+    },
+    {
+      "id": "verified-cutover",
+      "label": "Verified cutover",
+      "summary": "Backfill is complete, change lag is inside the cutover bound, and verification matches. The old owner is fenced before the directory advances to epoch 42.",
+      "activeEdges": ["application-router", "router-directory", "directory-target", "target-verifier", "verifier-audit", "directory-audit"],
+      "degradedNodes": ["source"],
+      "focusNode": "directory",
+      "result": "New requests reach the target at epoch 42. The source stays read-only during a rollback window and rejects writes carrying the new epoch."
+    },
+    {
+      "id": "source-fails-mid-copy",
+      "label": "Source fails mid-copy",
+      "summary": "The source becomes unavailable before the candidate has caught up and verification has passed. Some copied rows exist, but ownership has not changed.",
+      "activeEdges": ["application-router", "router-directory", "directory-source", "source-worker", "worker-target", "verifier-audit"],
+      "failedNodes": ["source"],
+      "degradedNodes": ["migration-worker", "target"],
+      "focusNode": "source",
+      "result": "Do not promote the partial target. Recover the source shard or one of its replicas, keep epoch 41 authoritative, then resume from the last durable checkpoint."
+    },
+    {
+      "id": "stale-router",
+      "label": "Stale router",
+      "summary": "The directory and target are at epoch 42, but one router still sends a request to the source using cached epoch 41 ownership.",
+      "activeEdges": ["application-router", "router-directory", "directory-target", "router-stale-source", "directory-audit"],
+      "degradedNodes": ["router", "source"],
+      "focusNode": "router",
+      "result": "The fenced source rejects the stale route or returns a moved response. The router refreshes epoch 42 and retries with the same request ID instead of creating split-brain writes."
+    }
+  ]
+}

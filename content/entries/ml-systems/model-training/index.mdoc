@@ -1,0 +1,205 @@
+---
+registryId: model-training
+---
+
+{% section-card tone="intro" %}
+## What is model training?
+
+Model training is the repeated process of showing a model examples, measuring its error, and adjusting its parameters so it makes better predictions. A training run is more than a loop over data: it is a controlled experiment with a specific dataset, configuration, hardware environment, and evaluation rule.
+
+Training matters because a model can appear to improve while learning noise, leaking future information, or becoming too expensive to operate. The core invariant is simple: **a promoted checkpoint must be reproducible from versioned inputs and must improve a protected validation measure, not just training loss.**
+
+This lesson assumes familiarity with [feature engineering](/ml-systems/feature-engineering) and [model evaluation](/ml-systems/model-evaluation). Those lessons explain what enters the model and how to judge whether an improvement is real.
+{% /section-card %}
+
+{% section-card %}
+## Start by defining a valid run
+
+Before choosing an optimizer or accelerator, write down what a successful run must prove.
+
+- **Objective and slice:** name the prediction target, the primary metric, and the important cohorts where a global average can hide failure.
+- **Frozen inputs:** record dataset version, split rule, feature definitions, label cutoff, code revision, and random seeds.
+- **Operating budget:** set a maximum wall time, accelerator cost, peak memory, and acceptable evaluation delay.
+- **Promotion gate:** require comparison against a baseline on the protected validation set, plus a rollback-ready checkpoint.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Optimize" eyebrow="Learning loop" icon="gauge" tone="blue" %}
+Use batches to estimate error, backpropagate gradients, and update parameters. Lower training loss is evidence of fitting, not proof of usefulness.
+{% /concept-card %}
+{% concept-card title="Validate" eyebrow="Generalization gate" icon="shield-check" tone="green" %}
+Measure held-out examples that were not used to choose updates. Keep the split rule stable across comparable runs.
+{% /concept-card %}
+{% concept-card title="Recover" eyebrow="Operational control" icon="rotate-ccw" tone="amber" %}
+Persist model weights, optimizer, scheduler, random state, and data position so an interruption resumes the same experiment.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Trace the training loop
+
+The model changes only after the data path, optimization path, and evaluation path have all produced interpretable signals.
+
+{% process-flow %}
+{% process-step number="1" title="Snapshot inputs" label="Reproduce" %}
+Materialize the dataset manifest, split rule, feature code, configuration, and baseline checkpoint under one run identifier.
+{% /process-step %}
+{% process-step number="2" title="Train and checkpoint" label="Learn" %}
+Load batches, compute loss, update parameters, and checkpoint complete state at a recovery interval that fits the failure budget.
+{% /process-step %}
+{% process-step number="3" title="Evaluate protected data" label="Measure" %}
+Run validation at a fixed cadence, retain per-slice metrics, and compare every candidate with the declared baseline.
+{% /process-step %}
+{% process-step number="4" title="Gate or investigate" label="Decide" %}
+Promote only an explainable improvement. Stop divergence, data contract failures, and invalid evaluations before they consume the full budget.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+## Plan capacity before scaling
+
+The first decision is not "which GPU is fastest?" It is whether the planned examples, input shape, batch, numerics, and learning rate can fit and remain stable together. Change the workload and operating controls below. The model updates optimizer steps, estimated wall time, device memory, compute cost, and a stability warning together.
+
+{% interactive-block id="ml-systems/model-training-capacity-lab" dataFile="/api/content/ml-systems/model-training/data/training-capacity-lab.json" /%}
+
+{% section-card %}
+## Scale for the constraint you actually have
+
+Use a more complex training strategy only after a measured limitation makes the coordination cost worthwhile.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Data parallel" eyebrow="Time constraint" icon="network" tone="blue" %}
+Replicate the model, split batches across workers, and synchronize gradients when one device can hold the state but throughput is too low.
+{% /concept-card %}
+{% concept-card title="Model or state sharding" eyebrow="Memory constraint" icon="layers" tone="violet" %}
+Partition parameters, optimizer state, or activations when the model cannot fit on a single accelerator. Measure communication before assuming linear speedup.
+{% /concept-card %}
+{% concept-card title="Federated learning" eyebrow="Data boundary" icon="shield" tone="green" %}
+Coordinate client updates when raw data must remain local. Non-identical client data and unreliable participation become first-class evaluation concerns.
+{% /concept-card %}
+{% concept-card title="Continual or active learning" eyebrow="Changing evidence" icon="refresh-cw" tone="amber" %}
+Use replay, retention tests, or targeted labeling when tasks change over time or labels are the scarce resource.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Distributed state must have one source of truth
+
+Distributed training changes the failure surface. Workers need a consistent view of the model version, optimizer state, gradient synchronization policy, and data shard assignment.
+
+- Start with a single-device baseline that records throughput, peak memory, learning curves, and validation quality.
+- Add data parallelism when memory fits but wall time is the binding constraint; inspect all-reduce time and input stalls as worker count grows.
+- Add sharding or model parallelism when memory is the binding constraint; budget for activation transfer, checkpoint assembly, and recovery time.
+- Treat a worker loss as an experiment event: reload a compatible checkpoint and verify that the data cursor and scheduler state still match.
+
+{% code-block file="/api/content/ml-systems/model-training/code/training-strategies-code-code-01.py" language="python" title="Distributed training: synchronize a data-parallel run" /%}
+
+### Decentralized data changes the evaluation problem
+
+Federated training keeps raw records on clients, but it does not make client updates representative. Check cohort coverage, participation bias, update clipping, and secure aggregation assumptions before comparing a global model with a centralized baseline.
+
+{% code-block file="/api/content/ml-systems/model-training/code/training-strategies-code-code-02.py" language="python" title="Federated training: coordinate protected client updates" /%}
+{% /section-card %}
+
+{% section-card %}
+## Adapt without losing the evidence you already earned
+
+Continual learning and active learning are useful when the data source changes, but they solve different decisions.
+
+- **Continual learning:** test every new checkpoint on retained tasks. A new-task gain is not acceptable when it silently destroys previously useful behavior.
+- **Active learning:** spend labeling effort on examples that reduce uncertainty while preserving coverage of operationally important, rare, and error-prone slices.
+- **Synthetic or augmented data:** document the transformation and test it against a real holdout. It can improve robustness, but it can also repeat artifacts at scale.
+
+{% code-block file="/api/content/ml-systems/model-training/code/training-strategies-code-code-03.py" language="python" title="Continual learning: retain prior-task information" /%}
+
+{% code-block file="/api/content/ml-systems/model-training/code/training-strategies-code-code-04.py" language="python" title="Active learning: choose a bounded labeling round" /%}
+{% /section-card %}
+
+{% section-card %}
+## Tune the update rule without searching blindly
+
+Hyperparameters are part of the experimental specification. Search them against a fixed validation protocol, and reserve a final holdout for the decision to ship.
+
+1. Establish a small baseline with a known-good data slice and one seed.
+2. Choose a search method that matches the cost of an evaluation: random search for broad uncertain spaces, Bayesian optimization for expensive continuous trials, and population-based training for schedule adaptation.
+3. Record every trial's configuration, code, data manifest, hardware, duration, failure reason, and checkpoint artifact.
+4. Confirm the winner with independent seeds and slice-level metrics before treating it as a real improvement.
+
+{% code-block file="/api/content/ml-systems/model-training/code/optimization-techniques-code-code-01.py" language="python" title="Hyperparameter optimization: evaluate trials consistently" /%}
+
+### Generalization controls are evidence controls
+
+Regularization, early stopping, and augmentation help only when validation tells you whether they protect generalization.
+
+- **Weight penalties and dropout** limit training-specific fit; tune them against the same protected split.
+- **Early stopping** chooses a checkpoint from validation behavior, so preserve the exact evaluation cadence and metric direction.
+- **Augmentation** must preserve the label's meaning. Inspect transformed examples and compare clean, augmented, and production-like slices.
+
+{% code-block file="/api/content/ml-systems/model-training/code/optimization-techniques-code-code-02.py" language="python" title="Regularization: constrain training-specific fit" /%}
+
+{% code-block file="/api/content/ml-systems/model-training/code/optimization-techniques-code-code-03.py" language="python" title="Augmentation: build label-preserving variants" /%}
+{% /section-card %}
+
+## Diagnose failure before applying a fix
+
+Loss alone does not identify a failure. Use the curve, the train/validation gap, gradient behavior, and data evidence together. Then choose an intervention and see whether it actually addresses the leading explanation.
+
+{% interactive-block id="ml-systems/model-training-diagnosis-lab" dataFile="/api/content/ml-systems/model-training/data/training-diagnosis-lab.json" /%}
+
+{% section-card %}
+## Operate a training run as a recoverable system
+
+Monitoring should answer whether the model is learning, whether the system is progressing, and whether the evidence is still valid.
+
+### Watch three signal groups
+
+- **Learning:** training and validation loss, task metrics, per-slice quality, learning rate, gradient norms, and weight distributions.
+- **Progress:** examples or tokens per second, data-loader wait, checkpoint duration, evaluation lag, and remaining budget.
+- **Infrastructure:** accelerator utilization and memory, CPU and network pressure, worker health, storage errors, and distributed synchronization time.
+
+### Define stop and recovery rules in advance
+
+- Stop immediately for a data contract violation, invalid label cutoff, NaN or infinite loss, or a validation job that no longer represents the protected split.
+- Recover transient infrastructure failures only from a checkpoint containing model, optimizer, scheduler, random state, and data position.
+- Escalate a quality regression when the overall metric is green but any protected cohort misses its gate.
+- Keep candidate artifacts immutable until the promotion decision and rollback window have passed.
+
+{% process-flow %}
+{% process-step number="1" title="Observe" label="Signals" %}
+Join metrics, logs, configuration, data manifest, and hardware allocation under the same run identifier.
+{% /process-step %}
+{% process-step number="2" title="Contain" label="Protect" %}
+Stop invalid work, retain the failing checkpoint and input interval, and prevent accidental promotion.
+{% /process-step %}
+{% process-step number="3" title="Reproduce" label="Verify" %}
+Replay a bounded control with the same inputs to separate an algorithmic issue from a transient system fault.
+{% /process-step %}
+{% process-step number="4" title="Release or roll back" label="Operate" %}
+Promote a versioned artifact through a reversible path only after quality, safety, and cost gates agree.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Make the trade-offs explicit
+
+- **Larger batches** can improve accelerator utilization and reduce wall time, but they raise memory use and may require learning-rate and generalization retuning.
+- **Mixed precision** reduces memory and often improves throughput, but it adds numerical checks, especially with FP16 and long sequences.
+- **Distributed training** shortens a sufficiently large job, but communication, stragglers, and checkpoint coordination reduce scaling efficiency.
+- **More tuning trials** can find better configurations, but they multiply compute cost and selection bias unless validation and holdouts remain protected.
+- **More frequent checkpoints** improve recoverability, but they consume storage bandwidth and can disrupt iteration cadence.
+
+The practical default is a small reproducible run, a bounded capacity profile, protected evaluation, and deliberate scale-out. This sequence makes failures cheaper to understand.
+{% /section-card %}
+
+{% section-card %}
+## Training tooling supports, but does not replace, the gates
+
+- [PyTorch](/technology/pytorch) and [TensorFlow](/technology/tensorflow) provide accelerated training and distributed primitives.
+- [MLflow](/technology/mlflow) and Weights & Biases track configurations, metrics, artifacts, and comparisons.
+- Ray can coordinate distributed tuning and training workloads.
+- Kubernetes or a managed scheduler can place workers, recover infrastructure failures, and enforce resource limits.
+
+Use these tools to preserve the run contract; do not use a dashboard's green status as a substitute for validation, slice checks, or reproducible artifacts.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/model-training/quiz/model-training.json" lessonSlug="model-training" /%}

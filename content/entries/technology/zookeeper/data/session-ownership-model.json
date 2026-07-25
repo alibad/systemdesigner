@@ -1,0 +1,88 @@
+{
+  "blockId": "technology/zookeeper-session-ownership-lab",
+  "title": "Recover ownership without trusting stale client state",
+  "description": "Choose a coordination pattern, inject a connection or session event, and decide how the client should recover. The server state, not the local cache, determines ownership.",
+  "defaults": {
+    "patternId": "leader-ownership",
+    "eventId": "session-expired",
+    "responseId": "recreate-and-fence"
+  },
+  "patterns": [
+    {
+      "id": "service-membership",
+      "label": "Service membership",
+      "detail": "An ephemeral znode advertises a live endpoint.",
+      "ownedState": "Ephemeral registration",
+      "expiredEffect": "The endpoint disappears from discovery after the session expires.",
+      "burstEffect": "Consumers may see one watch notification for several membership changes."
+    },
+    {
+      "id": "leader-ownership",
+      "label": "Leader ownership",
+      "detail": "An ephemeral sequential candidate establishes ordering.",
+      "ownedState": "Leadership claim",
+      "expiredEffect": "The candidate znode is deleted and another participant can become leader.",
+      "burstEffect": "Several candidate changes can occur before a disconnected client rereads the queue."
+    },
+    {
+      "id": "configuration-cache",
+      "label": "Configuration cache",
+      "detail": "A watch invalidates a locally cached configuration value.",
+      "ownedState": "Cached version",
+      "expiredEffect": "The old watch belongs to the expired session and cannot protect the cache.",
+      "burstEffect": "Multiple writes can collapse into one notification; the client must fetch the latest version."
+    }
+  ],
+  "events": [
+    {
+      "id": "short-disconnect",
+      "label": "Brief disconnect",
+      "detail": "Connectivity returns before the negotiated session timeout.",
+      "sessionState": "Session remains alive",
+      "serverState": "Ephemeral state remains",
+      "watchState": "Notifications may wait for reconnect",
+      "safeResponseIds": ["reread-and-rearm"],
+      "reviewResponseIds": ["recreate-and-fence"]
+    },
+    {
+      "id": "session-expired",
+      "label": "Session expires",
+      "detail": "The ensemble has not heard from the client before the timeout.",
+      "sessionState": "Old session is permanently invalid",
+      "serverState": "Ephemeral state is removed",
+      "watchState": "Old watches are gone",
+      "safeResponseIds": ["recreate-and-fence"],
+      "reviewResponseIds": []
+    },
+    {
+      "id": "mutation-burst",
+      "label": "Rapid state changes",
+      "detail": "Several writes occur before the client handles its watch event.",
+      "sessionState": "Session remains alive",
+      "serverState": "Latest version is authoritative",
+      "watchState": "A watch is not an event log",
+      "safeResponseIds": ["reread-and-rearm"],
+      "reviewResponseIds": ["recreate-and-fence"]
+    }
+  ],
+  "responses": [
+    {
+      "id": "trust-local-state",
+      "label": "Continue from local state",
+      "detail": "Keep serving from the cached value or ownership claim.",
+      "action": "No server read or ownership check is performed."
+    },
+    {
+      "id": "reread-and-rearm",
+      "label": "Reread and re-arm",
+      "detail": "Fetch the current znode and install the next watch as one recovery step.",
+      "action": "The client rebuilds its view from the ensemble's latest version."
+    },
+    {
+      "id": "recreate-and-fence",
+      "label": "Create a new session and fence",
+      "detail": "Re-register ephemeral state and obtain a newer fencing token before external work.",
+      "action": "A stale owner cannot continue writing after replacement."
+    }
+  ]
+}

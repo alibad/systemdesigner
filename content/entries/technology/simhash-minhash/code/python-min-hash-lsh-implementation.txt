@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import hashlib
+from collections import defaultdict
+
+
+def shingles(text: str, width: int = 3) -> frozenset[str]:
+    tokens = text.casefold().split()
+    return frozenset(
+        " ".join(tokens[index : index + width])
+        for index in range(len(tokens) - width + 1)
+    )
+
+
+def seeded_hash(value: str, seed: int) -> int:
+    digest = hashlib.blake2b(
+        value.encode("utf-8"),
+        digest_size=8,
+        person=seed.to_bytes(8, "big"),
+    ).digest()
+    return int.from_bytes(digest, "big")
+
+
+def minhash_signature(items: frozenset[str], rows: int) -> tuple[int, ...]:
+    if not items:
+        raise ValueError("MinHash requires a non-empty feature set")
+    return tuple(min(seeded_hash(item, seed) for item in items) for seed in range(rows))
+
+
+def estimated_jaccard(left: tuple[int, ...], right: tuple[int, ...]) -> float:
+    if len(left) != len(right) or not left:
+        raise ValueError("signatures must have one non-zero shared width")
+    return sum(a == b for a, b in zip(left, right)) / len(left)
+
+
+def exact_jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 1.0
+
+
+class MinHashIndex:
+    def __init__(self, bands: int = 16, rows_per_band: int = 8) -> None:
+        if bands <= 0 or rows_per_band <= 0:
+            raise ValueError("bands and rows_per_band must be positive")
+        self.bands = bands
+        self.rows_per_band = rows_per_band
+        self.signature_rows = bands * rows_per_band
+        self.buckets: dict[tuple[int, tuple[int, ...]], set[str]] = defaultdict(set)
+        self.features: dict[str, frozenset[str]] = {}
+
+    def _band_keys(self, signature: tuple[int, ...]):
+        if len(signature) != self.signature_rows:
+            raise ValueError("signature width must equal bands * rows_per_band")
+        for band in range(self.bands):
+            start = band * self.rows_per_band
+            yield band, signature[start : start + self.rows_per_band]
+
+    def add(self, document_id: str, text: str) -> None:
+        features = shingles(text)
+        signature = minhash_signature(features, self.signature_rows)
+        self.features[document_id] = features
+        for key in self._band_keys(signature):
+            self.buckets[key].add(document_id)
+
+    def candidates(self, text: str) -> set[str]:
+        signature = minhash_signature(shingles(text), self.signature_rows)
+        result: set[str] = set()
+        for key in self._band_keys(signature):
+            result.update(self.buckets.get(key, set()))
+        return result
+
+    def verified_matches(self, text: str, threshold: float) -> list[tuple[str, float]]:
+        query_features = shingles(text)
+        matches = []
+        for document_id in self.candidates(text):
+            score = exact_jaccard(query_features, self.features[document_id])
+            if score >= threshold:
+                matches.append((document_id, score))
+        return sorted(matches, key=lambda item: item[1], reverse=True)
+
+
+index = MinHashIndex(bands=16, rows_per_band=8)
+index.add("doc-1", "the quick brown fox jumps over the lazy dog")
+print(index.verified_matches("a quick brown fox jumps over the lazy dog", 0.5))

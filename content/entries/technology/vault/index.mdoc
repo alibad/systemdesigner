@@ -1,0 +1,236 @@
+---
+registryId: vault
+---
+
+{% section-card tone="intro" %}
+## What is HashiCorp Vault?
+
+**HashiCorp Vault is an identity-aware control plane for secrets and cryptographic operations.** A client proves an external identity, Vault issues a bounded token, policy authorizes exact paths and capabilities, and a secrets engine stores, generates, transforms, or revokes material.
+
+Vault matters because the safer unit is not “a password in a central box.” It is a complete lifecycle:
+
+`identity -> policy -> token -> secret or operation -> lease -> renewal or revocation -> audit evidence`
+
+The core invariant is:
+
+**Every secret access must be attributable to a current identity, authorized for one bounded purpose, short enough to limit exposure, renewable only when intended, revocable at the real enforcement point, and recorded without leaking the secret itself.**
+{% /section-card %}
+
+{% section-card %}
+## Separate Vault's four responsibilities
+
+{% concept-grid columns="4" %}
+{% concept-card title="Authenticate" eyebrow="Who is calling?" icon="fingerprint" tone="cyan" %}
+An auth method validates Kubernetes, cloud IAM, OIDC, LDAP, AppRole, certificate, or other evidence and maps it to Vault token policy.
+{% /concept-card %}
+{% concept-card title="Authorize" eyebrow="What may it do?" icon="shield" tone="violet" %}
+Path-based policy grants explicit capabilities such as `read`, `create`, `update`, `list`, or `delete`. Authentication alone grants no secret access.
+{% /concept-card %}
+{% concept-card title="Broker" eyebrow="What is issued?" icon="key" tone="amber" %}
+Secret engines version static data, create dynamic external identities, issue certificates, or perform cryptographic operations.
+{% /concept-card %}
+{% concept-card title="Account" eyebrow="What happened?" icon="activity" tone="green" %}
+Audit devices record API requests and responses, usually HMAC-hashing sensitive string values while preserving enough identity for investigation.
+{% /concept-card %}
+{% /concept-grid %}
+
+Vault does not replace the target system's authorization, availability, backups, or rotation behavior. A database credential is truly revoked only when the database accepts the revoke operation; a copied KV value remains valid until the application and external system rotate it.
+{% /section-card %}
+
+{% section-card %}
+## Follow one dynamic credential from identity to revocation
+
+{% process-flow %}
+{% process-step number="1" title="Authenticate the workload" label="Auth method" %}
+Validate short-lived platform evidence and map identity metadata to a tightly bounded token role.
+{% /process-step %}
+{% process-step number="2" title="Authorize one role" label="Policy" %}
+Permit only the required database credential path and token self-service operations; keep engine configuration under a separate operator policy.
+{% /process-step %}
+{% process-step number="3" title="Create and lease" label="Secrets engine" %}
+Ask the database plugin to create a unique login, store lease metadata, audit the response, and return the credential with TTL and lease ID.
+{% /process-step %}
+{% process-step number="4" title="Renew, replace, or revoke" label="Lifecycle" %}
+Renew before expiry when allowed, reacquire on rotation, and revoke the token tree when identity or workload ownership ends.
+{% /process-step %}
+{% /process-flow %}
+
+The [Vault lease documentation](https://developer.hashicorp.com/vault/docs/concepts/lease) states that dynamic secrets and service tokens carry leases, can be renewed when permitted, and are revoked automatically at expiry or explicitly through the API. Revoking a token also revokes leases created under that token tree unless an intentional orphan boundary changes the hierarchy.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 1: design the lease lifecycle
+
+Choose a workload identity, secret type, and client lifecycle, then adjust token TTL, credential TTL, renewal interval, and workload duration.
+
+{% interactive-block id="technology/vault-access-monitor" dataFile="/api/content/technology/vault/data/lease-lifecycle-model.json" /%}
+
+TTL is not only a security knob:
+
+- shorter lifetimes reduce the worst exposure after a lost client but increase renewal and target-system churn;
+- longer lifetimes can preserve availability through brief Vault outages but retain compromised access longer;
+- renewal timing needs margin for network, leader, audit, and backend latency;
+- maximum TTL and non-renewable token types set hard boundaries that a client loop cannot bypass.
+{% /section-card %}
+
+{% section-card %}
+## Bind workload identity to a minimal policy
+
+The safest client does not hold a reusable bootstrap secret. It presents platform identity, receives a short Vault token, and can reach only the path its role needs.
+
+{% code-block file="/api/content/technology/vault/code/payments-policy.hcl" language="hcl" title="Payments reader policy" /%}
+
+Separate duties:
+
+- **Platform owner:** configures the auth method and trusted identity source.
+- **Vault policy owner:** maps identity metadata to exact paths and capabilities.
+- **Secrets-engine owner:** configures privileged target-system connections and roles.
+- **Application owner:** renews, reloads, and handles denial, expiry, or unavailability.
+- **Security operations:** monitors audit evidence, root activity, policy changes, revocation failures, and emergency access.
+
+Do not give application tokens access to `database/config/*`, policy administration, auth configuration, audit configuration, or operator endpoints.
+{% /section-card %}
+
+{% section-card %}
+## Use dynamic database roles as external identities
+
+The [database secrets engine](https://developer.hashicorp.com/vault/docs/secrets/databases) uses database plugins to create unique credentials from configured roles. Unique usernames improve attribution and allow Vault to revoke the external identity when its lease ends.
+
+{% code-block file="/api/content/technology/vault/code/configure-payments-database-role.sh" language="bash" title="Configure a bounded PostgreSQL role" /%}
+
+{% code-block file="/api/content/technology/vault/code/payments-reader-create.sql" language="sql" title="Create the leased database identity" /%}
+
+Production requirements:
+
+- store the engine's privileged database credential outside shell history and rotate it;
+- constrain creation statements to the minimum database privileges;
+- set default and maximum TTL from workload and incident-response needs;
+- test revocation statements against active and idle sessions;
+- monitor queued or failed revocations when the database is unavailable;
+- make client retries idempotent and reload credentials before expiry.
+{% /section-card %}
+
+{% section-card %}
+## Choose secret engines by contract
+
+{% concept-grid columns="3" %}
+{% concept-card title="KV v2" eyebrow="Versioned static data" icon="database" tone="blue" %}
+Stores application-managed values with version history and deletion controls. Copying a value out of Vault creates a separate rotation and exposure boundary.
+{% /concept-card %}
+{% concept-card title="Dynamic engines" eyebrow="Lease-backed identity" icon="key" tone="amber" %}
+Database, cloud, Kubernetes, PKI, and other engines can generate target-system credentials or identities with engine-specific TTL and revocation behavior.
+{% /concept-card %}
+{% concept-card title="Transit" eyebrow="Cryptographic operation" icon="shield" tone="violet" %}
+Encrypts, decrypts, signs, verifies, or derives data without returning the protected key to the caller. Application ciphertext and key-version migration remain explicit.
+{% /concept-card %}
+{% /concept-grid %}
+
+Mount each engine at a purpose-specific path, tune its default and maximum lease settings, and keep roles narrower than organizational team names. A role should describe one consuming workload and one target privilege contract.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 2: trace control-plane failures and recovery
+
+Select each scenario to see why audit devices, external revocation, Raft quorum, the seal mechanism, and snapshots are different dependencies.
+
+{% topology-lab dataFile="/api/content/technology/vault/data/control-plane-recovery-topology.json" /%}
+
+Two boundaries deserve special attention:
+
+- Vault request availability depends on at least one enabled audit device accepting the record.
+- Auto-unseal reduces manual operations but makes the external KMS or HSM key part of Vault's recoverability.
+{% /section-card %}
+
+{% section-card %}
+## Treat audit durability as part of request availability
+
+Vault audit devices record API requests and responses separately from process logs. The [audit-device documentation](https://developer.hashicorp.com/vault/docs/audit) explains that Vault writes to all enabled devices and must successfully persist to at least one before servicing the corresponding request.
+
+HashiCorp's [audit best practices](https://developer.hashicorp.com/vault/docs/audit/best-practices) recommend at least two devices of different types and monitoring their health.
+
+Operational controls:
+
+- place file audit logs on dedicated capacity with rotation and disk alerts;
+- send an independent device to a remote analysis path;
+- preserve HMAC hashing for sensitive string fields unless a reviewed use case requires otherwise;
+- deduplicate and correlate records by request identity across devices;
+- alert on root-token activity, auth and policy changes, audit changes, permission-denied spikes, and device write failures;
+- test that audit backpressure and outages fail in the expected way before production.
+{% /section-card %}
+
+{% section-card %}
+## Design seal, storage, and snapshot recovery together
+
+Vault encrypts durable state behind its security barrier. A seal mechanism protects the key material needed to make that state usable.
+
+### Seal boundary
+
+- Shamir unseal distributes key shares among operators.
+- Auto-unseal delegates protection to a KMS or HSM and returns recovery keys for privileged quorum operations.
+- Recovery keys do not decrypt the root key when the auto-unseal mechanism is permanently unavailable.
+- Protect deletion and policy changes on the external seal key, and rehearse provider outages and seal migration.
+
+### Integrated storage boundary
+
+Vault [integrated storage](https://developer.hashicorp.com/vault/docs/concepts/integrated-storage) replicates state with Raft consensus. It provides HA semantics, not an independent backup. Maintain an odd-sized failure-domain-aware cluster, stable node identity, mTLS connectivity, quorum monitoring, and capacity headroom.
+
+### Snapshot boundary
+
+{% code-block file="/api/content/technology/vault/code/raft-snapshot-recovery.sh" language="bash" title="Snapshot and controlled restore outline" /%}
+
+Protect snapshots as sensitive encrypted state. Test restore with compatible seal access, then validate cluster health, auth methods, policies, secret engines, leases, audit devices, target-system connectivity, and client re-authentication before cutover.
+{% /section-card %}
+
+{% section-card %}
+## Integrate clients for rotation and failure
+
+Vault Agent, the CSI provider, a sidecar, or an application library can authenticate and retrieve material. The integration still needs explicit semantics:
+
+- where rendered material lives and which process may read it;
+- whether the application reloads files, reconnects, or restarts after rotation;
+- how renewal failures, sealed state, leadership changes, and `403` denials differ;
+- which secrets may be cached, for how long, and whether the cache persists;
+- how shutdown, identity revocation, and lease revocation are coordinated;
+- how bootstrap identity is protected and rotated.
+
+Do not log tokens, response bodies, rendered secrets, database passwords, private keys, or unredacted templates. Treat debugging endpoints, metrics labels, and error aggregation as possible exfiltration paths.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production checklist
+
+### Initialize and harden
+
+- Run Vault as a dedicated unprivileged user with minimal writable paths.
+- Use TLS for client and cluster traffic; separate API, cluster, and administration network paths.
+- Enable and verify two audit devices immediately after initialization.
+- Revoke the initial root token and use controlled root-generation procedures only for recovery.
+
+### Govern access
+
+- Map platform identity to short, narrow token roles.
+- Review wildcard policies, orphan tokens, periodic tokens, and privileged operator paths.
+- Separate auth, policy, secrets-engine, audit, seal, and storage administration.
+- Inventory static secrets that cannot be revoked automatically.
+
+### Operate and recover
+
+- Monitor seal state, leader changes, Raft quorum, audit failures, token and lease counts, expiration-manager pressure, and revocation failures.
+- Back up integrated storage and test restoration under the actual seal dependency.
+- Rehearse database outage during revoke, all-audit-device failure, KMS outage, node replacement, and client credential reload.
+- Keep emergency access documented, time-bounded, independently approved, and fully reviewed afterward.
+{% /section-card %}
+
+{% section-card %}
+## Current primary references
+
+- [Lease, renew, and revoke](https://developer.hashicorp.com/vault/docs/concepts/lease)
+- [Database secrets engine](https://developer.hashicorp.com/vault/docs/secrets/databases)
+- [Audit devices](https://developer.hashicorp.com/vault/docs/audit) and [audit best practices](https://developer.hashicorp.com/vault/docs/audit/best-practices)
+- [Seal and auto-unseal](https://developer.hashicorp.com/vault/docs/concepts/seal) and [sealing best practices](https://developer.hashicorp.com/vault/docs/configuration/seal/seal-best-practices)
+- [Integrated storage](https://developer.hashicorp.com/vault/docs/concepts/integrated-storage) and [production hardening](https://developer.hashicorp.com/vault/docs/concepts/production-hardening)
+
+Confirm edition-specific features and exact plugin behavior against the documentation for the Vault and secrets-engine versions you deploy.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/vault/quiz/vault-production-operations.json" lessonSlug="vault" title="Vault Production Operations Review" /%}

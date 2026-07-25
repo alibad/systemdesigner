@@ -1,0 +1,111 @@
+{
+  "title": "Trace candidate generation before the final duplicate decision",
+  "description": "Switch paths to see how normalization, compact signatures, an index, and exact verification divide responsibility. Candidate generation is allowed to be approximate; the product decision is not.",
+  "nodes": [
+    {
+      "id": "document",
+      "label": "Document pair",
+      "eyebrow": "Raw input",
+      "detail": "Provides the two objects to compare plus stable IDs, source metadata, and any domain-specific fields needed for a final decision.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 48
+    },
+    {
+      "id": "normalize",
+      "label": "Feature contract",
+      "eyebrow": "Canonicalize",
+      "detail": "Applies the same versioned tokenization, case folding, boilerplate removal, shingling, and feature weighting to indexed objects and queries.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 30,
+      "y": 48
+    },
+    {
+      "id": "simhash",
+      "label": "SimHash",
+      "eyebrow": "Weighted vector sketch",
+      "detail": "Projects weighted features into a fixed-width bit fingerprint. Nearby fingerprints are retrieved by Hamming-neighborhood indexing, not an all-pairs scan.",
+      "kind": "analytics",
+      "tone": "violet",
+      "x": 52,
+      "y": 18
+    },
+    {
+      "id": "minhash",
+      "label": "MinHash",
+      "eyebrow": "Set sketch",
+      "detail": "Stores minimum values from independent hash functions. Signature agreement estimates Jaccard similarity between the feature sets.",
+      "kind": "analytics",
+      "tone": "green",
+      "x": 52,
+      "y": 76
+    },
+    {
+      "id": "candidate-index",
+      "label": "Candidate index",
+      "eyebrow": "Approximate recall",
+      "detail": "Uses Hamming buckets or MinHash LSH bands to retrieve a bounded candidate set. Its job is to preserve useful recall while limiting verification work.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 72,
+      "y": 48
+    },
+    {
+      "id": "verify",
+      "label": "Exact verifier",
+      "eyebrow": "Policy boundary",
+      "detail": "Loads the original features, computes the declared exact metric, applies business rules, and records the decision with model and feature versions.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 90,
+      "y": 48
+    }
+  ],
+  "edges": [
+    {"id": "document-normalize", "from": "document", "to": "normalize", "label": "raw content"},
+    {"id": "normalize-simhash", "from": "normalize", "to": "simhash", "label": "weighted features"},
+    {"id": "normalize-minhash", "from": "normalize", "to": "minhash", "label": "shingle set"},
+    {"id": "simhash-index", "from": "simhash", "to": "candidate-index", "label": "nearby bits"},
+    {"id": "minhash-index", "from": "minhash", "to": "candidate-index", "label": "matching band"},
+    {"id": "index-verify", "from": "candidate-index", "to": "verify", "label": "candidate IDs"}
+  ],
+  "scenarios": [
+    {
+      "id": "minhash-match",
+      "label": "MinHash candidate",
+      "summary": "Two documents use the same feature contract, collide in at least one configured LSH band, and reach exact Jaccard verification.",
+      "activeEdges": ["document-normalize", "normalize-minhash", "minhash-index", "index-verify"],
+      "focusNode": "verify",
+      "result": "The verifier computes Jaccard similarity from the original shingle sets and applies the labeled threshold. The MinHash collision proposed the pair; it did not decide the outcome."
+    },
+    {
+      "id": "simhash-match",
+      "label": "SimHash candidate",
+      "summary": "Weighted feature vectors produce fingerprints inside the indexed Hamming search radius.",
+      "activeEdges": ["document-normalize", "normalize-simhash", "simhash-index", "index-verify"],
+      "focusNode": "simhash",
+      "result": "The Hamming index avoids an all-pairs comparison. The verifier still checks the original evidence because fingerprint proximity can include unrelated objects."
+    },
+    {
+      "id": "false-positive",
+      "label": "False-positive candidate",
+      "summary": "A pair collides in a MinHash band even though its exact Jaccard score is below the duplicate threshold.",
+      "activeEdges": ["document-normalize", "normalize-minhash", "minhash-index", "index-verify"],
+      "degradedNodes": ["candidate-index"],
+      "focusNode": "verify",
+      "result": "The exact verifier rejects the pair. This is expected candidate-stage work, not a product false positive, as long as approximate matches cannot bypass verification."
+    },
+    {
+      "id": "feature-drift",
+      "label": "Feature-version drift",
+      "summary": "Indexed documents and new queries use different normalization or shingling rules.",
+      "activeEdges": ["document-normalize", "normalize-minhash", "minhash-index"],
+      "failedNodes": ["normalize"],
+      "degradedNodes": ["candidate-index"],
+      "focusNode": "normalize",
+      "result": "A true neighbor can miss every candidate bucket and never reach verification. Version the feature contract, rebuild or dual-read the index, and measure recall on labeled pairs before promotion."
+    }
+  ]
+}

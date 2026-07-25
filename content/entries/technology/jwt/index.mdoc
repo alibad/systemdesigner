@@ -1,0 +1,379 @@
+---
+registryId: jwt
+---
+
+{% section-card tone="intro" %}
+## What is JWT?
+
+**JSON Web Token (JWT) is a compact, URL-safe format for carrying a set of
+claims between parties.** A claim is a name-value statement such as who issued
+the token (`iss`), who it describes (`sub`), which recipient may use it
+(`aud`), and when it expires (`exp`).
+
+A JWT places its claims inside a JSON Web Signature (JWS) or JSON Web
+Encryption (JWE) structure. A JWS can protect integrity and authenticate the
+signer. A JWE can provide confidentiality. A common three-part JWT is a
+signed JWS, so anyone holding it can usually decode its header and payload.
+Base64url encoding is not encryption.
+
+{% callout variant="info" %}
+### Core invariant
+
+A recipient may accept a JWT only when **the complete cryptographic operation,
+claims, token type, key source, time window, and request context all satisfy a
+policy configured by that recipient**. Data inside an unverified token is
+attacker-controlled input.
+{% /callout %}
+
+JWT is a format, not a complete security system. Using the format does not
+automatically provide:
+
+- encryption or secrecy;
+- authentication or authorization semantics;
+- logout, revocation, or session management;
+- protection against bearer-token replay;
+- safe key discovery or rotation.
+
+[RFC 7519](https://www.rfc-editor.org/rfc/rfc7519) defines JWT. Its required
+claims and validation rules depend on the profile using it. Review
+[OAuth 2.0](/technology/oauth2) when the token represents delegated API access;
+OAuth defines the authorization protocol, while JWT may be one access-token
+format within that protocol.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read the structure without confusing decoding with trust
+
+The compact serialization uses base64url-encoded parts separated by periods.
+The number and meaning of those parts come from the enclosing JOSE structure.
+
+{% concept-grid columns="3" %}
+{% concept-card title="JWS compact JWT" eyebrow="Integrity" icon="shield" tone="blue" %}
+Three parts: protected header, payload, and signature. The payload is readable.
+A valid signature or MAC shows that the protected bytes match a trusted key;
+it does not grant application permission.
+{% /concept-card %}
+{% concept-card title="JWE compact JWT" eyebrow="Confidentiality" icon="lock" tone="violet" %}
+Five parts: protected header, encrypted key, initialization vector, ciphertext,
+and authentication tag. JWE is a separate encrypted representation, not a
+property gained by signing a three-part token.
+{% /concept-card %}
+{% concept-card title="Nested JWT" eyebrow="Composition" icon="layers" tone="cyan" %}
+One JOSE object can contain another, such as signing and then encrypting.
+Every cryptographic layer must validate. Complexity is justified only when the
+protocol requires both properties.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A signed access-token header
+
+The protected header tells the verifier which registered algorithm was used,
+which key identifier is a lookup hint, and which token profile is intended.
+The verifier chooses its allowlist and trusted key source; the token does not.
+
+{% code-block file="/api/content/technology/jwt/code/access-token-header.json" language="json" title="Protected JWS header" /%}
+
+### A claims set
+
+Registered names create interoperable vocabulary, but RFC 7519 does not make
+all of them universally mandatory. An application profile must define which
+claims are required and what values are acceptable.
+
+{% code-block file="/api/content/technology/jwt/code/access-token-claims.json" language="json" title="JWT access-token claims" /%}
+
+- `iss` identifies the issuer. Match the configured value exactly and bind
+  verification keys to that issuer.
+- `sub` identifies the subject within the issuer's namespace. It is not
+  automatically a username, database key, or permission.
+- `aud` identifies intended recipients. Each resource server rejects a token
+  that does not name it.
+- `exp`, `nbf`, and `iat` are NumericDate values measured in seconds since the
+  Unix epoch. Keep any clock tolerance small and deliberate.
+- `jti` identifies one token. It supports a replay or denylist design only when
+  the recipient maintains and checks corresponding state.
+- Private claims need collision-resistant names or a closed agreement between
+  issuer and recipient. A claim named `role` has no universal meaning.
+
+The live [IANA JWT Claims registry](https://www.iana.org/assignments/jwt/jwt.xhtml)
+records standardized claim names. Registration documents a name; it does not
+make that claim trusted or suitable for every token profile.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Validate at the recipient's trust boundary
+
+Parsing is only the first step. A resource server must reject the token before
+application code uses its claims whenever a required validation gate fails.
+
+### Lab 1: change the token and the recipient policy
+
+Try `alg=none`, algorithm confusion, a foreign issuer, the wrong audience, an
+expired or not-yet-valid token, a missing key, an attacker-controlled key URL,
+and a copied bearer token. The trace shows why a valid-looking payload is not
+enough.
+
+{% interactive-block id="technology/jwt-performance" dataFile="/api/content/technology/jwt/data/token-validation-trust-boundary.json" /%}
+
+Apply checks in a bounded profile:
+
+1. **Parse defensively.** Reject malformed compact serialization, duplicate
+   claim names, unsupported critical headers, and input beyond configured size
+   limits.
+2. **Pin the token kind and algorithms.** Require the expected `typ` value
+   where the profile defines one. Pass an explicit algorithm allowlist to the
+   library. This API profile never accepts `none` and never lets a token switch
+   an RSA verification policy to HMAC.
+3. **Select keys from trusted configuration.** Resolve `kid` only inside the
+   key set bound to the configured issuer. Do not blindly follow `jku`, `jwk`,
+   or `x5u` values from an untrusted header.
+4. **Verify the complete cryptographic operation.** Reject the entire object if
+   any signature, MAC, decryption, or nested operation fails.
+5. **Validate required claims.** Check exact issuer, intended audience, subject
+   semantics, expiration, not-before time, and profile-specific claims.
+6. **Apply replay and authorization policy.** A copied bearer token can pass all
+   previous checks. Use audience restriction, sender constraint, one-time
+   state, revocation, and application authorization according to the threat.
+
+[RFC 8725](https://www.rfc-editor.org/rfc/rfc8725) requires callers to control
+the allowed algorithms, bind keys to issuers, validate audiences, treat received
+claims as untrusted lookup input, use explicit typing where confusion is
+possible, and define mutually exclusive rules for different JWT kinds.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose algorithms and keys as one policy
+
+The `alg` header is a statement from the token, not a command to the verifier.
+Configure the permitted algorithm for each token profile and key, then reject
+every other value.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Shared-key MAC" eyebrow="HS256 family" icon="key" tone="amber" %}
+Issuer and verifier share a high-entropy secret. Every verifier holding that
+secret can also mint tokens, so the trust boundary includes all verifiers.
+Human passwords are not MAC keys.
+{% /concept-card %}
+{% concept-card title="Public-key signature" eyebrow="RS, PS, ES, or EdDSA" icon="shield-check" tone="blue" %}
+The issuer signs with a private key and distributes public verification keys.
+Verifiers cannot mint tokens from the public key, but algorithm, curve, key
+size, library support, and current registry status still matter.
+{% /concept-card %}
+{% concept-card title="Encryption" eyebrow="JWE algorithms" icon="lock-keyhole" tone="violet" %}
+Key management and content encryption algorithms form a separate policy. Do
+not infer encryption from a JWS algorithm or hide sensitive claims merely by
+base64url-encoding them.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not copy a permanent list of “strong JWT algorithms” from a blog. The
+[IANA JOSE algorithms registry](https://www.iana.org/assignments/jose/jose.xhtml)
+tracks current implementation requirements and change-controller notes, while
+[RFC 7518](https://www.rfc-editor.org/rfc/rfc7518) defines the original JWA
+algorithms. Select algorithms required by the protocol profile, supported by a
+well-reviewed library and key service, and permitted by the organization's
+current cryptographic policy.
+
+### Rotate without breaking the trust chain
+
+- Publish the replacement public key before issuing tokens that reference its
+  `kid`.
+- During a planned rotation, sign new tokens with the replacement and retain
+  the old public key until every token the system still intends to accept has
+  aged out.
+- Bound JWKS fetch latency and retries. Cache previously trusted keys, but
+  define how stale the cache may become and fail closed for an unseen `kid`.
+- Remove a compromised key on the emergency path. Planned overlap is unsafe
+  when an attacker may sign with the old private key.
+- Monitor unknown `kid`, signature failure, issuer mismatch, and key-refresh
+  errors without recording complete credentials.
+
+[RFC 7517](https://www.rfc-editor.org/rfc/rfc7517) defines JWK and JWK Set
+formats. In JWS, `kid` is only a key-selection hint; it is not proof that the
+selected key belongs to the claimed issuer.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate verification from authorization
+
+A valid JWT establishes only the facts defined by its profile. An API still
+decides whether that subject or client may perform this action on this object
+in this tenant now.
+
+{% process-flow %}
+{% process-step number="1" title="Verify the credential" label="Resource server" %}
+Apply one issuer, audience, token type, algorithm, key, and time policy. Return
+no claims to business code when any gate fails.
+{% /process-step %}
+{% process-step number="2" title="Interpret the grant" label="Protocol profile" %}
+Map profile-defined scopes and claims to a narrow application identity. Do not
+treat arbitrary payload fields as trusted database queries or permissions.
+{% /process-step %}
+{% process-step number="3" title="Load current resource state" label="Application" %}
+Read ownership, tenant membership, suspension state, and other mutable policy
+from an authoritative source when the decision requires current data.
+{% /process-step %}
+{% process-step number="4" title="Authorize the action" label="Policy boundary" %}
+Require the operation's scope and enforce object-level and business rules.
+Record the decision without logging the bearer token.
+{% /process-step %}
+{% /process-flow %}
+
+[RFC 9068](https://www.rfc-editor.org/rfc/rfc9068) defines one specific JWT
+profile for OAuth 2.0 access tokens. It requires an `at+jwt` type and a defined
+set of claims so a resource server does not confuse an ID token or another JWT
+with an access token.
+
+This example uses the `jose` library and a JWKS URI supplied by trusted
+configuration. It pins the expected access-token profile and returns only a
+small identity object after validation.
+
+{% code-block file="/api/content/technology/jwt/code/verify-access-token.mjs" language="javascript" title="Verify a profiled JWT access token" /%}
+
+The next example performs scope and object-ownership checks after verification.
+This separation is the difference between “the issuer made these claims” and
+“this request may read this order.”
+
+{% code-block file="/api/content/technology/jwt/code/authorize-order.mjs" language="javascript" title="Authorize an object after token verification" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design the session and revocation system separately
+
+An access token is not the login session. A session can outlive several access
+tokens, end before one expires, require reauthentication, or be revoked while
+offline resource servers still accept an already issued token.
+
+### Lab 2: choose lifecycle and incident behavior
+
+Change the access-token lifetime, session ceiling, refresh strategy, key
+overlap, revocation propagation, and failure condition. This lab exposes two
+quantities that are often hidden:
+
+- **stale-access window:** how long an already issued access token can remain
+  usable after revocation is recorded under the selected enforcement model;
+- **rotation gap:** how long an old-key token may still be within its accepted
+  lifetime after the old public key is removed.
+
+{% interactive-block id="technology/jwt-performance" dataFile="/api/content/technology/jwt/data/session-rotation-revocation-architecture.json" /%}
+
+The lab's bounds are design arithmetic, not vendor defaults:
+
+`offline stale-access bound = configured access-token lifetime`
+
+`state-aware stale-access bound = min(access-token lifetime, configured revocation propagation)`
+
+`planned rotation gap = max(0, longest accepted old-key token lifetime - old-key overlap)`
+
+Real systems add detection time, network delay, cache policy, clock tolerance,
+client behavior, and tokens with different lifetimes. Inventory those inputs
+before using the bound in an incident plan.
+{% /section-card %}
+
+{% section-card %}
+## Put state where the decision needs it
+
+### Access tokens
+
+Keep audience and privilege narrow. Shorter lifetimes reduce the maximum
+offline stale-access window but increase renewal traffic and the effect of an
+authorization-server outage. Longer lifetimes do the opposite. Choose from the
+system's revocation objective, outage posture, and client behavior rather than
+from a universal duration.
+
+### Refresh tokens and sessions
+
+Refresh tokens are high-value credentials because they can mint replacement
+access tokens. [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700) requires a
+public client that receives refresh tokens to use sender-constrained refresh
+tokens or rotation that detects replay. Rotation needs server-side family
+lineage and an atomic “consume old, issue new” transition; merely returning a
+new string is not replay detection.
+
+### Revocation
+
+[RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) defines an OAuth token
+revocation endpoint. Revoking a refresh token does not automatically make every
+self-contained access token disappear from every verifier. The authorization
+server's cascade policy and the resource server's enforcement path determine
+the result.
+
+[RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) defines token introspection,
+which lets a protected resource ask an authorization server whether a token is
+active. That improves access to current state but adds network, cache, privacy,
+and availability dependencies to the request path.
+
+### Replay
+
+Audience restriction limits where a copied token works; it does not prove who
+presented it. A one-time `jti` cache can protect a narrow operation, but it
+reintroduces shared state. For OAuth, sender-constrained access tokens such as
+mutual-TLS-bound tokens or
+[DPoP](https://www.rfc-editor.org/rfc/rfc9449) bind use to proof of a key.
+They still require replay-safe proof validation and do not help if both token
+and proof key are stolen.
+{% /section-card %}
+
+{% section-card %}
+## Operate JWT as a trust distribution system
+
+### Before release
+
+- Write one validation profile per JWT kind: required `typ`, algorithms, issuer,
+  audience, claims, maximum size, key source, and clock tolerance.
+- Keep access tokens out of URLs, analytics, traces, crash reports, and normal
+  logs. TLS protects transport, not every place an application copies a token.
+- Test malformed input, duplicate claims, `none`, algorithm confusion, wrong
+  issuer, wrong audience, future `nbf`, expired `exp`, unknown `kid`, stale
+  JWKS, token substitution, and replay.
+- Decide whether browser tokens live in a backend-for-frontend, an
+  `HttpOnly` cookie with CSRF controls, or client memory. JWT format does not
+  make browser storage safe.
+
+### During operation
+
+- Rotate signing keys and client credentials through rehearsed planned and
+  emergency paths.
+- Alert on changes in validation failure classes, not on token contents.
+- Rehearse issuer and JWKS outage with known and unseen keys.
+- Measure revocation and refresh-family propagation at every verifier.
+- Preserve least privilege in downstream token exchange; never forward a broad
+  user token to every service by default.
+
+### Prefer a simpler session when it fits
+
+A server-side session identifier is often easier when one application owns the
+browser and server, immediate logout matters, and every request already reaches
+shared session state. JWT is useful when a defined protocol profile needs a
+portable claims object across independently operated boundaries. Choose it
+because the trust-distribution model fits, not because “stateless” sounds
+automatically scalable or secure.
+{% /section-card %}
+
+{% section-card %}
+## Primary specifications
+
+- [RFC 7519: JSON Web Token](https://www.rfc-editor.org/rfc/rfc7519) defines
+  JWT claims, NumericDate, compact representation, and validation foundations.
+- [RFC 7515: JSON Web Signature](https://www.rfc-editor.org/rfc/rfc7515)
+  defines JWS protected headers, signatures, `alg`, `kid`, `jku`, and compact
+  serialization.
+- [RFC 7516: JSON Web Encryption](https://www.rfc-editor.org/rfc/rfc7516)
+  defines the encrypted JWE representation.
+- [RFC 7517: JSON Web Key](https://www.rfc-editor.org/rfc/rfc7517) and
+  [RFC 7518: JSON Web Algorithms](https://www.rfc-editor.org/rfc/rfc7518)
+  define key and original algorithm formats.
+- [RFC 8725: JWT Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725)
+  covers algorithm verification, issuer and audience validation, explicit
+  typing, cross-JWT confusion, and untrusted key references.
+- [IANA JOSE](https://www.iana.org/assignments/jose/jose.xhtml) and
+  [IANA JWT Claims](https://www.iana.org/assignments/jwt/jwt.xhtml) are the
+  live registries for algorithm and claim assignments.
+- [RFC 9068](https://www.rfc-editor.org/rfc/rfc9068),
+  [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700),
+  [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009), and
+  [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) connect profiled JWT
+  access tokens to OAuth security, refresh replay detection, revocation, and
+  introspection.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/jwt/quiz/jwt-trust-boundaries.json" lessonSlug="jwt" title="JWT Trust Boundary Review" /%}

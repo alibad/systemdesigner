@@ -1,0 +1,283 @@
+---
+registryId: financial-ml
+---
+
+{% section-card tone="intro" %}
+## What is a financial ML system?
+
+A **financial ML system** uses a learned score, forecast, ranking, or anomaly signal inside a workflow that can affect money, customer access, market activity, or regulated records. The system is larger than its model: it includes event-time data, labels, feature joins, policy thresholds, deterministic limits, human authority, decision records, monitoring, and rollback.
+
+This matters because a model can look excellent offline while learning from future information, optimizing the wrong outcome, or creating actions that exceed operational capacity. The core invariant is: **reproduce every consequential decision from only the information available at that time, then keep the action bounded by an accountable policy and independent risk controls**.
+
+- Define the decision and its owner before choosing a model.
+- Treat availability time as part of every feature contract.
+- Evaluate on future-like periods with realistic costs and constraints.
+- Separate a model's score from permission to approve, decline, review, price, or trade.
+- Preserve the exact data, model, policy, reason, and override used for each decision.
+
+{% callout variant="warn" %}
+This lesson is educational system-design guidance, not financial, investment, legal, compliance, or regulatory advice. Requirements depend on the product, institution, role, and jurisdiction. Qualified risk, compliance, legal, security, and business owners must define the applicable controls.
+{% /callout %}
+{% /section-card %}
+
+{% process-flow %}
+{% process-step number="1" title="Define the decision contract" label="Frame" %}
+Name the subject, decision time, action, owner, error costs, service target, exclusions, and fallback.
+{% /process-step %}
+{% process-step number="2" title="Reconstruct available evidence" label="Data" %}
+Build point-in-time feature rows and labels whose observation windows are explicit and versioned.
+{% /process-step %}
+{% process-step number="3" title="Backtest the full policy" label="Evaluate" %}
+Replay model, threshold, review capacity, costs, limits, and delayed outcomes in chronological order.
+{% /process-step %}
+{% process-step number="4" title="Release with bounded authority" label="Control" %}
+Require independent challenge, deterministic limits, reason records, staged exposure, and tested rollback.
+{% /process-step %}
+{% process-step number="5" title="Monitor decisions and outcomes" label="Operate" %}
+Join delayed labels, inspect cohorts and regimes, investigate overrides, and contain boundary breaches.
+{% /process-step %}
+{% /process-flow %}
+
+{% section-card %}
+## Frame a decision, not a generic prediction
+
+A useful problem statement identifies what happens after the score. Ask these questions before discussing features or algorithms:
+
+1. **Subject and moment:** Which transaction, application, account, order, or portfolio is being evaluated, and at what decision timestamp?
+2. **Action and authority:** Does the system approve, decline, challenge, rank, price, size, route, or only advise? Who is allowed to commit that action?
+3. **Error consequences:** What do false positives, false negatives, poor calibration, delay, or abstention cost customers and the institution?
+4. **Operational boundary:** Which review capacity, latency budget, exposure limit, eligibility rule, and fallback constrain the policy?
+5. **Outcome horizon:** Which event proves whether the decision was useful, and when can that event be observed reliably?
+
+{% concept-grid columns="2" %}
+{% concept-card title="Fraud and financial crime" eyebrow="Protect activity" icon="shield" tone="rose" %}
+Rank or classify suspicious events, then combine the score with customer friction, investigation capacity, loss tolerance, and legal obligations. A later case disposition may be incomplete or influenced by the intervention itself.
+{% /concept-card %}
+{% concept-card title="Credit and underwriting" eyebrow="Allocate access" icon="scale" tone="blue" %}
+Estimate repayment or loss risk, then apply product, affordability, eligibility, pricing, and review policy. Specific reasons and consistent treatment belong to the decision system, not an afterthought.
+{% /concept-card %}
+{% concept-card title="Trading and execution" eyebrow="Act under limits" icon="activity" tone="violet" %}
+Forecast returns, fills, volatility, or market impact while pre-trade controls cap exposure and reject erroneous or unauthorized orders independently of the learned signal.
+{% /concept-card %}
+{% concept-card title="Operations and service" eyebrow="Prioritize work" icon="users" tone="green" %}
+Forecast cash demand, route cases, rank outreach, or detect operational anomalies. These uses can still affect customers, staff, liquidity, and access, so outcomes and cohorts remain material.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Make time part of the data model
+
+Financial records usually have more than one relevant clock. A correct historical row preserves all of them:
+
+- **Event time:** when the transaction, application, quote, payment, or account change occurred.
+- **Available time:** when the production decision path could first read the value after transport, validation, and publication.
+- **Decision time:** the deadline at which the system had to act.
+- **Outcome time:** when the target event occurred, such as a chargeback, repayment, loss, fill, or review disposition.
+- **Recorded time:** when a correction or late report entered storage; this may differ from both event and availability time.
+
+A current warehouse row is not a faithful historical feature row. Corrections, slowly changing dimensions, late events, revised bureau data, settled transactions, and downstream decisions can all reveal the future unless joins are evaluated **as of** the original decision timestamp.
+
+{% interactive-block id="ml-systems/financial-ml-point-in-time-lab" dataFile="/api/content/ml-systems/financial-ml/data/point-in-time-scenarios.json" /%}
+
+### Enforce the point-in-time contract in code
+
+The example keeps only values published by the decision deadline and creates chronological folds with an explicit gap. Production implementations also need source versioning, entity isolation, deletion handling, and replay tests against the online feature path.
+
+{% code-block file="/api/content/ml-systems/financial-ml/code/point-in-time-features.py" language="python" title="Build an as-of feature row and separated walk-forward folds" /%}
+{% /section-card %}
+
+{% section-card %}
+## Define labels as governed observation processes
+
+A label is not simply a column named `fraud`, `default`, or `return`. It is a rule connecting a decision to an observable outcome over a stated horizon.
+
+### Write the label contract
+
+- Name the event, observation window, grace period, maturity rule, and cutoff date.
+- Distinguish confirmed outcomes from analyst judgments, proxy labels, and unresolved cases.
+- Record who or what generated the label and which policy or investigation process influenced it.
+- Track corrections, reversals, censoring, missing follow-up, and class-dependent reporting delay.
+- Freeze label versions so a training run and its later validation can be reproduced.
+
+### Watch for intervention and selection bias
+
+The system can change the outcome it later tries to learn. A blocked payment cannot become a completed fraudulent charge; a declined applicant may never produce a repayment history; a reviewed case receives more evidence than an unreviewed one. Treat action, exposure, review selection, and missing outcomes as part of the causal data-generating process.
+
+{% callout variant="tip" %}
+Do not train unresolved cases as negatives merely because no bad outcome has appeared yet. Define when a label is mature, keep immature cases separate, and monitor how outcome availability differs by cohort and action.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Backtest without borrowing from the future
+
+An offline evaluation should simulate what the deployed system would have known and done. Random row splits are often weak evidence for financial decisions because they can mix regimes, related entities, overlapping labels, and revised features across train and test.
+
+### Use a chronological evaluation protocol
+
+1. Train on an earlier interval using feature values available in that interval.
+2. Leave a gap or embargo when label windows, features, or related events can overlap the test period.
+3. Evaluate on the next contiguous interval and keep entity or group dependencies out of both sides where required.
+4. Advance the clock and repeat across calm, stressed, seasonal, and policy-change regimes.
+5. Lock a final untouched period before model and threshold selection, then shadow the full policy on live traffic.
+
+### Replay the economics and constraints
+
+- Include fees, spread, slippage, market impact, delayed fills, rejects, and position limits for trading systems.
+- Include fraud loss, false-decline cost, challenge completion, review capacity, and delayed confirmations for fraud systems.
+- Include approval mix, expected loss, calibration, reason stability, review outcomes, and customer consequences for credit systems.
+- Report uncertainty and cohort variation, not only an average metric from the selected candidate.
+- Record how many models, features, thresholds, and strategies were tried; repeated selection can overfit the backtest itself.
+
+The [TimeSeriesSplit documentation](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html) explains why time-ordered data needs ordered folds and exposes a configurable gap. Bailey and colleagues' [Probability of Backtest Overfitting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253) shows why ordinary holdouts can still be misleading after extensive strategy selection.
+{% /section-card %}
+
+{% section-card %}
+## Turn a score into a bounded policy
+
+Ranking quality does not choose an action. The policy combines the score with eligibility, amount, exposure, customer state, capacity, reason requirements, and a fallback.
+
+{% system-flow title="A score cannot grant itself authority" caption="Version and observe each boundary separately so a model change cannot silently change policy or bypass deterministic controls." %}
+{% system-node title="Validate the request" eyebrow="Eligibility" icon="shield" tone="cyan" %}
+Check schema, identity, freshness, consent, product eligibility, and supported feature versions.
+{% /system-node %}
+{% system-node title="Produce a calibrated score" eyebrow="Model" icon="gauge" tone="violet" %}
+Return the model version, score, uncertainty or abstention state, and stable reason signals.
+{% /system-node %}
+{% system-node title="Apply policy" eyebrow="Decision" icon="scale" tone="blue" %}
+Map score and context to approve, decline, challenge, review, size, or no-action using versioned rules.
+{% /system-node %}
+{% system-node title="Enforce hard limits" eyebrow="Risk" icon="shield" tone="rose" %}
+Reject actions outside exposure, velocity, capital, eligibility, authorization, or safety boundaries.
+{% /system-node %}
+{% system-node title="Record and observe" eyebrow="Evidence" icon="storage" tone="green" %}
+Persist inputs, versions, reasons, action, override, latency, and later outcome for replay and monitoring.
+{% /system-node %}
+{% /system-flow %}
+
+### Select thresholds against the operating objective
+
+- For rare events, inspect precision-recall behavior and the absolute number of false alerts and misses.
+- Check calibration when a probability is used for pricing, expected loss, capacity, or capital decisions.
+- Optimize a cost or utility function only after its assumptions and affected groups are reviewable.
+- Evaluate multiple thresholds against queue capacity, service targets, customer friction, loss, and fallback behavior.
+- Keep the threshold and policy version separate from the model artifact so each can be approved, monitored, and rolled back.
+{% /section-card %}
+
+{% section-card %}
+## Keep risk controls independent of model confidence
+
+A highly confident model can still be wrong because of leakage, regime change, integration failure, adversarial behavior, or a policy mismatch. Consequential authority therefore needs controls that do not depend on the model agreeing with them.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Deterministic boundaries" eyebrow="Prevent excess" icon="shield" tone="rose" %}
+Enforce pre-set exposure, capital, amount, velocity, authorization, eligibility, and erroneous-action limits outside the learned path.
+{% /concept-card %}
+{% concept-card title="Effective challenge" eyebrow="Question evidence" icon="users" tone="violet" %}
+Give qualified independent reviewers enough data, competence, incentive, and authority to challenge assumptions, implementation, validation, and use.
+{% /concept-card %}
+{% concept-card title="Reproducible decisions" eyebrow="Preserve the record" icon="database" tone="blue" %}
+Store feature values and timestamps, model and policy versions, reasons, limits, overrides, approvals, and source lineage.
+{% /concept-card %}
+{% concept-card title="Contained failure" eyebrow="Recover safely" icon="activity" tone="amber" %}
+Define abstention, manual review, incumbent routing, circuit breakers, kill switches, queue draining, rollback, and evidence preservation before release.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% interactive-block id="ml-systems/financial-ml-release-gate-lab" dataFile="/api/content/ml-systems/financial-ml/data/release-gate-scenarios.json" /%}
+
+### Encode the gate as an auditable decision
+
+The example evaluates required evidence and independent review explicitly. A real gate should also bind approvals to immutable artifacts, expire stale evidence, reject self-approval, and emit a signed decision record.
+
+{% code-block file="/api/content/ml-systems/financial-ml/code/release-gate.py" language="python" title="Evaluate a bounded release evidence package" /%}
+{% /section-card %}
+
+{% section-card %}
+## Monitor the decision system, not only the model
+
+Outcome labels can arrive days or months after the prediction. Build monitoring in layers so earlier signals contain failures while later evidence evaluates real consequences.
+
+{% metric-strip %}
+{% metric label="Input" value="Fresh and in scope" detail="Schema, lateness, missingness, source version, cohort and regime mix" tone="cyan" /%}
+{% metric label="Score" value="Stable and calibrated" detail="Distribution, uncertainty, abstention, reason and calibration movement" tone="violet" /%}
+{% metric label="Action" value="Policy under control" detail="Approval, decline, review, challenge, order, override and fallback rates" tone="blue" /%}
+{% metric label="Outcome" value="Cost and harm visible" detail="Loss, repayment, fraud, return, complaints and cohort-level errors" tone="green" /%}
+{% /metric-strip %}
+
+### Join delayed outcomes deliberately
+
+- Track label maturity and unresolved exposure separately from confirmed good outcomes.
+- Compare observed and expected outcome rates by decision month, model, policy, cohort, product, channel, and regime.
+- Recompute calibration and error costs only on mature cohorts, while retaining leading indicators for faster containment.
+- Watch overrides, appeals, complaints, investigation yield, queue age, limit rejects, fallback use, and decision latency.
+- Alert on breached action or loss boundaries, not every statistically detectable shift.
+
+### Respond with a predefined ladder
+
+{% process-flow %}
+{% process-step number="1" title="Detect the boundary breach" label="Signal" %}
+Tie the alert to a specific data, score, action, outcome, cohort, limit, or control threshold.
+{% /process-step %}
+{% process-step number="2" title="Contain consequential authority" label="Protect" %}
+Tighten policy, reduce exposure, route to review, disable the candidate, or restore the incumbent path.
+{% /process-step %}
+{% process-step number="3" title="Preserve the decision trail" label="Diagnose" %}
+Freeze affected inputs, versions, reasons, approvals, overrides, outcomes, and surrounding system telemetry.
+{% /process-step %}
+{% process-step number="4" title="Recover through the release gate" label="Prove" %}
+Repair the failure, rerun independent validation, compare the replay, and require accountable approval before restoring scope.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Govern the complete model lifecycle
+
+Model governance should scale with the use and risk. Maintain an inventory that links each model to its owner, purpose, materiality, data, validation, limitations, policy dependencies, monitoring, incidents, and retirement state.
+
+### Require evidence at every transition
+
+1. **Development:** approved purpose, point-in-time data, label policy, assumptions, implementation tests, and reproducible training.
+2. **Validation:** conceptual soundness, independent implementation review, benchmark and challenger comparisons, temporal testing, cohort analysis, and limitations.
+3. **Approval:** accountable owners accept the intended use, limits, threshold, monitoring, customer or market consequences, and fallback.
+4. **Operation:** access control, versioned decisions, outcome joins, issue management, periodic review, vendor oversight, and tested recovery.
+5. **Change or retirement:** impact assessment, evidence proportional to the change, archive and lineage retention, downstream migration, and removal of obsolete authority.
+
+In April 2026, the U.S. federal banking agencies issued [revised model risk management guidance](https://www.federalreserve.gov/supervisionreg/srletters/SR2602.htm) that superseded SR 11-7 and emphasizes a risk-based approach, model development and use, validation and monitoring, and governance and controls. Applicability is institution- and use-specific; the guidance is a source for control principles, not a universal legal checklist.
+
+For U.S. credit decisions, the CFPB's [Circular 2022-03](https://www.consumerfinance.gov/compliance/circulars/circular-2022-03-adverse-action-notification-requirements-in-connection-with-credit-decisions-based-on-complex-algorithms/) states that creditors using complex algorithms must still provide the specific principal reasons for adverse action.
+
+For U.S. broker-dealer market access, SEC [Rule 15c3-5 materials](https://www.sec.gov/rules-regulations/2011/06/risk-management-controls-brokers-or-dealers-market-access) describe documented controls intended to limit financial exposure, prevent erroneous orders, restrict access, and support regular review.
+
+### Primary sources
+
+- [Federal Reserve: Revised Guidance on Model Risk Management, SR 26-2, April 17, 2026](https://www.federalreserve.gov/supervisionreg/srletters/SR2602.htm)
+- [FDIC: Agencies Issue Revised Model Risk Guidance, April 17, 2026](https://www.fdic.gov/news/press-releases/2026/agencies-issue-revised-model-risk-guidance)
+- [CFPB: Circular 2022-03 on adverse-action notices and complex algorithms](https://www.consumerfinance.gov/compliance/circulars/circular-2022-03-adverse-action-notification-requirements-in-connection-with-credit-decisions-based-on-complex-algorithms/)
+- [SEC: Risk Management Controls for Brokers or Dealers With Market Access](https://www.sec.gov/rules-regulations/2011/06/risk-management-controls-brokers-or-dealers-market-access)
+- [scikit-learn: TimeSeriesSplit](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html)
+- [Bailey et al.: The Probability of Backtest Overfitting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253)
+{% /section-card %}
+
+{% section-card %}
+## Review the production readiness boundary
+
+Before granting a financial ML system consequential authority, require evidence that the team can answer each question:
+
+1. Is the decision, timestamp, action, owner, error cost, scope, and fallback explicit?
+2. Can every training and production feature be reconstructed from its event and availability times?
+3. Are label maturity, intervention, censoring, corrections, and missing outcomes documented?
+4. Does the evaluation replay future-like periods, related entities, costs, constraints, and repeated model selection honestly?
+5. Are calibration, threshold, capacity, cohort behavior, and policy consequences validated separately from ranking quality?
+6. Do deterministic limits prevent the model from granting itself unbounded financial or market authority?
+7. Can the organization reproduce each decision from data, model, policy, reason, limit, approval, and override records?
+8. Are delayed outcomes, customer or market consequences, incidents, and release-boundary changes monitored by named owners?
+
+{% callout variant="warn" %}
+If a team cannot replay what the system knew, why it acted, which control authorized the action, and how to contain a bad release, the system is not ready for consequential use.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/financial-ml/quiz/financial-ml.json" lessonSlug="financial-ml" title="Financial ML Design and Governance Check" /%}

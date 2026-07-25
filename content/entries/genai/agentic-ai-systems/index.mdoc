@@ -1,0 +1,287 @@
+---
+registryId: agentic-ai-systems
+---
+
+{% section-card tone="intro" %}
+## What is an agentic AI system?
+
+An **agentic AI system** is software in which a model can choose the next step in a multi-step task, use tools, inspect results, and continue until a runtime stop condition is reached. The model may help decompose a goal and propose actions, but ordinary software still owns credentials, authorization, durable state, budgets, and execution.
+
+In plain language: a chatbot mainly produces a response. An agentic system can also choose and invoke bounded operations such as reading a case, running a test, or proposing a refund. That extra action surface can be useful, but it also lets one bad observation affect later decisions.
+
+{% callout variant="info" %}
+### Core invariant
+
+The model may propose what to do next, but a deterministic runtime decides what is allowed to execute, what state becomes durable, what may be retried, and when the run must stop.
+{% /callout %}
+
+The word *agentic* does not imply a mind, intent, or trustworthy autonomy. It describes a control pattern. A loop is not reliable merely because it can call tools.
+
+This advanced lesson builds on [AI agents](/genai/ai-agents), [AI safety](/genai/ai-safety), and [LLM serving](/genai/llm-serving).
+{% /section-card %}
+
+{% section-card %}
+## Choose agentic control only when the path is genuinely uncertain
+
+**Agentic control** means that a model selects at least part of the execution path at run time. It matters when the required steps cannot be enumerated cleanly in advance, but it adds latency, cost, policy surface, and recovery complexity.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Deterministic workflow" eyebrow="Known path" icon="workflow" tone="green" %}
+Code owns the sequence and branches. A model may classify or draft inside a step, but it does not decide the next operation. Prefer this when rules and transitions are known.
+{% /concept-card %}
+{% concept-card title="Bounded agent loop" eyebrow="Uncertain path" icon="route" tone="cyan" %}
+The model proposes the next step inside fixed tool, state, budget, and approval boundaries. Use it when run-time evidence changes which action is needed.
+{% /concept-card %}
+{% concept-card title="Multi-agent system" eyebrow="Multiple decision loops" icon="network" tone="violet" %}
+Several model-driven workers coordinate through a manager, handoffs, or shared tasks. Add this only when specialization or parallel work improves measured outcomes enough to justify more failure paths.
+{% /concept-card %}
+{% /concept-grid %}
+
+A useful selection test is:
+
+1. Can ordinary code express the path and edge cases clearly?
+2. Does model-selected sequencing improve a measurable task outcome?
+3. Can the environment expose authoritative feedback after each action?
+4. Can every consequential effect be bounded, observed, and recovered?
+
+If the first answer is yes and the others are weak, build a workflow rather than an open loop. Anthropic's official guidance similarly distinguishes predefined workflows from systems where a model dynamically directs tool use, and recommends adding complexity only when simpler patterns fall short.
+{% /section-card %}
+
+{% section-card %}
+## Separate the model, runtime, tools, and state
+
+**A system boundary** identifies which component owns a decision and which inputs it may trust. Production failures often begin when a model response is allowed to blur boundaries that normal software would enforce explicitly.
+
+{% system-flow title="One bounded decision path" caption="The planner proposes. The policy runtime authorizes. The tool gateway executes. Durable state and authoritative verification decide whether the goal was reached." %}
+{% system-node title="Goal contract" eyebrow="User intent" icon="target" tone="blue" %}
+Normalized task, scope, success criteria, and prohibited effects.
+{% /system-node %}
+{% system-node title="Planner" eyebrow="Model" icon="sparkles" tone="violet" %}
+Proposes a structured next action from the current bounded context.
+{% /system-node %}
+{% system-node title="Policy runtime" eyebrow="Deterministic" icon="shield" tone="amber" %}
+Checks identity, tool allowlist, arguments, budgets, and approval rules.
+{% /system-node %}
+{% system-node title="Tool gateway" eyebrow="Execution" icon="wrench" tone="cyan" %}
+Invokes a typed adapter with scoped credentials and one operation identity.
+{% /system-node %}
+{% system-node title="Authoritative state" eyebrow="Environment" icon="database" tone="green" %}
+Returns validated evidence used to verify the outcome and choose the next state.
+{% /system-node %}
+{% /system-flow %}
+
+Keep four forms of state distinct:
+
+- **Conversation context** is model-visible history. It helps continuity but is not an authoritative transaction log.
+- **Run state** records the current step, budget use, pending approval, tool call IDs, and terminal status.
+- **Domain state** lives in the source of truth, such as an order ledger, repository, ticket system, or deployment controller.
+- **Memory** carries selected information across runs. Treat writes to memory as governed mutations because poisoned memory can redirect later work.
+
+The runtime, not the model, maps an authenticated principal to tool credentials. A tool description tells the model how to propose a call; it does not grant authority.
+{% /section-card %}
+
+{% section-card %}
+## Make the execution loop explicit and bounded
+
+**An execution loop** repeatedly proposes, checks, acts, observes, and decides whether to continue. A production loop needs named transitions and terminal states so that operators can tell the difference between success, waiting, failure, and abandonment.
+
+{% process-flow %}
+{% process-step number="1" title="Bind the goal" label="Contract" %}
+Record the target object, allowed scope, success evidence, and prohibited effects before planning.
+{% /process-step %}
+{% process-step number="2" title="Propose a step" label="Model" %}
+Request one structured action or a terminal response from the planner.
+{% /process-step %}
+{% process-step number="3" title="Authorize and execute" label="Runtime" %}
+Validate the tool, arguments, identity, budget, and approval rule before credentials are used.
+{% /process-step %}
+{% process-step number="4" title="Validate observation" label="Evidence" %}
+Treat tool output as untrusted data, validate its schema and provenance, and reconcile domain state.
+{% /process-step %}
+{% process-step number="5" title="Persist or stop" label="State" %}
+Checkpoint progress, then complete, wait, retry within policy, or stop with a machine-readable reason.
+{% /process-step %}
+{% /process-flow %}
+
+Set independent limits because each protects a different resource or failure mode:
+
+- Maximum model turns limits recursive planning and token spend.
+- Maximum tool calls limits external load and action exposure.
+- Per-tool attempts limit repeated pressure on one dependency.
+- Wall-clock deadline releases workers and honors caller expectations.
+- Financial or compute budget limits paid work.
+- Repeated-state detection stops loops that make no measurable progress.
+- Cancellation and emergency-stop checks let operators end a run between effects.
+
+{% callout variant="warn" %}
+Do not express these limits only in the prompt. The runtime must count and enforce them even when the model proposes another step.
+{% /callout %}
+
+{% interactive-block id="genai/agentic-ai-systems-execution-trace-lab" dataFile="/api/content/genai/agentic-ai-systems/data/execution-trace-lab.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Persist durable state before long waits and ambiguous effects
+
+**Durable state** is run information that survives process restarts, worker loss, and long approval waits. Without it, a resumed worker cannot prove what was proposed, approved, attempted, or committed.
+
+A practical state machine includes:
+
+- `created`: the goal contract exists, but execution has not started.
+- `running`: one worker owns the current lease and may propose work.
+- `waiting_for_approval`: the exact pending tool call is durable and no effect has executed.
+- `recovering`: the runtime is reconciling an interrupted or ambiguous operation.
+- `completed`: authoritative outcome evidence satisfies the success contract.
+- `failed`, `cancelled`, or `budget_exhausted`: a terminal stop reason is recorded.
+
+Checkpoint before releasing a worker for approval, after every external result that can affect later decisions, and before reporting completion. Use optimistic versioning or a lease so two workers cannot advance the same run concurrently.
+
+{% code-block file="/api/content/genai/agentic-ai-systems/code/bounded-agent-runner.py" language="python" title="Provider-neutral bounded runner sketch" /%}
+
+This sketch deliberately omits model and workflow-framework implementation. It demonstrates the ownership boundary: the planner proposes, the gateway enforces authority, tool output is validated as data, and the run checkpoints before continuing.
+{% /section-card %}
+
+{% section-card %}
+## Grant the least authority and bind approval to one effect
+
+**Least authority** means that a run receives only the tools, credential scope, arguments, duration, and effect size needed for its current goal. A broad tool catalog with administrator credentials turns a planning error into a large security incident.
+
+For each tool, define:
+
+- A narrow purpose and an input schema with unknown fields rejected.
+- Read, proposal, reversible write, irreversible write, or privileged-administration effect.
+- Credential scope derived from the user and current task, never copied from model text.
+- Idempotency and reconciliation behavior for mutations.
+- Timeouts, rate limits, output schema, and maximum response size.
+- Approval policy based on the actual effect, not the model's confidence.
+
+**An approval gate** pauses a durable run before a sensitive tool call. The reviewer should see canonical server-generated details: tool name, target, arguments, credential scope, expected consequence, and whether the action is reversible. Approval binds to that exact call ID. If arguments change, approval is invalid.
+
+OpenAI's current Agents SDK documentation exposes this pattern as an interruption that can serialize and resume run state. MCP's tool specification likewise recommends confirmation for sensitive operations and requires clients to treat tool annotations as untrusted unless they come from trusted servers.
+
+{% code-block file="/api/content/genai/agentic-ai-systems/code/tool-authority-policy.json" language="json" title="Declarative tool authority and run budgets" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat retries, compensation, and injection as runtime problems
+
+**Recovery** is the ability to determine what happened after failure and move the system to a known state. Retrying is only one recovery technique, and it can make an incident worse when an external mutation is ambiguous.
+
+For a mutating call, use one stable operation or idempotency key for one user intent. If the network fails after the remote service may have committed, query authoritative state by that identity before replaying. A new key represents a new effect, not a retry.
+
+Use the recovery pattern that matches the effect:
+
+- **Read failure:** bounded retry with backoff may be safe if the caller deadline and dependency policy allow it.
+- **Ambiguous write:** reconcile by operation ID before deciding whether another delivery is needed.
+- **Reversible write:** checkpoint the effect and provide an audited compensation operation.
+- **Irreversible effect:** stage or preview it, require approval, and reduce authority because rollback may be impossible.
+- **Partial multi-step workflow:** resume from a versioned checkpoint; do not restart from the prompt and hope to reproduce the same path.
+
+**Prompt injection** occurs when untrusted content changes model behavior in an unintended way. In an agentic system, the injection may arrive through a webpage, document, tool result, memory record, or another agent. A schema-valid result can still contain a hostile instruction.
+
+Contain injection with independent controls:
+
+1. Label external content as data and keep it separate from trusted policy.
+2. Allow tools by task and identity, not by instructions found in content.
+3. Validate structured output and reject undeclared fields or authority claims.
+4. Gate sensitive effects on exact trusted arguments.
+5. Minimize data egress paths and block arbitrary destinations.
+6. Log the source, tool, arguments, policy decision, and resulting external state.
+7. Red-team direct, indirect, multimodal, memory, and cross-agent injection paths.
+
+OWASP's 2026 Agentic Applications list covers goal hijacking, tool misuse, identity and privilege abuse, memory poisoning, cascading failures, and related agent-specific risks. NIST AI 600-1 provides the broader governance, measurement, and risk-management profile; it does not replace application threat modeling.
+
+{% interactive-block id="genai/agentic-ai-systems-authority-recovery-lab" dataFile="/api/content/genai/agentic-ai-systems/data/authority-recovery-lab.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate outcomes, trajectories, boundaries, and recovery
+
+**Agent evaluation** tests the model and its runtime together in an environment where tools can change state. A fluent final message is not proof that the requested outcome exists.
+
+Use separate evidence layers:
+
+{% concept-grid columns="4" %}
+{% concept-card title="Outcome" eyebrow="Did it work?" icon="badge-check" tone="green" %}
+Grade authoritative environment state against task-specific success criteria. Detect false-success claims where the response and external state disagree.
+{% /concept-card %}
+{% concept-card title="Trajectory" eyebrow="How did it work?" icon="footprints" tone="violet" %}
+Inspect tool selection, arguments, step count, retries, handoffs, and unnecessary actions. A correct result can still reveal an unsafe path.
+{% /concept-card %}
+{% concept-card title="Boundary" eyebrow="What was prevented?" icon="shield" tone="amber" %}
+Inject disallowed tools, oversized arguments, prompt injection, approval bypass, scope escalation, and budget pressure.
+{% /concept-card %}
+{% concept-card title="Recovery" eyebrow="Can it resume?" icon="rotate-ccw" tone="cyan" %}
+Kill workers, duplicate deliveries, lose acknowledgements, expire approvals, and verify checkpoint, reconciliation, cancellation, and compensation behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+Build release suites from representative task distributions and risk-focused cases. Run multiple trials when model variance matters, but do not average away a hard safety or correctness gate. Measure outcomes by slice, including tool, permission scope, language, tenant, task complexity, and failure mode.
+
+Anthropic's agent evaluation guidance distinguishes the transcript or trajectory from the final environment outcome. That distinction is essential: the system may claim success while the database, repository, or external service shows otherwise.
+{% /section-card %}
+
+{% section-card %}
+## Observe enough to explain and recover every run
+
+**Observability** is the evidence needed to reconstruct a run, detect abnormal behavior, and support recovery without storing unnecessary secrets or personal data.
+
+Record at minimum:
+
+- Run, task, trace, parent, model, prompt, policy, tool-schema, and deployment versions.
+- Authenticated principal, delegated scope, and the policy rule that allowed or denied a call.
+- Structured proposals, redacted arguments, call IDs, operation IDs, latency, retries, and error class.
+- Approval request, reviewer identity, exact approved call hash, decision, and expiry.
+- State transitions, checkpoint version, lease owner, cancellation, and terminal stop reason.
+- Verified outcome from the source of truth and any compensation or manual repair.
+
+Trace inputs and outputs may contain secrets, personal data, or hostile content. Apply field-level redaction, access control, retention limits, and regional policy before export. OpenAI's Agents SDK tracing documentation explicitly notes that model and function spans may capture sensitive inputs and outputs.
+
+Operational signals should answer concrete questions:
+
+- Are runs completing according to authoritative state?
+- Which tools, policies, or model versions create repeated failure?
+- How often do runs exhaust steps, tool calls, time, or money?
+- Which mutations are retried, duplicated, rejected, compensated, or manually repaired?
+- Are approval queues meeting service objectives without becoming a rubber stamp?
+- Did a release change permission violations, false-success gaps, or recovery rates?
+{% /section-card %}
+
+{% section-card %}
+## Operate a controlled release, not a demo loop
+
+**A release gate** is a set of independent conditions that must pass before an agent configuration receives real authority. Framework features and benchmark scores do not replace these conditions.
+
+Before production exposure:
+
+1. Version the goal contract, prompts, model, tools, policy, and state schema.
+2. Test deterministic validators and tool adapters without a model.
+3. Run outcome, trajectory, adversarial, permission, and recovery evaluations in a sandbox.
+4. Start with read-only or proposal-only tools and narrow identities.
+5. Add exact-call approval before sensitive mutations.
+6. Canary on a small task and tenant scope with emergency stop and rollback paths.
+7. Compare production traces with evaluation assumptions and feed new failures back into tests.
+8. Expand authority only when evidence supports the specific new effect.
+
+Keep multi-agent designs especially narrow. Each handoff adds identity, context, state, timeout, and attribution questions. A manager pattern can centralize policy, while peer handoffs can distribute work, but neither is safer by default. The same runtime controls must apply across nested agents and delegated tools.
+
+Libraries and protocols can supply runners, typed tools, sessions, approvals, tracing, or transport. Verify their current contracts in official documentation, then keep business authorization and recovery semantics in your application control plane.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+These sources define the current practices and contracts used in this lesson:
+
+- [OpenAI, A practical guide to building AI agents](https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/) for use-case selection, orchestration, tool safeguards, stop conditions, and human intervention.
+- [OpenAI Agents SDK, Running agents](https://openai.github.io/openai-agents-python/running_agents/) for loop behavior, maximum turns, and durable execution integrations.
+- [OpenAI Agents SDK, Human-in-the-loop](https://openai.github.io/openai-agents-python/human_in_the_loop/) for exact tool-call interruption, serialized run state, approval, rejection, and resume.
+- [OpenAI Agents SDK, Tracing](https://openai.github.io/openai-agents-python/tracing/) for trace and span coverage plus sensitive-data handling.
+- [Anthropic, Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) for workflow-versus-agent selection, environmental feedback, stopping conditions, and tool design.
+- [Anthropic, Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) for trials, trajectories, outcomes, graders, and environment-based evaluation.
+- [NIST AI 600-1, Generative AI Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) for cross-sector generative-AI risk management.
+- [OWASP Top 10 for Agentic Applications 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) and [LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) for agent goal hijack, tool misuse, privilege abuse, memory/context poisoning, and direct or indirect prompt injection.
+- [Model Context Protocol 2025-11-25 tool specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) and [MCP security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices) for tool schemas, confirmation, output validation, least privilege, and transport-specific security.
+{% /section-card %}
+
+{% quiz title="Agentic AI Systems Design Check" questionsFile="/api/content/genai/agentic-ai-systems/quiz/agentic-ai-systems-review.json" lessonSlug="agentic-ai-systems" /%}

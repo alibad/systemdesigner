@@ -1,0 +1,178 @@
+{
+  "title": "Decide whether an alias may move",
+  "description": "Select a change, collect required evidence, bound the rollout, and inject a handoff failure. The alias moves only after the release decision is reproducible.",
+  "defaults": {
+    "changeId": "routine-retrain",
+    "handoffId": "resolve-once",
+    "failureId": "none",
+    "canaryPercent": 5,
+    "candidateF1": 86,
+    "worstSliceRecall": 78,
+    "p95LatencyMs": 104,
+    "completedGateIds": [
+      "lineage",
+      "signature",
+      "evaluation",
+      "dependency-scan",
+      "serving-smoke"
+    ]
+  },
+  "bounds": {
+    "canaryPercent": { "min": 1, "max": 100, "step": 1 },
+    "candidateF1": { "min": 60, "max": 95, "step": 1 },
+    "worstSliceRecall": { "min": 50, "max": 95, "step": 1 },
+    "p95LatencyMs": { "min": 60, "max": 220, "step": 5 }
+  },
+  "thresholds": {
+    "minimumF1": 82,
+    "minimumWorstSliceRecall": 74,
+    "maximumP95LatencyMs": 120,
+    "maximumInitialCanaryPercent": 10
+  },
+  "changes": [
+    {
+      "id": "routine-retrain",
+      "label": "Routine retrain",
+      "detail": "The feature and serving contracts are unchanged, but data and model behavior moved.",
+      "requiredGateIds": [
+        "lineage",
+        "signature",
+        "evaluation",
+        "serving-smoke",
+        "observability",
+        "rollback"
+      ]
+    },
+    {
+      "id": "feature-contract-change",
+      "label": "Feature contract change",
+      "detail": "Input schema, preprocessing, producers, and serving consumers must move together.",
+      "requiredGateIds": [
+        "lineage",
+        "signature",
+        "evaluation",
+        "dependency-scan",
+        "serving-smoke",
+        "consumer-contract",
+        "observability",
+        "rollback"
+      ]
+    },
+    {
+      "id": "mlflow-upgrade",
+      "label": "MLflow and model rebuild",
+      "detail": "Tracking schema, client compatibility, package metadata, and serving behavior may all change.",
+      "requiredGateIds": [
+        "lineage",
+        "signature",
+        "evaluation",
+        "dependency-scan",
+        "serving-smoke",
+        "migration-backup",
+        "client-matrix",
+        "observability",
+        "rollback"
+      ]
+    }
+  ],
+  "handoffs": [
+    {
+      "id": "resolve-once",
+      "label": "Resolve alias once",
+      "detail": "The deployment controller resolves champion, records the immutable version, and deploys that version.",
+      "preventsAliasDrift": true
+    },
+    {
+      "id": "runtime-alias-poll",
+      "label": "Poll alias at runtime",
+      "detail": "Serving workers can silently load different versions as the mutable alias changes.",
+      "preventsAliasDrift": false
+    }
+  ],
+  "gates": [
+    {
+      "id": "lineage",
+      "label": "Lineage complete",
+      "detail": "Run, dataset, code, parameters, and package can be traced end to end."
+    },
+    {
+      "id": "signature",
+      "label": "Signature compatible",
+      "detail": "Inputs, outputs, defaults, and serving examples match consumers."
+    },
+    {
+      "id": "evaluation",
+      "label": "Evaluation reproduced",
+      "detail": "Overall and slice metrics come from a versioned evaluation dataset."
+    },
+    {
+      "id": "dependency-scan",
+      "label": "Dependencies reviewed",
+      "detail": "Resolved dependencies and bundled code pass policy and vulnerability checks."
+    },
+    {
+      "id": "serving-smoke",
+      "label": "Serving smoke test",
+      "detail": "The packaged model loads and answers valid and invalid payloads in a clean runtime."
+    },
+    {
+      "id": "consumer-contract",
+      "label": "Consumer contract",
+      "detail": "Feature producers and inference clients accept the new schema."
+    },
+    {
+      "id": "migration-backup",
+      "label": "Migration backup",
+      "detail": "Tracking metadata and artifact references can be restored after schema migration."
+    },
+    {
+      "id": "client-matrix",
+      "label": "Client compatibility",
+      "detail": "Pinned training, evaluation, and deployment clients pass against the target server."
+    },
+    {
+      "id": "observability",
+      "label": "Observability ready",
+      "detail": "Version, alias resolution, model quality, latency, errors, and rollback signals are queryable."
+    },
+    {
+      "id": "rollback",
+      "label": "Rollback rehearsed",
+      "detail": "The previous immutable version remains loadable and routing can return to it."
+    }
+  ],
+  "failures": [
+    {
+      "id": "none",
+      "label": "No injected failure",
+      "detail": "Review evidence and rollout scope before promotion.",
+      "signal": "No fault signal",
+      "containment": "Keep the alias unchanged until every required gate passes.",
+      "baseRecoveryMinutes": 0
+    },
+    {
+      "id": "artifact-unavailable",
+      "label": "Artifact unavailable",
+      "detail": "The deployment controller cannot fetch the candidate package.",
+      "signal": "Artifact download or checksum verification fails before startup.",
+      "containment": "Abort the candidate and keep serving the already loaded champion version.",
+      "baseRecoveryMinutes": 4
+    },
+    {
+      "id": "schema-rejection",
+      "label": "Schema rejection spike",
+      "detail": "Canary requests fail model signature or consumer contract checks.",
+      "signal": "Validation errors rise only for the candidate version and payload shape.",
+      "containment": "Set candidate traffic to zero and retain rejected payload samples without sensitive values.",
+      "baseRecoveryMinutes": 3
+    },
+    {
+      "id": "alias-race",
+      "label": "Concurrent alias update",
+      "detail": "Another release moves champion after this decision read the old pointer.",
+      "signal": "The expected champion version no longer matches the registry response.",
+      "containment": "Fail the compare step, refresh evidence, and never overwrite the newer promotion blindly.",
+      "baseRecoveryMinutes": 2
+    }
+  ]
+}

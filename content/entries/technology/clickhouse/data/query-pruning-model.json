@@ -1,0 +1,83 @@
+{
+  "kind": "clickhouse-query-pruning",
+  "blockId": "technology/clickhouse-performance",
+  "title": "Match the physical order to the questions users ask",
+  "description": "Choose a query shape and an ORDER BY key. The model estimates how many primary-index granules remain after pruning; it is a teaching fixture, not a ClickHouse query planner.",
+  "granuleRows": 8192,
+  "retentionDays": 90,
+  "rowsPerDay": 24000000,
+  "defaults": {
+    "queryId": "tenant-window",
+    "orderKeyId": "tenant-time",
+    "windowDays": 7,
+    "selectedBytesPerRow": 28
+  },
+  "ranges": {
+    "windowDays": {
+      "min": 1,
+      "max": 30,
+      "step": 1
+    },
+    "selectedBytesPerRow": {
+      "min": 8,
+      "max": 160,
+      "step": 4
+    }
+  },
+  "queries": [
+    {
+      "id": "tenant-window",
+      "label": "Tenant dashboard",
+      "detail": "Filter one tenant over a bounded time window and aggregate a few metric columns.",
+      "filter": "tenant_id = ? AND event_time >= ?",
+      "usefulRowFraction": 0.002
+    },
+    {
+      "id": "event-window",
+      "label": "Event-type trend",
+      "detail": "Filter one event type across tenants over a bounded time window.",
+      "filter": "event_type = ? AND event_time >= ?",
+      "usefulRowFraction": 0.04
+    },
+    {
+      "id": "user-history",
+      "label": "User history",
+      "detail": "Trace one user's events in time order for support or investigation.",
+      "filter": "user_id = ? AND event_time >= ?",
+      "usefulRowFraction": 0.00002
+    }
+  ],
+  "orderKeys": [
+    {
+      "id": "tenant-time",
+      "label": "(tenant_id, event_date, event_time)",
+      "detail": "Clusters each tenant's time range together. Strong for tenant dashboards; weak when tenant_id is absent.",
+      "readFractions": {
+        "tenant-window": 0.004,
+        "event-window": 0.82,
+        "user-history": 0.68
+      }
+    },
+    {
+      "id": "event-time",
+      "label": "(event_type, event_date, event_time)",
+      "detail": "Clusters event types before time. Useful for event trends, but tenant and user lookups read broadly.",
+      "readFractions": {
+        "tenant-window": 0.74,
+        "event-window": 0.055,
+        "user-history": 0.72
+      }
+    },
+    {
+      "id": "user-time",
+      "label": "(user_id, event_time)",
+      "detail": "Clusters each user's history. Excellent for point investigations, expensive for broad dashboards.",
+      "readFractions": {
+        "tenant-window": 0.7,
+        "event-window": 0.88,
+        "user-history": 0.0008
+      }
+    }
+  ],
+  "notice": "The estimate assumes evenly distributed rows, one monthly partitioning scheme, and a fixed granule size. Real pruning depends on part layout, value distribution, compression, projections, skip indexes, query rewrites, and the exact ClickHouse version."
+}

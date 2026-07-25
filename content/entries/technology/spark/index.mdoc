@@ -1,0 +1,407 @@
+---
+registryId: spark
+---
+
+{% section-card tone="intro" %}
+## What is Apache Spark?
+
+**Apache Spark is a distributed computation engine that turns a data job into
+tasks and runs those tasks across a cluster.** It is commonly used for batch
+ETL, interactive SQL, feature preparation, and stateful stream processing when
+one machine cannot finish the work inside the required time or memory budget.
+
+Spark matters because it gives several data workloads one execution model:
+
+- a driver builds and coordinates the plan;
+- executors run parallel tasks and hold cached or shuffle data;
+- a cluster manager supplies processes and resources;
+- storage systems remain the durable source and destination.
+
+The core invariant is simple: **Spark can parallelize independent partitions,
+but a dependency that needs records from other partitions creates data
+movement and a new scheduling boundary.** More executors do not automatically
+fix skew, excess shuffling, tiny files, an overloaded driver, or an unsafe
+streaming sink.
+
+This lesson moves from that mental model to stage planning, partition sizing,
+executor failure, Structured Streaming, and production operations. Review
+[distributed systems](/fundamentals/distributed-systems) first if partitions,
+retries, and failure domains are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one job from code to tasks
+
+A **Spark application** is one driver plus a set of executor processes. The
+application can submit many jobs over its lifetime.
+
+{% system-flow title="The Spark control and data path" caption="The driver coordinates work; executors exchange and transform partition data." %}
+{% system-node title="Application code" eyebrow="Logical intent" icon="code" tone="blue" %}
+DataFrame, SQL, or Dataset operations describe filters, joins, aggregations,
+and output without manually assigning records to machines.
+{% /system-node %}
+{% system-node title="Driver" eyebrow="Plan and coordinate" icon="workflow" tone="violet" %}
+Builds the logical plan, asks Spark to optimize it, creates stages and tasks,
+and tracks their completion. Driver loss normally ends the application unless
+the platform restarts it.
+{% /system-node %}
+{% system-node title="Cluster manager" eyebrow="Allocate processes" icon="server" tone="neutral" %}
+Kubernetes, YARN, or a standalone cluster grants resources for the driver and
+executors. It does not choose Spark's join or partition strategy.
+{% /system-node %}
+{% system-node title="Executors" eyebrow="Run tasks" icon="layers" tone="cyan" %}
+Each executor runs several tasks concurrently, keeps cached blocks, writes
+shuffle output, and reports results and metrics to the driver.
+{% /system-node %}
+{% /system-flow %}
+
+Four terms keep the execution hierarchy clear:
+
+1. **Application:** one driver and its executors.
+2. **Job:** work triggered by an action such as writing data or counting rows.
+3. **Stage:** a group of tasks that can run without crossing a shuffle boundary.
+4. **Task:** one stage's work for one partition.
+
+An action does not run "on the cluster" as one indivisible operation. It
+becomes many tasks whose duration, memory demand, and data placement determine
+the job's real behavior.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Read the DAG before tuning the cluster
+
+Spark transformations are **lazy**: they describe a logical plan and do not
+start execution until an action requires a result. Spark then optimizes the
+plan and builds a directed acyclic graph, or DAG, of dependencies.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Narrow dependency" eyebrow="One parent partition" icon="route" tone="green" %}
+Each output partition reads from one parent partition. Filters, projections,
+and many row-level transformations can be pipelined in one stage without
+redistributing records across executors.
+{% /concept-card %}
+{% concept-card title="Wide dependency" eyebrow="Many parent partitions" icon="network" tone="amber" %}
+An output partition needs records from several parent partitions. Grouping,
+sorting, repartitioning, and many joins write and fetch shuffle blocks, so they
+create a stage boundary.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% process-flow %}
+{% process-step number="1" title="Build the logical plan" label="Lazy transformations" %}
+Record the requested filters, projections, joins, and aggregations without
+materializing each intermediate result.
+{% /process-step %}
+{% process-step number="2" title="Optimize the physical plan" label="Catalyst and strategy selection" %}
+Push filters, prune columns, choose operators, and decide whether a join can
+avoid a full shuffle. Inspect the actual plan instead of assuming the choice.
+{% /process-step %}
+{% process-step number="3" title="Split stages at shuffles" label="Dependency boundary" %}
+Pipeline narrow operations together. Materialize exchange output where records
+must be regrouped by key, range, or partition.
+{% /process-step %}
+{% process-step number="4" title="Run one task per partition" label="Parallel execution" %}
+Schedule tasks into available executor slots, retry failed attempts, and start
+downstream stages when their required shuffle outputs exist.
+{% /process-step %}
+{% /process-flow %}
+
+A stage with 2,000 partitions exposes at most 2,000 concurrent tasks, even if
+the cluster has more free slots. A stage with 20 partitions cannot use 200
+cores at once. Partition count therefore controls both parallelism and the
+size of each unit of work.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 1: turn a logical operation into a stage plan
+
+Choose a workload and execution strategy, then change partition count and hot
+key concentration. The lab shows four consequences together:
+
+- shuffle bytes crossing the network;
+- average and hottest partition size;
+- task waves across the available slots;
+- whether the chosen plan is valid for the data shape.
+
+Use the failure states deliberately. Try broadcasting a dimension that exceeds
+the modeled safety limit, then compare a plain hash aggregation with a salted
+hot key.
+
+{% interactive-block id="technology/spark-partition-shuffle-lab" dataFile="/api/content/technology/spark/data/partition-shuffle-model.json" /%}
+
+The goal is not the smallest partition or the fewest shuffle bytes in
+isolation. Choose enough partitions to use the cluster while keeping scheduler
+overhead, per-task memory, skew, and output-file count inside measured limits.
+{% /section-card %}
+
+{% section-card %}
+## Choose the highest-level API that preserves the plan
+
+DataFrames, SQL, Datasets, and RDDs all execute on Spark, but they expose
+different information to the optimizer.
+
+{% concept-grid columns="3" %}
+{% concept-card title="DataFrame or SQL" eyebrow="Default for structured data" icon="database" tone="blue" %}
+Use named columns and relational operators so Spark can prune columns, push
+filters, reorder work, and select physical operators. Validate the optimized
+and physical plans for important jobs.
+{% /concept-card %}
+{% concept-card title="Typed Dataset" eyebrow="JVM type boundary" icon="braces" tone="violet" %}
+Use when Scala or Java code benefits from compile-time domain types and the
+encoder cost is acceptable. Some typed operations can reduce optimizer
+visibility compared with relational expressions.
+{% /concept-card %}
+{% concept-card title="RDD" eyebrow="Low-level control" icon="layers" tone="amber" %}
+Use for data or algorithms that do not fit structured operators. RDD code owns
+more serialization, partitioning, and aggregation decisions and gives Catalyst
+less structure to optimize.
+{% /concept-card %}
+{% /concept-grid %}
+
+Preserve useful structure before adding resources:
+
+- project only required columns before a wide exchange;
+- filter early when semantics permit it;
+- pre-aggregate by key before a large shuffle;
+- broadcast only a bounded, measured side of a join;
+- align partitioning when several repeated operations use the same key;
+- avoid Python row UDFs when a built-in expression or vectorized operation can
+  express the same logic;
+- compact small source and output files outside latency-sensitive jobs.
+
+`cache()` is not a universal accelerator. Persist an intermediate result only
+when it is reused and recomputing it costs more than storing, serializing, and
+evicting it. Unpersist it after the final consumer.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Estimate partitions from bytes, slots, and skew
+
+Start with a target task size, then validate it against real stage metrics.
+For an illustrative 600 GiB shuffle:
+
+{% metric-strip %}
+{% metric value="600 GiB" label="Shuffle input" detail="Bytes after projection and pre-aggregation" tone="blue" /%}
+{% metric value="256 MiB" label="Initial target" detail="One measured task-size hypothesis" tone="cyan" /%}
+{% metric value="2,400" label="Starting partitions" detail="600 GiB / 256 MiB" tone="violet" /%}
+{% metric value="200 slots" label="Peak concurrency" detail="About 12 waves before skew" tone="amber" /%}
+{% /metric-strip %}
+
+The calculation is a starting point, not a Spark constant. Adjust it when:
+
+- compression makes input bytes differ from in-memory row size;
+- one key concentrates far more than the average partition;
+- per-task state, sorting, or hash tables spill despite moderate input bytes;
+- remote storage or an external service limits useful concurrency;
+- the sink cannot tolerate thousands of small output files;
+- adaptive query execution coalesces or splits shuffle partitions at runtime.
+
+Skew requires a key-level response. Adding partitions helps only if the
+partitioner can spread the hot records. Salting, skew-aware joins, pre-
+aggregation, or isolating a dominant key changes that distribution; adding
+idle executors does not.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Size executors around the task, not a round number
+
+An executor has heap memory, non-heap overhead, CPU cores, and a local failure
+boundary. More cores per executor create more concurrent tasks sharing one
+heap, garbage collector, network connection pool, and process fate.
+
+Reserve memory for distinct consumers:
+
+- execution memory for joins, sorts, aggregations, and shuffles;
+- storage memory for cached blocks and broadcasts;
+- user memory for objects not managed by Spark's execution pool;
+- process overhead for native memory, Python workers, and container costs;
+- headroom for skewed tasks and transient serialization buffers.
+
+Fewer large executors reduce process overhead but increase the number of task
+slots and cached blocks lost with one process. Many small executors reduce
+blast radius but add scheduling, connection, and per-process overhead.
+
+### Lab 2: expose executor failure blast radius
+
+Select an executor shape and a failure event. Change executor count and task
+duration to see how process size affects:
+
+- usable task memory and spill pressure;
+- total parallel slots and task waves;
+- tasks invalidated by executor loss;
+- estimated recomputation and recovery time.
+
+{% interactive-block id="technology/spark-executor-resilience-lab" dataFile="/api/content/technology/spark/data/executor-resilience-model.json" /%}
+
+Choose a shape from measured task memory and garbage-collection behavior, then
+reserve enough surviving capacity for the failure mode the service-level
+objective assumes.
+{% /section-card %}
+
+{% section-card %}
+## Make retries safe at every boundary
+
+Spark can recompute a lost partition from lineage and retry failed task
+attempts. That protects deterministic computation, not every external effect.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Task retry" eyebrow="One partition attempt" icon="repeat" tone="green" %}
+Safe when the transformation is deterministic and the attempt does not create
+an untracked external side effect. A retried task may run more than once.
+{% /concept-card %}
+{% concept-card title="Shuffle recovery" eyebrow="Lost executor output" icon="network" tone="amber" %}
+If required shuffle blocks disappear with an executor, Spark may rerun upstream
+map tasks before downstream work can continue. External shuffle storage or
+decommissioning can change the blast radius.
+{% /concept-card %}
+{% concept-card title="Driver recovery" eyebrow="Application coordination" icon="warning" tone="rose" %}
+Executor retries do not preserve driver-local state. Restart behavior depends
+on the cluster platform, durable checkpoints, source offsets, and idempotent
+sink design.
+{% /concept-card %}
+{% /concept-grid %}
+
+Speculative execution can launch a duplicate attempt for a slow task. It helps
+with an unhealthy worker, but not when every copy receives the same hot key or
+waits on the same overloaded dependency.
+
+Checkpointing truncates lineage by writing a durable recovery point. Use it
+for long or stateful dependency chains where recomputing from the source would
+violate the recovery objective. Do not confuse a cached block with a durable
+checkpoint.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build a partition-aware batch pipeline
+
+The example keeps projection and filtering before the join, validates the
+dimension's bounded size before allowing a broadcast hint, and repartitions
+the final write by a business key. The numbers are explicit hypotheses to
+measure, not universal defaults.
+
+{% code-block file="/api/content/technology/spark/code/build-partition-aware-job.py" language="python" title="PySpark batch job with explicit join and partition decisions" /%}
+
+Review the plan and stage metrics after representative runs:
+
+1. Confirm source filters and column pruning appear in the physical plan.
+2. Check whether the intended broadcast or shuffle join was actually selected.
+3. Compare median and maximum task input, duration, spill, and shuffle fetch.
+4. Verify output file sizes and partition distribution at the sink.
+5. Repeat with production-shaped skew and one executor unavailable.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Treat Structured Streaming as repeated, stateful computation
+
+Structured Streaming expresses a continuously updated result as incremental
+table processing. A trigger selects available input, Spark plans tasks for
+that trigger, and a checkpoint records progress and state metadata needed for
+recovery.
+
+{% process-flow %}
+{% process-step number="1" title="Read bounded progress" label="Source offsets" %}
+Discover the next input range from a replayable source. Persist enough source
+progress to reconstruct what a restarted query should process.
+{% /process-step %}
+{% process-step number="2" title="Transform and update state" label="Event time" %}
+Apply parsing, deduplication, windows, joins, and aggregations. Watermarks bound
+how long old event-time state must remain eligible for late data.
+{% /process-step %}
+{% process-step number="3" title="Commit the sink" label="Retry-safe output" %}
+Write a deterministic batch or transaction identifier so replay does not
+duplicate a business effect. Sink guarantees matter as much as Spark retries.
+{% /process-step %}
+{% process-step number="4" title="Checkpoint progress" label="Recovery evidence" %}
+Record committed offsets and state-store metadata in durable, isolated storage.
+Monitor checkpoint latency and verify restart from a production snapshot.
+{% /process-step %}
+{% /process-flow %}
+
+Watermarks are state-retention and completeness decisions, not a promise that
+all records arrive on time. A shorter delay reduces state but can finalize
+windows before late events; a longer delay preserves more late data but grows
+state and recovery work.
+
+{% code-block file="/api/content/technology/spark/code/validate-streaming-batch.py" language="python" title="Idempotent foreachBatch boundary with a durable commit ledger" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate Spark from stage evidence
+
+Cluster CPU alone cannot explain a slow job. Preserve application, job, stage,
+task, executor, and source/sink dimensions in telemetry.
+
+### Watch the execution path
+
+- scheduling delay and active versus pending tasks;
+- stage duration percentiles and critical-path stages;
+- median, p95, and maximum task duration;
+- input, output, shuffle read, and shuffle write bytes;
+- local and remote shuffle fetch wait;
+- memory and disk spill per task;
+- executor lost, task retry, fetch failure, and speculation counts.
+
+### Watch the data shape
+
+- partition row and byte distribution;
+- hottest keys and skew ratio;
+- source file count and average file size;
+- output file count, size distribution, and failed commits;
+- cache hit, eviction, and recomputation behavior;
+- streaming input rate, processing rate, state rows, watermark, and trigger lag.
+
+### Rehearse recovery
+
+1. Remove one executor during the largest shuffle.
+2. Restart the driver from the production checkpoint and deployment contract.
+3. Throttle the source or sink and verify backpressure and alert timing.
+4. Replay a streaming batch and prove the sink does not duplicate effects.
+5. Inject one hot key and confirm the maximum task, not the average, triggers
+   the capacity response.
+6. Restore checkpoint and source credentials in a clean environment.
+
+Keep the Spark event log long enough to reconstruct an incident. A completed
+application disappears from the live UI, but its stage and task evidence is
+still needed for regression analysis.
+{% /section-card %}
+
+{% section-card %}
+## Choose Spark when distributed execution is the real need
+
+{% concept-grid columns="2" %}
+{% concept-card title="Spark is a strong fit" eyebrow="Distributed transformation" icon="check" tone="green" %}
+- Data exceeds one machine's practical memory, CPU, or completion window.
+- The workload benefits from SQL, batch, and streaming under one execution
+  model.
+- Transformations can be expressed as deterministic partition work.
+- The team can inspect plans, operate shuffles, and test recovery.
+{% /concept-card %}
+{% concept-card title="Use a simpler or different engine" eyebrow="Different constraint" icon="x" tone="rose" %}
+- One machine or an embedded analytical database finishes reliably and more
+  cheaply.
+- Millisecond request serving is the primary workload.
+- The computation needs tightly coupled low-latency updates between every
+  worker.
+- External side effects cannot be made idempotent under task retry.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Production review
+
+Before launch, require evidence for:
+
+- **Plan:** important joins, exchanges, partition counts, and adaptive behavior
+  are visible in representative physical plans.
+- **Data:** skew, row width, file count, and growth assumptions use measured
+  production-shaped samples.
+- **Resources:** executor memory, cores, overhead, and surviving capacity are
+  tied to task metrics and a named failure.
+- **Correctness:** retries, speculative attempts, and streaming replay cannot
+  duplicate or lose a business effect.
+- **Recovery:** executor, shuffle, driver, source, sink, and checkpoint failures
+  have rehearsed responses.
+- **Operations:** event logs, stage metrics, data-quality checks, and ownership
+  remain available after the application exits.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/spark/quiz/spark-production-decisions.json" lessonSlug="spark" title="Spark Production Decisions" /%}

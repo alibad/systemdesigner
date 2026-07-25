@@ -1,0 +1,242 @@
+---
+registryId: production-document-extraction
+---
+
+{% section-card tone="intro" %}
+## What is production document extraction?
+
+Production document extraction turns PDFs, images, and document bundles into structured records that downstream software can safely use. OCR may recover characters, but a production system must also decide **which parser to run, whether every required page and field is present, where each value came from, and what to do when evidence is weak or contradictory**.
+
+The core invariant is: **an extracted value is a candidate until a versioned policy accepts its source evidence, schema, and validation results**. Accepted output should remain immutable; retries and model upgrades create new candidates that can be compared, reviewed, promoted, or rejected.
+
+This lesson builds on [Document Parsing Systems](/genai/document-parsing-systems), which introduces text, layout, tables, and field evidence. Here, the focus shifts to production routing, quality gates, provenance, recovery, and operations.
+{% /section-card %}
+
+{% system-flow title="A production extraction control plane" caption="The data plane produces candidates. The control plane decides which route runs, which evidence is sufficient, and which version may become accepted output." %}
+{% system-node title="Immutable intake" eyebrow="Identify" icon="storage" tone="blue" %}
+Hash the original bytes, record tenant and source metadata, validate the file, and preserve page order before processing.
+{% /system-node %}
+{% system-node title="Classify and route" eyebrow="Choose" icon="route" tone="cyan" %}
+Split bundles into document units, identify the family, and choose native-text, OCR, layout, table, or specialist extraction paths.
+{% /system-node %}
+{% system-node title="Build candidates" eyebrow="Extract" icon="braces" tone="violet" %}
+Emit typed fields and relationships with raw spans, page regions, model identity, and calibrated confidence.
+{% /system-node %}
+{% system-node title="Apply quality gates" eyebrow="Decide" icon="shield" tone="amber" %}
+Check required fields, structural completeness, cross-field invariants, source coverage, and action-specific risk.
+{% /system-node %}
+{% system-node title="Accept, review, or recover" eyebrow="Commit" icon="check" tone="green" %}
+Promote a version, send bounded work to review, quarantine an input, or replay a candidate without overwriting history.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Define the output contract before choosing a model
+
+A model is one implementation detail. The product contract determines what must be extracted, what evidence must accompany it, and which errors are tolerable for each downstream action.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Source identity" eyebrow="Which bytes?" icon="key" tone="blue" %}
+Store a content hash, source URI or object key, ingestion time, tenant, page count, and file-validation result. A retry must point to the same source or declare a new revision.
+{% /concept-card %}
+{% concept-card title="Typed schema" eyebrow="Which meaning?" icon="braces" tone="violet" %}
+Version field names, data types, units, cardinality, required status, table relationships, and normalization rules. Schema migration is separate from model inference.
+{% /concept-card %}
+{% concept-card title="Evidence anchors" eyebrow="Where from?" icon="search" tone="cyan" %}
+Keep raw text, page number, text span, polygon or bounding box, and nearby structure for every consequential field. A reviewer should be able to inspect the source quickly.
+{% /concept-card %}
+{% concept-card title="Decision record" eyebrow="Why accepted?" icon="shield" tone="green" %}
+Record parser and model versions, validator results, policy version, review corrections, and the accepted output version. Confidence alone is not a release decision.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Separate extraction quality from action risk
+
+- **Search indexing** may tolerate a missing heading while preserving the original document as the authority.
+- **Invoice payment** must fail closed when supplier identity, currency, total, or reconciliation evidence is missing.
+- **Claims intake** may accept partial data into a review queue, but should not infer an absent signature or approval.
+- **Regulated records** need retention, access control, correction history, and source evidence that match the governing policy.
+
+{% callout variant="info" %}
+Do not choose one global confidence threshold. Calibrate thresholds on labeled documents, then combine field-level confidence with required-field, structural, and business-rule gates for the specific action.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Route documents with a cheap probe and explicit fallbacks
+
+Routing happens before the expensive extraction path. Use evidence available at intake: MIME verification, native text coverage, page count, image quality, language, layout novelty, classifier output, and the downstream action.
+
+{% process-flow %}
+{% process-step number="1" title="Verify the source" label="Trust boundary" %}
+Reject or quarantine corrupt, encrypted, oversized, unsupported, or unsafe files before a parser or renderer handles them.
+{% /process-step %}
+{% process-step number="2" title="Split and classify" label="Document units" %}
+Detect attachments and page ranges. A mixed PDF can contain several document families that need different schemas and owners.
+{% /process-step %}
+{% process-step number="3" title="Run the narrowest capable route" label="Cost and latency" %}
+Prefer native text for reliable digital pages, OCR for scans, layout and table models for structural evidence, and specialists for known high-value families.
+{% /process-step %}
+{% process-step number="4" title="Fallback on measured evidence" label="Recovery path" %}
+Escalate unknown layouts, incomplete pages, and failed gates to a stronger route, bounded review, or quarantine. Do not silently emit partial records.
+{% /process-step %}
+{% /process-flow %}
+
+The lab values below are illustrative operating thresholds, not vendor guarantees. The important decision is which evidence a policy observes and which unsafe records it can release.
+{% /section-card %}
+
+{% interactive-block id="genai/production-document-extraction-routing-quality-lab" dataFile="/api/content/genai/production-document-extraction/data/routing-quality-scenarios.json" /%}
+
+{% section-card %}
+## Build gates around consequences, not averages
+
+An aggregate document score hides the field that actually controls an action. A production gate evaluates the candidate at several levels.
+
+{% metric-strip %}
+{% metric value="Bytes" label="Input gate" detail="File validity, source hash, expected pages, render safety, and readable content" tone="blue" /%}
+{% metric value="Shape" label="Structure gate" detail="Document family, reading order, table shape, required sections, and page continuity" tone="violet" /%}
+{% metric value="Fields" label="Semantic gate" detail="Required values, types, units, anchors, and field-specific confidence" tone="cyan" /%}
+{% metric value="Rules" label="Action gate" detail="Totals reconcile, identifiers agree, dates are plausible, and policy permits release" tone="green" /%}
+{% /metric-strip %}
+
+### Give each outcome a precise meaning
+
+- **Straight-through:** every gate required by the action passed; the candidate can be promoted to an accepted version.
+- **Specialist route:** intake is usable, but the general route does not cover the document family or structure reliably.
+- **Human review:** the source and candidate are inspectable, but bounded fields need correction or confirmation.
+- **Quarantine:** source integrity, page completeness, or evidence identity is broken; a reviewer should not repair values without resolving the input.
+- **Reject:** the input violates an explicit product contract and should not be processed further.
+
+{% code-block file="/api/content/genai/production-document-extraction/code/routing-quality-gate.py" language="python" title="A dependency-free routing and quality-gate policy" /%}
+{% /section-card %}
+
+{% section-card %}
+## Preserve evidence at field and relationship level
+
+Cloud document APIs expose more than strings. Their result models include text spans, page regions or geometry, confidence, and relationships among words, lines, key-value pairs, cells, and tables. Preserve those links in your own provider-neutral contract rather than flattening the response immediately.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Field evidence" eyebrow="One claim" icon="search" tone="cyan" %}
+- Raw and normalized value
+- Page plus span or polygon
+- Field confidence and method
+- Required validators and outcomes
+{% /concept-card %}
+{% concept-card title="Relationship evidence" eyebrow="One structure" icon="network" tone="violet" %}
+- Key linked to value
+- Cell linked to row, column, and headers
+- Section linked to reading order
+- Continuation linked across pages
+{% /concept-card %}
+{% concept-card title="Generation evidence" eyebrow="One candidate" icon="repeat" tone="amber" %}
+- Source hash and schema version
+- Parser, model, and configuration versions
+- Processing time and route
+- Parent accepted or candidate version
+{% /concept-card %}
+{% /concept-grid %}
+
+### Treat tables as a graph until validation finishes
+
+Do not reduce a table to CSV before resolving merged cells, multi-row headers, units, and continuation across pages. Keep cell IDs, row and column indexes, spans, header relationships, and source geometry. Then validate domain rules such as column types, required identifiers, subtotal equations, and expected row counts.
+
+### Make corrections additive
+
+A reviewer correction should create a new field or document revision with actor, reason, timestamp, and the evidence it supersedes. The original model output remains available for evaluation and incident reconstruction.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recover by replaying candidates, never by erasing history
+
+Extraction is reproducible only when the system can identify the exact input, processor version, schema, configuration, validators, and decision policy. A blind retry against a mutable default model can produce different output with no explanation.
+
+{% interactive-block id="genai/production-document-extraction-provenance-recovery-lab" dataFile="/api/content/genai/production-document-extraction/data/provenance-recovery-scenarios.json" /%}
+
+{% callout variant="warn" %}
+When completion is ambiguous, reconcile against the accepted-version store before retrying. Reprocessing should create a candidate with an idempotency key; promotion to accepted output is a separate compare-and-swap decision.
+{% /callout %}
+
+{% code-block file="/api/content/genai/production-document-extraction/code/provenance-replay.py" language="python" title="Immutable accepted output with replay and field-level diff" /%}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the pipeline with labeled evidence
+
+One document-level accuracy number is usually misleading: fields may be optional, repeated, or absent, and the cost of a false accept can differ sharply from a false review. Evaluate the exact schema and action on a representative labeled set.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Precision" eyebrow="Accepted claims" icon="check" tone="green" %}
+Of the extracted predictions that matched the release criteria, how many matched the labeled evidence?
+{% /concept-card %}
+{% concept-card title="Recall" eyebrow="Required evidence" icon="search" tone="cyan" %}
+Of the labeled entities that should have been extracted, how many were recovered above the selected threshold?
+{% /concept-card %}
+{% concept-card title="Review load" eyebrow="Operations" icon="users" tone="amber" %}
+How many documents and fields enter review, how long do they wait, and which routes create avoidable work?
+{% /concept-card %}
+{% concept-card title="Escaped error" eyebrow="Risk" icon="warning" tone="rose" %}
+Which incorrect or unsupported fields reached a downstream action, and what was their impact?
+{% /concept-card %}
+{% /concept-grid %}
+
+### Slice the evaluation where failures cluster
+
+- Document family, template revision, supplier or source channel.
+- Native PDF, scan, photograph, fax, handwriting, or mixed bundle.
+- Language, page count, orientation, image quality, and layout complexity.
+- Required and optional fields, tables, repeated line items, and signatures.
+- Parser route, model version, schema version, and policy version.
+- Straight-through, review, quarantine, and reject outcomes.
+
+### Test changes as migrations
+
+1. Pin the current and candidate processor versions.
+2. Replay a frozen labeled corpus and recent production samples through both.
+3. Compare field precision, recall, structural validity, review load, latency, and escaped risk by slice.
+4. Canary the candidate route with immutable outputs and rapid rollback.
+5. Promote only after the downstream action contract passes; retain the previous version for investigation and replay.
+{% /section-card %}
+
+{% section-card %}
+## Operate the system as queues plus versioned state
+
+### Keep the asynchronous job contract small
+
+- `document_id` identifies the logical document; `source_hash` identifies the exact bytes.
+- `route_id`, `processor_version`, `schema_version`, and `policy_version` make work reproducible.
+- An idempotency key collapses duplicate delivery of the same processing intent.
+- Attempt records are append-only and include start, deadline, completion, error class, and output candidate ID.
+- The accepted-version record changes only through an explicit promotion with optimistic concurrency.
+
+### Bound every queue
+
+- Separate interactive and batch work so large backfills cannot starve user-facing extraction.
+- Cap retries by error class; corrupt files and unsupported formats do not improve through repeated inference.
+- Monitor queue age, not only queue length. Old work can hide behind steady throughput.
+- Keep review capacity, retention deadlines, and dead-letter ownership visible.
+- Apply backpressure before a parser, model endpoint, or reviewer pool becomes the failure amplifier.
+
+### Protect document data
+
+- Isolate tenants and use scoped credentials for source, candidate, review, and accepted-output stores.
+- Sandbox renderers and converters; uploaded files cross a hostile-content boundary.
+- Redact logs and traces by default. Field values and page images should not appear in general application telemetry.
+- Encrypt stored sources and outputs, enforce purpose-based retention, and test deletion across derived artifacts.
+- Audit reviewer access and correction history without copying sensitive content into the audit event itself.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and current API checks
+
+- [Amazon Textract response objects](https://docs.aws.amazon.com/textract/latest/dg/how-it-works-document-layout.html) describe block IDs, confidence, geometry, and parent-child or key-value relationships.
+- [Azure Document Intelligence layout](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/prebuilt/layout?view=doc-intel-4.0.0) documents spans, bounding regions, tables, figures, and selection marks in current analysis output.
+- [Google Cloud Document AI Document resource](https://docs.cloud.google.com/document-ai/docs/reference/rest/v1/Document) defines text anchors, page anchors, entities, tables, confidence, and normalized values.
+- [Google Cloud Document AI evaluation](https://docs.cloud.google.com/document-ai/docs/evaluate) explains label-level precision, recall, F1, and the precision-recall effect of changing confidence thresholds.
+- [Google Cloud Document AI processor versions](https://docs.cloud.google.com/document-ai/docs/manage-processor-versions) documents explicit version selection and the risk of relying on a changing default version.
+- [W3C PROV-O](https://www.w3.org/TR/prov-o/) defines entities, activities, agents, generation, use, revision, and derivation for interoperable provenance models.
+- [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html) covers allowlisted types, size limits, safe storage, malicious-file scanning, and sandboxing uploaded content.
+
+Provider fields, model catalogs, versions, quotas, and pricing change. Verify the exact API version and region you operate, and benchmark your own documents instead of copying vendor examples into a release policy.
+{% /section-card %}
+
+{% quiz title="Production Document Extraction Design Review" lessonSlug="production-document-extraction" questionsFile="/api/content/genai/production-document-extraction/quiz/production-document-extraction-review.json" /%}

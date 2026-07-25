@@ -1,0 +1,195 @@
+{
+  "kind": "dvc-invalidation-recovery",
+  "blockId": "technology/dvc-data-versioning-invalidation-recovery-lab",
+  "title": "Choose the narrowest correct pipeline action",
+  "description": "Inject a code, parameter, or workspace change and choose a response. The graph shows which stages recompute, restore, remain valid, or block.",
+  "defaults": {
+    "scenarioId": "prepare-code",
+    "actionId": "targeted-repro"
+  },
+  "stages": [
+    {
+      "id": "prepare",
+      "label": "Prepare",
+      "detail": "Raw data + prepare.py + prepare parameters",
+      "output": "data/prepared"
+    },
+    {
+      "id": "train",
+      "label": "Train",
+      "detail": "Prepared data + train.py + train parameters",
+      "output": "models/classifier.pkl"
+    },
+    {
+      "id": "evaluate",
+      "label": "Evaluate",
+      "detail": "Model + prepared data + evaluation code",
+      "output": "reports/metrics.json"
+    }
+  ],
+  "actions": [
+    {
+      "id": "targeted-repro",
+      "label": "Reproduce the evaluation target",
+      "detail": "Let DVC traverse dependencies and execute only invalidated stages.",
+      "command": "dvc repro evaluate"
+    },
+    {
+      "id": "checkout",
+      "label": "Restore from the local cache",
+      "detail": "Materialize the current revision's output without downloading or recomputing it.",
+      "command": "dvc checkout models/classifier.pkl"
+    },
+    {
+      "id": "pull",
+      "label": "Fetch from the team remote",
+      "detail": "Download the referenced object and restore it into the workspace.",
+      "command": "dvc pull models/classifier.pkl"
+    },
+    {
+      "id": "force-repro",
+      "label": "Force every stage to rerun",
+      "detail": "Ignore unchanged-stage reuse and recompute the entire target graph.",
+      "command": "dvc repro --force evaluate"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "prepare-code",
+      "label": "Preprocessing code changed",
+      "detail": "src/prepare.py has a new hash; raw data and parameters are unchanged.",
+      "changedInput": "src/prepare.py",
+      "expectedActionId": "targeted-repro",
+      "reason": "The prepare command depends on the changed code. Its new output invalidates both downstream stages.",
+      "outcomes": {
+        "targeted-repro": {
+          "grade": "safe",
+          "headline": "Recompute from the first invalid stage",
+          "detail": "Prepare, train, and evaluate rerun; raw data remains a valid dependency.",
+          "stageStates": ["rerun", "rerun", "rerun"]
+        },
+        "checkout": {
+          "grade": "blocked",
+          "headline": "Checkout would restore a stale model",
+          "detail": "The previous model exists, but it was produced by the old preprocessing code.",
+          "stageStates": ["invalid", "stale", "stale"]
+        },
+        "pull": {
+          "grade": "blocked",
+          "headline": "Pulling old outputs does not satisfy a new dependency hash",
+          "detail": "Remote availability cannot make the old prepared data valid for the changed code.",
+          "stageStates": ["invalid", "stale", "stale"]
+        },
+        "force-repro": {
+          "grade": "waste",
+          "headline": "Correct result, unnecessarily broad execution",
+          "detail": "Every stage reruns, which matches the required graph here but discards any usable run-cache result.",
+          "stageStates": ["rerun", "rerun", "rerun"]
+        }
+      }
+    },
+    {
+      "id": "train-parameter",
+      "label": "Training parameter changed",
+      "detail": "train.max_depth changed; prepared data and preprocessing remain valid.",
+      "changedInput": "params.yaml: train.max_depth",
+      "expectedActionId": "targeted-repro",
+      "reason": "Only train declares this parameter key. Train reruns, and its new model invalidates evaluation.",
+      "outcomes": {
+        "targeted-repro": {
+          "grade": "safe",
+          "headline": "Reuse preparation and rerun the affected suffix",
+          "detail": "Prepare stays valid while train and evaluate produce evidence for the new parameter.",
+          "stageStates": ["cached", "rerun", "rerun"]
+        },
+        "checkout": {
+          "grade": "blocked",
+          "headline": "The cached model belongs to the previous parameter",
+          "detail": "Materializing it would not create evidence for the requested max_depth value.",
+          "stageStates": ["cached", "stale", "stale"]
+        },
+        "pull": {
+          "grade": "blocked",
+          "headline": "Remote transfer cannot replace required computation",
+          "detail": "Unless the exact run exists in cache, the new parameter requires training.",
+          "stageStates": ["cached", "invalid", "stale"]
+        },
+        "force-repro": {
+          "grade": "waste",
+          "headline": "The result may be valid, but preparation is repeated",
+          "detail": "Forcing the graph ignores a valid prepared-data stage and expands cost and runtime.",
+          "stageStates": ["rerun", "rerun", "rerun"]
+        }
+      }
+    },
+    {
+      "id": "workspace-deleted",
+      "label": "Model deleted; cache is warm",
+      "detail": "The workspace model is absent, but its exact hash remains in the local cache.",
+      "changedInput": "models/classifier.pkl missing from workspace",
+      "expectedActionId": "checkout",
+      "reason": "No declared dependency changed. The desired output can be materialized from the local content-addressed cache.",
+      "outcomes": {
+        "targeted-repro": {
+          "grade": "waste",
+          "headline": "Computation is broader than restoration",
+          "detail": "The graph is still valid; restore the known object instead of spending training capacity.",
+          "stageStates": ["cached", "rerun", "rerun"]
+        },
+        "checkout": {
+          "grade": "safe",
+          "headline": "Restore the exact object without recomputation",
+          "detail": "DVC links or copies the current revision's model from cache into the workspace.",
+          "stageStates": ["cached", "restored", "cached"]
+        },
+        "pull": {
+          "grade": "waste",
+          "headline": "The result is correct, but network transfer is unnecessary",
+          "detail": "The exact object is already local, so checkout is the narrower operation.",
+          "stageStates": ["cached", "restored", "cached"]
+        },
+        "force-repro": {
+          "grade": "waste",
+          "headline": "A missing workspace link does not justify a full rebuild",
+          "detail": "All stages rerun even though the current output hash is already cached.",
+          "stageStates": ["rerun", "rerun", "rerun"]
+        }
+      }
+    },
+    {
+      "id": "cache-cold",
+      "label": "Model and cache object are missing",
+      "detail": "The Git revision references a model stored in the team remote, but this runner has an empty cache.",
+      "changedInput": "Referenced model hash absent locally",
+      "expectedActionId": "pull",
+      "reason": "The revision is valid and the exact object exists remotely. Fetching it preserves provenance and avoids unnecessary training.",
+      "outcomes": {
+        "targeted-repro": {
+          "grade": "waste",
+          "headline": "Recomputation discards an available immutable result",
+          "detail": "Training can be expensive or nondeterministic; fetch the referenced object when it is available.",
+          "stageStates": ["cached", "rerun", "rerun"]
+        },
+        "checkout": {
+          "grade": "blocked",
+          "headline": "Checkout cannot materialize an object absent from cache",
+          "detail": "The metadata identifies the hash, but no local bytes satisfy it.",
+          "stageStates": ["cached", "blocked", "blocked"]
+        },
+        "pull": {
+          "grade": "safe",
+          "headline": "Fetch and restore the revision's exact model",
+          "detail": "The remote supplies the missing object; the pipeline remains unchanged.",
+          "stageStates": ["cached", "restored", "cached"]
+        },
+        "force-repro": {
+          "grade": "waste",
+          "headline": "A full rebuild is not the first recovery choice",
+          "detail": "It spends compute and may not reproduce identical bytes even though the exact artifact is available.",
+          "stageStates": ["rerun", "rerun", "rerun"]
+        }
+      }
+    }
+  ],
+  "notice": "The trace models declared DVC dependencies. Undeclared files, external services, environment drift, and nondeterministic code can still change results without appearing in the graph."
+}

@@ -1,0 +1,238 @@
+---
+title: "Model Context Protocol"
+section: technology
+level: intermediate
+duration: 35 min
+description: "Understand MCP architecture, primitives, lifecycle, transports, capability negotiation, authorization boundaries, and safe recovery."
+registryId: model-context-protocol-tech
+---
+
+{% section-card tone="intro" %}
+## What is Model Context Protocol?
+
+The **Model Context Protocol (MCP)** is an open protocol for connecting an AI application to programs that provide context or actions. Instead of inventing a connector for every integration, a host can use MCP to discover and exchange typed **resources**, **prompts**, and **tools** over JSON-RPC.
+
+In plain language, MCP gives AI applications and capability providers a shared conversation format. It does not decide whether a server is trustworthy or whether an action is allowed.
+
+The core invariant is **capability is not authority**. A successful handshake says which protocol features both sides understand. Authorization, user consent, tenant isolation, and operation policy remain separate decisions.
+{% /section-card %}
+
+{% section-card %}
+## Keep the host, client, and server separate
+
+An MCP deployment has three protocol participants. The distinction matters because each participant owns a different part of security and failure recovery.
+
+{% system-flow title="One MCP connection" caption="A host may manage many clients, but each client maintains one isolated connection to one server." %}
+{% system-node title="Host" eyebrow="Application boundary" icon="workflow" tone="blue" %}
+Owns the user experience, model integration, consent, policy, and any movement of context between servers.
+{% /system-node %}
+{% system-node title="MCP client" eyebrow="Session boundary" icon="route" tone="cyan" %}
+Negotiates one stateful session, routes JSON-RPC messages, and tracks the capabilities of one server.
+{% /system-node %}
+{% system-node title="MCP server" eyebrow="Capability boundary" icon="server" tone="violet" %}
+Publishes focused primitives and validates every request before touching its dependencies.
+{% /system-node %}
+{% system-node title="External system" eyebrow="Data or side effect" icon="database" tone="green" %}
+Provides the records, files, APIs, or business actions behind the server's MCP contract.
+{% /system-node %}
+{% /system-flow %}
+
+The host should give each server only the context needed for its task. A server should not receive the whole conversation or inspect another server's session.
+{% /section-card %}
+
+{% section-card %}
+## Choose the primitive by who initiates it
+
+MCP server primitives differ in how they enter the user experience. That ownership should shape discovery, review, and approval.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Resources" eyebrow="Application-controlled" icon="database" tone="blue" %}
+Addressable context such as files, schemas, or records. The client lists or reads a URI, then decides whether the result belongs in model context.
+{% /concept-card %}
+{% concept-card title="Prompts" eyebrow="User-controlled" icon="braces" tone="violet" %}
+Reusable message templates. A user explicitly selects a prompt and supplies its arguments before the client retrieves the generated messages.
+{% /concept-card %}
+{% concept-card title="Tools" eyebrow="Model-controlled" icon="workflow" tone="amber" %}
+Schema-described operations the model may request. The application should expose the request, validate its inputs, apply policy, and let a human deny sensitive calls.
+{% /concept-card %}
+{% /concept-grid %}
+
+Clients can also advertise features to servers, including roots, sampling, elicitation, and task support. Negotiating a feature only makes its messages legal for the session; it does not make every use safe.
+{% /section-card %}
+
+{% section-card %}
+## Finish initialization before normal work
+
+MCP is a stateful protocol. Initialization must be the first interaction, and both sides may use only the version and capabilities established for that session.
+
+{% process-flow %}
+{% process-step number="1" title="Propose a version" label="Initialize" %}
+The client sends `initialize` with its latest supported protocol revision, implementation information, and client capabilities.
+{% /process-step %}
+{% process-step number="2" title="Return the contract" label="Negotiate" %}
+The server returns a supported revision, server information, and server capabilities. The client disconnects if it cannot support the returned revision.
+{% /process-step %}
+{% process-step number="3" title="Mark the session ready" label="Acknowledge" %}
+The client sends `notifications/initialized`. Normal tools, resources, and prompts operations begin only after this lifecycle boundary.
+{% /process-step %}
+{% process-step number="4" title="Operate within bounds" label="Use" %}
+Both sides respect negotiated sub-capabilities, apply finite timeouts, validate messages, and terminate through the underlying transport.
+{% /process-step %}
+{% /process-flow %}
+
+For example, advertising `resources` does not imply subscription support, and advertising `tools` does not imply `listChanged` notifications or task-augmented calls. Check the specific capability object before sending related messages.
+{% /section-card %}
+
+{% section-card %}
+## Compose the transport and capability contract
+
+Transport selection changes process ownership, authentication, streaming, and failure behavior. Capability selection changes which protocol operations the session can legally perform. Build a connection and inspect both consequences together.
+
+{% interactive-block id="technology/model-context-protocol-transport-capability-lab" dataFile="/api/content/technology/model-context-protocol/data/transport-capability-scenarios.json" /%}
+
+The healthy design is not the bundle with the most features. It is the smallest negotiated surface that satisfies the workload across the correct process boundary.
+
+{% code-block file="/api/content/technology/model-context-protocol/code/negotiate-connection.mjs" language="javascript" title="Reject Unsupported Versions and Missing Capabilities" /%}
+{% /section-card %}
+
+{% section-card %}
+## Select transport by deployment boundary
+
+The protocol defines two standard transports. Both carry UTF-8 JSON-RPC messages, but they have different operating models.
+
+{% concept-grid columns="2" %}
+{% concept-card title="stdio" eyebrow="Local subprocess" icon="code" tone="cyan" %}
+The client launches the server and exchanges newline-delimited messages through standard input and output. Logs belong on standard error. Pin the executable and constrain its environment, filesystem, and network access.
+{% /concept-card %}
+{% concept-card title="Streamable HTTP" eyebrow="Remote or shared service" icon="globe" tone="blue" %}
+The server exposes one MCP endpoint for POST and GET, with optional server-sent events. Validate `Origin`, authenticate protected requests, and bind local-only endpoints to localhost.
+{% /concept-card %}
+{% /concept-grid %}
+
+Streamable HTTP replaced the older HTTP+SSE transport from the 2024-11-05 revision. A compatibility migration may temporarily serve both, but new clients should target the current transport contract.
+{% /section-card %}
+
+{% section-card %}
+## Treat schemas and annotations as inputs, not proof
+
+MCP uses JSON Schema throughout the protocol. A tool can define an input schema and optional output schema, but schema validity proves only that a value has the expected shape.
+
+### Validate every boundary
+
+- Reject unknown fields when a tool contract should be closed.
+- Validate tool arguments before business logic and validate structured results before returning them.
+- Apply user, tenant, resource-ownership, rate-limit, and approval checks after schema validation.
+- Treat tool annotations as untrusted unless the server itself is trusted.
+- Sanitize returned text, links, and embedded resources before they enter model context.
+
+### Separate protocol errors from tool errors
+
+- Use JSON-RPC errors for invalid methods, malformed parameters, and protocol failures.
+- Return a tool result with `isError: true` for an expected operation failure the model can safely reason about.
+- Preserve correlation identifiers without logging tokens, authorization codes, secrets, or sensitive result bodies.
+{% /section-card %}
+
+{% section-card %}
+## Put authorization around the session
+
+For HTTP, MCP defines an OAuth-based authorization flow. Authentication protects access to the MCP endpoint, while host and server policy still decide whether a particular primitive or tool call is allowed.
+
+{% system-flow title="A protected remote tool call" caption="The token accepted by the MCP server is audience-bound to that server. A downstream API requires a separate credential." %}
+{% system-node title="User and host" eyebrow="Intent" icon="users" tone="blue" %}
+Review the server, requested scopes, tool inputs, target resource, and side effect.
+{% /system-node %}
+{% system-node title="Authorization server" eyebrow="Grant" icon="key" tone="violet" %}
+Issues a token for the canonical MCP server URI after the client requests the correct resource and scopes.
+{% /system-node %}
+{% system-node title="MCP server" eyebrow="Enforce" icon="shield" tone="amber" %}
+Validates issuer, audience, expiry, signature, scope, tenant, ownership, and current approval.
+{% /system-node %}
+{% system-node title="Downstream API" eyebrow="Separate audience" icon="lock" tone="green" %}
+Receives its own credential. The server never forwards the client's MCP access token unchanged.
+{% /system-node %}
+{% /system-flow %}
+
+{% callout variant="warn" %}
+Token passthrough is forbidden by the MCP authorization specification. A token issued for the MCP server is not a reusable credential for a downstream API.
+{% /callout %}
+
+For `stdio`, the HTTP authorization flow does not apply. The local process normally receives narrowly scoped credentials through its environment, and the host must treat launching that process as a privileged action.
+{% /section-card %}
+
+{% section-card %}
+## Recover the boundary that actually failed
+
+An expired MCP session, an insufficient OAuth scope, a wrong token audience, and an ambiguous tool completion require different responses. Choose an incident and apply a recovery action to see whether it restores the correct boundary or creates a second failure.
+
+{% interactive-block id="technology/model-context-protocol-authorization-session-recovery-lab" dataFile="/api/content/technology/model-context-protocol/data/authorization-session-incidents.json" /%}
+
+A lost HTTP connection does not prove that a write was canceled. Reconcile by operation identifier or server-side state before retrying, and make write tools idempotent when the dependency supports it.
+
+{% code-block file="/api/content/technology/model-context-protocol/code/recover-session.mjs" language="javascript" title="Classify Session and Authorization Failures Before Retrying" /%}
+{% /section-card %}
+
+{% section-card %}
+## Design timeouts, cancellation, and session state together
+
+### Bound request lifetime
+
+- Configure a finite timeout for every request.
+- Send a cancellation notification when the timeout expires and stop waiting for the response.
+- Allow progress to extend a working deadline only under an absolute maximum.
+- Remember that cancellation is a request, not proof that remote work stopped.
+
+### Keep session identity separate from user identity
+
+- Treat `MCP-Session-Id` as untrusted input and never as authentication.
+- Send `MCP-Protocol-Version` on subsequent HTTP requests.
+- If a server returns HTTP `404` for a known session, discard that session ID and initialize a new session.
+- Recheck authorization on every protected request and rotate session state when identity or grants change.
+
+### Make replay behavior explicit
+
+- Use caller-scoped idempotency keys for retryable writes.
+- Record an operation state that can distinguish accepted, running, completed, failed, and unknown outcomes.
+- Reconcile ambiguous outcomes before issuing another side effect.
+- Keep recovery evidence in audit logs without retaining secrets.
+{% /section-card %}
+
+{% section-card %}
+## Review an MCP integration as three contracts
+
+{% concept-grid columns="3" %}
+{% concept-card title="Protocol contract" eyebrow="Interoperability" icon="braces" tone="blue" %}
+Pin supported revisions, test initialization order, validate schemas, and use only negotiated capabilities and sub-capabilities.
+{% /concept-card %}
+{% concept-card title="Authority contract" eyebrow="Trust" icon="shield" tone="amber" %}
+Verify server provenance, minimize context, audience-bind tokens, separate downstream credentials, and require meaningful approval.
+{% /concept-card %}
+{% concept-card title="Recovery contract" eyebrow="Operations" icon="repeat" tone="green" %}
+Define timeout, cancellation, session expiry, reconciliation, idempotency, audit, revocation, and kill-switch behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+A production review should answer:
+
+- Which host owns user intent and each client connection?
+- Which protocol revision and exact capabilities were negotiated?
+- Which server supplied each primitive and returned content item?
+- Which host policy exposed it to the model, and which approval authorized the call?
+- Which identity, tenant, scope, and token audience reached each protected system?
+- Which evidence distinguishes a completed write from an ambiguous or retryable failure?
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+This lesson targets the latest stable MCP revision available while authoring, **2025-11-25**. MCP uses dated revisions, so implementations should negotiate versions and consult the matching specification instead of treating a sample message as timeless.
+
+- [MCP 2025-11-25 architecture](https://modelcontextprotocol.io/specification/2025-11-25/architecture)
+- [Lifecycle and capability negotiation](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
+- [stdio and Streamable HTTP transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+- [HTTP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+- [Tools and tool security](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+- [Resources and URI security](https://modelcontextprotocol.io/specification/2025-11-25/server/resources)
+- [MCP security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/model-context-protocol/quiz/model-context-protocol.json" lessonSlug="model-context-protocol" /%}

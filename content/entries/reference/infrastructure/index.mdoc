@@ -1,0 +1,236 @@
+---
+registryId: infrastructure
+---
+
+{% section-card tone="intro" %}
+## What is infrastructure?
+
+Infrastructure is the runtime foundation that lets application code receive traffic, execute work, store data, release changes, expose evidence, and recover after failure. It includes compute, networks, data systems, deployment controls, observability, and recovery mechanisms.
+
+In plain language, the application describes **what the product should do**; infrastructure provides **where and under what operating limits it can keep doing it**. The core invariant is that every user-visible promise has a named owner, enough capacity, an observable health signal, and a tested recovery path.
+
+More infrastructure is not automatically more reliable. Each extra cache, queue, region, orchestrator, or proxy adds a useful capability only when the team can explain the constraint it solves and the new failure modes it creates.
+{% /section-card %}
+
+{% section-card %}
+## Follow one request across responsibility boundaries
+
+A request crosses several boundaries before business code runs. Each component should have one clear job; otherwise failures are retried, hidden, or handled inconsistently by several layers.
+
+{% system-flow title="Public request path" caption="The response path ends at authoritative state; telemetry and asynchronous work continue on separate paths." %}
+{% system-node title="DNS and edge" eyebrow="Find and protect" icon="globe" tone="cyan" %}
+
+DNS maps a name to an endpoint. The edge terminates TLS, filters coarse abuse, and may serve policy-safe cached content.
+
+{% /system-node %}
+{% system-node title="Load balancer and gateway" eyebrow="Route and constrain" icon="network" tone="blue" %}
+
+Health checks remove known-bad endpoints. The gateway applies route policy, request limits, and deadline propagation.
+
+{% /system-node %}
+{% system-node title="Application compute" eyebrow="Decide" icon="server" tone="violet" %}
+
+The application owns business authorization, idempotency, dependency budgets, and the response contract.
+
+{% /system-node %}
+{% system-node title="Data systems" eyebrow="Remember and decouple" icon="database" tone="amber" %}
+
+Databases own authoritative state; caches accelerate bounded reads; queues absorb asynchronous work under an explicit delay policy.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Know what each layer does not guarantee
+
+- **DNS** publishes where a service can be reached; it does not prove the destination is healthy or make failover instantaneous because resolvers cache answers.
+- **TLS 1.3** authenticates the endpoint and protects bytes in transit; it does not decide whether an authenticated user may change another tenant's data.
+- **A load balancer** distributes traffic across endpoints that pass its checks; it cannot detect every application-level corruption or prevent overload when every endpoint is saturated.
+- **An API gateway** can enforce coarse authentication, quotas, and routing; the application still owns resource-level authorization and business invariants.
+- **A cache** is a performance copy, not a new source of truth. Its miss path and freshness rule must remain valid.
+- **A message queue** separates arrival rate from processing rate; it adds lag, redelivery, ordering, and poison-message decisions rather than removing them.
+
+{% callout variant="info" %}
+A managed service transfers implementation work to a provider, but accountability stays with your team. You still own data classification, configuration, objectives, dependency behavior, cost, and recovery verification.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Estimate capacity before choosing a deployment shape
+
+Capacity planning starts with a measured unit of work. Suppose a stateless API must sustain **1,200 peak requests per second**, and one replica has been load-tested at **250 requests per second** while meeting the latency target.
+
+With 30% headroom, the target utilization is 70%:
+
+1. Effective capacity per replica is `250 x 0.70 = 175 requests/second`.
+2. Steady-state demand needs `ceil(1,200 / 175) = 7 replicas`.
+3. Seven replicas spread across three zones become `3 + 2 + 2`.
+4. Losing the busiest zone leaves four replicas, or only `4 x 250 = 1,000 requests/second`.
+
+The steady-state estimate fits, but the zone-loss estimate does not. Failure-aware planning asks whether the **remaining** fault domains can carry the promised load, not whether the healthy fleet looks comfortable.
+
+{% interactive-block id="reference/infrastructure-capacity-cost-deployment-lab" /%}
+
+Treat the displayed cost as a planning model, not a cloud quote. Replace replica throughput, per-replica cost, fixed services, data transfer, storage, support, and engineering time with measured values before approving a design.
+{% /section-card %}
+
+{% section-card %}
+## Choose the smallest shape that satisfies the failure promise
+
+{% concept-grid columns="3" %}
+{% concept-card title="Single-zone pool" eyebrow="Lowest operating burden" icon="server" tone="green" %}
+
+Use for development, internal tools, or workloads whose documented recovery time can include a zone restore. Multiple hosts reduce process and host risk, but the zone remains one shared failure domain.
+
+{% /concept-card %}
+{% concept-card title="Multi-zone service" eyebrow="Common production baseline" icon="network" tone="blue" %}
+
+Use when a host or zone failure must not stop the customer path. Capacity, data replicas, queues, and load-balancer health checks must all span zones; compute spread alone is insufficient.
+
+{% /concept-card %}
+{% concept-card title="Dual-region service" eyebrow="Regional fault objective" icon="globe" tone="violet" %}
+
+Use when business impact, regulation, or a contractual recovery objective justifies independent traffic entry, compute, data, secrets, observability, and rehearsed regional failover.
+
+{% /concept-card %}
+{% /concept-grid %}
+
+### Make the choice with explicit criteria
+
+- **Business impact:** What happens to customers, revenue, safety, or compliance while this path is unavailable?
+- **Failure domain:** Must the service survive one process, host, zone, provider service, or entire region?
+- **Recovery objectives:** How quickly must service return, and how much acknowledged data may be lost?
+- **Data semantics:** Can two locations safely accept writes, or does failover require fencing one writer before promoting another?
+- **Team capacity:** Who owns releases, incidents, capacity reviews, certificates, upgrades, and recovery exercises around the clock?
+- **Total cost:** Include idle failover capacity, data transfer, observability, support, and engineering time rather than compute alone.
+
+Multi-region architecture is not a substitute for backups, and backups are not a substitute for availability. Availability keeps a path running through a fault; recovery restores a correct path after interruption or data damage.
+{% /section-card %}
+
+{% section-card %}
+## Trace failure scope and recovery ownership
+
+A **blast radius** is the set of users, requests, data, and components affected by one failure. Select each scenario below and inspect the highlighted path. The topology distinguishes a contained host failure from a zone or region event, and it shows why losing telemetry is operationally serious even while requests still succeed.
+
+{% topology-lab dataFile="/api/content/reference/infrastructure/data/infrastructure-blast-radius-topology.json" /%}
+
+### Assign decisions before the incident
+
+- **Application owner:** defines safe fallback behavior, idempotency, dependency deadlines, and which work may continue asynchronously.
+- **Platform owner:** runs traffic entry, health checks, compute placement, deployment controls, and host or zone replacement.
+- **Data owner:** defines authoritative writers, replication lag limits, backup retention, restore verification, and failover fencing.
+- **Observability owner:** preserves metrics, logs, traces, alert delivery, and a way to detect when the evidence pipeline itself is unhealthy.
+- **Incident commander:** coordinates containment, customer communication, recovery sequencing, and the decision to resume releases.
+
+Ownership can belong to the same small team, but the decisions must still be explicit. A box on a diagram is not a recovery plan.
+{% /section-card %}
+
+{% section-card %}
+## Observe user promises, not just machines
+
+**Observability** is the ability to infer what a system is doing from its emitted evidence. Monitoring asks known questions such as "is checkout error rate above its limit?" Observability also supports investigation when the exact failure was not predicted.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Metrics" eyebrow="Detect and compare" icon="activity" tone="cyan" %}
+
+Track rates, ratios, latency distributions, saturation, queue age, and objective consumption. Metrics are efficient for dashboards and alerts but usually lack per-request detail.
+
+{% /concept-card %}
+{% concept-card title="Logs" eyebrow="Explain events" icon="code" tone="amber" %}
+
+Record structured decisions and state transitions with request, tenant-safe, release, and dependency identifiers. Avoid secrets and unbounded payloads.
+
+{% /concept-card %}
+{% concept-card title="Traces" eyebrow="Connect the path" icon="route" tone="violet" %}
+
+Propagate one trace context across gateways, services, and asynchronous boundaries so operators can see where time was spent and where a failure originated.
+
+{% /concept-card %}
+{% /concept-grid %}
+
+{% metric-strip %}
+{% metric value="99.9%" label="Monthly availability objective" detail="About 43 minutes 50 seconds of unavailable time in a 30-day month" tone="green" /%}
+{% metric value="300 ms" label="Example p95 latency objective" detail="Measure the full customer path, not only application CPU time" tone="blue" /%}
+{% metric value="30 min" label="Example recovery-time objective" detail="Maximum target time to restore the service after interruption" tone="violet" /%}
+{% metric value="5 min" label="Example recovery-point objective" detail="Maximum target amount of data history that may need reconstruction" tone="amber" /%}
+{% /metric-strip %}
+
+### A minimum production view should expose
+
+- request rate, success ratio, and tail latency by route and important customer cohort;
+- resource and dependency saturation, including connection pools, queue age, and storage limits;
+- release, configuration, feature-flag, and infrastructure versions at the time behavior changed;
+- retry, timeout, circuit-breaker, failover, and fallback activity;
+- telemetry freshness and alert-delivery health, because a silent evidence pipeline can hide a live incident.
+
+Alert on user impact or fast objective consumption. A high CPU percentage without user harm may be an optimization signal; a small but sustained payment failure ratio may require immediate action.
+{% /section-card %}
+
+{% section-card %}
+## Make recovery a tested sequence
+
+Recovery is not "restart until green." It is a controlled return to a correct, observable state with an understood data boundary.
+
+{% process-flow %}
+{% process-step number="1" title="Detect and classify" label="Evidence" %}
+
+Confirm user impact, affected scope, first bad change, and whether observability itself is trustworthy.
+
+{% /process-step %}
+{% process-step number="2" title="Contain the blast radius" label="Control" %}
+
+Stop promotion, shed optional work, fence an uncertain writer, or isolate the failed dependency before retries multiply load.
+
+{% /process-step %}
+{% process-step number="3" title="Restore the promised path" label="Recovery" %}
+
+Rollback, fail over, replace capacity, replay durable work, or restore data according to the runbook and remaining data boundary.
+
+{% /process-step %}
+{% process-step number="4" title="Verify and reopen" label="Proof" %}
+
+Check user journeys, invariants, backlog drain, telemetry, and objective burn before resuming releases or declaring recovery complete.
+
+{% /process-step %}
+{% /process-flow %}
+
+An **RTO** is the target time to restore service. An **RPO** is the target amount of data history the business can afford to reconstruct or lose. Neither is credible until a timed exercise proves that people, permissions, backups, automation, and dependency order can meet it.
+
+The following operational contract keeps ownership and proof next to the deployment shape:
+
+{% code-block file="/api/content/reference/infrastructure/code/service-operating-contract.yaml" language="yaml" title="Service operating contract" /%}
+
+### Exercise what is easy to assume
+
+- restore a backup into an isolated environment and verify application-level invariants;
+- remove one host or zone under representative load and confirm surviving capacity;
+- rehearse rollback with a backward-compatible data change;
+- fail an alert-delivery path and verify a second signal detects the monitoring gap;
+- record actual recovery time, recovery point, manual decisions, and missing permissions.
+
+{% callout variant="warn" %}
+A backup that has never been restored is only a recovery hypothesis. Replication can copy deletion or corruption, so keep independent, retained backups and test the full restore path.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Apply complexity only when evidence pays for it
+
+Before adding a platform layer, write down the current constraint, the smallest viable change, the success measure, the owner, and the exit plan.
+
+1. **Measure the constraint.** Use load tests, traces, incidents, objective burn, security requirements, or recovery exercises.
+2. **Try the narrow correction.** Tune the current system, remove waste, or adopt a managed capability before creating a new platform.
+3. **Price total ownership.** Include migration, on-call, upgrades, data transfer, observability, and recovery work.
+4. **Define rollback and removal.** A layer that cannot be safely bypassed or retired can become permanent risk.
+
+Common trade-offs remain visible:
+
+- Autoscaling reduces manual capacity changes, but it reacts after a signal moves and cannot repair a saturated database or bad dependency contract.
+- More zones reduce shared host risk, but they add cross-zone dependencies, data-transfer cost, and failure-capacity requirements.
+- More regions can reduce regional outage impact, but they make data consistency, failover authority, testing, and incident coordination harder.
+- More services can isolate ownership and releases, but they add network failure, compatibility, telemetry, and coordination work.
+- More caching lowers origin load, but it adds freshness, invalidation, privacy, and cold-path capacity decisions.
+
+Choose infrastructure that the team can explain, observe, recover, and afford under the failure promise it actually needs.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/infrastructure/quiz/infrastructure-decisions.json" lessonSlug="infrastructure" title="Infrastructure Decision Review" /%}

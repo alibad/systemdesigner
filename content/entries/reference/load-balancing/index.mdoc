@@ -1,0 +1,200 @@
+---
+registryId: load-balancing
+---
+
+{% section-card tone="intro" %}
+## What is load balancing?
+
+Load balancing is the process of choosing an eligible backend for each new request or connection. It lets one service use several instances, absorb more demand, and continue serving when an instance is drained or fails.
+
+The load balancer does not create capacity or correctness. It can only distribute work across the capacity it can see. Its core invariant is: **route each unit of work only to a backend that is ready and has enough safe capacity for its assigned share**.
+
+Three decisions make that invariant concrete:
+
+- **Routing signal:** choose a Layer 4 connection signal or a Layer 7 application signal.
+- **Distribution policy:** decide what "fair" means for unequal requests and unequal servers.
+- **Eligibility policy:** define the evidence that removes, drains, and restores a backend.
+
+If you are new to request paths, review [Networking Protocols](/reference/networking-protocols) before comparing transport and application routing. The [Proxies and Load Balancing deep dive](/technology/proxies-load-balancing) covers product-oriented implementation details.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow the two control loops behind one request
+
+A production load balancer combines a fast data-plane decision with a slower feedback loop. The routing decision uses the eligible set that health checks, passive failures, deployment state, and capacity signals most recently produced.
+
+{% system-flow title="Request routing with eligibility feedback" caption="Routing is immediate; health and capacity evidence arrives later, so thresholds and headroom matter." %}
+{% system-node title="Client or upstream" eyebrow="Demand" icon="users" tone="blue" %}
+
+Open a connection or send a request through a redundant service endpoint.
+
+{% /system-node %}
+{% system-node title="Load balancer" eyebrow="Select" icon="route" tone="cyan" %}
+
+Filter to eligible backends, then apply the configured distribution policy.
+
+{% /system-node %}
+{% system-node title="Backend pool" eyebrow="Serve" icon="server" tone="green" %}
+
+Consume CPU, memory, connections, and downstream capacity while completing the work.
+
+{% /system-node %}
+{% system-node title="Health and capacity loop" eyebrow="Correct" icon="activity" tone="amber" %}
+
+Observe probes and real traffic, then update eligibility, weights, or drain state.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the responsibilities separate
+
+- The **data plane** must make a bounded, deterministic choice from the current eligible set.
+- The **health loop** must distinguish a backend that is alive from one that is ready for this traffic.
+- The **capacity plan** must leave enough headroom for a backend or zone to disappear without overloading the survivors.
+- The **deployment controller** must drain existing work before removing a backend whenever the protocol permits it.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose the layer by the decision you need to make
+
+Layer 4 and Layer 7 describe what the load balancer can inspect, not a universal speed ranking. Actual throughput and latency depend on TLS, connection reuse, payloads, filters, logging, hardware, and implementation.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Layer 4 transport routing" eyebrow="Connection signal" icon="network" tone="blue" %}
+Route TCP or UDP using addresses, ports, and connection state. This is useful for protocol pass-through, very broad protocol support, or when the proxy must not interpret application messages.
+{% /concept-card %}
+{% concept-card title="Layer 7 application routing" eyebrow="Request signal" icon="route" tone="cyan" %}
+Parse HTTP, gRPC, or another supported protocol to route by host, path, header, method, or cookie. This enables canaries and service rules but adds application-aware work and configuration.
+{% /concept-card %}
+{% concept-card title="TLS pass-through" eyebrow="Preserve backend termination" icon="shield" tone="violet" %}
+Keep encrypted application contents opaque to the load balancer. Routing choices are limited to connection metadata and any protocol information intentionally exposed before termination.
+{% /concept-card %}
+{% concept-card title="TLS termination" eyebrow="Inspect and enforce" icon="lock-keyhole" tone="amber" %}
+Terminate TLS where certificates, HTTP routing, authentication filters, and request telemetry are owned. Re-encrypt to backends when the trust boundary requires it.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="tip" %}
+Choose the lowest layer that exposes the signal the policy actually needs. Do not pay for request parsing when a connection-level decision is enough, and do not force application routing into IP or port rules.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab: distribute demand without hiding a hot backend
+
+The first lab models three backends with unequal safe capacities. Change request rate, distribution policy, and fleet state. Watch the assigned request rate and per-backend utilization change together.
+
+{% interactive-block id="reference/load-balancing-capacity-distribution-lab" dataFile="/api/content/reference/load-balancing/data/capacity-distribution-model.json" /%}
+
+### Read the model as a capacity review
+
+- **Round robin** equalizes request count, not CPU time, bytes, or downstream cost. It is safe only when requests and backends are similar enough for count to represent work.
+- **Weighted round robin** uses declared shares. It handles known capacity differences, but stale weights do not react to a newly slow backend.
+- **Draining or losing a backend** reduces eligible capacity immediately. The surviving pool must carry the same demand unless callers shed load or use another region.
+- **Headroom is a failure budget.** A fleet at 90% utilization while healthy cannot lose one-third of its capacity and remain healthy.
+
+The lab is intentionally a deterministic planning model. It does not claim to predict queueing latency, autoscaling delay, connection reuse, or request-cost variance.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Select an algorithm by the signal that represents work
+
+An algorithm is a measurement choice. State what it observes, what it ignores, and how quickly its evidence becomes stale.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Round robin" eyebrow="Request count" icon="refresh-cw" tone="blue" %}
+Send successive requests across eligible backends. Use it when backend capacity and request cost are comparable. It does not notice a slow backend until another mechanism changes eligibility.
+{% /concept-card %}
+{% concept-card title="Weighted round robin" eyebrow="Declared capacity" icon="scale" tone="cyan" %}
+Assign a static proportion to each backend. Use measured weights for heterogeneous fleets, then review them after instance, runtime, or workload changes.
+{% /concept-card %}
+{% concept-card title="Least connections" eyebrow="Inflight connection count" icon="git-branch" tone="green" %}
+Prefer the backend with fewer active connections. This helps when connections have varied lifetimes, but one multiplexed connection or one expensive request can carry much more work than another.
+{% /concept-card %}
+{% concept-card title="Consistent hashing" eyebrow="Stable key ownership" icon="circle-dot" tone="violet" %}
+Map a tenant, session, or cache key onto a backend ring so membership changes remap a limited share of keys. It reduces movement; it does not prevent hot keys or make backend-local state durable.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Feedback-based policies need guardrails
+
+Least-response-time and adaptive-weight policies can react to observed latency, errors, or utilization. They also introduce delayed feedback: a backend can look fast because it received less work, and frequent weight changes can move pressure around the fleet. Smooth measurements, cap weight changes, preserve a minimum probe rate, and keep an overload or load-shedding policy outside the algorithm.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: inject a failure and tune ejection behavior
+
+Health is a state machine, not one green endpoint. Select the probe depth and a failure scenario, then tune consecutive failure and recovery thresholds. The timeline shows what the probe observes, whether traffic remains eligible, and how long unsafe work can still be routed.
+
+{% interactive-block id="reference/load-balancing-health-ejection-lab" dataFile="/api/content/reference/load-balancing/data/health-ejection-model.json" /%}
+
+### Interpret thresholds as explicit trade-offs
+
+- A shorter interval or lower failure threshold reduces the unsafe routing window, but makes a transient probe failure more likely to eject healthy capacity.
+- A higher success threshold slows re-entry and reduces flapping. It cannot prove that a recovered backend has warmed caches or regained downstream capacity.
+- A TCP connect proves that a listener accepted a connection. It does not prove that an application handler or critical dependency can complete the target request.
+- A deep readiness check can detect more failures, but checking a shared dependency can eject every otherwise healthy frontend during one dependency outage. Define the all-unhealthy behavior and shed load deliberately.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Model backend health as a lifecycle
+
+Use separate states so deployments and failures do not share one ambiguous boolean.
+
+{% process-flow %}
+{% process-step number="1" title="Register and warm" label="Starting" %}
+Start the process, load configuration, establish required pools, and keep it out of rotation until it can serve the documented request class.
+{% /process-step %}
+{% process-step number="2" title="Admit new work" label="Ready" %}
+Require the readiness evidence and success threshold. Continue observing passive request failures after admission.
+{% /process-step %}
+{% process-step number="3" title="Stop new assignments" label="Draining" %}
+Remove the backend from new routing while allowing bounded inflight requests or connections to finish. Enforce a maximum drain deadline.
+{% /process-step %}
+{% process-step number="4" title="Eject, repair, and probe" label="Unhealthy" %}
+Stop normal routing after the failure threshold, preserve enough probe traffic to observe recovery, then require consecutive success before re-entry.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="warn" %}
+All targets unhealthy is a product-specific policy, not a universal outcome. Some systems fail closed, some fail open, and some route to a fallback pool. Test the configured behavior instead of assuming the health dashboard predicts request routing.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement eligibility before distribution
+
+This example keeps health transitions and routing separate. Consecutive probe results change eligibility; draining removes a backend from new assignments; weighted round robin then selects only from the remaining ready pool.
+
+{% code-block file="/api/content/reference/load-balancing/code/health-aware-routing.ts" language="typescript" title="Health-aware weighted routing state machine" /%}
+
+The example is deliberately local and deterministic. A real data plane also needs concurrent state publication, bounded staleness, connection lifecycle handling, zone-aware policy, observability, and a defined response when no backend is eligible.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate the load balancer and the remaining fleet together
+
+### Capacity and correctness evidence
+
+- **Demand:** requests or connections per second, concurrency, bytes, request-cost classes, and retry amplification.
+- **Distribution:** assigned work and utilization per backend, zone, tenant, and route; alert on skew before the average fleet saturates.
+- **Eligibility:** ready, draining, and unhealthy counts; probe latency; failure reasons; ejection rate; recovery rate; and flapping.
+- **Outcomes:** load-balancer and backend latency, errors, resets, timeouts, queue depth, load shedding, and retry volume.
+- **Control-plane safety:** configuration age, propagation lag, certificate expiry, endpoint discovery errors, and policy rollback status.
+
+### Failure drills worth running
+
+1. Drain one backend during long-lived traffic and verify that new work stops while bounded inflight work completes.
+2. Crash one backend at peak demand and confirm the survivors stay below their safe capacity.
+3. Break a critical dependency while the TCP port remains open and verify the chosen readiness signal detects the real failure.
+4. Inject one lost probe and confirm the threshold does not eject healthy capacity unexpectedly.
+5. Remove every healthy backend in a staging pool and observe the actual fail-open, fail-closed, or fallback behavior.
+6. Lose one load-balancer node or zone and verify that endpoint discovery and connection retry do not turn it into a service-wide outage.
+
+### Primary references
+
+- [NGINX HTTP load-balancing methods and passive health behavior](https://nginx.org/en/docs/http/load_balancing.html)
+- [AWS Application Load Balancer target health checks](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/load-balancing/quiz/load-balancing-decisions.json" title="Load Balancing Decision Review" /%}

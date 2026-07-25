@@ -1,0 +1,245 @@
+---
+registryId: activemq
+---
+
+{% section-card tone="intro" %}
+## What is Apache ActiveMQ?
+
+**Apache ActiveMQ is a family of message brokers that lets applications communicate
+asynchronously.** A producer sends a message to a broker-managed destination, and a
+consumer processes it later. The broker absorbs timing differences so the producer
+does not need to wait for the consumer to be online or finish its work.
+
+The project has two broker implementations. **ActiveMQ Classic** is the established
+JMS broker used by the configuration and delivery examples in this lesson.
+**ActiveMQ Artemis** is the newer broker with a different core architecture and
+configuration model. Do not treat their tuning knobs or deployment files as
+interchangeable.
+
+{% callout variant="info" %}
+The core invariant is: **the broker owns message availability; the application owns
+the business outcome.** Acknowledgement, persistence, redelivery, and failover reduce
+specific loss windows, but consumers still need idempotency for ambiguous outcomes.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow a message from send to business commit
+
+JMS separates the API contract from the broker implementation. Application code
+creates a connection, session, destination, producer, and consumer. ActiveMQ Classic
+then routes and stores messages according to destination and broker policy.
+
+{% system-flow title="ActiveMQ Classic delivery path" caption="Persistence and settlement protect different boundaries: the broker stores a message, while the consumer commits the business effect." %}
+{% system-node title="Producer" eyebrow="Create" icon="code" tone="blue" %}
+Builds a message with a destination, stable business event ID, persistence mode,
+priority, and optional expiration.
+{% /system-node %}
+{% system-node title="Broker destination" eyebrow="Route" icon="network" tone="cyan" %}
+Accepts the send, applies queue or topic policy, and controls dispatch when consumers
+or broker resources fall behind.
+{% /system-node %}
+{% system-node title="Message store" eyebrow="Persist" icon="storage" tone="violet" %}
+Journals persistent messages. ActiveMQ Classic commonly uses KahaDB as its local
+persistence adapter.
+{% /system-node %}
+{% system-node title="Consumer" eyebrow="Process" icon="users" tone="amber" %}
+Runs the handler and acknowledges or commits the delivery according to the JMS session
+mode.
+{% /system-node %}
+{% system-node title="Business store" eyebrow="Commit" icon="database" tone="green" %}
+Applies the domain mutation and records the event ID atomically when possible.
+{% /system-node %}
+{% /system-flow %}
+
+Three signals answer different questions:
+
+- A **successful send** says the broker accepted the message according to the selected
+  producer and persistence semantics.
+- A **consumer acknowledgement or session commit** says the delivery can advance at
+  the broker.
+- A **business receipt** says the application has already applied this event and can
+  make a replay harmless.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the destination from the delivery contract
+
+Queues and topics are not styling choices. They determine who receives a copy and what
+happens while a consumer is disconnected.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Queue" eyebrow="One consumer per message" icon="list" tone="blue" %}
+Use competing consumers to distribute independent work. Each message is dispatched to
+one available consumer, subject to acknowledgement, redelivery, ordering, and
+prefetch behavior.
+{% /concept-card %}
+{% concept-card title="Non-durable topic" eyebrow="Online subscribers" icon="radio" tone="cyan" %}
+Use when every currently connected subscriber should receive its own copy and missing
+messages during disconnection is acceptable.
+{% /concept-card %}
+{% concept-card title="Durable subscription" eyebrow="Offline continuity" icon="archive" tone="violet" %}
+Use when one logical topic subscriber must retain matching messages while disconnected.
+Stable subscription identity, cleanup, storage, and lag monitoring become operational
+responsibilities.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before creating a destination, decide:
+
+- whether work is shared or copied to independent subscribers;
+- whether offline consumers must catch up;
+- which ordering key, selector, expiration, and priority rules are actually required;
+- how much retained backlog the broker may hold before producers slow down;
+- who owns stale durable subscriptions and destination cleanup.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Turn workload assumptions into a recovery envelope
+
+There is no portable messages-per-second limit for ActiveMQ. Payload size, persistence,
+disk latency, acknowledgement mode, selectors, prefetch, network, consumer code, and
+broker version all change the result. Start with arithmetic you can explain, then load
+test the exact deployment.
+
+Choose a workload and adjust arrival rate, consumers, persistent share, and consumer
+interruption. The planner reserves 25% of measured handler capacity for variance and
+catch-up; it does not claim a broker benchmark.
+
+{% interactive-block id="technology/activemq-performance" dataFile="/api/content/technology/activemq/data/broker-capacity-envelope.json" /%}
+
+{% code-block file="/api/content/technology/activemq/code/estimate-recovery-envelope.py" language="python" title="Executable backlog and catch-up estimate" /%}
+
+The raw persistent-payload result excludes KahaDB journal and index overhead,
+filesystem behavior, backups, replicas, temporary storage, and retention cleanup.
+Measure those factors before setting store limits.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Inject delivery ambiguity and broker pressure
+
+ActiveMQ Classic can redeliver after a transacted session rolls back or closes before
+commit, after `Session.recover()` in `CLIENT_ACKNOWLEDGE`, or when a client connection
+times out. Once the configured maximum redeliveries is exceeded, the client can send a
+poison acknowledgement so the broker routes the message to a dead-letter queue.
+
+Select each scenario and trace the active path. Compare a retryable unknown outcome
+with a permanent poison message and a capacity failure.
+
+{% topology-lab dataFile="/api/content/technology/activemq/data/delivery-failure-topology.json" /%}
+
+{% callout variant="warn" %}
+A dead-letter queue is quarantine, not success. Alert on arrivals, preserve message
+identity, record the failure reason, repair the cause, and replay at a rate the healthy
+path can absorb.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make repeated delivery produce one result
+
+The dangerous failure is a successful business commit followed by a lost or late
+acknowledgement. The broker cannot inspect an external payment or order database, so it
+must treat the delivery as uncertain and may send the message again.
+
+Use a stable event ID and commit an inbox receipt with the domain mutation. The unique
+receipt turns a repeated delivery into a lookup of the first result.
+
+{% code-block file="/api/content/technology/activemq/code/simulate-idempotent-consumer.py" language="python" title="Executable idempotent consumer model" /%}
+
+The example uses SQLite so it runs without a broker or third-party package. In a real
+consumer, settle the JMS delivery only after the database transaction succeeds. A
+process-local set is not enough because it disappears on restart and cannot coordinate
+several consumer instances.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Bound broker resources instead of hiding overload
+
+ActiveMQ Classic uses producer flow control when configured destination or system usage
+limits are reached. A synchronous producer may block until resources become available
+or fail according to policy. This is backpressure, not a hung broker.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Memory usage" eyebrow="Dispatch working set" icon="memory" tone="blue" %}
+Protects heap used for messages and dispatch. Store-based cursors can page pending work
+rather than keeping every message body in memory.
+{% /concept-card %}
+{% concept-card title="Store usage" eyebrow="Persistent backlog" icon="database" tone="violet" %}
+Bounds persistent message storage such as KahaDB. A rising oldest-message age usually
+reveals consumer trouble before the disk limit is reached.
+{% /concept-card %}
+{% concept-card title="Temporary usage" eyebrow="Non-persistent spill" icon="hard-drive" tone="amber" %}
+Bounds temporary storage used when non-persistent messages cannot remain in memory.
+Transient delivery still needs a pressure policy.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/activemq/code/broker-config.xml" language="xml" title="Illustrative ActiveMQ Classic resource and DLQ policy" /%}
+
+The configuration binds OpenWire to localhost for a safe local example. A production
+deployment also needs explicit authentication, authorization, encrypted transport,
+secret management, network policy, backup, and a tested high-availability design.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the end-to-end message outcome
+
+Queue depth alone is incomplete: ten old messages can be more urgent than ten thousand
+fresh ones. Monitor time, resource pressure, and the final business effect together.
+
+{% process-flow %}
+{% process-step number="1" title="Declare the contract" label="Design" %}
+Record destination type, owner, schema, event ID, persistence, expiration, ordering,
+selector, acknowledgement, redelivery, and DLQ policy.
+{% /process-step %}
+{% process-step number="2" title="Measure the envelope" label="Capacity" %}
+Load test realistic payloads and broker storage while downstream dependencies exhibit
+normal latency and failure behavior.
+{% /process-step %}
+{% process-step number="3" title="Protect correctness" label="Consume" %}
+Validate schema, make the handler idempotent, bound processing time, and settle only
+after the durable business result.
+{% /process-step %}
+{% process-step number="4" title="Watch age and pressure" label="Observe" %}
+Alert on oldest-message age, enqueue and dequeue rates, inflight work, redelivery, DLQ
+growth, memory usage, store usage, and final business latency.
+{% /process-step %}
+{% process-step number="5" title="Rehearse recovery" label="Operate" %}
+Test consumer loss, broker reconnect, store pressure, poison messages, bounded replay,
+and reconciliation after an ambiguous commit.
+{% /process-step %}
+{% /process-flow %}
+
+Before launch, verify:
+
+- the failover URI has bounded reconnect and send behavior appropriate to callers;
+- durable subscriptions and inactive destinations have explicit ownership and cleanup;
+- message size, prefetch, concurrency, and selectors are tested with production skew;
+- backups and broker failover are restored in a drill, not only described in a runbook;
+- dashboards distinguish broker acceptance from the final business outcome.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Know which ActiveMQ broker you are operating
+
+ActiveMQ Classic is a practical fit for mature JMS applications, integration-heavy
+systems, and protocol bridging where its operational model is already understood.
+Evaluate Artemis separately when building a new deployment; it uses addresses, queues,
+and anycast or multicast routing under a different broker architecture.
+
+Choose a database, object store, workflow engine, or analytical log when the dominant
+need is mutable state, large payload storage, long-running orchestration, or broad
+replay and stream processing rather than message dispatch.
+
+Primary references:
+
+- [ActiveMQ Classic message redelivery and DLQ handling](https://activemq.apache.org/components/classic/documentation/message-redelivery-and-dlq-handling)
+- [ActiveMQ Classic producer flow control](https://activemq.apache.org/components/classic/documentation/producer-flow-control)
+- [ActiveMQ Classic message cursors](https://activemq.apache.org/components/classic/documentation/message-cursors)
+- [ActiveMQ Classic KahaDB](https://activemq.apache.org/components/classic/documentation/kahadb)
+- [ActiveMQ Classic failover transport](https://activemq.apache.org/components/classic/documentation/failover-transport-reference)
+- [ActiveMQ Artemis address model](https://activemq.apache.org/components/artemis/documentation/latest/address-model.html)
+{% /section-card %}
+
+{% quiz quizId="activemq" lessonSlug="activemq" title="ActiveMQ Production Design Review" questionsFile="/api/content/technology/activemq/quiz/activemq-production-design.json" /%}

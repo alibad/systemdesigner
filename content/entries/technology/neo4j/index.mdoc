@@ -1,0 +1,329 @@
+---
+registryId: neo4j
+---
+
+{% section-card tone="intro" %}
+## What is Neo4j?
+
+**Neo4j is a transactional graph database that stores business entities as nodes and
+their connections as typed relationships.** Cypher queries describe the pattern to
+find, such as an account that transferred money to another account owned by the same
+device.
+
+Neo4j matters when the useful answer depends on following connections, such as an
+account that sent money to another account controlled by the same device. A relational
+database can represent the same facts, but repeated joins become awkward when a path
+has variable depth, several relationship types, or many possible branches.
+
+The core invariant is **a relationship connects two existing nodes, and every committed
+transaction satisfies the graph's declared constraints**. Graph storage makes
+navigation direct; it does not make an unbounded search cheap.
+
+New to databases? Start with [Database Fundamentals](/fundamentals/database-fundamentals)
+for records, indexes, transactions, and replication.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read the property graph as connected facts
+
+A property graph is a data model made from nodes, relationships, labels, and
+properties. Each element has one specific job.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Nodes" eyebrow="Things with identity" icon="database" tone="blue" %}
+An `Account`, `Person`, or `Device` node represents an entity that can participate in
+many facts. A stable domain identifier lets the application find the same entity again.
+{% /concept-card %}
+{% concept-card title="Relationships" eyebrow="Typed connections" icon="route" tone="violet" %}
+`(:Account)-[:SENT_TO]->(:Account)` stores a named, directed fact. A relationship can
+carry properties such as `at`, `amount`, or `role` when they describe that connection.
+{% /concept-card %}
+{% concept-card title="Labels" eyebrow="Roles and entry points" icon="layers" tone="green" %}
+Labels such as `Account` and `Merchant` classify nodes for constraints, indexes, and
+query planning. A node may have more than one label.
+{% /concept-card %}
+{% concept-card title="Properties" eyebrow="Values on facts" icon="braces" tone="amber" %}
+Properties hold scalar, temporal, spatial, or list values. Keep large blobs in object
+storage and place only the graph-relevant metadata in Neo4j.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Index-free adjacency needs a precise interpretation
+
+After Neo4j locates a starting node, it can follow that node's stored relationships
+without performing a foreign-key join for every hop. The work still grows with the
+number of relationships inspected, the number of paths produced, and whether the
+needed pages are cached. A node with millions of relationships can remain a hotspot.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose Neo4j for a path-shaped workload
+
+A path-shaped workload asks how entities are connected, not only which records match a
+filter. The query shape, consistency boundary, and operational constraints should drive
+the database choice.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Connections are the answer" icon="network" tone="green" %}
+Fraud rings, identity resolution, recommendations, network dependencies, authorization
+paths, and knowledge graphs repeatedly traverse several relationship types.
+{% /concept-card %}
+{% concept-card title="Possible fit" eyebrow="Mixed access patterns" icon="scale" tone="amber" %}
+Catalogs and customer views may benefit from graph traversal while orders, ledgers, or
+large aggregates remain in systems optimized for those access paths.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Connections add little" icon="warning" tone="rose" %}
+Append-only events, wide scans, simple key lookups, blob storage, and high-volume
+time-series aggregation usually have clearer primary stores.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Validate the decision with representative questions
+
+- Name the starting identity, relationship types, maximum useful depth, and result
+  size for each important query.
+- Measure degree distribution, not only average degree. A few supernodes can dominate
+  latency and memory even when the average looks safe.
+- Decide which facts Neo4j owns. If another database remains authoritative, define an
+  idempotent change-data path and an acceptable synchronization delay.
+- Benchmark production-like graph shape and skew. A graph with the right node count but
+  uniform relationships hides the hardest traversal behavior.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Model the graph from questions and invariants
+
+Graph modeling is the process of turning domain questions into stable node identities,
+relationship semantics, and integrity rules. Start from the path the application must
+read or change, not from a mechanical copy of relational tables.
+
+{% process-flow %}
+{% process-step number="1" title="Write the question" label="Query first" %}
+State the starting entity, the connection to follow, the terminal entity, and the
+maximum path depth. Include the latency and freshness requirement.
+{% /process-step %}
+{% process-step number="2" title="Assign identity" label="Node boundary" %}
+Promote a value to a node when it needs independent identity, many relationships, or a
+lifecycle. Keep descriptive values as properties.
+{% /process-step %}
+{% process-step number="3" title="Name the fact" label="Relationship" %}
+Use a specific relationship type and meaningful direction. Put properties on the
+relationship only when they describe that fact rather than either endpoint.
+{% /process-step %}
+{% process-step number="4" title="Enforce and test" label="Invariant" %}
+Create identity constraints, load skewed sample data, run the real pattern, and inspect
+its plan before freezing the model into application APIs.
+{% /process-step %}
+{% /process-flow %}
+
+### Use constraints as concurrency controls
+
+A uniqueness constraint on `Account.id` prevents two concurrent writers from creating
+different nodes for the same account. `MERGE` describes the pattern to match or create,
+but a constraint is what makes domain identity unambiguous under concurrency. Prefer
+merging one constrained node at a time before creating relationships between bound
+nodes.
+
+{% code-block file="/api/content/technology/neo4j/code/model-and-query.mjs" language="javascript" title="Model identity and a bounded recommendation pattern" /%}
+
+Run the standalone example with
+`node content/entries/technology/neo4j/code/model-and-query.mjs`. It checks a small
+in-memory graph without a database, then prints the parameterized Cypher that a Neo4j
+driver should execute.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Start selective and bound every traversal
+
+Traversal budgeting is a rough estimate of how many relationships a pattern may inspect
+before filters and deduplication finish. It exposes the most important query controls:
+anchor cardinality, degree, path depth, and predicates applied while expanding.
+
+{% metric-strip %}
+{% metric label="Anchor rows" value="Start as close to 1 as possible" detail="Use a label plus indexed or constrained identity" tone="blue" /%}
+{% metric label="Branching" value="degree x pass rate" detail="Measure percentiles and supernodes, not only the mean" tone="violet" /%}
+{% metric label="Depth" value="Always set a useful maximum" detail="One extra hop can multiply the search frontier" tone="amber" /%}
+{% metric label="Evidence" value="EXPLAIN, then PROFILE" detail="Compare estimated rows, actual rows, DB hits, and memory" tone="green" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/neo4j-performance" dataFile="/api/content/technology/neo4j/data/traversal-workloads.json" /%}
+
+The lab is a planning envelope, not a Neo4j benchmark. Cycles, repeated paths, planner
+operators, cache state, runtime choice, and data skew change real work. Use it to detect
+a dangerous query shape, then prove the plan against representative data.
+
+{% code-block file="/api/content/technology/neo4j/code/estimate-traversal.mjs" language="javascript" title="Estimate a traversal envelope from the command line" /%}
+
+Run `node content/entries/technology/neo4j/code/estimate-traversal.mjs 1 20 3 100`.
+The four arguments are anchor rows, average degree, maximum hops, and the percentage of
+relationships that pass an expansion-time predicate.
+
+### Read a Cypher plan in order
+
+1. Prefix a query with `EXPLAIN` to inspect estimated operators without executing it.
+2. Confirm the plan begins with a node index seek or another intentionally small anchor,
+   rather than a broad label scan.
+3. Trace estimated row growth through each expand, join, aggregation, sort, or shortest
+   path operator.
+4. Use `PROFILE` only on safe, bounded queries because it executes the query and adds
+   measurement overhead. Compare estimated rows with actual rows and inspect DB hits.
+5. Change one model, predicate, or index decision at a time and retain before-and-after
+   plans with the representative parameters.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Keep transaction retries safe
+
+A Neo4j transaction is an atomic unit of reads and writes. The official drivers can
+route read and write transaction functions and retry transient failures, so the callback
+may run more than once even though one successful database transaction commits.
+
+### Build the write boundary deliberately
+
+- Pass values as query parameters; do not build Cypher by concatenating user input.
+- Put all graph changes that protect one business invariant in the same transaction.
+- Make retried callbacks idempotent. Do not send email, charge a card, or mutate shared
+  process state inside a callback that the driver may execute again.
+- Read or consume results inside the transaction function instead of returning a live
+  result object after the transaction closes.
+- Use stable domain keys and constraints before `MERGE`; a broad `MERGE` pattern can
+  create more of the graph than intended.
+- Bound transaction time, result size, and memory. Large batch imports should use
+  measured chunks and restartable checkpoints.
+
+{% callout variant="warn" %}
+`executeRead` and `executeWrite` are routing declarations, not authorization controls.
+Database roles and privileges must still prevent an application identity from changing
+data it should only read.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Size heap, page cache, and native memory separately
+
+Neo4j memory is an operating envelope, not one cache setting. The page cache holds graph
+store and native index pages; JVM heap holds query, transaction, and object state; the
+operating system and native allocations also need explicit headroom.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Page cache" eyebrow="Store and native indexes" icon="storage" tone="blue" %}
+Cache the repeatedly traversed working set where practical. Watch page faults and hit
+behavior after restart, topology movement, and workload shifts.
+{% /concept-card %}
+{% concept-card title="JVM heap" eyebrow="Transactions and queries" icon="layers" tone="violet" %}
+Heap must absorb concurrent query state and transaction changes without disruptive
+garbage collection. One unbounded query can still consume a dangerous share.
+{% /concept-card %}
+{% concept-card title="Native and OS" eyebrow="Runtime headroom" icon="server" tone="amber" %}
+Network buffers, JVM overhead, plugins, vector indexes, and the operating system need
+memory outside the configured heap and page cache.
+{% /concept-card %}
+{% concept-card title="Storage" eyebrow="Latency and recovery" icon="database" tone="green" %}
+Fast durable storage affects page faults, checkpoints, transaction logs, backup, and
+recovery. Memory cannot compensate for an untested storage boundary.
+{% /concept-card %}
+{% /concept-grid %}
+
+Start with `neo4j-admin server memory-recommendation`, explicitly configure heap and page
+cache for self-managed deployments, then tune from measurements. Track query latency and
+timeouts, transaction memory, heap and GC pauses, page cache faults, checkpoint duration,
+disk latency, and free space together.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Route around failures without weakening consistency
+
+A Neo4j cluster separates consensus-bearing primaries from asynchronously replicated
+secondaries. One primary is elected writer for each database; secondaries add read
+capacity but do not join the commit quorum.
+
+Use the scenarios below to trace normal writes, scaled reads, read-after-write, leader
+failure, and majority loss. Select a component to inspect its responsibility.
+
+{% topology-lab dataFile="/api/content/technology/neo4j/data/cluster-routing-scenarios.json" /%}
+
+### Know what each copy can promise
+
+- **Three primaries** can keep writes available after one primary fails because the two
+  remaining copies still form a majority. A second failure removes write quorum.
+- **Secondaries** pull transaction logs asynchronously and scale read-only work. They
+  can lag and do not increase write fault tolerance.
+- **Routing drivers** discover readers and the current writer when the application uses
+  a routing URI. Directly pinning all work to one server defeats that behavior.
+- **Bookmarks** carry causal position between dependent transactions. Use them when a
+  read must observe a prior write; unnecessary cross-session bookmark dependencies add
+  waiting and coordination.
+- **Replicas are not backups.** They can copy an accidental delete or corrupt logical
+  change. Keep independent backups and prove restore time and recovered state.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate the graph from user-visible objectives
+
+Production operations connect graph-specific signals to latency, correctness,
+availability, and recoverability. A healthy process is not enough if a traversal is
+silently expanding millions of paths or a cluster has lost write quorum.
+
+{% system-flow title="Observe one query from admission to durable state" caption="Each stage needs a limit, a signal, and an owner." %}
+{% system-node title="Driver pool" eyebrow="Admission" icon="network" tone="cyan" %}
+Bound sessions and concurrent transactions, set acquisition and transaction timeouts,
+and distinguish pool wait from server execution time.
+{% /system-node %}
+{% system-node title="Planner and runtime" eyebrow="Query work" icon="workflow" tone="blue" %}
+Capture query fingerprints, latency percentiles, rows, DB hits, memory, timeouts, and
+plan changes for important patterns.
+{% /system-node %}
+{% system-node title="Store and cache" eyebrow="Data path" icon="storage" tone="violet" %}
+Watch page cache faults, disk latency, checkpoint pressure, transaction logs, store
+growth, and hotspots in node degree.
+{% /system-node %}
+{% system-node title="Cluster" eyebrow="Authority" icon="shield" tone="amber" %}
+Monitor writer identity, primary health, replication progress, elections, routing
+errors, and whether a majority remains available.
+{% /system-node %}
+{% system-node title="Recovery" eyebrow="Proof" icon="repeat" tone="green" %}
+Run scheduled backups, validate artifacts, restore into an isolated environment, and
+measure actual RPO, RTO, permissions, constraints, and application-level integrity.
+{% /system-node %}
+{% /system-flow %}
+
+### Review before production
+
+- Constraints enforce every domain identity relied on by `MERGE` and ingestion.
+- Critical queries have representative `EXPLAIN` and `PROFILE` evidence, bounded path
+  depth, realistic result limits, and tests against high-degree nodes.
+- Driver pools, transaction retries, timeouts, and backpressure are measured under peak
+  concurrency and during leader changes.
+- Least-privilege roles, encrypted client and cluster traffic, credential rotation, and
+  audit requirements match the threat model.
+- Memory leaves room for page cache, heap, native allocations, the operating system,
+  maintenance, and failover load.
+- Backup restore and cluster failover exercises prove the recovery objectives; they are
+  not inferred from replication status.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Keep the final decision explicit
+
+Neo4j earns its place when bounded traversal is a primary access path and the team can
+operate a graph-specific consistency and memory model. Keep another store authoritative
+when the graph is only a derived projection, and define synchronization behavior as part
+of the product contract.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Model for paths" eyebrow="Correct abstraction" icon="route" tone="violet" %}
+Name identities and relationships from real questions. Protect identity with constraints
+and treat high-degree nodes as a deliberate modeling decision.
+{% /concept-card %}
+{% concept-card title="Budget expansion" eyebrow="Predictable work" icon="gauge" tone="amber" %}
+Seek a selective anchor, specify relationship types, prune during traversal, cap depth,
+limit results, and verify the physical plan.
+{% /concept-card %}
+{% concept-card title="Prove recovery" eyebrow="Production ownership" icon="shield" tone="green" %}
+Use routing and bookmarks for the required consistency, monitor quorum and lag, and
+restore independent backups on a schedule.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/neo4j/quiz/neo4j-production-design.json" lessonSlug="neo4j" title="Neo4j Production Design Review" /%}

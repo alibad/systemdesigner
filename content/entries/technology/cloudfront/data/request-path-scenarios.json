@@ -1,0 +1,28 @@
+{
+  "title": "Follow a CloudFront request through cache and failure states",
+  "description": "Switch scenarios to see where request processing runs, which cache layer answers, and when origin capacity or failover becomes user-visible.",
+  "nodes": [
+    {"id":"viewer","label":"Viewer","eyebrow":"HTTPS request","detail":"A browser, app, or service connects to the distribution hostname and experiences the final latency, freshness, and authorization result.","kind":"client","tone":"blue","x":7,"y":48},
+    {"id":"edge-function","label":"Viewer function","eyebrow":"Before cache lookup","detail":"A CloudFront Function or viewer-request Lambda@Edge function can normalize the URI, query string, cookies, and headers before CloudFront identifies a cache object.","kind":"edge","tone":"cyan","x":27,"y":48},
+    {"id":"edge-cache","label":"Edge cache","eyebrow":"Nearest cache","detail":"Returns a reusable object immediately on a hit. On a miss, the request continues through CloudFront's cache hierarchy.","kind":"cache","tone":"green","x":48,"y":28},
+    {"id":"regional-cache","label":"Regional cache","eyebrow":"Shared reuse","detail":"Aggregates demand from multiple edge locations so a miss at one edge may still avoid the origin path.","kind":"cache","tone":"violet","x":68,"y":28},
+    {"id":"origin-shield","label":"Origin Shield","eyebrow":"Optional cache layer","detail":"Centralizes requests for an origin and can consolidate simultaneous misses for the same object before the origin.","kind":"cache","tone":"amber","x":68,"y":72},
+    {"id":"primary-origin","label":"Primary origin","eyebrow":"Authoritative response","detail":"Generates or retrieves content. Its tested miss-path capacity remains a hard dependency for uncached traffic.","kind":"database","tone":"rose","x":91,"y":28},
+    {"id":"failover-origin","label":"Failover origin","eyebrow":"Origin group","detail":"Receives eligible requests only after the primary returns a status or failure configured for origin failover.","kind":"database","tone":"blue","x":91,"y":76}
+  ],
+  "edges": [
+    {"id":"viewer-function","from":"viewer","to":"edge-function","label":"viewer request"},
+    {"id":"function-edge","from":"edge-function","to":"edge-cache","label":"normalized key"},
+    {"id":"edge-regional","from":"edge-cache","to":"regional-cache","label":"edge miss"},
+    {"id":"regional-origin","from":"regional-cache","to":"primary-origin","label":"cache miss"},
+    {"id":"regional-shield","from":"regional-cache","to":"origin-shield","label":"shield enabled"},
+    {"id":"shield-origin","from":"origin-shield","to":"primary-origin","label":"shield miss"},
+    {"id":"primary-failover","from":"primary-origin","to":"failover-origin","label":"eligible failure","via":{"x":94,"y":52}}
+  ],
+  "scenarios": [
+    {"id":"edge-hit","label":"Edge hit","summary":"The normalized cache key matches a fresh object at the nearest edge location.","activeEdges":["viewer-function","function-edge"],"focusNode":"edge-cache","result":"CloudFront returns the object without a regional-cache or origin request. Viewer-request logic still runs because it occurs before cache lookup."},
+    {"id":"regional-hit","label":"Regional hit","summary":"The nearest edge misses, but a regional cache already holds the object.","activeEdges":["viewer-function","function-edge","edge-regional"],"focusNode":"regional-cache","result":"The edge refills from CloudFront's cache hierarchy. The origin remains protected even though the nearest edge reported a miss."},
+    {"id":"shield-miss","label":"Shield miss burst","summary":"Several edges request the same uncached object. Origin Shield receives their misses and forwards a consolidated origin request.","activeEdges":["viewer-function","function-edge","edge-regional","regional-shield","shield-origin"],"focusNode":"origin-shield","result":"A centralized cache layer can reduce duplicate simultaneous origin work. Unique misses still reach the primary, so Origin Shield does not replace origin capacity planning."},
+    {"id":"origin-failover","label":"Origin failure","summary":"The primary returns a configured failover condition and CloudFront tries the secondary origin in its origin group.","activeEdges":["viewer-function","function-edge","edge-regional","regional-origin","primary-failover"],"failedNodes":["primary-origin"],"focusNode":"failover-origin","result":"Only eligible requests and failure conditions follow this path. The secondary must have compatible content, authorization, and capacity before failover is useful."}
+  ]
+}

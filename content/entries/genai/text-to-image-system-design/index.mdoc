@@ -1,0 +1,314 @@
+---
+registryId: text-to-image-system-design
+---
+
+{% section-card tone="intro" %}
+## What is a text-to-image system?
+
+A **text-to-image system** turns a written intent into an image through a bounded generation job. The job combines text conditioning, a generative model, decoding, policy checks, storage, and delivery. Diffusion is a common generation method, but it is not the entire product.
+
+The difficult system-design question is not simply "Which model makes the best image?" It is how to deliver useful images while GPU capacity, latency, safety, quality, provenance, and failure recovery remain measurable.
+
+**Core invariant: a generation is complete only after the system records the job state, policy decision, model configuration, output identity, and durable delivery result.** A decoded image without those facts is an ungoverned artifact, not a production result.
+
+Review [Diffusion Models in Production](/genai/diffusion-models-production) first if latent denoising, schedulers, and guidance are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## A generation job crosses five boundaries
+
+Long-running image generation should leave the synchronous request path. The API validates intent, creates an idempotent job, and returns a job identifier. Workers then advance that durable record through explicit states.
+
+{% system-flow title="From prompt to governed image" caption="Admission prevents invalid work, the GPU worker produces a candidate, and release policy decides whether that candidate may leave the system." %}
+{% system-node title="Admit the request" eyebrow="API boundary" icon="shield" tone="blue" %}
+Authenticate the caller, normalize the prompt, enforce quota and policy, validate dimensions, and store one immutable generation contract.
+{% /system-node %}
+{% system-node title="Schedule compatible work" eyebrow="Capacity boundary" icon="layers" tone="amber" %}
+Route by model, precision, adapter, dimensions, priority, and memory class. A queue is not a substitute for admission control.
+{% /system-node %}
+{% system-node title="Generate a candidate" eyebrow="GPU boundary" icon="server" tone="violet" %}
+Encode conditioning, initialize latent noise from a seed, run the configured denoising passes, and decode pixels.
+{% /system-node %}
+{% system-node title="Inspect and attest" eyebrow="Release boundary" icon="search" tone="rose" %}
+Evaluate the actual output, apply product policy, record decision evidence, and attach supported provenance metadata.
+{% /system-node %}
+{% system-node title="Publish durably" eyebrow="Delivery boundary" icon="cloud" tone="green" %}
+Store the accepted asset and metadata, create a scoped URL, and complete the job with a stable output identifier.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the state machine explicit
+
+- `accepted`: the contract and idempotency key are durable.
+- `queued`: a scheduler owns the request, priority, and deadline.
+- `running`: one worker lease owns the current attempt.
+- `moderating`: pixels exist but are not yet releasable.
+- `succeeded`: an accepted asset and its evidence are durable.
+- `rejected`, `failed`, or `cancelled`: the terminal reason is recorded and safe to query.
+
+A client retry with the same idempotency key must return the existing job. It must not purchase another generation accidentally.
+{% /section-card %}
+
+{% section-card %}
+## Write a generation contract before choosing a GPU
+
+The contract separates user intent from mutable infrastructure choices. It also makes a result reproducible enough to investigate, even when hardware kernels or model implementations are not perfectly deterministic.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Intent" eyebrow="User-controlled" icon="users" tone="blue" %}
+Prompt, negative constraints, reference assets, requested operation, locale, and accessibility needs.
+{% /concept-card %}
+{% concept-card title="Render envelope" eyebrow="Bounded work" icon="gauge" tone="amber" %}
+Width, height, image count, quality tier, deadline, priority, and maximum spend.
+{% /concept-card %}
+{% concept-card title="Model recipe" eyebrow="Versioned" icon="workflow" tone="violet" %}
+Model and encoder versions, adapter set, sampler or scheduler, steps, guidance, precision, and seed policy.
+{% /concept-card %}
+{% concept-card title="Release policy" eyebrow="Governed" icon="shield" tone="rose" %}
+Policy version, required checks, audience, retention, provenance mode, and review route.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Reject invalid combinations at admission
+
+- Dimensions must match the selected model and worker pool constraints.
+- A reference image must have an authorized purpose, bounded size, and known retention rule.
+- Requested adapters and model versions must be compatible and licensed for the product context.
+- The maximum work estimate must fit the caller's quota and the product deadline.
+- Release policy must be selected before work starts, not inferred after a surprising image appears.
+
+The runnable contract below normalizes a request, validates bounded fields, and derives a stable idempotency fingerprint without storing the raw prompt in the key.
+
+{% code-block file="/api/content/genai/text-to-image-system-design/code/generation-contract.py" language="python" title="Validate one durable generation contract" /%}
+{% /section-card %}
+
+{% section-card %}
+## Estimate denoising work before admission
+
+For one calibrated model and worker class, denoising work grows roughly with **spatial area × denoising passes × image count**. Architecture, precision, attention implementation, guidance method, and batching change the constant, so production planning must use measurements from the exact deployment recipe.
+
+### Keep three numbers separate
+
+{% metric-strip %}
+{% metric value="Job seconds" label="One compatible batch on one worker" tone="violet" /%}
+{% metric value="Images/min" label="Measured service capacity" tone="blue" /%}
+{% metric value="Utilization" label="Arrival rate divided by capacity" tone="amber" /%}
+{% metric value="Queue age" label="User-visible pressure signal" tone="rose" /%}
+{% /metric-strip %}
+
+- **Resolution** changes the number of spatial positions processed at each denoising pass.
+- **Steps** change how many sequential denoiser evaluations occur.
+- **Batch size** can improve throughput through shared execution, but one batch may take longer and consume more memory.
+- **GPU count** raises pool capacity; it does not make one image faster unless the model supports a measured parallel execution strategy.
+- **Arrival shape** matters: a stable daily average can hide a burst that violates the interactive queue deadline.
+
+The capacity model should be intentionally humble. Calibrate it from load tests, reserve headroom for retries and heterogeneous jobs, then compare its forecast with observed queue age.
+
+{% code-block file="/api/content/genai/text-to-image-system-design/code/capacity-envelope.py" language="python" title="Compute a calibrated worker-pool envelope" /%}
+{% /section-card %}
+
+{% interactive-block id="genai/text-to-image-system-design-capacity-budget-lab" dataFile="/api/content/genai/text-to-image-system-design/data/capacity-budget.json" /%}
+
+{% section-card %}
+## Separate model mechanics from product guarantees
+
+Latent diffusion reduces spatial compute by denoising a compressed representation and then decoding it to pixels. Cross-attention or related conditioning mechanisms connect text representations to the image model. The denoiser backbone may be convolutional, transformer-based, or hybrid; the system contract should not depend on one architecture name.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Condition" eyebrow="Meaning" icon="braces" tone="blue" %}
+Encode text and any authorized controls into conditioning values. Truncation, tokenization, and reference preprocessing must be observable.
+{% /concept-card %}
+{% concept-card title="Initialize" eyebrow="Variation" icon="refresh" tone="cyan" %}
+Create the starting latent from a recorded seed policy. A seed aids investigation but does not guarantee identical pixels across every runtime.
+{% /concept-card %}
+{% concept-card title="Denoise" eyebrow="Expensive loop" icon="workflow" tone="violet" %}
+Run sequential model evaluations under the selected scheduler, guidance, precision, and stop rule.
+{% /concept-card %}
+{% concept-card title="Decode" eyebrow="Candidate pixels" icon="image" tone="green" %}
+Transform the latent into an image, then treat the pixels as untrusted output until release checks finish.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Do not promise a knob you have not evaluated
+
+- More steps do not guarantee a better product result after the model's useful range.
+- Stronger guidance can improve prompt adherence while reducing variation or introducing artifacts.
+- A higher pixel count can increase latency and memory without improving composition.
+- A fixed seed can support comparison, but changed kernels, precision, or model versions can change the output.
+- A faster sampler is valuable only if task-slice quality and policy behavior stay inside their release bounds.
+
+[Latent Diffusion Models](https://openaccess.thecvf.com/content/CVPR2022/html/Rombach_High-Resolution_Image_Synthesis_With_Latent_Diffusion_Models_CVPR_2022_paper.html) demonstrate text conditioning in a compressed latent space. [Diffusion Transformers](https://openaccess.thecvf.com/content/ICCV2023/html/Peebles_Scalable_Diffusion_Models_with_Transformers_ICCV_2023_paper.html) show that the denoiser backbone can instead operate as a transformer over latent patches.
+{% /section-card %}
+
+{% section-card %}
+## Schedule around compatibility, fairness, and deadlines
+
+A scheduler should build batches from jobs that can actually share a loaded worker. Mixing incompatible models, adapters, dimensions, or precision modes creates reload churn and unpredictable memory pressure.
+
+{% process-flow %}
+{% process-step number="1" title="Classify the job" label="Envelope" %}
+Derive model family, memory class, dimensions, quality tier, deadline, and policy route from the immutable contract.
+{% /process-step %}
+{% process-step number="2" title="Choose a compatible queue" label="Isolation" %}
+Separate interactive, batch, and review-sensitive work. Preserve tenant fairness and cap one caller's in-flight GPU seconds.
+{% /process-step %}
+{% process-step number="3" title="Lease a warm worker" label="Execution" %}
+Prefer a worker with the required recipe loaded. Give the attempt a deadline, heartbeat, cancellation token, and stable job ID.
+{% /process-step %}
+{% process-step number="4" title="Reconcile the attempt" label="Recovery" %}
+Commit output identity atomically with attempt state. Expired leases may be retried only after checking whether an accepted output already exists.
+{% /process-step %}
+{% /process-flow %}
+
+### Autoscale from pressure, not CPU
+
+- Oldest runnable job age by service tier.
+- Estimated queued GPU seconds by compatibility class.
+- Warm-worker availability and model-load duration.
+- Memory rejection, out-of-memory, cancellation, and retry rates.
+- Sustained utilization with enough spare capacity for one worker failure.
+
+Scale-down policy matters too. Draining a worker must stop new leases, allow bounded in-flight work to finish, and preserve loaded-model economics without trapping stale capacity forever.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the product on named task slices
+
+One aggregate image-quality score cannot prove that the system follows prompts, renders text, respects a brand style, avoids unsafe content, and serves every language equally. Build an evaluation set from real product intents and expected failure modes.
+
+### Measure generation behavior
+
+- Prompt-object and attribute alignment.
+- Counting, spatial relationship, and compositional accuracy.
+- Text rendering and typography where the product supports it.
+- Anatomy, geometry, repetition, and other artifact classes.
+- Diversity across seeds without losing requested constraints.
+
+### Measure product behavior
+
+- Task completion or user acceptance by intent slice.
+- Regeneration, edit, and abandonment rates.
+- End-to-end latency from accepted job to releasable image.
+- Policy blocks, review outcomes, appeals, and confirmed escapes.
+- Cost per accepted image, not merely cost per GPU attempt.
+
+### Compare changes at a fixed contract
+
+Version the prompt set, model recipe, policy, evaluator, and human-review rubric. A cheaper candidate should be compared at a matched quality and safety bar; a better-looking candidate should be compared at a matched latency and cost envelope.
+{% /section-card %}
+
+{% section-card %}
+## Safety needs an input gate and an output gate
+
+Prompt inspection can reject clearly prohibited requests before expensive work. It cannot determine everything the stochastic model will render. Output inspection sees the candidate but occurs after compute has been spent. Production policy needs both boundaries and an explicit review path.
+
+{% system-flow title="A release decision is evidence, not one score" caption="The path may stop before generation, reject the candidate, hold it for review, or release it with a recorded policy and provenance result." %}
+{% system-node title="Prompt gate" eyebrow="Before compute" icon="shield" tone="blue" %}
+Evaluate request policy, identity-sensitive intent, references, abuse patterns, tenant rules, and rate limits.
+{% /system-node %}
+{% system-node title="Candidate generation" eyebrow="Untrusted output" icon="image" tone="violet" %}
+Produce pixels in an isolated worker. Do not publish directly from the GPU process.
+{% /system-node %}
+{% system-node title="Output gate" eyebrow="After compute" icon="search" tone="rose" %}
+Inspect the actual image across relevant policy dimensions and preserve model, threshold, and policy versions.
+{% /system-node %}
+{% system-node title="Review or release" eyebrow="Accountable action" icon="check" tone="green" %}
+Fail closed when required evidence is unavailable. Record reviewer action, provenance attachment, and the final asset identity.
+{% /system-node %}
+{% /system-flow %}
+
+The policy evaluator below keeps input, output, review, and provenance decisions separate so an audit can explain where a release stopped.
+
+{% code-block file="/api/content/genai/text-to-image-system-design/code/release-gate.py" language="python" title="Evaluate a two-stage image release policy" /%}
+{% /section-card %}
+
+{% interactive-block id="genai/text-to-image-system-design-release-gate-lab" dataFile="/api/content/genai/text-to-image-system-design/data/release-gate-scenarios.json" /%}
+
+{% section-card %}
+## Provenance complements policy; it does not replace it
+
+Content provenance can carry signed claims about an asset's origin and history. It does not prove that an image is true, harmless, unbiased, or legally authorized. Treat provenance, moderation, and product disclosure as separate controls.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Decision evidence" eyebrow="Internal" icon="search" tone="blue" %}
+Store job ID, policy version, detector versions, bounded scores, action, reviewer, timestamps, and output hash under a retention rule.
+{% /concept-card %}
+{% concept-card title="Content provenance" eyebrow="Portable" icon="badge" tone="violet" %}
+Attach a supported, verifiable manifest describing relevant creation actions and asset relationships without leaking private prompt data.
+{% /concept-card %}
+{% concept-card title="User disclosure" eyebrow="Experience" icon="users" tone="green" %}
+Present understandable generation and edit information where it helps the audience judge the asset. Preserve accessibility and fallback behavior.
+{% /concept-card %}
+{% /concept-grid %}
+
+The [C2PA specifications](https://spec.c2pa.org/specifications/) define interoperable Content Credentials and related implementation guidance. Validate the manifest after storage, transformation, and CDN delivery; attaching one before a pipeline step that strips it creates false confidence.
+{% /section-card %}
+
+{% section-card %}
+## Design failure behavior before launch
+
+{% concept-grid columns="4" %}
+{% concept-card title="Worker dies mid-job" eyebrow="Lease expiry" icon="server" tone="rose" %}
+Mark the attempt expired, reconcile any committed output, and retry within a bounded attempt budget on a compatible worker.
+{% /concept-card %}
+{% concept-card title="Moderation is unavailable" eyebrow="Evidence gap" icon="shield" tone="amber" %}
+Hold or fail closed for policies that require the missing check. Do not silently downgrade a high-risk release path.
+{% /concept-card %}
+{% concept-card title="Object storage fails" eyebrow="Commit gap" icon="cloud" tone="blue" %}
+Keep the job nonterminal until durable storage succeeds. Delete orphaned temporary pixels through a reconciler.
+{% /concept-card %}
+{% concept-card title="Callback delivery fails" eyebrow="Notification gap" icon="refresh" tone="violet" %}
+The completed job remains queryable. Retry signed callbacks independently without rerunning generation.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Test the recovery paths
+
+- Duplicate client submission before and after job creation.
+- Queue redelivery while the first worker lease is still alive.
+- Worker termination before output, after output, and after durable storage.
+- Cancellation while queued, while denoising, and during moderation.
+- Detector timeout, stale policy configuration, and unavailable review capacity.
+- Storage success with lost response, callback replay, and expired delivery URL.
+{% /section-card %}
+
+{% section-card %}
+## Observe cost, quality, and policy together
+
+Optimization can move harm between metrics. Larger batches may improve throughput while hurting interactive latency. Aggressive output thresholds may reduce escapes while overwhelming reviewers. A faster model may lower GPU cost while increasing regeneration.
+
+### Operational signals
+
+- Accepted jobs, terminal outcomes, and state age by tenant and service tier.
+- Queue age, estimated queued GPU seconds, warm-worker ratio, and worker utilization.
+- Generation time by model recipe, resolution, steps, batch, and hardware class.
+- Out-of-memory, timeout, cancellation, retry, and duplicate-output rates.
+- Moderation block, review, appeal, and confirmed-escape rates by policy version.
+- Storage, egress, and review cost per accepted image.
+
+### Evaluation signals
+
+- Prompt alignment and artifact rate by task slice.
+- User acceptance, regeneration, and edit rate by quality tier.
+- Safety recall and false-positive burden on reviewed, policy-labeled samples.
+- Performance and policy gaps across language, identity, geography, and accessibility slices relevant to the product.
+
+The [NIST Generative AI Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) emphasizes measuring and managing generative-AI risks across the lifecycle. Use that governance frame to assign owners and evidence, not as a substitute for product-specific tests.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production readiness checklist
+
+- The API creates one durable job per idempotency key and exposes explicit terminal reasons.
+- Every job has a bounded generation contract, estimated work, deadline, and policy version.
+- Interactive and batch queues have separate service objectives and fair-share controls.
+- Capacity forecasts are calibrated against the exact model, runtime, hardware, and batch recipe.
+- Worker leases, cancellation, retry, and output reconciliation are tested under failure.
+- Prompt and output gates are independently observable and fail according to declared policy.
+- Review capacity, appeals, kill switches, and emergency policy rollout have named owners.
+- Accepted assets carry durable model, policy, provenance, and storage evidence without retaining unnecessary sensitive data.
+- Quality, safety, latency, and cost are evaluated on named product slices before promotion.
+- Rollback restores the previous model recipe and policy contract, not only the previous container image.
+{% /section-card %}
+
+{% quiz title="Text-to-Image System Design Review" questionsFile="/api/content/genai/text-to-image-system-design/quiz/text-to-image-system-design-review.json" lessonSlug="text-to-image-system-design" /%}

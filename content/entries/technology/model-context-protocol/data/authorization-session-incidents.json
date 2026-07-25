@@ -1,0 +1,108 @@
+{
+  "title": "Boundary recovery runbook",
+  "description": "Classify the failed boundary before choosing whether to reinitialize, reauthorize, reconcile, or retry.",
+  "defaultScenarioId": "expired-session",
+  "defaultActionId": "reinitialize",
+  "scenarios": [
+    {
+      "id": "expired-session",
+      "label": "Expired HTTP session",
+      "detail": "A request carrying a previously valid Mcp-Session-Id receives HTTP 404.",
+      "boundary": "Session lifecycle",
+      "signal": "404 for a known session identifier",
+      "authorizationState": "Token may still be valid",
+      "completionState": "No new tool call was accepted",
+      "recommendedActionId": "reinitialize",
+      "safeConsequence": "The client discards stale protocol state and establishes a fresh negotiated session.",
+      "wrongConsequence": "Authorization churn or a blind tool retry does not repair the missing session contract.",
+      "evidence": [
+        "The 404 is tied to a request that carried the known session ID.",
+        "A new initialize exchange succeeds without the stale ID.",
+        "Capabilities are re-evaluated before normal operations resume."
+      ]
+    },
+    {
+      "id": "insufficient-scope",
+      "label": "Insufficient OAuth scope",
+      "detail": "A protected write receives a challenge for a narrower additional scope.",
+      "boundary": "Authorization grant",
+      "signal": "WWW-Authenticate reports insufficient_scope",
+      "authorizationState": "Authenticated but not authorized for this operation",
+      "completionState": "Write was denied before execution",
+      "recommendedActionId": "step-up",
+      "safeConsequence": "The user sees the additional scope and can approve or deny a bounded step-up grant.",
+      "wrongConsequence": "Reinitializing or repeating the same token creates a loop without adding authority.",
+      "evidence": [
+        "The resource metadata identifies the correct authorization server.",
+        "The challenge names the minimum additional scope.",
+        "The replacement token is issued for the canonical MCP server resource."
+      ]
+    },
+    {
+      "id": "wrong-audience",
+      "label": "Wrong token audience",
+      "detail": "The MCP endpoint receives a token issued for a different API.",
+      "boundary": "Resource identity",
+      "signal": "Token audience does not match the MCP server URI",
+      "authorizationState": "Credential is invalid for this resource server",
+      "completionState": "Request must fail closed",
+      "recommendedActionId": "reauthorize",
+      "safeConsequence": "The server rejects the token and the client obtains a new audience-bound grant.",
+      "wrongConsequence": "Trusting or forwarding the token turns the MCP server into a confused deputy.",
+      "evidence": [
+        "The token's audience equals the canonical MCP server URI.",
+        "Issuer, expiry, signature, and required scope also validate.",
+        "Any downstream API receives a separate credential."
+      ]
+    },
+    {
+      "id": "ambiguous-write",
+      "label": "Connection lost after a write",
+      "detail": "The stream closes after tools/call was sent, but before the client receives a result.",
+      "boundary": "Operation completion",
+      "signal": "Transport ended with no authoritative tool result",
+      "authorizationState": "Grant was valid when the call began",
+      "completionState": "Side effect may have committed",
+      "recommendedActionId": "reconcile",
+      "safeConsequence": "The client checks operation state or an idempotency record before considering another write.",
+      "wrongConsequence": "A blind retry can create a duplicate side effect even though the first response was lost.",
+      "evidence": [
+        "A caller-scoped operation or idempotency identifier is available.",
+        "Server or dependency state can report the authoritative outcome.",
+        "Only an absent or safely retryable outcome permits another call."
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "id": "reinitialize",
+      "label": "Start a fresh session",
+      "detail": "Discard the stale session ID, send initialize, and renegotiate capabilities.",
+      "restores": "Protocol lifecycle"
+    },
+    {
+      "id": "step-up",
+      "label": "Request step-up consent",
+      "detail": "Show the additional scope and repeat authorization with the correct resource.",
+      "restores": "Operation authority"
+    },
+    {
+      "id": "reauthorize",
+      "label": "Reject and reauthorize",
+      "detail": "Fail closed, then obtain a token issued specifically for the MCP server.",
+      "restores": "Audience binding"
+    },
+    {
+      "id": "reconcile",
+      "label": "Reconcile operation state",
+      "detail": "Query by operation or idempotency ID before deciding whether another call is safe.",
+      "restores": "Completion certainty"
+    },
+    {
+      "id": "blind-retry",
+      "label": "Retry immediately",
+      "detail": "Repeat the failed request without changing its grant, session, or operation evidence.",
+      "restores": "Nothing reliably"
+    }
+  ]
+}

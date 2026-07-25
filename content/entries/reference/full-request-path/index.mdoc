@@ -1,0 +1,173 @@
+---
+registryId: full-request-path
+---
+
+{% section-card tone="intro" %}
+## What is a full request path?
+
+A full request path is everything that must happen between a person asking for a page or API result and seeing that result. It includes the client network, edge infrastructure, application work, data reads, response transfer, and browser rendering.
+
+This view matters because a user experiences **one total wait**, not a collection of independent service timings. The core rule is simple: sequential work adds together, parallel work is limited by its slowest required branch, and work outside the response path must not delay the answer.
+
+For a product target such as p95 under 300 ms, every required step spends part of one shared budget. Start by measuring the complete path, then remove work, shorten the dominant stage, or make non-critical work asynchronous.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with a promise and a budget
+
+Before naming infrastructure, state what the person is waiting for. For example: "A signed-in customer sees an order summary within 300 ms at p95." That statement creates a budget, an eligible request population, and a way to reject optimizations that do not improve the user outcome.
+
+{% concept-grid columns="3" %}
+{% concept-card title="End-to-end deadline" eyebrow="One clock" icon="timer" tone="blue" %}
+The maximum time the caller is willing to wait. Downstream calls receive only the time that remains; they do not each receive a fresh full timeout.
+{% /concept-card %}
+
+{% concept-card title="Critical path" eyebrow="Required work" icon="route" tone="violet" %}
+The chain that must complete before a response is useful. A fast cache cannot rescue a request that still waits on an unnecessary remote call.
+{% /concept-card %}
+
+{% concept-card title="Tail latency" eyebrow="p95 and p99" icon="activity" tone="amber" %}
+The slower experiences near the tail. Averages hide mobile transfer delay, queueing, retries, and a small number of overloaded dependencies.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% metric-strip %}
+{% metric value="300 ms" label="Example p95 target" detail="Signed-in order summary" tone="blue" /%}
+{% metric value="80 ms" label="Client and transport" detail="DNS, setup, and round trip" tone="cyan" /%}
+{% metric value="90 ms" label="Origin work" detail="Gateway, app, and data" tone="violet" /%}
+{% metric value="130 ms" label="Transfer and render" detail="Payload-sensitive tail" tone="amber" /%}
+{% /metric-strip %}
+
+{% callout variant="info" %}
+The numbers above are an allocation to investigate, not a universal formula. Measure separate cohorts for warm versus cold connections, cache hits versus misses, regions, device classes, and payload sizes. A p95 budget is only meaningful when its population is explicit.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Latency budget lab
+
+Choose the response path, network condition, and response size. The lab estimates a p95 path from those assumptions, shows the remaining 300 ms budget, and names the stage that currently deserves attention. Notice that an edge hit removes origin work, while a smaller payload helps even when the origin is already fast.
+
+{% interactive-block id="reference/full-request-path-latency-budget-lab" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Trace the required work in order
+
+Most user requests begin at a client, reach a nearby edge, and either end there or continue to an origin. A dynamic request often crosses a gateway, verifies identity, executes application code, and reads cached or durable state. The response then crosses the network again and must be parsed and rendered.
+
+{% process-flow %}
+{% process-step number="1" title="Arrive at the edge" label="Client and network" %}
+Reuse DNS and encrypted connections where possible. The edge can enforce coarse policy and answer a cacheable request without spending origin capacity.
+{% /process-step %}
+
+{% process-step number="2" title="Do only required origin work" label="Critical path" %}
+Authenticate, route, and execute the smallest correct read path. Bound each remote dependency by the remaining deadline, not an independent long timeout.
+{% /process-step %}
+
+{% process-step number="3" title="Send a useful response" label="Payload" %}
+Compress, paginate, and avoid sending data the screen will not use. Transfer time is often the dominant mobile stage after server work is optimized.
+{% /process-step %}
+
+{% process-step number="4" title="Render and observe" label="Experience" %}
+Measure client-visible completion alongside service spans. A server-side success is incomplete evidence when a browser waits on transfer, parse, or rendering.
+{% /process-step %}
+{% /process-flow %}
+
+### A worked estimate
+
+For a warm 4G request with a 200 KB JSON response, a useful initial estimate might be:
+
+- **Network and connection reuse: 80 ms.** The connection is already secure, but radio and round-trip delay still apply.
+- **Edge, gateway, authentication, application, and a cache read: 65 ms.** These are sequential required stages for the dynamic response.
+- **Transfer and browser work: 125 ms.** At this point, response size can cost more than application work.
+
+The estimate is 270 ms, leaving only 30 ms of p95 headroom. Adding a database miss, a second remote dependency, or a larger response can consume that headroom quickly. A 95% edge-cache hit rate changes the path shape: cached requests do not need to pay origin work at all.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Request-path failure and topology lab
+
+Select a scenario to light up exactly the required path. Then choose a node to inspect its responsibility. The important design question is not only "what failed?" but also "which user-visible promise is allowed to degrade, and which dependency must be protected from a retry storm?"
+
+{% topology-lab dataFile="/api/content/reference/full-request-path/data/request-path-failure-topology.json" /%}
+
+{% callout variant="warn" %}
+Do not retry every failure from every layer. One client request can become many gateway, application, and database attempts if each layer independently retries. Give retries one owner, cap attempts by the remaining deadline, and use idempotency keys before replaying a write with an uncertain outcome.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design the failure behavior before the incident
+
+A healthy path is only half the design. Decide what each boundary does when it is slow, unavailable, or overloaded.
+
+- **Edge cache unavailable:** Route only a bounded share to origin, shed abusive or low-priority traffic first, and protect the authoritative store with concurrency limits. A cache outage should not automatically become a database outage.
+- **Identity provider slow:** Use local verification for tokens when the security model allows it. Otherwise fail closed for protected data and return a clear, fast error rather than holding every request until a long timeout.
+- **Database tail grows:** Set a deadline smaller than the caller's remaining budget, cancel work that can no longer help, and serve a contractually safe cached, partial, or unavailable result. Do not wait until the browser deadline to start recovery.
+- **Analytics or logging pipeline fails:** Keep durable correctness work separate from optional telemetry. Buffer or drop best-effort events under an explicit policy; never make page rendering wait on a dashboard write.
+
+### Timeout budget example
+
+With a 300 ms caller deadline and 50 ms reserved for the return trip and browser work, an application may begin with 250 ms. If the edge and gateway already spend 70 ms, the application has 180 ms left. A database call configured for 500 ms is therefore incorrect: it can only produce a late answer. A 120 ms data deadline leaves room for a fallback, cleanup, and a useful error.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose optimizations by the path they remove
+
+{% tabs %}
+{% tab title="Connection setup" %}
+
+Connection reuse and modern transport reduce repeated DNS, TCP, and TLS setup. They are valuable for bursty navigation and API clients, but they do not shrink an oversized response or a slow database query.
+
+{% /tab %}
+{% tab title="Edge caching" %}
+
+Caching at the edge removes origin work for responses that are safe to reuse. The trade-off is freshness and invalidation complexity. Define which fields may be stale and test the miss path at the lowest acceptable hit rate.
+
+{% /tab %}
+{% tab title="Payload reduction" %}
+
+Compression, pagination, image sizing, and field selection reduce transfer and client work across both cached and dynamic paths. The trade-off is more client round trips or product complexity when data is loaded incrementally.
+
+{% /tab %}
+{% tab title="Origin optimization" %}
+
+Indexes, local caches, parallel independent reads, and removing remote calls shorten required server work. Parallelize only independent work, then set a deadline and a fallback for the slowest branch.
+
+{% /tab %}
+{% /tabs %}
+
+The practical order is: remove unnecessary work, cache safely, reduce bytes, then tune the remaining origin stages. Micro-optimizing a 3 ms proxy is rarely useful when a 200 ms payload transfer or an avoidable database miss dominates the same request.
+{% /section-card %}
+
+{% section-card %}
+## Operate the whole path
+
+Treat traces, metrics, and logs as one request narrative rather than separate dashboards.
+
+1. **Propagate a trace and deadline:** Attach a request or trace ID at the edge and carry the remaining deadline through every synchronous call. Record cancellation and timeout reasons.
+2. **Measure the right distributions:** Track client-visible p50, p95, and p99 by route, cache outcome, region, device/network cohort, response-size bucket, and release. Keep high-cardinality request IDs in traces, not metric labels.
+3. **Alert on the promise:** Page on a sustained increase in eligible request failures or tail latency. Use dependency errors, pool waits, queue age, and cache hit rate to diagnose why the promise moved.
+4. **Load-test failures, not only the happy path:** Exercise cache loss, slow identity, database saturation, and telemetry failure. Verify that fallback, shedding, and retry limits keep the protected dependency inside its tested envelope.
+5. **Keep a path runbook:** For each critical route, name its owner, p95 target, downstream budgets, safe degraded response, retry owner, dashboard, and rollback or mitigation action.
+
+{% callout variant="tip" %}
+During an incident, compare three views of the same cohort: edge arrival rate, origin completion rate, and client-visible completion. Divergence between them points to a boundary: cache, gateway, timeout, transfer, or browser rendering.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [Latency and Throughput](/fundamentals/latency-vs-throughput): Relate queueing and saturation to tail latency.
+- [Caching](/fundamentals/caching): Choose cache placement, invalidation, and miss-path protection.
+- [Load Balancing](/fundamentals/load-balancing): Route traffic without concentrating failures.
+- [Monitoring Metrics](/reference/monitoring-metrics): Define user-facing signals and actionable alerts.
+{% /section-card %}
+
+{% section-card %}
+## Check your request-path decisions
+
+{% quiz questionsFile="/api/content/reference/full-request-path/quiz/full-request-path-decisions.json" title="Full Request Path Decisions" /%}
+{% /section-card %}

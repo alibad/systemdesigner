@@ -1,0 +1,47 @@
+{
+  "title": "Fit model state into each accelerator",
+  "description": "Change the model, cluster, reserve, and sharding stage. The result exposes which bytes stay replicated and which bytes divide across the data-parallel group.",
+  "defaultModelParametersBillions": 70,
+  "defaultGpuCount": 32,
+  "defaultGpuMemoryGb": 80,
+  "defaultActivationReserveGb": 18,
+  "gpuMemoryOptionsGb": [40, 80, 192],
+  "strategies": [
+    {
+      "id": "fsdp-full-shard",
+      "label": "FSDP / ZeRO Stage 3",
+      "detail": "Shard parameters, gradients, and optimizer state across the data-parallel group.",
+      "replicatedBytesPerParameter": 0,
+      "shardedBytesPerParameter": 16,
+      "communication": "Parameters are all-gathered for computation and gradients are reduce-scattered. Peak memory can exceed the persistent estimate while full parameter groups are live.",
+      "tradeoff": "Use full sharding when replicated model state does not fit. It saves the most persistent memory but makes parameter communication and wrapping policy part of the critical design."
+    },
+    {
+      "id": "ddp",
+      "label": "DistributedDataParallel",
+      "detail": "Replicate parameters, gradients, and Adam state on every data-parallel rank.",
+      "replicatedBytesPerParameter": 16,
+      "shardedBytesPerParameter": 0,
+      "communication": "Gradient buckets are all-reduced during backward. Each rank ends with the same averaged gradients and applies the optimizer update to its local replica.",
+      "tradeoff": "Prefer DDP when a complete replica fits comfortably. It keeps execution simple, but adding ranks does not reduce per-GPU model-state memory."
+    },
+    {
+      "id": "zero-stage-1",
+      "label": "ZeRO Stage 1",
+      "detail": "Partition the FP32 master weights and Adam moments while keeping parameters and gradients replicated.",
+      "replicatedBytesPerParameter": 4,
+      "shardedBytesPerParameter": 12,
+      "communication": "Gradients remain replicated, while each rank owns only its optimizer-state partition and exchanges updated parameter information after the local optimizer work.",
+      "tradeoff": "Stage 1 is a smaller operational step from DDP, but it cannot solve memory pressure dominated by replicated parameters or gradients."
+    },
+    {
+      "id": "zero-stage-2",
+      "label": "ZeRO Stage 2",
+      "detail": "Partition gradients and optimizer state while keeping low-precision parameters replicated.",
+      "replicatedBytesPerParameter": 2,
+      "shardedBytesPerParameter": 14,
+      "communication": "Gradient ownership is reduce-scattered and updated parameter state is synchronized across ranks. Parameters still consume replicated memory.",
+      "tradeoff": "Stage 2 removes most persistent redundancy without parameter all-gathers, but it still cannot fit a parameter set larger than one accelerator."
+    }
+  ]
+}

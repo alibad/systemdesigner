@@ -1,0 +1,167 @@
+---
+registryId: redshift
+---
+
+{% section-card tone="intro" %}
+## What is Amazon Redshift?
+
+Amazon Redshift is a managed analytical database for running SQL across large datasets. It stores values by column, divides query work across compute slices, and coordinates those slices as a massively parallel processing (MPP) system.
+
+That design fits scans, joins, and aggregations over many rows. It does not turn Redshift into an operational database for high-frequency single-row transactions.
+
+{% callout variant="info" %}
+Parallelism helps only when rows, memory, and query work are distributed well enough that one slice, queue, or data movement step does not dominate the result.
+{% /callout %}
+
+{% concept-grid %}
+  {% concept-card title="Leader and optimizer" icon="route" tone="blue" %}
+  Parses SQL, builds a plan, coordinates compute work, and returns the combined result.
+  {% /concept-card %}
+  {% concept-card title="Compute slices" icon="server" tone="cyan" %}
+  Own table blocks and execute parallel scan, join, sort, and aggregation stages.
+  {% /concept-card %}
+  {% concept-card title="Columnar blocks" icon="database" tone="green" %}
+  Keep values from the same column together so projections, encodings, and block metadata can reduce I/O.
+  {% /concept-card %}
+  {% concept-card title="Managed storage" icon="layers" tone="violet" %}
+  RA3 clusters separate much of the storage lifecycle from local compute, while Serverless manages the workgroup capacity boundary.
+  {% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Follow one analytical query through the warehouse
+
+The SQL text is only the beginning. A query becomes a distributed plan whose elapsed time depends on the bytes read, rows moved, memory used, and slowest required slice.
+
+{% system-flow title="One Redshift query path" %}
+  {% system-node title="SQL and workload class" eyebrow="Identity, queue, priority" icon="code" tone="blue" %}
+  The request enters one named workload boundary.
+  {% /system-node %}
+  {% system-node title="Plan and prune" eyebrow="Columns, blocks, join order" icon="route" tone="cyan" %}
+  The optimizer chooses the distributed stages and candidate block ranges.
+  {% /system-node %}
+  {% system-node title="Parallel slice work" eyebrow="Scan, join, aggregate" icon="server" tone="violet" %}
+  Compute slices execute their assigned portions of each required stage.
+  {% /system-node %}
+  {% system-node title="Merge and return" eyebrow="Rows plus system evidence" icon="check" tone="green" %}
+  The leader combines results while system views retain query evidence.
+  {% /system-node %}
+{% /system-flow %}
+
+Read an `EXPLAIN` plan before guessing at a fix. A large redistribution, broadcast, spill, or scan may matter more than node count. The current [data-distribution guidance](https://docs.aws.amazon.com/redshift/latest/dg/t_Distributing_data.html) describes two goals: keep slice work balanced and minimize runtime data movement.
+{% /section-card %}
+
+{% section-card %}
+## Make table layout serve the dominant query
+
+Distribution answers **where rows live**. Sort design influences **which blocks a predicate can skip**. They solve different problems and should be evaluated separately.
+
+- `DISTSTYLE AUTO` lets automatic table optimization choose and evolve a layout from observed workloads.
+- `EVEN` spreads rows without trying to collocate a join.
+- `KEY` places equal key values together, which can reduce one important join but can also create skew.
+- `ALL` copies a full table to every compute node, exchanging storage and load work for local joins.
+- A leading sort column helps only when common predicates constrain that column enough for block ranges to prune data.
+
+Use the lab to compare the costs instead of treating one style as universally best.
+
+{% interactive-block id="technology/redshift-cluster" dataFile="/api/content/technology/redshift/data/table-design-model.json" /%}
+
+The model uses fixed percentages to make the mechanism visible. Production evidence comes from representative data, query plans, system views, statistics, and observed automatic-optimization actions.
+
+{% code-block file="/api/content/technology/redshift/code/sales-fact-table.sql" language="sql" title="Start with automatic table optimization and a batch load" /%}
+
+Redshift documents `AUTO`, `EVEN`, `KEY`, and `ALL` in its current [distribution-style reference](https://docs.aws.amazon.com/redshift/latest/dg/c_choosing_dist_sort.html). Automatic table optimization can change eligible AUTO tables in the background; inspect those actions rather than assuming AUTO means “no ownership.”
+{% /section-card %}
+
+{% section-card %}
+## Protect short queries from long-running work
+
+Workload Management (WLM) controls how queries are classified, prioritized, admitted, and queued under contention. Automatic WLM adjusts concurrency and memory from query needs. Separate queues, query priorities, short-query acceleration, query-monitoring rules, and concurrency scaling are related controls, not interchangeable labels.
+
+Three signals must stay distinct:
+
+{% metric-strip %}
+  {% metric label="Queue time" value="Admission delay" detail="Time spent waiting before execution starts." /%}
+  {% metric label="Execution time" value="Active work" detail="Time spent running after admission." /%}
+  {% metric label="Completed work" value="Useful output" detail="Success, cancellation, abort, or failure by workload class." /%}
+{% /metric-strip %}
+
+Change the arrivals, ETL concurrency, and policy below. The slot arithmetic is deliberately simple; it demonstrates isolation and pressure, not Redshift's internal automatic-WLM algorithm.
+
+{% interactive-block id="technology/redshift-workload-lab" dataFile="/api/content/technology/redshift/data/workload-isolation-model.json" /%}
+
+The official [automatic WLM documentation](https://docs.aws.amazon.com/redshift/latest/dg/automatic-wlm.html) explains queue priorities and eligible concurrency scaling. Scaling can move eligible queries out of a busy queue, but it does not repair a poor plan, unbounded workload, or missing ownership.
+{% /section-card %}
+
+{% section-card %}
+## Observe the plan before changing capacity
+
+Use system evidence to connect a user-visible symptom to a constrained stage:
+
+1. Separate queue delay from execution delay.
+2. Find the query class, priority, status, and repeated plan shape.
+3. Measure scanned bytes, returned rows, spill, redistribution, skew, and blocked work.
+4. Compare the same query against representative table statistics and data volume.
+5. Change one layout, query, or workload policy at a time, then rerun the evidence.
+
+`SYS_QUERY_HISTORY` provides one row per user query with accumulated fields for running and completed work. Automatic table actions are visible separately.
+
+{% code-block file="/api/content/technology/redshift/code/observe-workloads.sql" language="sql" title="Review recent queries and automatic table actions" /%}
+
+{% callout variant="warn" %}
+Primary-key and foreign-key declarations are informational to the Redshift optimizer; Redshift does not enforce them. Do not declare a relationship unless the data pipeline preserves it.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Load and transform data in bounded stages
+
+Large analytical systems need explicit ownership from source to serving table.
+
+{% process-flow %}
+  {% process-step number="1" title="Land immutable input" label="Register" %}
+  Write source files with a stable batch identity, schema contract, and retention policy.
+  {% /process-step %}
+  {% process-step number="2" title="Load in parallel" label="Ingest" %}
+  Use `COPY` from supported object storage formats instead of many row-by-row inserts.
+  {% /process-step %}
+  {% process-step number="3" title="Validate before publish" label="Reconcile" %}
+  Reconcile row counts, rejected records, keys, nulls, and business totals in a staging boundary.
+  {% /process-step %}
+  {% process-step number="4" title="Promote one version" label="Release" %}
+  Make the accepted table or partition visible and retain enough lineage to replay or roll back.
+  {% /process-step %}
+{% /process-flow %}
+
+Materialized views can persist expensive results, and Spectrum can query external data in S3. Neither choice removes freshness, ownership, authorization, or cost decisions. Define who refreshes a view, how stale it may be, and whether an external table is authoritative or a serving copy.
+{% /section-card %}
+
+{% section-card %}
+## Operate Redshift as a production data system
+
+Use controls that expose failure instead of hiding it:
+
+- **Data correctness**
+  - make loads idempotent by batch or object identity;
+  - reconcile source and target totals before promotion;
+  - keep schema changes backward compatible across producers and consumers.
+- **Performance**
+  - inspect plans and query history before resizing;
+  - monitor skew, unsorted data, stale statistics, spill, queue time, and concurrency-scaling usage;
+  - test automatic and explicit designs against the same representative workload.
+- **Security**
+  - separate database roles by workload and data domain;
+  - use narrowly scoped IAM roles for `COPY`, `UNLOAD`, and external access;
+  - audit query and data-access paths, not only console administration.
+- **Recovery**
+  - define snapshot or recovery-point objectives for the selected deployment mode;
+  - rehearse restoring data and dependent grants into an isolated environment;
+  - preserve source objects and transformation lineage long enough to replay critical datasets.
+
+{% callout variant="tip" %}
+When a dashboard slows down, ask four questions in order: did it wait, did it scan more, did it move more, or did one slice do more? Each answer points to different evidence and a different control.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/redshift/quiz/redshift-production-decisions.json" lessonSlug="redshift" /%}

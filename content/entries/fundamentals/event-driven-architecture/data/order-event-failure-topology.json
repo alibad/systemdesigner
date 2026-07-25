@@ -1,0 +1,134 @@
+{
+  "title": "Trace an order event across failure boundaries",
+  "description": "Switch scenarios to see which path survives a commit, redelivery, or incompatible consumer. Select any component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "checkout",
+      "label": "Checkout API",
+      "eyebrow": "Command boundary",
+      "detail": "Accepts CreateOrder, validates the immediate request, and returns the committed order identity. It does not wait for every downstream reaction.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "order-service",
+      "label": "Order service",
+      "eyebrow": "Fact owner",
+      "detail": "Owns the order invariant. It commits the order and the publication intent in one local transaction before acknowledging success.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 27,
+      "y": 50
+    },
+    {
+      "id": "order-store",
+      "label": "Order store",
+      "eyebrow": "Source of truth",
+      "detail": "Stores authoritative order state. Downstream projections may lag, but they cannot redefine whether the order was accepted.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 45,
+      "y": 18
+    },
+    {
+      "id": "outbox",
+      "label": "Transactional outbox",
+      "eyebrow": "Publish intent",
+      "detail": "Stores the event envelope in the same database transaction as the order. A relay can retry publication without guessing whether the business commit happened.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 45,
+      "y": 73
+    },
+    {
+      "id": "broker",
+      "label": "Event broker",
+      "eyebrow": "Durable channel",
+      "detail": "Retains or routes OrderCreated for independent subscriber groups. Its acknowledgement and redelivery rules are part of the application contract.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 64,
+      "y": 45
+    },
+    {
+      "id": "inventory",
+      "label": "Inventory projection",
+      "eyebrow": "Version-aware consumer",
+      "detail": "Applies compatible order events in aggregate order. It rejects or quarantines a schema it cannot interpret instead of silently corrupting stock state.",
+      "kind": "service",
+      "tone": "green",
+      "x": 84,
+      "y": 17
+    },
+    {
+      "id": "payment",
+      "label": "Payment consumer",
+      "eyebrow": "Idempotent effect",
+      "detail": "Records the event ID with the charge in one local transaction. A duplicate delivery therefore converges on one business effect.",
+      "kind": "service",
+      "tone": "green",
+      "x": 84,
+      "y": 49
+    },
+    {
+      "id": "recovery",
+      "label": "Recovery queue",
+      "eyebrow": "Owned failure",
+      "detail": "Preserves the event identity, schema version, error, attempt count, and correlation context for repair and controlled replay.",
+      "kind": "stream",
+      "tone": "rose",
+      "x": 84,
+      "y": 82
+    }
+  ],
+  "edges": [
+    { "id": "checkout-order", "from": "checkout", "to": "order-service", "label": "CreateOrder" },
+    { "id": "order-store", "from": "order-service", "to": "order-store", "label": "commit state" },
+    { "id": "order-outbox", "from": "order-service", "to": "outbox", "label": "commit event" },
+    { "id": "direct-publish", "from": "order-service", "to": "broker", "label": "separate publish", "mode": "async" },
+    { "id": "outbox-broker", "from": "outbox", "to": "broker", "label": "retry publish", "mode": "async" },
+    { "id": "broker-inventory", "from": "broker", "to": "inventory", "label": "OrderCreated", "mode": "async" },
+    { "id": "broker-payment", "from": "broker", "to": "payment", "label": "OrderCreated", "mode": "async" },
+    { "id": "inventory-recovery", "from": "inventory", "to": "recovery", "label": "quarantine", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-outbox",
+      "label": "Healthy outbox",
+      "summary": "CreateOrder commits authoritative state and an OrderCreated envelope together. The relay publishes later, and each subscriber group advances independently.",
+      "activeEdges": ["checkout-order", "order-store", "order-outbox", "outbox-broker", "broker-inventory", "broker-payment"],
+      "focusNode": "outbox",
+      "result": "Checkout can return after the local commit. Inventory and payment may lag, but the durable outbox preserves a path from every accepted order to its event."
+    },
+    {
+      "id": "dual-write-gap",
+      "label": "Direct publish gap",
+      "summary": "The order transaction commits, then the service crashes before its separate broker publish completes. The database and broker now disagree about what happened.",
+      "activeEdges": ["checkout-order", "order-store", "direct-publish"],
+      "failedNodes": ["order-service"],
+      "degradedNodes": ["broker", "inventory", "payment"],
+      "focusNode": "order-service",
+      "result": "The customer has an accepted order, but no subscriber can discover it from the broker. A transactional outbox or database change stream closes this dual-write gap."
+    },
+    {
+      "id": "lost-ack",
+      "label": "Lost consumer ack",
+      "summary": "Payment commits a charge, but its acknowledgement is lost. The broker delivers the same event ID again because it cannot prove the first attempt completed.",
+      "activeEdges": ["order-outbox", "outbox-broker", "broker-payment"],
+      "degradedNodes": ["payment"],
+      "focusNode": "payment",
+      "result": "At-least-once delivery is safe only when the consumer records the event ID with the business effect. The retry then becomes a no-op instead of a second charge."
+    },
+    {
+      "id": "schema-break",
+      "label": "Schema break",
+      "summary": "A producer replaces a required field without a compatibility window. Payment ignores that field, but the older inventory consumer cannot interpret the new event.",
+      "activeEdges": ["outbox-broker", "broker-inventory", "broker-payment", "inventory-recovery"],
+      "failedNodes": ["inventory"],
+      "focusNode": "inventory",
+      "result": "One incompatible consumer fails without blocking the other group. Quarantine the event, restore a compatible contract, then replay from the preserved event identity and position."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+---
+- name: Roll out the checkout API in bounded batches
+  hosts: "webservers:&production"
+  order: sorted
+  serial: 3
+  max_fail_percentage: 33
+
+  pre_tasks:
+    - name: Drain this host from the load balancer
+      ansible.builtin.uri:
+        url: "https://lb-admin.example.net/backends/{{ inventory_hostname }}/drain"
+        method: POST
+        status_code: 200
+      delegate_to: localhost
+
+  tasks:
+    - name: Install the reviewed application artifact
+      ansible.builtin.package:
+        name: "checkout-api-{{ release_version }}"
+        state: present
+      become: true
+
+    - name: Wait for application health
+      ansible.builtin.uri:
+        url: "http://{{ inventory_hostname }}:8080/health/ready"
+        status_code: 200
+      register: readiness
+      retries: 6
+      delay: 5
+      until: readiness.status == 200
+      delegate_to: localhost
+
+  post_tasks:
+    - name: Return a healthy host to the load balancer
+      ansible.builtin.uri:
+        url: "https://lb-admin.example.net/backends/{{ inventory_hostname }}/enable"
+        method: POST
+        status_code: 200
+      delegate_to: localhost

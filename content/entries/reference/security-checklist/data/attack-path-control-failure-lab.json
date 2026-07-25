@@ -1,0 +1,136 @@
+{
+  "title": "Attack path and control-failure lab",
+  "description": "Compare how identity, authorization, data-access, and evidence controls change the route and consequence of the same public request path.",
+  "nodes": [
+    {
+      "id": "attacker",
+      "label": "Untrusted caller",
+      "eyebrow": "Internet",
+      "detail": "May send guessed credentials, a stolen session, malformed input, or a valid-looking request for a resource owned by someone else.",
+      "kind": "client",
+      "tone": "rose",
+      "x": 8,
+      "y": 48
+    },
+    {
+      "id": "edge",
+      "label": "Edge controls",
+      "eyebrow": "Coarse limits",
+      "detail": "Terminates TLS, constrains request size, and applies IP, account, device, and route-aware abuse limits. It cannot make resource-level authorization decisions alone.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 25,
+      "y": 48
+    },
+    {
+      "id": "identity",
+      "label": "Identity service",
+      "eyebrow": "Who",
+      "detail": "Verifies authenticators, screens weak or breached passwords, applies step-up checks, issues short-lived sessions, and supports prompt revocation and safe recovery.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 44,
+      "y": 17
+    },
+    {
+      "id": "api",
+      "label": "Application API",
+      "eyebrow": "Intent",
+      "detail": "Parses the request into a bounded command, applies business invariants, propagates identity and correlation context, and rejects malformed or oversized input.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 44,
+      "y": 75
+    },
+    {
+      "id": "authorization",
+      "label": "Policy decision",
+      "eyebrow": "May this actor act?",
+      "detail": "Evaluates identity, action, tenant, resource, ownership, and context on every request. Sensitive actions deny when no explicit allow or trustworthy decision exists.",
+      "kind": "security",
+      "tone": "green",
+      "x": 63,
+      "y": 48
+    },
+    {
+      "id": "data-access",
+      "label": "Data-access guard",
+      "eyebrow": "Constrained query",
+      "detail": "Uses parameterized operations, fixed projections, bounded result sizes, and a narrowly privileged workload identity to limit injection and accidental over-read.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 80,
+      "y": 18
+    },
+    {
+      "id": "protected-data",
+      "label": "Protected data",
+      "eyebrow": "Asset",
+      "detail": "Stores authoritative customer records. Encryption at rest protects media and backups, while authorization and least privilege control legitimate online reads.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 92,
+      "y": 48
+    },
+    {
+      "id": "audit",
+      "label": "Security evidence",
+      "eyebrow": "Detect + investigate",
+      "detail": "Durably records important decisions and changes, protects events from unauthorized alteration, and feeds tested alerts without capturing credentials or secret payloads.",
+      "kind": "analytics",
+      "tone": "neutral",
+      "x": 80,
+      "y": 82
+    }
+  ],
+  "edges": [
+    { "id": "caller-edge", "from": "attacker", "to": "edge", "label": "public request" },
+    { "id": "edge-identity", "from": "edge", "to": "identity", "label": "sign-in" },
+    { "id": "identity-api", "from": "identity", "to": "api", "label": "session" },
+    { "id": "edge-api", "from": "edge", "to": "api", "label": "session request" },
+    { "id": "api-policy", "from": "api", "to": "authorization", "label": "actor + action + resource" },
+    { "id": "policy-data", "from": "authorization", "to": "data-access", "label": "explicit allow" },
+    { "id": "data-store", "from": "data-access", "to": "protected-data", "label": "parameterized read" },
+    { "id": "identity-audit", "from": "identity", "to": "audit", "label": "auth result", "mode": "async", "via": { "x": 58, "y": 93 } },
+    { "id": "policy-audit", "from": "authorization", "to": "audit", "label": "decision", "mode": "async" },
+    { "id": "data-audit", "from": "data-access", "to": "audit", "label": "rejection", "mode": "async" },
+    { "id": "store-audit", "from": "protected-data", "to": "audit", "label": "sensitive read", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "stuffing-contained",
+      "label": "Stuffing contained",
+      "summary": "A caller cycles through breached username and password pairs. Edge limits slow the campaign and the identity service rejects the credentials or requires a stronger authenticator.",
+      "activeEdges": ["caller-edge", "edge-identity", "identity-audit"],
+      "degradedNodes": ["edge", "identity"],
+      "focusNode": "identity",
+      "result": "The attack stops before an application session exists. The team can investigate bounded authentication events and tune controls without exposing protected records."
+    },
+    {
+      "id": "authorization-missing",
+      "label": "Authorization missing",
+      "summary": "A stolen but valid session requests another tenant's order. The API accepts the identifier, but the resource-level policy check is missing or incorrectly returns allow.",
+      "activeEdges": ["caller-edge", "edge-api", "api-policy", "policy-data", "data-store", "store-audit"],
+      "failedNodes": ["authorization"],
+      "focusNode": "authorization",
+      "result": "Authentication succeeds but the wrong customer's data is returned. Server-side authorization on every object is the control that prevents this broken-access path."
+    },
+    {
+      "id": "injection-rejected",
+      "label": "Injection rejected",
+      "summary": "A signed-in caller places query syntax in an order identifier. The request reaches the data-access boundary, where schema constraints and parameter binding reject it before execution.",
+      "activeEdges": ["caller-edge", "edge-api", "api-policy", "policy-data", "data-audit"],
+      "focusNode": "data-access",
+      "result": "No query reaches protected data. The rejection is observable, but the event stores a safe reason and request ID rather than the full malicious payload."
+    },
+    {
+      "id": "evidence-pipeline-down",
+      "label": "Evidence pipeline down",
+      "summary": "A permitted high-volume export reaches protected data while the security-event pipeline is unavailable. The primary request succeeds, but the expected decision and read evidence cannot be delivered.",
+      "activeEdges": ["caller-edge", "edge-api", "api-policy", "policy-data", "data-store", "policy-audit", "store-audit"],
+      "failedNodes": ["audit"],
+      "focusNode": "audit",
+      "result": "The export completes without timely searchable evidence, increasing detection and investigation time. High-risk exports need durable local buffering or an explicit fail-closed policy when evidence cannot be preserved."
+    }
+  ]
+}

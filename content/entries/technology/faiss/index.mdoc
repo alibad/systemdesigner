@@ -1,0 +1,215 @@
+---
+registryId: faiss
+---
+
+{% section-card tone="intro" %}
+## What is FAISS?
+
+**FAISS**, short for Facebook AI Similarity Search, is a library for nearest-neighbor search and clustering over fixed-width vectors. It provides exact and approximate index structures, vector compression, CPU and GPU implementations, and composable index factories for building search pipelines.
+
+FAISS is not a complete vector database. It does not by itself provide durable replication, tenant authorization, metadata truth, distributed consensus, online schema migration, or managed backup and recovery. A production system must wrap the library with those contracts.
+
+### The invariant to remember
+
+**Every query vector and indexed vector must share one declared vector-space contract, and every returned ID must resolve against the matching metadata generation.** Fast neighbors are wrong when embedding model, dimensions, metric, normalization, IDs, or metadata drift apart.
+
+Review [vector databases](/technology/vector-databases) if embeddings, distance metrics, and approximate nearest-neighbor search are new.
+{% /section-card %}
+
+{% section-card %}
+## Follow one similarity query
+
+{% process-flow %}
+{% process-step number="1" title="Create the query vector" label="Embedding" %}
+Use the exact embedding model, preprocessing, dimensions, and normalization contract recorded by the index generation.
+{% /process-step %}
+{% process-step number="2" title="Choose search scope" label="Admission" %}
+Authenticate the caller, enforce tenant and resource policy, and resolve metadata filters or permitted shards before vector search.
+{% /process-step %}
+{% process-step number="3" title="Traverse the index" label="FAISS" %}
+Run exact scan, IVF cell probes, graph traversal, compressed-code comparison, or a composed factory pipeline.
+{% /process-step %}
+{% process-step number="4" title="Refine and hydrate" label="Results" %}
+Optionally re-rank candidates with full vectors, then map stable IDs to metadata from the same published generation.
+{% /process-step %}
+{% process-step number="5" title="Observe quality" label="Evidence" %}
+Record index version, parameters, filters, candidate count, latency, failures, and sampled recall against known ground truth.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Start with the exact baseline
+
+Flat indexes compare the query with every stored vector. They require no training and establish exact neighbors for the chosen metric. That makes Flat useful for small corpora, low query volume, and the ground-truth sample used to evaluate every approximate candidate.
+
+For cosine similarity, a common contract normalizes vectors and uses inner product. The normalization choice must be identical for index and query vectors; changing only one side changes the meaning of distance.
+
+{% metric-strip %}
+{% metric value="N x d" label="Flat distance work" detail="An exact query compares N vectors across d dimensions before batching and hardware acceleration." tone="blue" /%}
+{% metric value="4 x d" label="float32 bytes/vector" detail="Raw float32 storage is four bytes per dimension before IDs, graphs, centroids, or other index overhead." tone="violet" /%}
+{% metric value="recall@K" label="Approximation evidence" detail="Compare the approximate top K with exact Flat neighbors over representative query slices." tone="green" /%}
+{% metric value="p99" label="Serving target" detail="Measure tail latency under the real concurrency, batch, filter, and update workload." tone="amber" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card %}
+## Choose an index family by constraint
+
+{% concept-grid columns="2" %}
+{% concept-card title="Flat" eyebrow="Exact scan" icon="database" tone="blue" %}
+Guarantees exact neighbors for L2 or inner product. Use when exactness is required, the corpus is manageable, or search volume cannot amortize a complex build.
+{% /concept-card %}
+{% concept-card title="IVF" eyebrow="Probe selected cells" icon="grid" tone="cyan" %}
+Trains a coarse partition and scans vectors in selected inverted lists. `nprobe` raises recall and search work by visiting more cells.
+{% /concept-card %}
+{% concept-card title="HNSW" eyebrow="Traverse a graph" icon="network" tone="green" %}
+Uses a proximity graph with construction and search breadth controls. It can be fast and accurate but adds link memory and has different update constraints.
+{% /concept-card %}
+{% concept-card title="Product Quantization" eyebrow="Compress vectors" icon="package" tone="violet" %}
+Encodes vector subspaces into compact lossy codes. It reduces memory and bandwidth while making code size, training data, recall, and optional re-ranking explicit trade-offs.
+{% /concept-card %}
+{% /concept-grid %}
+
+Composite factory strings can add preprocessing, IVF, encoding, fast scan, and refinement. Treat the full factory string and every trained artifact as release configuration, not an informal tuning note.
+{% /section-card %}
+
+{% section-card %}
+## Reject poor candidates before an expensive build
+
+Memory is often the first hard constraint because FAISS indexes are normally searched from RAM. Exact raw vector memory is only the starting point: add IDs, centroids, graph links, codebooks, temporary build memory, replicas, rollout overlap, and process headroom.
+
+{% interactive-block id="technology/faiss-performance" /%}
+
+{% code-block file="/api/content/technology/faiss/code/plan-index.py" language="python" title="Choose a benchmark family from exactness and raw-memory constraints" /%}
+
+{% callout variant="info" %}
+The planner narrows the experiment. Only a benchmark on representative embeddings, queries, filters, hardware, threads, and traffic can approve an index.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Tune against a measured quality frontier
+
+{% tabs %}
+{% tab title="IVF" %}
+Sweep the number of coarse cells and `nprobe`. Train on a representative sample, inspect list imbalance, and include filter selectivity because filtering can leave too few eligible candidates.
+{% /tab %}
+{% tab title="HNSW" %}
+Sweep graph degree, construction effort, and `efSearch`. Measure memory and build time as well as recall and latency; higher search breadth is not free.
+{% /tab %}
+{% tab title="PQ" %}
+Sweep code size, subquantizers, bits, residual encoding, optional OPQ, fast-scan variants, and exact or compressed refinement. Validate that dimensions satisfy the chosen encoding.
+{% /tab %}
+{% tab title="Serving" %}
+Sweep threads, batches, replicas, CPU or GPU placement, and admission. Benchmark p50 and p99 under concurrency rather than extrapolating one isolated query.
+{% /tab %}
+{% /tabs %}
+
+### Keep the evaluation slices visible
+
+- Head and tail entities, languages, locales, modalities, tenants, and time ranges
+- Short, long, common, rare, adversarial, and out-of-distribution queries
+- Filtered and unfiltered searches at realistic selectivity
+- Fresh vectors, deleted entities, stale metadata, and missing hydration records
+- Recall@K, precision or task outcome, latency, throughput, memory, build time, and cost
+{% /section-card %}
+
+{% section-card %}
+## Treat filters and updates as system contracts
+
+FAISS focuses on vector search. Metadata filtering, authorization, online mutation, deletion semantics, and result hydration often live outside the index and can dominate correctness.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Pre-filter" eyebrow="Narrow first" icon="filter" tone="blue" %}
+Resolve an eligible ID set or shard before vector search. This preserves policy but can fragment indexes or make small subsets inefficient.
+{% /concept-card %}
+{% concept-card title="Search then filter" eyebrow="Over-fetch" icon="search" tone="amber" %}
+Retrieve extra vector candidates and discard ineligible results. It is simple, but selective filters can exhaust candidates and produce too few results.
+{% /concept-card %}
+{% concept-card title="Partition by policy" eyebrow="Physical boundary" icon="layers" tone="violet" %}
+Separate tenants, regions, or coarse categories into independent indexes. Isolation improves, while small shards and cross-partition ranking add cost.
+{% /concept-card %}
+{% concept-card title="Delta plus rebuild" eyebrow="Mutable overlay" icon="repeat" tone="green" %}
+Search a stable base and a small mutable delta, merge results, and rebuild generations periodically. Define duplicate IDs, tombstones, and cutover ordering.
+{% /concept-card %}
+{% /concept-grid %}
+
+Never return an unauthorized candidate and filter later at the client. Authorization belongs before result disclosure.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Publish the index as one immutable generation
+
+An index generation includes more than a `.faiss` file. It binds the embedding model and preprocessing, dimensions, metric, normalization, factory string, trained parameters, vector IDs, deletion state, metadata snapshot, benchmark evidence, and artifact integrity.
+
+{% interactive-block id="technology/faiss-index-release-lab" dataFile="/api/content/technology/faiss/data/index-release-incidents.json" /%}
+
+{% code-block file="/api/content/technology/faiss/code/validate-generation.py" language="python" title="Reject an incompatible index generation before publication" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build the serving path around explicit ownership
+
+{% system-flow title="FAISS is the search engine inside a larger service" caption="Durability, policy, metadata truth, publication, and recovery remain outside the library boundary." %}
+{% system-node title="Embedding service" eyebrow="Vector contract" icon="cpu" tone="cyan" %}
+Produces versioned query and corpus vectors under one preprocessing, dimensions, metric, and normalization contract.
+{% /system-node %}
+{% system-node title="Index builder" eyebrow="Offline generation" icon="workflow" tone="violet" %}
+Samples training data, trains when required, adds stable IDs, validates counts, benchmarks quality, and serializes immutable artifacts.
+{% /system-node %}
+{% system-node title="Artifact and manifest store" eyebrow="Durable publication" icon="package" tone="blue" %}
+Stores trusted bytes, checksums, compatibility metadata, benchmark evidence, and the previous known-good generation.
+{% /system-node %}
+{% system-node title="Search replicas" eyebrow="Warm serving" icon="search" tone="green" %}
+Load and validate a complete generation, execute bounded queries, and expose versioned quality and systems telemetry.
+{% /system-node %}
+{% system-node title="Metadata and policy" eyebrow="Authorize and hydrate" icon="shield" tone="amber" %}
+Applies tenant and filter scope, resolves result IDs against matching metadata, and prevents unauthorized disclosure.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Plan sharding, replication, and recovery
+
+### Shard only after measuring one index
+
+- **By vector ID:** balances corpus size but requires every query to fan out and merge top K.
+- **By tenant or policy:** creates strong boundaries but can produce uneven and tiny indexes.
+- **By coarse semantic partition:** reduces fan-out when routing is accurate, but routing mistakes lower recall.
+- **By hardware capacity:** keeps each loaded index within RAM and build windows, while operational metadata must track ownership.
+
+Every shard needs a generation ID, replica set, checksum, warmup state, query admission limit, and clear behavior when unavailable. A partial result must be distinguishable from a complete top K.
+
+### Rehearse these failures
+
+- A replica fails during a traffic spike and remaining replicas approach memory or CPU saturation.
+- A new generation loads successfully but has a recall or metadata-hydration regression.
+- One shard is missing, slow, or on a different generation during top-K merge.
+- The embedding service rolls forward before the matching corpus index is ready.
+- A deletion or policy change must take effect before the next full rebuild.
+{% /section-card %}
+
+{% section-card %}
+## Review the production checklist
+
+### Build these controls
+
+- Establish exact Flat ground truth before tuning approximate candidates.
+- Version the complete vector-space and metadata contract with every generation.
+- Benchmark recall, latency, throughput, memory, build time, filters, and cost on representative slices.
+- Load only trusted, integrity-checked artifacts and validate them outside the request path.
+- Shadow and warm a complete generation before an atomic routing swap.
+- Retain a known-good rollback generation and rehearse shard and model-version failures.
+
+### Avoid these traps
+
+- Calling FAISS a database while durability, authorization, metadata, and recovery are unspecified.
+- Comparing index families with invented accuracy or latency constants instead of measured ground truth.
+- Mixing embedding models, dimensions, metrics, normalization, IDs, or metadata generations.
+- Assuming one global `nprobe` or `efSearch` value works across every query and filter slice.
+- Updating files in place, trusting mutable names, or loading serialized artifacts from untrusted sources.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/faiss/quiz/faiss-production.json" lessonSlug="faiss" /%}

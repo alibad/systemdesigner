@@ -1,0 +1,324 @@
+---
+registryId: dynamodb
+---
+
+{% section-card tone="intro" %}
+## What is Amazon DynamoDB?
+
+**Amazon DynamoDB is a serverless, fully managed, distributed NoSQL database that
+stores key-value and document data.** Applications read and mutate items through
+primary keys, secondary indexes, and bounded APIs instead of sending arbitrary joins
+to a relational query planner.
+
+DynamoDB matters when a request path needs predictable single-digit millisecond
+performance while traffic and data grow. AWS owns servers, partition management,
+replication inside a Region, maintenance, and service scaling. Your team still owns
+the data model, key distribution, consistency contract, capacity and quota boundaries,
+retry behavior, and recovery drills.
+
+The core invariant is: **every important access pattern must map to a key-based
+operation whose traffic remains distributed.** A table with ample aggregate capacity
+can still throttle when one partition-key value or GSI key range receives too much
+work.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Known access paths" icon="key" tone="blue" %}
+Use DynamoDB for high-scale request paths with known point reads, bounded range
+queries, conditional writes, and simple item-centered transactions.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Ad hoc relationships" icon="warning" tone="rose" %}
+Do not expect joins, arbitrary multi-attribute filtering, or analytical scans to remain
+efficient as a transactional table grows.
+{% /concept-card %}
+{% concept-card title="Design responsibility" eyebrow="Serverless is not schemaless thinking" icon="shield" tone="green" %}
+AWS operates the service. The application must encode entities and relationships into
+keys, test skew, make retries safe, and prove restore procedures.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build the mental model from tables, items, and keys
+
+A **table** is a collection of **items**. An item is a collection of named
+**attributes**, similar to a row with scalar, set, list, map, or document values. Each
+item can have different non-key attributes, but every item must satisfy the table's
+primary-key schema. The complete item, including attribute names, must remain within
+the 400 KB item limit.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Partition key" eyebrow="Placement and lookup" icon="hash" tone="blue" %}
+DynamoDB hashes this value to place an item. A simple primary key contains only this
+attribute, so its value must be unique per item.
+{% /concept-card %}
+{% concept-card title="Sort key" eyebrow="Ordered item collection" icon="layers" tone="violet" %}
+With a composite primary key, items may share a partition key and are ordered by sort
+key. Prefixes and ranges can retrieve related items without a scan.
+{% /concept-card %}
+{% concept-card title="Primary key" eyebrow="Unique identity" icon="key" tone="green" %}
+The partition key alone, or the partition-key and sort-key pair, uniquely identifies
+one item and defines the direct access contract.
+{% /concept-card %}
+{% /concept-grid %}
+
+For a commerce table, `PK = CUSTOMER#c-42` and
+`SK = ORDER#2026-07-24T09:30:00Z#o-2048` can group one customer's orders and sort them
+by time. A separate order item can use `PK = ORDER#o-2048` for a direct lookup.
+Duplicating selected facts is often intentional when it serves two bounded access
+patterns without a join.
+
+Read the official
+[core-components guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.CoreComponents.html)
+when the distinction between item identity, item collections, and secondary indexes
+needs a deeper walkthrough.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design from access patterns before drawing a table
+
+Relational modeling often starts with normalized entities and derives queries later.
+DynamoDB modeling reverses that sequence: list the application's reads and writes,
+then choose keys and indexes that answer them directly.
+
+{% process-flow %}
+{% process-step number="1" title="Name each operation" label="Contract" %}
+Write concrete requests such as “get order by ID,” “list a customer's newest orders,”
+or “transition one order from pending to paid.”
+{% /process-step %}
+{% process-step number="2" title="Define bounds" label="Shape" %}
+Record result count, item size, read freshness, write atomicity, peak rate, tenant
+isolation, and retention for every operation.
+{% /process-step %}
+{% process-step number="3" title="Assign keys and indexes" label="Model" %}
+Map direct identity to the base key, ordered relationships to sort-key ranges, and
+required alternate lookup dimensions to a secondary index.
+{% /process-step %}
+{% process-step number="4" title="Test skew and failure" label="Prove" %}
+Load-test realistic key distributions, retries, concurrency races, GSI pressure, and
+restore procedures before treating the schema as production-ready.
+{% /process-step %}
+{% /process-flow %}
+
+### Access-pattern review
+
+- Prefer `GetItem` when the complete primary key is known.
+- Prefer `Query` when one partition-key value and an optional sort-key condition bound
+  the result.
+- Treat `Scan` as deliberate table-wide work, not the fallback for an unmodeled
+  request path.
+- Remember that a `FilterExpression` is applied after DynamoDB reads candidate items;
+  it does not turn a broad read into a cheap key lookup.
+- Design both the base table and every GSI for high-cardinality, well-distributed
+  partition-key values.
+
+AWS's current
+[DynamoDB data-modeling guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/data-modeling.html)
+describes single-table and multiple-table foundations. Single-table design is a
+technique, not a requirement: use it when colocated item collections simplify real
+operations, not as a badge of sophistication.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Separate aggregate capacity from hot-key pressure
+
+DynamoDB rounds write capacity by item size: one write capacity unit supports one
+write per second for an item up to 1 KB. A strongly consistent read of an item up to
+4 KB consumes one read capacity unit; an eventually consistent read of the same size
+uses half as much read capacity.
+
+Each partition is designed for up to 1,000 write capacity units and 3,000 read
+capacity units per second. Adaptive capacity helps uneven workloads, but it does not
+remove the per-partition ceiling. The same distribution problem applies independently
+to the base table and every GSI.
+
+{% interactive-block id="technology/dynamodb-key-distribution-capacity-lab" dataFile="/api/content/technology/dynamodb/data/key-distribution-capacity-model.json" /%}
+
+### Choose capacity mode from traffic evidence
+
+- **On-demand:** pays per request and removes a configured table-level capacity
+  target. It is a strong default for new, spiky, or unpredictable workloads, but hot
+  key ranges, configured maximum throughput, account quotas, and rapid growth beyond
+  warm throughput still matter.
+- **Provisioned:** configures RCU and WCU directly, optionally with auto scaling. It
+  fits steady, measurable workloads when the team can manage headroom and scale before
+  scheduled bursts.
+- **Both modes:** require realistic partition-key distribution, per-index monitoring,
+  bounded clients, and diagnosis from the throttling reason rather than a generic
+  “add capacity” response.
+
+Use the official
+[partition-key guidance](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-partition-key-design.html)
+and
+[capacity-mode guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/CostOptimization_TableCapacityMode.html)
+to verify service behavior as limits and features evolve.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Add secondary indexes only for named queries
+
+A secondary index stores a separate, projected view of table items under another key
+schema. It makes an alternate query efficient, but it adds write work, storage, and a
+new distribution surface.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Base table" eyebrow="Authoritative key" icon="database" tone="blue" %}
+Supports eventually consistent reads by default and optional strongly consistent reads
+for `GetItem`, `Query`, and `Scan`.
+{% /concept-card %}
+{% concept-card title="Local secondary index" eyebrow="Same partition key" icon="layers" tone="violet" %}
+Uses the base partition key with another sort key. It shares table capacity and can
+support strong reads, but must be created with the table and has item-collection
+constraints.
+{% /concept-card %}
+{% concept-card title="Global secondary index" eyebrow="Alternate partition key" icon="network" tone="green" %}
+Can use different partition and sort keys. Updates are asynchronous, reads are always
+eventually consistent, and its partitions and capacity are independent of the base
+table.
+{% /concept-card %}
+{% /concept-grid %}
+
+In provisioned mode, a GSI has separate RCU and WCU. If an index cannot absorb base
+table updates, DynamoDB can throttle the base-table write to maintain index
+consistency. A low-cardinality GSI partition key such as `status = OPEN` can therefore
+become hot even when the base table's customer IDs distribute perfectly.
+
+Review AWS's
+[read-consistency contract](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html)
+and
+[GSI back-pressure guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/gsi-throttling.html)
+before promising read-after-write behavior or diagnosing write throttling.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose consistency, correctness, and recovery together
+
+Read consistency answers what a read may observe. Conditional writes and transactions
+answer whether concurrent mutations preserve business invariants. Backups answer how
+operators recover from a valid API call that produced the wrong business state. None
+of these controls substitutes for the other two.
+
+{% interactive-block id="technology/dynamodb-consistency-index-recovery-lab" dataFile="/api/content/technology/dynamodb/data/consistency-index-recovery-model.json" /%}
+
+### Correctness boundaries
+
+- A single `PutItem`, `UpdateItem`, or `DeleteItem` is atomic for its item.
+- A condition expression rejects a write when the current item no longer satisfies a
+  version, existence, state, or numeric invariant.
+- `TransactWriteItems` groups multiple item actions into one ACID operation that
+  commits or cancels as a unit.
+- A strongly consistent pre-read does not lock the item. Use a condition or
+  transaction at mutation time to prevent lost updates and invalid transitions.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make throttles, retries, and stream delivery harmless
+
+Transient throttling is part of the API contract. A reliable client slows down,
+retries only safe work, and preserves the identity of the business operation.
+
+{% system-flow title="Bounded DynamoDB mutation and event path" caption="The write invariant is enforced before the table changes. Stream-triggered consumers still need destination-side idempotency because failed batches can be retried." %}
+{% system-node title="Application command" eyebrow="Identify" icon="users" tone="blue" %}
+Carry a stable order, request, or event identifier so a retry refers to the same
+business operation.
+{% /system-node %}
+{% system-node title="Condition or transaction" eyebrow="Protect" icon="shield" tone="violet" %}
+Check the current invariant atomically and commit one item or an all-or-nothing item
+set.
+{% /system-node %}
+{% system-node title="DynamoDB table" eyebrow="Persist" icon="database" tone="green" %}
+Return success only after the write is durably persisted, or return a specific
+condition, transaction, quota, or throttling failure.
+{% /system-node %}
+{% system-node title="Stream consumer" eyebrow="React" icon="activity" tone="cyan" %}
+Process change records with an idempotency boundary so a retried Lambda batch does not
+repeat a charge, email, or projection mutation.
+{% /system-node %}
+{% /system-flow %}
+
+### Retry rules
+
+- Use AWS SDK retry behavior or bounded exponential backoff with jitter for throttling
+  and retryable service failures.
+- Inspect `ThrottlingReason` and the affected resource ARN; table capacity, key-range
+  pressure, and GSI pressure require different fixes.
+- `BatchWriteItem` is not atomic as a whole. Retry only returned
+  `UnprocessedItems`, not every request that already succeeded.
+- Use conditional writes, transaction client tokens where supported, and stable
+  operation IDs to make repeated requests safe.
+- Send exhausted work to a visible failure path with enough context to replay it
+  deliberately; do not retry forever inside a request thread.
+
+DynamoDB Streams captures item changes for event-driven processing. A Lambda trigger
+retries a failed batch, so the consumer must be idempotent even when the source record
+itself has a stable event ID.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat backups as a recovery workflow, not a checkbox
+
+Point-in-time recovery continuously captures table recovery points at per-second
+granularity for a configurable period from 1 to 35 days. A restore creates a **new
+table**; it does not rewind the current table in place. The team must validate the
+restored data and deliberately reapply or verify settings such as IAM policies, auto
+scaling, alarms, streams, TTL, tags, deletion protection, and PITR itself.
+
+On-demand backups are useful for named milestones and longer-lived snapshots.
+Replicas, global tables, GSIs, and Streams improve availability or propagate changes,
+but they can also propagate an accidental delete or corrupt write. They are not
+independent rollback history.
+
+{% process-flow %}
+{% process-step number="1" title="Detect and contain" label="Stop" %}
+Block the bad writer, capture the failure window, and preserve logs before another
+deployment or repair changes the evidence.
+{% /process-step %}
+{% process-step number="2" title="Restore to a new table" label="Recover" %}
+Choose a point before the mutation and restore without consuming source-table
+provisioned throughput.
+{% /process-step %}
+{% process-step number="3" title="Validate data and settings" label="Prove" %}
+Check representative keys, counts, indexes, encryption, access policy, streams, TTL,
+alarms, and application compatibility.
+{% /process-step %}
+{% process-step number="4" title="Cut over and reconcile" label="Resume" %}
+Redirect traffic deliberately, reconcile valid writes after the restore point, monitor
+the new table, and keep a rollback path until the incident is closed.
+{% /process-step %}
+{% /process-flow %}
+
+See the official
+[PITR guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Point-in-time-recovery.html)
+and
+[restore behavior](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/pointintimerecovery_restores.html)
+when writing the runbook.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Put the contracts into focused code
+
+The first example turns named access patterns into concrete primary-key, range-query,
+and transaction requests. The key strings make entity type and relationship intent
+visible during debugging.
+
+{% code-block file="/api/content/technology/dynamodb/code/model-order-access-patterns.ts" language="typescript" title="Model key-based order access patterns" /%}
+
+`BatchWriteItem` may return a partially processed result. This loop resubmits only the
+unprocessed work with capped exponential backoff and jitter.
+
+{% code-block file="/api/content/technology/dynamodb/code/retry-unprocessed-batches.ts" language="typescript" title="Retry unprocessed batch writes" /%}
+
+A stream-triggered Lambda can see a batch again after failure. The final example
+transactionally claims the stream event ID and creates one outbox intent. A downstream
+worker can then retry that stable intent without silently losing or duplicating the
+derived work.
+
+{% code-block file="/api/content/technology/dynamodb/code/process-stream-record-idempotently.ts" language="typescript" title="Process stream records idempotently" /%}
+
+{% callout variant="tip" %}
+Keep the key grammar, condition expressions, retry policy, and restore procedure under
+version control. A DynamoDB table can be operationally healthy while the application's
+access contract is still incorrect.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/dynamodb/quiz/dynamodb-production-design.json" lessonSlug="dynamodb" title="Amazon DynamoDB Production Design Review" /%}

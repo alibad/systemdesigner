@@ -1,0 +1,144 @@
+{
+  "title": "Trace consistency through a Neo4j cluster",
+  "description": "Switch scenarios to see how the routing driver, primary majority, asynchronous secondary, and backup boundary change the user-visible result. Select any component for its responsibility.",
+  "nodes": [
+    {
+      "id": "driver",
+      "label": "Neo4j driver",
+      "eyebrow": "Application",
+      "detail": "Maintains a connection pool and routing table, declares read or write access mode, retries eligible transient failures, and carries bookmarks when causal ordering is required.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 9,
+      "y": 24
+    },
+    {
+      "id": "router",
+      "label": "Routing table",
+      "eyebrow": "Readers and writer",
+      "detail": "Maps the database's current writer, readers, and routers. A routing driver refreshes this view when leadership changes or an address stops accepting the requested mode.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 29,
+      "y": 24
+    },
+    {
+      "id": "primary-a",
+      "label": "Primary A",
+      "eyebrow": "Current writer",
+      "detail": "Orders writes for this database and synchronously replicates transaction-log entries to enough primaries for a majority commit.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 51,
+      "y": 24
+    },
+    {
+      "id": "primary-b",
+      "label": "Primary B",
+      "eyebrow": "Voting copy",
+      "detail": "Acknowledges synchronous replication and can be elected writer when it is sufficiently up to date and receives a majority of votes.",
+      "kind": "database",
+      "tone": "green",
+      "x": 76,
+      "y": 11
+    },
+    {
+      "id": "primary-c",
+      "label": "Primary C",
+      "eyebrow": "Voting copy",
+      "detail": "Completes the three-primary fault-tolerance set. With only this copy available, reads may continue but no majority exists for new writes.",
+      "kind": "database",
+      "tone": "green",
+      "x": 76,
+      "y": 38
+    },
+    {
+      "id": "secondary",
+      "label": "Secondary",
+      "eyebrow": "Read scaling",
+      "detail": "Pulls transaction logs asynchronously and serves read-only queries. It can lag and does not vote in the primary commit quorum.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 76,
+      "y": 70
+    },
+    {
+      "id": "backup",
+      "label": "Backup store",
+      "eyebrow": "Independent recovery",
+      "detail": "Retains backup artifacts outside the live replication topology. Restore tests prove recovery point, recovery time, constraints, privileges, and application integrity.",
+      "kind": "cache",
+      "tone": "neutral",
+      "x": 42,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "driver-router", "from": "driver", "to": "router", "label": "route + context" },
+    { "id": "router-primary-a", "from": "router", "to": "primary-a", "label": "write" },
+    { "id": "primary-a-primary-b", "from": "primary-a", "to": "primary-b", "label": "sync log" },
+    { "id": "primary-a-primary-c", "from": "primary-a", "to": "primary-c", "label": "sync log" },
+    { "id": "primary-a-secondary", "from": "primary-a", "to": "secondary", "label": "async log", "mode": "async", "via": { "x": 60, "y": 58 } },
+    { "id": "router-secondary", "from": "router", "to": "secondary", "label": "read", "via": { "x": 48, "y": 58 } },
+    { "id": "router-primary-b", "from": "router", "to": "primary-b", "label": "new writer", "via": { "x": 49, "y": 6 } },
+    { "id": "router-primary-c", "from": "router", "to": "primary-c", "label": "read only", "via": { "x": 51, "y": 40 } },
+    { "id": "primary-b-primary-c", "from": "primary-b", "to": "primary-c", "label": "majority" },
+    { "id": "primary-a-backup", "from": "primary-a", "to": "backup", "label": "backup", "mode": "async", "via": { "x": 46, "y": 54 } }
+  ],
+  "scenarios": [
+    {
+      "id": "majority-write",
+      "label": "Committed write",
+      "summary": "The driver routes a write transaction to the current writer. The writer synchronously sends the ordered change to the other primaries and completes commit after enough copies confirm a majority.",
+      "activeEdges": ["driver-router", "router-primary-a", "primary-a-primary-b", "primary-a-primary-c"],
+      "focusNode": "primary-a",
+      "result": "In a three-primary topology, the writer plus at least one other primary makes the commit durable against one primary failure."
+    },
+    {
+      "id": "scaled-read",
+      "label": "Scaled read",
+      "summary": "A read transaction is routed to the asynchronous secondary so analytical or traversal traffic does not consume the writer's capacity.",
+      "activeEdges": ["driver-router", "primary-a-secondary", "router-secondary"],
+      "degradedNodes": ["secondary"],
+      "focusNode": "secondary",
+      "result": "Read throughput increases, but a request without a causal bookmark may observe state older than the latest committed write."
+    },
+    {
+      "id": "causal-read",
+      "label": "Read own write",
+      "summary": "A write returns a bookmark. The dependent read carries it, so a routed secondary waits until it has applied at least that causal position before executing.",
+      "activeEdges": ["driver-router", "router-primary-a", "primary-a-primary-b", "primary-a-primary-c", "primary-a-secondary", "router-secondary"],
+      "degradedNodes": ["secondary"],
+      "focusNode": "driver",
+      "result": "The user sees the prior write even when the read moves to another copy; the consistency requirement may add replication wait."
+    },
+    {
+      "id": "writer-failure",
+      "label": "Writer failure",
+      "summary": "The current writer fails. The remaining two primaries still form a majority, elect an up-to-date writer, and cause the routing driver to refresh and retry eligible work.",
+      "activeEdges": ["driver-router", "router-primary-b", "primary-b-primary-c"],
+      "failedNodes": ["primary-a"],
+      "degradedNodes": ["primary-b"],
+      "focusNode": "primary-b",
+      "result": "Writes pause during detection and election, then resume on Primary B. Application callbacks must remain idempotent because transient work may be retried."
+    },
+    {
+      "id": "majority-loss",
+      "label": "Majority loss",
+      "summary": "Two of three primaries are unavailable. The surviving primary still has graph state but cannot form a majority to order new writes safely.",
+      "activeEdges": ["driver-router", "router-primary-c"],
+      "failedNodes": ["primary-a", "primary-b"],
+      "degradedNodes": ["primary-c"],
+      "focusNode": "primary-c",
+      "result": "Write transactions are rejected until quorum is restored. Serving stale or read-only traffic is a separate product decision, not automatic write availability."
+    },
+    {
+      "id": "restore-boundary",
+      "label": "Restore proof",
+      "summary": "A backup artifact leaves the live topology and is restored in isolation. Replication health alone cannot prove recovery from deletion, corruption, or operator error.",
+      "activeEdges": ["primary-a-backup"],
+      "focusNode": "backup",
+      "result": "A successful restore test records recovered time, data and constraint checks, credentials, application verification, and measured RPO and RTO."
+    }
+  ]
+}

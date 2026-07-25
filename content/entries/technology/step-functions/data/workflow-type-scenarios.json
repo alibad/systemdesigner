@@ -1,0 +1,198 @@
+{
+  "title": "Choose Standard or Express from execution semantics",
+  "description": "Select a workload and compare Standard, Asynchronous Express, and Synchronous Express. The lab uses documented guarantees and feature support, not mutable price or throughput estimates.",
+  "defaultScenarioId": "payment-saga",
+  "defaultWorkflowTypeId": "standard",
+  "workflowTypes": [
+    {
+      "id": "standard",
+      "label": "Standard",
+      "detail": "Durable, auditable orchestration for long-running or side-effecting processes.",
+      "invocation": "Asynchronous start; inspect status or receive events",
+      "maximumDuration": "Up to one year",
+      "executionGuarantee": "Exactly-once workflow execution",
+      "history": "Step Functions managed history",
+      "integrationPatterns": "Request-response, .sync, and callback",
+      "sideEffectRule": "Protect retries and redrives",
+      "observability": "Console and API history; CloudWatch logging can also be enabled"
+    },
+    {
+      "id": "async-express",
+      "label": "Asynchronous Express",
+      "detail": "High-volume event processing when the caller only needs start acknowledgement.",
+      "invocation": "Start acknowledgement; result is not returned to caller",
+      "maximumDuration": "Up to five minutes",
+      "executionGuarantee": "At-least-once workflow execution",
+      "history": "CloudWatch Logs when enabled",
+      "integrationPatterns": "Request-response only",
+      "sideEffectRule": "Every effect must tolerate replay",
+      "observability": "No Step Functions execution history; configure logs and correlation"
+    },
+    {
+      "id": "sync-express",
+      "label": "Synchronous Express",
+      "detail": "Short request-response composition that returns the completed workflow result.",
+      "invocation": "Caller waits for completion and receives result",
+      "maximumDuration": "Up to five minutes",
+      "executionGuarantee": "At-most-once workflow execution",
+      "history": "CloudWatch Logs when enabled",
+      "integrationPatterns": "Request-response only",
+      "sideEffectRule": "Protect task retries and caller ambiguity",
+      "observability": "No Step Functions execution history; retain logs and caller traces"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "payment-saga",
+      "label": "Payment and inventory saga",
+      "detail": "A 20-minute order can reserve inventory, charge once, compensate, and require audit evidence.",
+      "contract": "Long-running orchestration, durable state, side-effect recovery, and queryable execution history are required.",
+      "evaluations": [
+        {
+          "workflowTypeId": "standard",
+          "fit": "recommended",
+          "rationale": "Standard supports the duration, managed execution history, durable state between transitions, and all integration patterns. The charge and compensation handlers still need stable idempotency keys because explicit retries, timeouts, and redrives can repeat a Task attempt.",
+          "checks": [
+            "Give reserve, charge, release, and notification operations stable business keys that survive retries and redrive.",
+            "Bound every retry by error class, attempt count, delay cap, timeout, and jitter policy.",
+            "Test successful completion, unknown task outcome, compensation failure, timeout, and operator redrive."
+          ]
+        },
+        {
+          "workflowTypeId": "async-express",
+          "fit": "blocked",
+          "rationale": "The stated 20-minute duration exceeds the five-minute Express limit, and Step Functions does not retain Express execution history. At-least-once workflow execution also makes every effect replayable by design.",
+          "checks": [
+            "If the process is decomposed, prove each Express segment completes within five minutes and persists business state externally.",
+            "Enable CloudWatch logging and carry one order correlation identifier through every segment.",
+            "Keep the durable saga owner explicit rather than treating chained events as implicit orchestration."
+          ]
+        },
+        {
+          "workflowTypeId": "sync-express",
+          "fit": "blocked",
+          "rationale": "The process exceeds five minutes and should not hold an API caller open through a business saga. At-most-once workflow execution also means an invocation failure can leave the caller without a result and without automatic workflow restart.",
+          "checks": [
+            "Return an operation identifier from an asynchronous API instead of waiting for the business process.",
+            "Expose a status resource or event so callers can observe completion independently.",
+            "Persist business state and idempotency outside the request connection."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "event-transform",
+      "label": "Idempotent event transform",
+      "detail": "A telemetry event is normalized and stored in seconds; the producer does not wait for output.",
+      "contract": "Short, high-volume asynchronous processing can replay safely and needs explicit log-based observability.",
+      "evaluations": [
+        {
+          "workflowTypeId": "standard",
+          "fit": "possible",
+          "rationale": "Standard can run this workflow and provides managed history, but the contract does not require long duration, callbacks, job waiting, or exactly-once workflow execution. Choose it only when audit and execution inspection justify the different operating model.",
+          "checks": [
+            "Quantify the value of managed per-execution history for this event stream.",
+            "Validate current state-transition quotas and account-specific billing against the arrival pattern.",
+            "Keep the transform idempotent even if Standard retries a Task."
+          ]
+        },
+        {
+          "workflowTypeId": "async-express",
+          "fit": "recommended",
+          "rationale": "Asynchronous Express matches a short event processor whose caller only needs start acknowledgement. At-least-once execution is acceptable only because the transform and storage write use a durable event identifier to absorb replay.",
+          "checks": [
+            "Use a producer-assigned event ID or stable business key; do not generate a new key inside each replay.",
+            "Enable CloudWatch Logs with fields that connect start, task, retry, duplicate, and terminal failure events.",
+            "Load-test duration and payload growth so every execution stays inside the Express envelope."
+          ]
+        },
+        {
+          "workflowTypeId": "sync-express",
+          "fit": "possible",
+          "rationale": "Synchronous Express can execute the same short definition, but it makes the producer wait for a result the scenario does not need. That couples producer latency and availability to downstream processing.",
+          "checks": [
+            "Confirm a response payload is actually part of the producer contract.",
+            "Set caller timeouts and define what an interrupted connection means for the accepted event.",
+            "Keep task side effects idempotent because explicit Task retries can still repeat calls."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "api-composition",
+      "label": "Synchronous API composition",
+      "detail": "An API combines two read-only service responses and normally completes in two seconds.",
+      "contract": "The caller waits for a bounded result; operations are read-only or idempotent and complete far below five minutes.",
+      "evaluations": [
+        {
+          "workflowTypeId": "standard",
+          "fit": "possible",
+          "rationale": "Standard starts asynchronously and does not provide the direct StartSyncExecution request-response contract. An API can poll or wait through another integration, but that adds a status protocol this short composition does not otherwise need.",
+          "checks": [
+            "Define the asynchronous operation resource if the API cannot return the final workflow result directly.",
+            "Compare the extra polling or callback path with a Synchronous Express integration.",
+            "Keep downstream read timeouts bounded so a slow dependency cannot consume the whole request budget."
+          ]
+        },
+        {
+          "workflowTypeId": "async-express",
+          "fit": "blocked",
+          "rationale": "Asynchronous Express acknowledges that execution started but does not wait for completion or return the workflow output. That conflicts with an API whose response requires the composed result.",
+          "checks": [
+            "Change the API to return an operation identifier only if asynchronous completion is acceptable to clients.",
+            "Publish completion state outside Step Functions because Express execution history is not retained by the service.",
+            "Do not imply that start acknowledgement means the downstream reads succeeded."
+          ]
+        },
+        {
+          "workflowTypeId": "sync-express",
+          "fit": "recommended",
+          "rationale": "Synchronous Express waits for a short workflow and returns its output to the caller. At-most-once workflow execution fits read-only composition, but callers still need timeouts and must distinguish no response from a known workflow failure.",
+          "checks": [
+            "Set end-to-end caller and task timeouts below the product latency budget.",
+            "Enable logs and propagate request, trace, and execution identifiers because Step Functions does not retain Express history.",
+            "Keep any future write operation idempotent and do not infer completion from a lost client connection."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "external-approval",
+      "label": "External approval or managed job",
+      "detail": "The workflow waits for a human task token or for a managed batch job to finish.",
+      "contract": "The orchestrator must pause durably and use a callback or .sync service integration beyond a normal request-response call.",
+      "evaluations": [
+        {
+          "workflowTypeId": "standard",
+          "fit": "recommended",
+          "rationale": "Standard supports `.waitForTaskToken` callbacks and `.sync` job integrations and can remain active for up to one year. Add heartbeats or explicit deadlines so abandoned work cannot wait forever.",
+          "checks": [
+            "Set task or workflow timeouts and, where supported, heartbeat deadlines for external workers.",
+            "Treat task tokens as secrets and return them only from principals in the same AWS account.",
+            "Test cancellation, late callback, duplicate callback, job failure, and timeout recovery."
+          ]
+        },
+        {
+          "workflowTypeId": "async-express",
+          "fit": "blocked",
+          "rationale": "Express workflows do not support `.sync` or `.waitForTaskToken` integration patterns and cannot run longer than five minutes. Start acknowledgement does not create a durable external wait.",
+          "checks": [
+            "Use a Standard parent when the orchestrator must own the wait contract.",
+            "If events replace waiting, persist correlation and timeout state in an explicit durable service.",
+            "Do not hide a long-running process behind repeated short Express executions without a named owner."
+          ]
+        },
+        {
+          "workflowTypeId": "sync-express",
+          "fit": "blocked",
+          "rationale": "Synchronous Express also lacks `.sync` and callback patterns and has the same five-minute limit. Holding the caller connection open is not durable approval or managed-job coordination.",
+          "checks": [
+            "Return an operation identifier when the caller cannot wait for the full process.",
+            "Move the external wait into a Standard workflow or an explicitly modeled durable coordinator.",
+            "Define timeout and cancellation behavior independently of the client connection."
+          ]
+        }
+      ]
+    }
+  ]
+}

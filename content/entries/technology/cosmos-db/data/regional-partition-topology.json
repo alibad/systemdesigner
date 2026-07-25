@@ -1,0 +1,112 @@
+{
+  "title": "Trace partition ownership and regional failure",
+  "description": "Select a scenario to see which path is active, where request units are consumed, and why a healthy account can still throttle one hot partition key range.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Cosmos SDK client",
+      "eyebrow": "Session-aware",
+      "detail": "Caches account topology, sends the partition key with point operations, carries session tokens, and retries documented transient responses with bounded backoff.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 52
+    },
+    {
+      "id": "gateway",
+      "label": "Account endpoint",
+      "eyebrow": "Routing plane",
+      "detail": "Resolves the request to a region and partition key range. A preferred-regions policy should match the application's failover contract.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 31,
+      "y": 52
+    },
+    {
+      "id": "region-a",
+      "label": "Region A",
+      "eyebrow": "Preferred region",
+      "detail": "Hosts replicated partition key ranges and receives the full configured regional RU/s budget.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 57,
+      "y": 28
+    },
+    {
+      "id": "hot-range",
+      "label": "Hot key range",
+      "eyebrow": "Local bottleneck",
+      "detail": "One physical partition receives a disproportionate share of requests. Other partitions can be idle while this range returns 429 responses.",
+      "kind": "allocator",
+      "tone": "rose",
+      "x": 84,
+      "y": 23
+    },
+    {
+      "id": "region-b",
+      "label": "Region B",
+      "eyebrow": "Replica region",
+      "detail": "Maintains replicated data and can receive traffic when routing changes or the preferred region is unavailable.",
+      "kind": "database",
+      "tone": "green",
+      "x": 57,
+      "y": 77
+    },
+    {
+      "id": "cold-range",
+      "label": "Other key ranges",
+      "eyebrow": "Available headroom",
+      "detail": "Evenly distributed logical partitions retain capacity that cannot automatically rescue a single overloaded key range.",
+      "kind": "allocator",
+      "tone": "amber",
+      "x": 84,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "resolve", "from": "client", "to": "gateway", "label": "partition key", "mode": "sync" },
+    { "id": "route-a", "from": "gateway", "to": "region-a", "label": "preferred", "mode": "sync" },
+    { "id": "route-b", "from": "gateway", "to": "region-b", "label": "failover", "mode": "sync" },
+    { "id": "write-hot", "from": "region-a", "to": "hot-range", "label": "skewed traffic", "mode": "sync" },
+    { "id": "write-cold", "from": "region-a", "to": "cold-range", "label": "distributed", "mode": "sync", "via": { "x": 72, "y": 53 } },
+    { "id": "replicate", "from": "region-a", "to": "region-b", "label": "replicate", "mode": "async" },
+    { "id": "read-hot-b", "from": "region-b", "to": "hot-range", "label": "regional read", "mode": "sync", "via": { "x": 72, "y": 52 } },
+    { "id": "read-cold-b", "from": "region-b", "to": "cold-range", "label": "regional read", "mode": "sync" }
+  ],
+  "scenarios": [
+    {
+      "id": "balanced-session",
+      "label": "Balanced session reads",
+      "summary": "The client routes by partition key to Region A, and requests are spread across key ranges.",
+      "activeEdges": ["resolve", "route-a", "write-hot", "write-cold", "replicate"],
+      "focusNode": "region-a",
+      "result": "Session consistency preserves the client's session guarantees while balanced keys let physical partitions consume their regional RU budget independently."
+    },
+    {
+      "id": "hot-partition",
+      "label": "Hot partition",
+      "summary": "Most requests target one logical key family even though total account RU/s still has headroom.",
+      "activeEdges": ["resolve", "route-a", "write-hot"],
+      "degradedNodes": ["hot-range"],
+      "focusNode": "hot-range",
+      "result": "The hot range can return 429 responses while other ranges remain quiet. Increase key cardinality or redesign ownership before simply adding more account-level RU/s."
+    },
+    {
+      "id": "regional-read",
+      "label": "Regional read",
+      "summary": "A client near Region B reads from its preferred replica region under a relaxed consistency contract.",
+      "activeEdges": ["resolve", "route-b", "read-hot-b", "read-cold-b"],
+      "focusNode": "region-b",
+      "result": "Local reads reduce network distance. The selected consistency level still defines freshness and ordering; proximity does not strengthen the contract."
+    },
+    {
+      "id": "region-a-outage",
+      "label": "Preferred region fails",
+      "summary": "Region A is unavailable and the client refreshes topology before routing supported operations to Region B.",
+      "activeEdges": ["resolve", "route-b", "read-hot-b", "read-cold-b"],
+      "failedNodes": ["region-a"],
+      "focusNode": "gateway",
+      "result": "Availability depends on the configured write-region mode, consistency, SDK region preferences, and application retry policy. Drill the exact account configuration rather than assuming every operation fails over identically."
+    }
+  ]
+}

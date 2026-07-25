@@ -1,0 +1,112 @@
+{
+  "title": "Order contract decision lab",
+  "description": "Select a client intent to trace the resource, method, and ownership path it needs. The contract result explains the promise a client can rely on.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Client",
+      "eyebrow": "States an intent",
+      "detail": "Sends an authenticated request with a method, target, headers, and optional representation. The client should be able to decide whether and how to retry from the documented contract.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "api-edge",
+      "label": "API boundary",
+      "eyebrow": "Auth + validation",
+      "detail": "Authenticates the caller, enforces authorization and limits, validates the representation, and attaches a request ID before the request reaches domain logic.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 27,
+      "y": 50
+    },
+    {
+      "id": "orders-collection",
+      "label": "Orders collection",
+      "eyebrow": "GET / POST",
+      "detail": "Represents many orders. A GET reads a filtered, bounded collection; a POST accepts a new-order representation and may create a new order resource.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 50,
+      "y": 17
+    },
+    {
+      "id": "order-resource",
+      "label": "Order resource",
+      "eyebrow": "GET one order",
+      "detail": "Represents one identified order. It is the target for a safe read and a stable reference in related resources such as cancellation records.",
+      "kind": "service",
+      "tone": "green",
+      "x": 50,
+      "y": 50
+    },
+    {
+      "id": "cancellations",
+      "label": "Cancellations",
+      "eyebrow": "POST a durable fact",
+      "detail": "Represents cancellation records with a reason, timestamp, actor, and policy result. It preserves order history instead of treating cancellation as deletion.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 50,
+      "y": 83
+    },
+    {
+      "id": "order-service",
+      "label": "Order service",
+      "eyebrow": "Domain rules",
+      "detail": "Applies ownership, inventory, cancellation-policy, and idempotency rules. HTTP routing should not decide whether an order may be cancelled.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 74,
+      "y": 50
+    },
+    {
+      "id": "order-store",
+      "label": "Order store",
+      "eyebrow": "Authoritative facts",
+      "detail": "Stores order and cancellation facts, including the records needed to return a consistent outcome after a retried write.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 92,
+      "y": 50
+    }
+  ],
+  "edges": [
+    { "id": "client-edge", "from": "client", "to": "api-edge", "label": "HTTP request" },
+    { "id": "edge-collection", "from": "api-edge", "to": "orders-collection", "label": "collection intent" },
+    { "id": "edge-order", "from": "api-edge", "to": "order-resource", "label": "identified order" },
+    { "id": "edge-cancellation", "from": "api-edge", "to": "cancellations", "label": "cancellation request" },
+    { "id": "collection-service", "from": "orders-collection", "to": "order-service", "label": "read or create" },
+    { "id": "order-service", "from": "order-resource", "to": "order-service", "label": "retrieve" },
+    { "id": "cancellation-service", "from": "cancellations", "to": "order-service", "label": "policy check" },
+    { "id": "service-store", "from": "order-service", "to": "order-store", "label": "authoritative write" }
+  ],
+  "scenarios": [
+    {
+      "id": "list-orders",
+      "label": "List orders",
+      "summary": "The client needs a bounded, filtered page of many orders. It reads the collection with GET and receives a deterministic continuation token when another page exists.",
+      "activeEdges": ["client-edge", "edge-collection", "collection-service", "service-store"],
+      "focusNode": "orders-collection",
+      "result": "Use GET /v1/orders with documented filters, limit, cursor, and ordering. The collection is read-only here, so a retry must not create or mutate an order."
+    },
+    {
+      "id": "create-order",
+      "label": "Create once",
+      "summary": "The client submits a new order representation. The collection routes the request to the order service, which validates the request and writes the authoritative order exactly once for the supplied idempotency key.",
+      "activeEdges": ["client-edge", "edge-collection", "collection-service", "service-store"],
+      "focusNode": "order-service",
+      "result": "Use POST /v1/orders with an Idempotency-Key. The resource path names the collection; the service owns new IDs, validation, and the replay-safe result."
+    },
+    {
+      "id": "cancel-order",
+      "label": "Record cancellation",
+      "summary": "The client records a cancellation against a known order. The cancellation resource reaches the order service, where state and policy determine whether the order can transition.",
+      "activeEdges": ["client-edge", "edge-cancellation", "cancellation-service", "service-store"],
+      "focusNode": "cancellations",
+      "result": "Use POST /v1/orders/{order_id}/cancellations when cancellation needs an audit trail or separate lifecycle. DELETE would make a meaningful historical fact disappear."
+    }
+  ]
+}

@@ -1,0 +1,214 @@
+---
+registryId: hive
+---
+
+{% section-card tone="intro" %}
+## What is Apache Hive?
+
+**Apache Hive is a distributed SQL data-warehouse layer.** It gives files in HDFS or
+compatible storage a table schema, accepts HiveQL statements, builds an execution plan,
+and coordinates a distributed engine to carry out that plan.
+
+Hive matters when analysts and data engineers need repeatable batch transformations and
+large analytical scans without writing a MapReduce program for every question. It is not
+a row-serving database: its useful unit of work is normally a partition, file, stripe, or
+distributed stage rather than one application record.
+
+{% callout variant="info" %}
+The core invariant is **metadata and data must agree**. The Hive Metastore records what a
+table means and where its partitions live; storage holds the files. If schemas, locations,
+partition records, or file layouts drift apart, valid HiveQL can still return an error or
+the wrong operational result.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate the catalog, plan, execution, and files
+
+A Hive statement moves through several owners. Keeping their responsibilities separate
+makes failures easier to localize: a catalog failure is not a storage failure, and a weak
+plan is not proof that the execution engine lacks capacity.
+
+{% concept-grid columns="4" %}
+{% concept-card title="HiveServer2 + driver" eyebrow="Session" icon="server" tone="blue" %}
+Accepts client statements, owns session state, coordinates execution, and returns status
+or rows through client protocols.
+{% /concept-card %}
+{% concept-card title="Compiler + optimizer" eyebrow="Plan" icon="search" tone="violet" %}
+Parses HiveQL, resolves names and types, builds operators, applies rules, and uses available
+statistics to choose a physical plan.
+{% /concept-card %}
+{% concept-card title="Hive Metastore" eyebrow="Contract" icon="database" tone="green" %}
+Stores databases, table definitions, partitions, locations, and available statistics in a
+metadata service backed by a relational database.
+{% /concept-card %}
+{% concept-card title="Engine + storage" eyebrow="Work" icon="storage" tone="cyan" %}
+The configured backend runs distributed stages against HDFS or compatible storage paths
+described by the table metadata.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Prune input before adding compute
+
+Query latency cannot be predicted from table size and an engine name. A useful first
+model asks what remains eligible at each boundary: which partition directories match,
+which files are opened, which columns are projected, and which ORC row groups can be
+skipped from predicate statistics.
+
+{% interactive-block id="technology/hive-performance" dataFile="/api/content/technology/hive/data/scan-planning-model.json" /%}
+
+The lab uses a declared 365-day teaching dataset with 10 GiB per hour and 12 equal-width
+modeled columns. Its numbers are deterministic scan arithmetic, not compression ratios,
+throughput claims, or query-time forecasts.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design the physical table around bounded filters
+
+### Partition by a stable, commonly bounded dimension
+
+A partition creates a separate data directory for each distinct partition-value
+combination and a corresponding catalog entry. A date partition can let Hive remove old
+directories before execution, but a high-cardinality key can create an unmanageable number
+of partitions.
+
+### Bucket only when the hashing contract is useful
+
+Bucketing distributes rows by a hash of the bucket column into a declared number of files.
+It can support efficient sampling and some join strategies, but only when writers preserve
+the declared bucket layout. It is not a substitute for a filterable partition key.
+
+### Prefer a columnar format for analytical tables
+
+ORC stores data in column streams grouped into stripes. Its file and row-group statistics
+can skip data that cannot satisfy a predicate, while column projection avoids reading
+unselected streams. A skip rate depends on predicates, ordering, and actual values; the
+format alone does not guarantee one.
+
+{% code-block file="/api/content/technology/hive/code/create-partitioned-orc-table.sql" language="sql" title="Create and load a daily ORC partition" /%}
+
+Before adopting a layout, verify:
+
+- the most common queries include a bounded predicate on the partition key;
+- one partition contains enough data to avoid a stream of tiny files;
+- late data has an explicit overwrite, merge, or repair contract;
+- the table location and Metastore partition records are changed together;
+- bucket counts and bucket-column types are preserved by every writer that relies on them.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Trace the statement that actually runs
+
+Metadata statements, analytical reads, and distributed writes do not visit exactly the
+same path. Select a statement, then inject a catalog, planning, execution, or storage
+condition to see whether the request is blocked, degraded, or unaffected.
+
+{% interactive-block id="technology/hive-query-path-lab" dataFile="/api/content/technology/hive/data/query-path-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Give the optimizer evidence, then inspect its decision
+
+Hive can collect basic table or partition statistics and column statistics. The optimizer
+uses this evidence for cardinality estimates, join ordering, and physical choices. Stale or
+missing statistics do not necessarily make a query invalid, but they can make a plausible
+plan badly matched to the current data.
+
+{% process-flow %}
+{% process-step number="1" title="State the query contract" label="Shape" %}
+Name the required columns, bounded filters, joins, grouping, output size, and freshness
+target before changing settings.
+{% /process-step %}
+{% process-step number="2" title="Refresh relevant statistics" label="Evidence" %}
+Collect table, partition, and column statistics after material changes to volume or value
+distribution.
+{% /process-step %}
+{% process-step number="3" title="Read the planned work" label="Explain" %}
+Use `EXPLAIN`, `EXPLAIN CBO`, or `EXPLAIN VECTORIZATION` to inspect operators, estimates,
+partition pruning, join choices, and vectorized sections.
+{% /process-step %}
+{% process-step number="4" title="Verify the runtime" label="Measure" %}
+Compare estimates with stage counters, bytes and files read, skew, retries, spill, and the
+user-visible completion time on representative data.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/hive/code/refresh-statistics-and-explain.sql" language="sql" title="Refresh evidence and inspect two views of the plan" /%}
+
+{% callout variant="warn" %}
+Do not treat `EXPLAIN` as a latency guarantee. It shows the selected plan and estimates;
+runtime behavior still depends on data distribution, file layout, cluster pressure,
+storage, engine configuration, and failures.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Choose an execution backend as a compatibility decision
+
+Hive documents MapReduce, Tez, and Spark execution integrations. The backend changes how a
+physical plan is scheduled, but it does not repair poor partitioning, stale statistics,
+tiny files, skew, or an unavailable Metastore.
+
+{% concept-grid columns="3" %}
+{% concept-card title="MapReduce" eyebrow="Historical" icon="repeat" tone="rose" %}
+The Hive configuration reference marks the MapReduce backend as historical and deprecated
+in the Hive 2 line. Keep it only where the deployed distribution still requires and tests
+it.
+{% /concept-card %}
+{% concept-card title="Apache Tez" eyebrow="DAG backend" icon="network" tone="blue" %}
+Tez runs work as a directed graph and exposes Hive-specific controls such as container size
+and optional runtime reducer-parallelism adjustment. Tune from measured stage behavior.
+{% /concept-card %}
+{% concept-card title="Apache Spark" eyebrow="Version-bound" icon="speed" tone="violet" %}
+Hive on Spark translates Hive operators into Spark work, but the official guide guarantees
+compatibility only for specific Hive and Spark version combinations. Validate the supported
+pair in the deployed distribution.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Operate Hive as a metadata and file system
+
+### Monitor the boundaries together
+
+- compilation and Metastore latency, errors, connection pressure, and backing-database
+  health;
+- partitions and files considered, bytes read, rows produced, and time spent planning;
+- stage skew, retries, spill, failed tasks, queue delay, and container pressure;
+- small-file growth, orphaned locations, missing partition records, and stale statistics;
+- authorization failures using the same execution identity that reads or writes storage.
+
+### Drill the failures users will see
+
+- Metastore unavailable while table files remain healthy;
+- a partition recorded in metadata whose storage location is missing or denied;
+- one hot join key concentrating most shuffle work in one task;
+- a broad query enumerating thousands of fine-grained partitions and files;
+- a failed overwrite or transactional write that requires a documented recovery path;
+- an execution-engine upgrade that changes plan shape, compatibility, or operational limits.
+
+### Keep the fit explicit
+
+Hive is a strong fit for scheduled transformations, warehouse tables, and large scans where
+seconds-to-minutes coordination is acceptable. Use a serving database or purpose-built
+interactive engine when the product needs predictable per-request latency, frequent
+row-level transactions, or a high-concurrency API hot path.
+{% /section-card %}
+
+{% section-card %}
+## Continue with the official Apache Hive references
+
+This lesson's contracts and examples are grounded in the current Apache Hive documentation:
+
+- [Hive architecture and design](https://hive.apache.org/development/desingdocs/design/)
+- [Metastore 3.0 administration](https://hive.apache.org/docs/latest/admin/adminmanual-metastore-3-0-administration/)
+- [DDL, partitions, and transactional tables](https://hive.apache.org/docs/latest/language/languagemanual-ddl/)
+- [ORC file structure and statistics](https://hive.apache.org/docs/latest/language/languagemanual-orc/)
+- [EXPLAIN forms](https://hive.apache.org/docs/latest/language/languagemanual-explain/)
+- [Execution-engine configuration](https://hive.apache.org/docs/latest/user/configuration-properties/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/hive/quiz/hive-production-design.json" lessonSlug="hive" title="Apache Hive Design Review" /%}

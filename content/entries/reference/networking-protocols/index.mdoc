@@ -1,0 +1,140 @@
+---
+registryId: reference-networking-protocols
+---
+
+{% section-card tone="intro" %}
+## What is a networking protocol?
+
+**A networking protocol is a shared contract for moving and interpreting data between systems.** It can define how an endpoint is named, how packets are routed, whether bytes arrive in order, how a peer is authenticated, or how an application asks for a resource.
+
+Protocol names are often compared as if they compete. They usually do not. A browser API might use DNS to find an address, IP to route packets, QUIC or TCP to carry data, TLS to protect it, and HTTP to describe the request. The useful decision is: **choose the layer whose guarantee matches the workload, then state what the application must still handle.**
+
+{% callout variant="info" %}
+Reliable transport does not make a business operation reliable. A payment, enqueue, or reservation still needs a deadline, idempotency rule, durable result, and observable recovery path.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Assign each layer one responsibility
+
+One request crosses several contracts. Read them by the job each one owns, rather than treating DNS, TLS, HTTP, and TCP as alternatives.
+
+{% system-flow title="A protected API request" caption="Each layer owns a different kind of decision and failure." %}
+{% system-node title="DNS" eyebrow="Name to address" icon="globe" tone="blue" %}
+Maps a service name to reachable addresses, subject to caching and record lifetime.
+{% /system-node %}
+{% system-node title="IP" eyebrow="Packet routing" icon="route" tone="cyan" %}
+Moves packets across networks on a best-effort path.
+{% /system-node %}
+{% system-node title="TCP or QUIC" eyebrow="Transport" icon="network" tone="violet" %}
+Carries bytes or streams with different recovery, ordering, and multiplexing behavior.
+{% /system-node %}
+{% system-node title="TLS" eyebrow="Peer + privacy" icon="lock" tone="amber" %}
+Authenticates the peer and protects data in transit.
+{% /system-node %}
+{% system-node title="HTTP or MQTT" eyebrow="Application meaning" icon="braces" tone="green" %}
+Defines requests, responses, topics, acknowledgements, and application metadata.
+{% /system-node %}
+{% /system-flow %}
+
+- **Naming failure:** DNS may return a stale address or no usable record; cache lifetime and resolver behavior shape recovery.
+- **Path failure:** IP can drop, delay, duplicate, or reorder packets; it does not promise application delivery.
+- **Transport failure:** TCP and QUIC recover lost data differently; UDP leaves recovery to the application.
+- **Application failure:** A server can process a request even when the client never receives its response.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Select for traffic shape and delivery contract
+
+Start with the direction of communication, who controls the endpoints, and whether every message must survive. The selector proposes a protocol role and makes its failure and operating cost explicit.
+
+{% interactive-block id="reference/networking-protocols-protocol-selector" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Compare the protocol families at their decision boundary
+
+These are starting points, not universal replacements. A system can combine several of them across different paths.
+
+{% tabs %}
+{% tab id="https" title="Browser APIs" %}
+
+### HTTPS with HTTP/2 or HTTP/3
+
+Use HTTPS for browser-facing request-response APIs, resource caching, authentication boundaries, and infrastructure that already understands HTTP methods and status codes.
+
+- **Protects:** Confidentiality and peer authentication through TLS; explicit request, response, cache, and status semantics through HTTP.
+- **Watch:** TLS failures, status-code families, p95 and p99 latency, connection reuse, cache hit rate, and requests that exhaust their deadline.
+- **Do not infer:** A `POST` timeout does not say whether the server made the change. Use an idempotency key for replayable writes.
+{% /tab %}
+{% tab id="live" title="Live browser sessions" %}
+
+### Server-Sent Events and WebSocket
+
+Use Server-Sent Events when the server mainly pushes updates to a browser. Use WebSocket when both sides need a persistent bidirectional session, such as collaboration or a live control surface.
+
+- **Protects:** Lower per-update setup cost and a natural long-lived channel.
+- **Watch:** Connection count, heartbeat failures, reconnect rate, proxy idle timeouts, backpressure, event lag, and per-session memory.
+- **Do not infer:** Reconnecting a socket does not restore missed state. Define a cursor, replay window, snapshot, or resynchronization step.
+{% /tab %}
+{% tab id="services" title="Internal services" %}
+
+### gRPC over HTTP/2
+
+Use gRPC when controlled services benefit from generated contracts, typed payloads, streaming, and explicit method deadlines. It is often a strong internal API choice, not an automatic browser API.
+
+- **Protects:** A shared service contract and multiplexed RPCs over a persistent connection.
+- **Watch:** Deadline-exceeded errors, retry volume, connection churn, method saturation, payload sizes, and error-code distributions.
+- **Do not infer:** A typed schema does not validate a business invariant. Servers still validate authorization, state transitions, and idempotency.
+{% /tab %}
+{% tab id="devices" title="Devices and fresh state" %}
+
+### MQTT and UDP
+
+Use MQTT for lightweight brokered device telemetry and topic fan-out. Use UDP only when freshness can matter more than complete ordered delivery, and when the application can own sequencing and resynchronization.
+
+- **Protects:** MQTT gives topic-oriented delivery controls; UDP avoids waiting for an obsolete datagram.
+- **Watch:** Broker sessions, QoS acknowledgements, retained-message age, offline queues, loss, jitter, out-of-order drops, and resync rate.
+- **Do not infer:** MQTT QoS can trade duplicates and latency for delivery. UDP provides no acknowledgement, ordering, or retry policy by itself.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Trace loss, latency, and retries separately
+
+Loss can trigger transport recovery, timeout, reconnect, application replay, or duplicate side effects. The controls below show why a retry policy must be designed with the operation, not added after an incident.
+
+{% interactive-block id="reference/networking-protocols-latency-loss-retry-lab" /%}
+
+{% callout variant="warn" %}
+Never configure automatic retries for a non-idempotent write simply because it is slow. First define the operation key, where completion is recorded, how callers query an uncertain result, and which layer owns retrying.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the contract at the boundary
+
+Production incidents usually expose a missing boundary rather than a missing acronym. Make the owning team, signal, and safe response visible for each path.
+
+1. **Set a deadline budget:** Carry one end-to-end deadline. Give each downstream call only its remaining budget; avoid a chain of independent long timeouts.
+2. **Classify retries:** Mark reads, naturally idempotent writes, and idempotency-keyed writes separately. Bound attempts and add jitter so a shared outage does not become a retry storm.
+3. **Apply backpressure:** Cap queued work, streaming buffers, and per-connection memory. Shed or coalesce stale updates before latency becomes unbounded.
+4. **Measure both sides of an exchange:** Record client-visible timeout rate alongside server completion and duplicate-suppression counts. A timeout without server evidence is an uncertain outcome.
+5. **Practice degraded behavior:** Decide whether to serve a cached response, reconnect with a cursor, reject a command, or ask the user to check status. Do not silently repeat irreversible work.
+
+{% callout variant="tip" %}
+For every protocol path, write one sentence in the runbook: "When this request times out, the caller knows ____, the server records ____, and the safe next action is ____." That sentence exposes whether the delivery contract is complete.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [HTTP/2 and HTTP/3](/technology/http2-http3): Compare multiplexed TCP and QUIC-based HTTP in more detail.
+- [WebSocket](/technology/websocket): Design a durable bidirectional session and reconnect behavior.
+- [Latency and Throughput](/fundamentals/latency-vs-throughput): Relate request budgets, queues, and saturation to user-visible latency.
+- [Delivery Semantics](/fundamentals/delivery-semantics): Design idempotency, acknowledgements, deduplication, and retries for asynchronous work.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/networking-protocols/quiz/networking-protocol-decisions.json" title="Networking Protocol Decisions" /%}

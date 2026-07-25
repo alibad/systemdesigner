@@ -1,0 +1,298 @@
+---
+title: "Design Social Media Feed"
+section: practice
+level: advanced
+duration: 60 min
+description: "Design a social media feed with timeline generation, hybrid fan-out, ranking, real-time updates, and content storage."
+registryId: practice-news-feed
+---
+
+{% section-card tone="intro" %}
+## What is a social media feed?
+
+A **social media feed** selects, filters, and orders posts for a reader. The system combines durable post data, the social graph, precomputed timeline candidates, fresh activity, and ranking signals while enforcing current visibility rules.
+
+The hardest design tension is asymmetric scale. Most authors have modest audiences and benefit from fan-out on write. A celebrity can have tens of millions of followers, turning one post into a write storm. A production design must protect fast reads without allowing high-follower accounts to overwhelm distribution.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Trace the critical path" eyebrow="Flow" icon="route" tone="blue" %}
+Post event -> hybrid fan-out -> candidate timeline -> policy filter -> ranking -> response.
+{% /concept-card %}
+{% concept-card title="Protect the invariant" eyebrow="Correctness" icon="shield" tone="violet" %}
+Blocks, privacy, deletion, and moderation rules are checked at read time even when cached candidates are stale.
+{% /concept-card %}
+{% concept-card title="Design the degraded mode" eyebrow="Reliability" icon="activity" tone="rose" %}
+Fall back to a recent safe timeline when ranking is unavailable and contain celebrity fan-out with pull-based delivery.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="info" %}
+Complete the design challenge before reading the walkthrough. Submit the architecture for grading, then compare its data flow, overload controls, and failure behavior with the reference design.
+{% /callout %}
+
+{% design-challenge
+   challengeId="news-feed"
+   title="Design the feed read and fan-out path"
+   prompt="Reads dominate and a popular post must reach every eligible follower. Sketch how ordinary posts fan out asynchronously, how celebrity posts avoid a write explosion, and how a reader gets a safe ranked timeline under 200ms." /%}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+Start by defining the product boundary. This walkthrough assumes a Twitter-like microblogging service with text posts, optional media, follow relationships, and a personalized home timeline.
+
+### Functional requirements
+
+- Create, delete, and read posts.
+- Follow or unfollow authors.
+- Load a personalized timeline with cursor pagination.
+- Like, repost, and reply.
+- Deliver new-post indicators to active readers.
+- Enforce blocks, private-account rules, deletion, and moderation decisions.
+
+### Non-functional goals
+
+{% metric-strip %}
+{% metric label="Timeline latency" value="<200ms" detail="p95 at the API boundary" tone="blue" /%}
+{% metric label="Availability" value="99.9%" detail="Safe degraded feed allowed" tone="green" /%}
+{% metric label="Freshness" value="<5s" detail="For active ordinary authors" tone="violet" /%}
+{% metric label="Consistency" value="Eventual" detail="Except visibility enforcement" tone="amber" /%}
+{% /metric-strip %}
+
+### Decisions to confirm with the interviewer
+
+1. Is ranking required, or is a chronological feed enough for the first release?
+2. Do private accounts, blocks, and moderation changes need immediate enforcement? Assume yes.
+3. Are search, trending topics, ads, and recommendations in scope? Treat them as extensions.
+4. How should celebrity authors be defined: follower count, observed fan-out cost, or both?
+5. Can the service return a recent unranked feed when the ranking service is unhealthy? Assume yes.
+
+The key invariant is simple: **a cached candidate is never proof that the reader may still see the post**.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate scale and constraints" %}
+
+Use rounded numbers that expose the bottlenecks rather than pretending to predict exact production traffic.
+
+{% metric-strip %}
+{% metric label="Daily readers" value="300M" detail="About 150M at a major peak" tone="blue" /%}
+{% metric label="Posts" value="500M/day" detail="Roughly 20K/s at peak" tone="green" /%}
+{% metric label="Feed reads" value="1M/s" detail="About 300 reads per write" tone="violet" /%}
+{% metric label="Average follows" value="150" detail="Highly skewed distribution" tone="amber" /%}
+{% /metric-strip %}
+
+### Back-of-the-envelope model
+
+- **Post storage:** `500M posts/day x 2KB` is about `1TB/day` before indexes, replicas, and media.
+- **Ordinary fan-out:** `20K posts/s x 150 followers` is about `3M timeline insertions/s` at peak.
+- **Celebrity fan-out:** one post to `50M` followers can exceed the normal second-by-second workload by an order of magnitude.
+- **Timeline response traffic:** `1M reads/s x 10KB` is about `10GB/s` before CDN and protocol overhead.
+- **Candidate ranking:** rank a bounded set such as 500-1,000 candidates, not every post from every followed author.
+
+The average hides the real design problem. Move the audience slider to see where pure fan-out on write stops being safe.
+
+{% interactive-block id="practice/news-feed-fanout-lab" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+Separate the durable write path, asynchronous distribution, and latency-sensitive read path.
+
+{% system-flow title="Hybrid feed delivery" caption="Post creation is durable and asynchronous; feed reads merge candidates before applying current policy and ranking." %}
+{% system-node title="Create and authorize" eyebrow="Write" icon="users" tone="blue" %}
+Validate the author, store the post and media references, and publish a stable post-created event through an outbox.
+{% /system-node %}
+{% system-node title="Hybrid fan-out" eyebrow="Distribute" icon="route" tone="cyan" %}
+Push ordinary-author posts into follower inboxes while recording celebrity posts for pull-time retrieval.
+{% /system-node %}
+{% system-node title="Candidate timeline" eyebrow="Read" icon="cache" tone="violet" %}
+Load precomputed inbox entries, recent celebrity posts, and social context without treating cache state as authorization.
+{% /system-node %}
+{% system-node title="Filter and rank" eyebrow="Decide" icon="scale" tone="green" %}
+Apply current visibility rules, score eligible candidates, diversify the slate, and return a cursor-bound response.
+{% /system-node %}
+{% /system-flow %}
+
+### Write path
+
+1. The API validates identity, content limits, and media references.
+2. The Post Store commits the post and an outbox event atomically.
+3. A fan-out consumer reads follower batches from the Social Graph Service.
+4. Ordinary-author candidates are appended to per-user timeline inboxes.
+5. Celebrity posts are indexed in a pull store rather than copied to every follower.
+6. A lightweight notification tells active clients that newer candidates exist.
+
+### Read path
+
+1. The Timeline Service loads the reader's cached inbox and pull candidates.
+2. The Policy Service removes blocked, private, deleted, and unsafe content.
+3. The Ranking Service scores a bounded candidate set.
+4. A diversity pass prevents one author or topic from dominating the page.
+5. The response contains opaque cursor state tied to the ranking version and boundary timestamp.
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Design data, storage, and contracts" %}
+
+Choose each store from its access pattern. One universal database would couple unrelated scaling and consistency requirements.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Post store" eyebrow="Durable source of truth" icon="database" tone="blue" %}
+Partition immutable posts by stable post ID and keep an author-time index for profile reads. Store large media objects separately behind a CDN.
+{% /concept-card %}
+{% concept-card title="Timeline inbox" eyebrow="Read-optimized candidates" icon="cache" tone="violet" %}
+Use a bounded sorted collection per reader. Keep post IDs and lightweight ranking context, not full duplicated post bodies.
+{% /concept-card %}
+{% concept-card title="Social graph" eyebrow="Follower access" icon="network" tone="green" %}
+Support paged follower lookup for fan-out and followee lookup for pull. Partition or cache high-degree nodes deliberately.
+{% /concept-card %}
+{% concept-card title="Feature store" eyebrow="Ranking context" icon="gauge" tone="amber" %}
+Serve versioned online features with freshness timestamps so the ranker can detect missing or stale values.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Minimal records
+
+- **Post:** `post_id`, `author_id`, `created_at`, content reference, reply/repost reference, language, deletion state.
+- **Timeline candidate:** `reader_id`, `post_id`, source, insertion time, coarse score, expiry time.
+- **Follow edge:** `follower_id`, `followee_id`, state, creation time.
+- **Visibility state:** blocks, mutes, private-account grants, moderation action, and version.
+
+### API contracts
+
+- `POST /posts` accepts a client idempotency key and returns the durable post ID.
+- `GET /timeline?cursor=...` returns eligible posts plus an opaque continuation cursor.
+- `POST /posts/{id}/engagements` uses an idempotent `(user, post, action)` key.
+- A real-time channel emits `timeline_available`, not a trusted post body; the client refreshes through the policy-enforced read path.
+
+Cursor pagination is preferable to offsets because new posts arrive continuously. The cursor should encode the ranking version and score boundary so page transitions remain stable enough for one session.
+
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="5. Deep-dive on ranking and fan-out" %}
+
+### Ranking is a constrained decision
+
+The system should not multiply a few signals into one opaque number and call the work complete. A practical pipeline has ordered stages:
+
+{% process-flow %}
+{% process-step number="1" title="Retrieve" label="Broad recall" %}
+Merge precomputed inbox entries, celebrity pull candidates, and optional recommendations into a bounded pool.
+{% /process-step %}
+{% process-step number="2" title="Filter" label="Hard policy" %}
+Remove content the reader cannot see because of privacy, blocks, deletion, moderation, or regional restrictions.
+{% /process-step %}
+{% process-step number="3" title="Score" label="Soft preference" %}
+Estimate relevance from recency, relationship strength, engagement quality, and user-topic affinity.
+{% /process-step %}
+{% process-step number="4" title="Diversify" label="Slate quality" %}
+Limit repetition by author, topic, and media type before returning the final page.
+{% /process-step %}
+{% /process-flow %}
+
+Use the mixer to see why ranking weights are product policy and why safety cannot be only another weighted feature.
+
+{% interactive-block id="practice/news-feed-ranking-lab" /%}
+
+### Fan-out boundary
+
+Do not hard-code one universal follower threshold. Route authors using observed cost: follower count, active-follower ratio, queue lag, write amplification, and regional spread. A large but mostly inactive audience may be cheaper than a smaller highly active one.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability, reliability, and operations" %}
+
+### Overload controls
+
+- Partition fan-out work by author or follower shard while preserving per-author ordering where needed.
+- Cap work per author so one celebrity cannot monopolize consumers.
+- Apply backpressure before the fan-out queue grows beyond the freshness objective.
+- Drop optional ranking features before dropping policy checks.
+- Bound timeline inbox size and rebuild it from durable posts when cache state is lost.
+
+### Degraded modes
+
+{% concept-grid columns="2" %}
+{% concept-card title="Ranking unavailable" eyebrow="Serve safely" icon="activity" tone="amber" %}
+Return a recency-ordered feed from eligible candidates. Mark the response with the fallback mode and measure its duration.
+{% /concept-card %}
+{% concept-card title="Timeline cache unavailable" eyebrow="Reconstruct" icon="repeat" tone="blue" %}
+Pull recent posts from a bounded subset of followed authors, then warm the reader's inbox asynchronously.
+{% /concept-card %}
+{% concept-card title="Fan-out lagging" eyebrow="Contain" icon="warning" tone="rose" %}
+Switch expensive authors to pull, prioritize active readers, and expose freshness lag rather than silently growing an unbounded backlog.
+{% /concept-card %}
+{% concept-card title="Feature store stale" eyebrow="Simplify" icon="timer" tone="green" %}
+Use recency and relationship fallbacks. Never let missing optional features block the entire feed.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Signals to operate the system
+
+- Timeline p50, p95, and p99 latency split by normal and degraded mode.
+- Candidate count before and after policy filtering.
+- Fan-out queue age, not only queue depth.
+- Per-author write amplification and top cost contributors.
+- Cache hit rate, rebuild rate, and inbox staleness.
+- Ranking timeout rate, feature freshness, and fallback duration.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+{% concept-grid columns="2" %}
+{% concept-card title="Push vs pull" eyebrow="Where work happens" icon="route" tone="blue" %}
+Push buys cheap reads with write amplification. Pull buys cheap writes with read aggregation. Hybrid routing accepts operational complexity to bound both extremes.
+{% /concept-card %}
+{% concept-card title="Ranked vs chronological" eyebrow="Product policy" icon="scale" tone="violet" %}
+Ranking can improve relevance but reduces transparency. A chronological option provides user control and a useful degraded mode.
+{% /concept-card %}
+{% concept-card title="Freshness vs stability" eyebrow="Changing corpus" icon="timer" tone="amber" %}
+Injecting every new post immediately causes visible reordering. Use refresh boundaries and stable cursors within a browsing session.
+{% /concept-card %}
+{% concept-card title="Precompute vs reconstruct" eyebrow="Storage cost" icon="database" tone="green" %}
+Cached inboxes reduce latency but are disposable. Durable posts and graph edges must be sufficient to rebuild them.
+{% /concept-card %}
+{% /concept-grid %}
+
+The selected design uses hybrid fan-out, bounded cached inboxes, read-time policy enforcement, multi-stage ranking, and a recency fallback. Its main cost is additional routing and merge logic; its benefit is predictable behavior across ordinary and celebrity workloads.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrapup" title="8. Wrap up with risks and extensions" %}
+
+### Restate the design in one minute
+
+1. Posts are durably stored and emitted through an outbox.
+2. Ordinary posts fan out to bounded reader inboxes; celebrity posts remain pull candidates.
+3. Reads merge candidates, enforce current visibility, rank, diversify, and paginate with an opaque cursor.
+4. Ranking can degrade to recency, caches can be rebuilt, and overload shifts expensive authors toward pull.
+
+### Risks to call out
+
+- Celebrity routing that reacts too slowly to a sudden audience spike.
+- Stale privacy or moderation data leaking content from cached candidates.
+- Feedback loops that over-promote already popular content.
+- Cursor instability when ranking models or candidate sets change mid-session.
+- Fan-out retries producing duplicate inbox entries without idempotent writes.
+
+### Extensions to discuss
+
+- Short-form video with heavier CDN, transcoding, and watch-time features.
+- Ads inserted under pacing, budget, frequency, and policy constraints.
+- Stronger creator controls, private communities, and regional moderation.
+- Online experimentation with guardrails for latency, safety, and ecosystem health.
+
+End by naming the first production measurement: **fan-out queue age by author tier**, because it exposes whether the core hybrid boundary is protecting feed freshness.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/news-feed/quiz/news-feed-design-review.json"
+   lessonSlug="practice-news-feed"
+   title="News Feed Design Review" /%}

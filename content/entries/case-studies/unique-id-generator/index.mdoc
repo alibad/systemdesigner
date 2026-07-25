@@ -1,0 +1,186 @@
+---
+registryId: case-study-unique-id-generator
+---
+
+{% section-card tone="intro" %}
+## What is a distributed unique ID generator?
+
+A distributed unique ID generator gives each new order, message, upload, or event an identifier that no other generator can issue. It matters because a database sequence is simple but can become a shared dependency, while random strings often cost more storage and do not sort naturally.
+
+In plain language, a Snowflake-style generator makes an ID from three coordinates: **when** it was created, **which generator** created it, and **which request** it was within that millisecond. Its invariant is precise: no two live generators may emit the same timestamp, generator identity, and sequence tuple.
+
+This case study designs a positive 64-bit, roughly time-sortable ID for a multi-region product. You will turn requirements into a bit budget, make the request path independent, then test the clock and identity failures that can still break uniqueness.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ID contract before choosing fields" %}
+
+## Define what an ID promises
+
+An ID is not a database row and it is not automatically a security token. Start by deciding what callers may rely on, because that determines whether a local, sortable integer is the right tool.
+
+### Functional requirements
+
+- Issue one unique numeric ID for every accepted create request.
+- Keep IDs roughly ordered by creation time so common index and range-scan patterns remain efficient.
+- Generate locally with no database or consensus call on the normal request path.
+- Decode an ID during investigation to recover its timestamp, generator identity, and sequence position.
+
+### Non-functional constraints
+
+- **Scale:** 1,000 active generators, each able to absorb a burst of 50,000 IDs per second.
+- **Latency:** in-process generation normally completes well below 1 ms.
+- **Lifetime:** retain a format that lasts at least 30 years from a chosen custom epoch.
+- **Availability:** a bad generator may fail closed; it must never preserve availability by risking a duplicate.
+
+{% callout variant="info" %}
+"Roughly ordered" means IDs from healthy clocks usually increase with time. It does not mean a globally serial order across regions, nor does it establish the business order of two concurrent writes.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Turn the traffic target into a bit budget" %}
+
+## Spend bits only after doing the math
+
+With a 12-bit sequence, one generator can issue `2^12 = 4,096` IDs in a millisecond, or about 4.096 million per second. That is far above a 50,000 IDs/s target. Ten generator bits support `2^10 = 1,024` active identities. The remaining 41 data bits for milliseconds last about 69.7 years from the custom epoch.
+
+Use the lab to choose a format. It calculates the lifetime, number of generator identities, and burst capacity from the same 63 usable bits. A design is only viable when it clears all three requirements; adding machine bits always removes capacity from time or sequence.
+
+{% interactive-block id="case-studies/unique-id-generator-bit-budget-lab" /%}
+
+### Planning estimates
+
+{% metric-strip %}
+{% metric value="50M/s" label="Fleet target" detail="1,000 generators at a 50K IDs/s burst each." tone="blue" /%}
+{% metric value="4.096M/s" label="Per-generator ceiling" detail="12 sequence bits across 1,000 milliseconds." tone="green" /%}
+{% metric value="69.7 years" label="Time range" detail="41 milliseconds bits after a custom epoch." tone="violet" /%}
+{% metric value="1,024" label="Live identities" detail="10 generator bits, with no duplicate lease." tone="amber" /%}
+{% /metric-strip %}
+
+The common 1/41/10/12 allocation is a useful starting point, not a standard. A fleet with fewer generator identities might buy a longer lifetime; a very bursty generator might need more sequence bits or deliberate load spreading.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Keep the generation path local and the control plane strict" %}
+
+## Separate issuing an ID from authorizing a generator
+
+The hot path reads a monotonic millisecond value, updates a small in-memory sequence, and packs fields into a signed 64-bit integer. It should not wait for a network service. A control plane still assigns identities and establishes whether a process is allowed to use one.
+
+{% system-flow title="Normal ID generation path" caption="The request path stays local. The lease and time-health checks are established before a generator accepts traffic." %}
+{% system-node title="Acquire identity lease" eyebrow="Control plane" icon="key-round" tone="violet" %}
+Give one generator identity to one live process, with renewal and fencing before a replacement starts.
+{% /system-node %}
+{% system-node title="Read safe millisecond" eyebrow="Local guard" icon="clock-3" tone="blue" %}
+Reject a timestamp below the process's last emitted timestamp; do not silently move backwards.
+{% /system-node %}
+{% system-node title="Advance sequence" eyebrow="In memory" icon="list-ordered" tone="cyan" %}
+Increment within the millisecond; wait for the next one if the finite sequence range is exhausted.
+{% /system-node %}
+{% system-node title="Pack and return" eyebrow="No network call" icon="binary" tone="green" %}
+Shift timestamp, generator ID, and sequence into one positive integer, then return it to the caller.
+{% /system-node %}
+{% /system-flow %}
+
+### The packed form
+
+`id = ((timestamp - epoch) << 22) | (generatorId << 12) | sequence`
+
+The shifts are not arbitrary: 22 is the sum of 10 generator bits and 12 sequence bits. Keeping time in the most significant field makes IDs from later milliseconds numerically larger when clocks behave.
+
+{% /accordion-item %}
+
+{% accordion-item id="storage" title="4. Store the minimum durable state that preserves the invariant" %}
+
+## The generator needs little data, but its leases need evidence
+
+The normal generator state is tiny: the last timestamp and sequence are in memory. The durable control-plane record is more important than the request-path storage because it prevents two live processes from sharing a generator identity after a restart, failover, or autoscaling event.
+
+| Record | Owner | Why it exists | Correctness rule |
+| --- | --- | --- | --- |
+| Generator lease | Identity registry | Binds a generator ID to a process, zone, and expiry | One unexpired holder per identity |
+| Fencing generation | Lease service | Makes newer ownership distinguishable from stale ownership | A stale process cannot renew or be routed traffic |
+| Time-health record | Generator telemetry | Reports offset, rollback events, and last safe timestamp | An unsafe clock removes the process from service |
+| ID audit sample | Observability store | Decodes selected IDs for incident analysis | Sampling must never become a synchronous dependency |
+
+Do not persist the sequence counter for every ID. That would turn a local operation into a write bottleneck. Instead, fail a generator closed on restart or clock uncertainty until it has a valid identity lease and safe time source.
+
+{% /accordion-item %}
+
+{% accordion-item id="failure-lab" title="5. Trace clock, sequence, and identity failures" %}
+
+## A local algorithm still has distributed failure modes
+
+Choose a scenario, then select a node in the map to inspect who owns the response. The active path changes with the failure: a safe system removes only the unsafe generator or waits for the next millisecond, rather than issuing a potentially duplicate ID.
+
+{% topology-lab dataFile="/api/content/case-studies/unique-id-generator/data/clock-and-identity-topology.json" /%}
+
+### Required failure behavior
+
+- **Clock rollback:** stop the affected generator, quarantine it from routing, and wait until the wall clock catches the last emitted timestamp or switch to an explicitly safe logical-time policy.
+- **Sequence exhaustion:** wait for the next millisecond after all sequence values are used; never wrap the counter inside the same timestamp.
+- **Duplicate identity lease:** fence and drain the stale process before a replacement becomes eligible. A load balancer health check alone is not an ownership protocol.
+- **Epoch exhaustion:** alert years before the timestamp field rolls over, then migrate clients to a new versioned format before the old epoch ends.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Scale by adding isolated generators, not a central counter" %}
+
+## Make degradation explicit
+
+Capacity scales nearly linearly with healthy generators because each owns a disjoint generator ID. A deployment should route away from a generator whose lease, clock, or sequence guard fails; the remaining fleet continues issuing IDs within its own ranges.
+
+### Reliability plan
+
+- Run generators in multiple zones and assign leases from a highly available control plane.
+- Keep generator utilization below a measured threshold so one zone's loss does not force all survivors into sequence-exhaustion waits.
+- Use time synchronization and alert on offset, leap handling, rollback events, and long waits for the next millisecond.
+- Expose generation rejects, lease conflicts, sequence waits, IDs per generator, and decoded timestamp skew as first-class metrics.
+- Load-test recovery by killing a leased process, starting a replacement, and proving that the old process cannot issue IDs after fencing.
+
+{% callout variant="warn" %}
+Do not retry indefinitely against an unhealthy local generator. Retrying preserves latency pressure but cannot repair a duplicate-risking clock or identity condition; route to another safe generator instead.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare formats against the contract, not fashion" %}
+
+## Every ID format makes a different promise
+
+Choose the representation from the property that is hardest to recover later. A random UUID is excellent when independent creation matters most; a database sequence is excellent when one database already owns the write order; a Snowflake-style integer is strong when compactness, locality, and rough time order all matter.
+
+| Approach | Strongest property | Cost | Use it when |
+| --- | --- | --- | --- |
+| UUIDv4 | No coordination for uniqueness | 128 bits, random index locality, no embedded time | IDs are created independently and ordering is irrelevant |
+| Database sequence | Simple total order at one writer | Shared availability and scaling boundary | A single database is already the authoritative write path |
+| UUIDv7 | Time-friendly standard UUID shape | 128 bits and implementation-specific sequencing details | Interoperability matters more than compact integers |
+| Snowflake-style 64-bit | Compact local generation and rough time order | Clock and identity control plane | Many writers need sortable numeric IDs at low latency |
+
+The key trade-off is not "coordination versus no coordination." Snowflake removes coordination from each ID request, then moves the critical coordination to identity leases, routing, time health, and incident response.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Ship with an operational contract and a migration plan" %}
+
+## Treat the format as a long-lived API
+
+Once IDs appear in URLs, logs, databases, and client caches, changing their fields is a compatibility project. Document the epoch, bit layout, decoder, ownership protocol, and rollback behavior before the first production client depends on them.
+
+### Launch checklist
+
+1. Prove the chosen allocation clears current and projected lifetime, generator-count, and burst requirements.
+2. Test duplicate-lease, stale-process, rollback, sequence-exhaustion, and zone-loss scenarios in an environment that resembles production routing.
+3. Publish a decoder and a support runbook that explains whether an ID's timestamp is creation time, acceptance time, or only an ordering hint.
+4. Set alerts for lease conflict, clock skew, reject rate, sequence wait, and date-of-epoch-exhaustion.
+5. Reserve a versioning or migration strategy before the timestamp horizon becomes an emergency.
+
+The durable lesson is that the 64-bit formula is the easy part. Global uniqueness comes from protecting the tuple around it: one live owner for each generator identity, a non-regressing timestamp, and a sequence that never wraps inside that timestamp.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/unique-id-generator/quiz/unique-id-generator.json" lessonSlug="unique-id-generator" title="Review the ID generator design" /%}

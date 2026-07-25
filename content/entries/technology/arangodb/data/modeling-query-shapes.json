@@ -1,0 +1,220 @@
+{
+  "title": "Choose an ArangoDB access path from the query shape",
+  "description": "Select a real application question, then compare key-value, document, and graph modeling. The result changes the lookup path, required index, and maintenance cost without inventing benchmark numbers.",
+  "defaultQueryId": "profile-by-key",
+  "models": [
+    {
+      "id": "key-value",
+      "label": "Key-value access",
+      "detail": "Use the document key and built-in primary index when the caller already knows the identity."
+    },
+    {
+      "id": "document",
+      "label": "Document query",
+      "detail": "Filter, sort, project, or aggregate JSON attributes with AQL and deliberate secondary indexes."
+    },
+    {
+      "id": "graph",
+      "label": "Graph traversal",
+      "detail": "Store nodes and directed edge documents when paths or neighborhoods are the central result."
+    }
+  ],
+  "queryShapes": [
+    {
+      "id": "profile-by-key",
+      "label": "Load one profile by ID",
+      "prompt": "The API receives user key u-184 and must return that user's current profile document.",
+      "requestShape": [
+        "The caller already knows the immutable document key.",
+        "The result is one document, not an attribute search or relationship path.",
+        "No secondary ordering or traversal is required."
+      ],
+      "recommendedModelId": "key-value",
+      "outcomes": {
+        "key-value": {
+          "fit": "best",
+          "headline": "Use the primary-key path directly",
+          "explanation": "ArangoDB's key-value model is a subset of its document model. Every collection has a primary index on _key, so the known identity is already the access path.",
+          "path": [
+            "Receive collection and _key",
+            "Resolve the built-in primary index",
+            "Return one profile document"
+          ],
+          "indexPlan": "Use the built-in primary index on _key or _id. Do not add a duplicate secondary index for the same identity.",
+          "tradeoff": "The path cannot answer arbitrary attribute predicates. A later search by email, city, or status needs a separate indexed document query."
+        },
+        "document": {
+          "fit": "workable",
+          "headline": "A document query works, but it adds no value here",
+          "explanation": "AQL can filter by _key and the optimizer can use the primary index, but the request already has the exact identity. Keep the query simple and avoid disguising a point lookup as a broad scan.",
+          "path": [
+            "Enter an AQL FOR and FILTER",
+            "Match _key through the primary index",
+            "Return one profile document"
+          ],
+          "indexPlan": "Filter by _key equality so the primary index remains usable. Verify the plan instead of assuming every FILTER becomes a point lookup.",
+          "tradeoff": "The additional query structure is justified only if the request also needs projections, joins, aggregation, or another AQL operation."
+        },
+        "graph": {
+          "fit": "workable",
+          "headline": "A vertex is still a document, but no edge is needed",
+          "explanation": "Graph nodes are documents and can be loaded by key. Creating or traversing edges for a request that only needs one profile would add relationship state without answering a relationship question.",
+          "path": [
+            "Resolve the vertex document key",
+            "Skip every unrelated edge collection",
+            "Return the vertex properties"
+          ],
+          "indexPlan": "Use the vertex collection's primary index. The automatic edge indexes on _from and _to do not help this point lookup.",
+          "tradeoff": "Model the profile as a graph node only when other important queries traverse its relationships; the point read alone does not justify graph maintenance."
+        }
+      }
+    },
+    {
+      "id": "catalog-filter",
+      "label": "Filter and sort a catalog",
+      "prompt": "A listing page needs active laptops in one category, ordered by rating, with only six projected fields.",
+      "requestShape": [
+        "The caller does not know document keys in advance.",
+        "The query combines equality filters, ordering, projection, and a limit.",
+        "Relationships between products are not part of the result."
+      ],
+      "recommendedModelId": "document",
+      "outcomes": {
+        "key-value": {
+          "fit": "weak",
+          "headline": "Known-key retrieval cannot express the catalog predicate",
+          "explanation": "A primary-key map answers which document owns a known key. It does not discover every active laptop or order those documents by rating.",
+          "path": [
+            "Start without the required keys",
+            "Scan records or maintain a second mapping",
+            "Sort and limit outside the key lookup"
+          ],
+          "indexPlan": "A separate secondary access path is required. Once that path supports category, status, and rating, this is a document query rather than pure key-value access.",
+          "tradeoff": "Maintaining ad hoc lookup maps duplicates index work and creates another consistency boundary between the map and the product documents."
+        },
+        "document": {
+          "fit": "best",
+          "headline": "Shape one indexed AQL document query",
+          "explanation": "The result is selected from document attributes, so use AQL with a persistent index designed from the equality filters and requested ordering.",
+          "path": [
+            "Filter category and active status",
+            "Read the indexed rating order",
+            "Project six fields and limit"
+          ],
+          "indexPlan": "Test a persistent index whose leading fields match the equality predicates and whose remaining order supports the sort. Confirm with EXPLAIN and representative data.",
+          "tradeoff": "Every useful secondary index adds storage and write maintenance. An index should earn that cost through an observed query shape."
+        },
+        "graph": {
+          "fit": "workable",
+          "headline": "Vertex documents can be filtered, but traversal is unnecessary",
+          "explanation": "Graph vertices remain regular documents, so AQL can filter them. The graph model adds value only when product relationships enter the question.",
+          "path": [
+            "Treat products as vertex documents",
+            "Run the same attribute index path",
+            "Return products without traversing edges"
+          ],
+          "indexPlan": "Use a persistent index on the vertex collection's queried attributes. Edge indexes do not accelerate a product-only filter.",
+          "tradeoff": "If recommendations or compatibility edges are not part of this request, graph definitions and edge lifecycles are extra operational state."
+        }
+      }
+    },
+    {
+      "id": "fraud-neighborhood",
+      "label": "Trace a two-hop fraud neighborhood",
+      "prompt": "An investigator starts from one account and asks which other accounts share a device or payment instrument within two directed hops.",
+      "requestShape": [
+        "The answer is a path through changing many-to-many relationships.",
+        "Direction and traversal depth are part of the query contract.",
+        "The result needs both connected entities and relationship evidence."
+      ],
+      "recommendedModelId": "graph",
+      "outcomes": {
+        "key-value": {
+          "fit": "weak",
+          "headline": "Point lookups cannot discover an unknown neighborhood",
+          "explanation": "The first account key is known, but the connected device, instrument, and account keys are the result of the query. A key-value path cannot discover them without a separately maintained adjacency structure.",
+          "path": [
+            "Load the starting account",
+            "Chase application-owned adjacency lists",
+            "Deduplicate paths and fetch every result"
+          ],
+          "indexPlan": "Application-owned adjacency documents become a graph index in disguise. Their update, cleanup, and dangling-reference rules must be made explicit.",
+          "tradeoff": "Every relationship change can touch several adjacency copies. Partial retries can leave one side of the relationship stale."
+        },
+        "document": {
+          "fit": "workable",
+          "headline": "Embedded references work only for bounded, stable neighborhoods",
+          "explanation": "Documents can embed related IDs and AQL can join collections, but a many-to-many network with frequent changes creates fan-out, duplicate references, and manual path logic.",
+          "path": [
+            "Read embedded relationship identifiers",
+            "Join documents for each hop",
+            "Assemble and deduplicate paths"
+          ],
+          "indexPlan": "Index every join key used by the hop expansion. Measure the actual fan-out and bound depth so one request cannot grow without limit.",
+          "tradeoff": "Embedding favors reads but makes relationship updates and delete cleanup harder. Normalized references reduce duplication but turn traversal into repeated joins."
+        },
+        "graph": {
+          "fit": "best",
+          "headline": "Represent the evidence as edge documents",
+          "explanation": "ArangoDB edge documents carry _from and _to references plus relationship properties. AQL can traverse a bounded neighborhood and return vertices, edges, and paths together.",
+          "path": [
+            "Resolve the starting account vertex",
+            "Traverse device and instrument edges",
+            "Return bounded paths with evidence"
+          ],
+          "indexPlan": "Use the automatic edge indexes on _from and _to, then add vertex-centric indexes only for selective edge filters that the measured traversal needs.",
+          "tradeoff": "Traversal depth and branching must stay bounded. Low-selectivity edges can expand the neighborhood rapidly even though the syntax is concise."
+        }
+      }
+    },
+    {
+      "id": "mixed-risk-review",
+      "label": "Combine a profile filter with relationship evidence",
+      "prompt": "A risk review starts from active business accounts, traverses ownership edges, and returns owners whose profile documents match a jurisdiction rule.",
+      "requestShape": [
+        "Document attributes select the starting accounts and final owners.",
+        "Ownership edges connect entities that live in separate collections.",
+        "One query must preserve the relationship path as evidence."
+      ],
+      "recommendedModelId": "graph",
+      "outcomes": {
+        "key-value": {
+          "fit": "weak",
+          "headline": "The request does not begin with every required key",
+          "explanation": "Several keys are discovered by filtering and traversal. Pure key-value access would need external indexes plus application-side graph assembly.",
+          "path": [
+            "Consult external attribute mappings",
+            "Chase relationship-key documents",
+            "Reconstruct evidence in the application"
+          ],
+          "indexPlan": "Each external mapping needs its own consistency and recovery contract. The primary index alone cannot select accounts by status or owners by jurisdiction.",
+          "tradeoff": "The application becomes the query engine and must reconcile partial reads across several independently maintained mappings."
+        },
+        "document": {
+          "fit": "workable",
+          "headline": "AQL joins can express the query with explicit references",
+          "explanation": "Document collections and indexed foreign-reference fields can join accounts to ownership records and owners. This can fit when the relationship depth is fixed and small.",
+          "path": [
+            "Filter active account documents",
+            "Join indexed ownership references",
+            "Filter and project owner documents"
+          ],
+          "indexPlan": "Index account status, both ownership reference fields, and the owner jurisdiction predicate. Confirm that the fixed joins stay selective.",
+          "tradeoff": "As path depth or relationship types grow, nested joins become harder to reason about and every new hop needs another explicit access path."
+        },
+        "graph": {
+          "fit": "best",
+          "headline": "Compose document filters and graph traversal in one AQL query",
+          "explanation": "The native multi-model value is visible here: AQL can filter starting documents, traverse ownership edges, inspect owner attributes, and return the path without synchronizing a separate graph store.",
+          "path": [
+            "Filter active account documents",
+            "Traverse bounded ownership edges",
+            "Filter owners and return path evidence"
+          ],
+          "indexPlan": "Use persistent indexes for the document predicates and automatic edge indexes for traversal. In a cluster, shard placement must also match the dominant path.",
+          "tradeoff": "One query language does not remove distributed-query cost. Cross-shard traversals and broad starting sets can still create network fan-out."
+        }
+      }
+    }
+  ]
+}

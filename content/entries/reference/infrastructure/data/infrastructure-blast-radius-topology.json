@@ -1,0 +1,168 @@
+{
+  "title": "See where an infrastructure failure stops",
+  "description": "Switch scenarios to trace the active path, identify failed or degraded components, inspect ownership boundaries, and compare the user-visible blast radius.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Customer client",
+      "eyebrow": "User promise",
+      "detail": "Starts the request with a deadline and observes success, latency, a bounded degraded response, or an explicit failure.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 7,
+      "y": 40
+    },
+    {
+      "id": "edge",
+      "label": "DNS and edge",
+      "eyebrow": "Traffic entry",
+      "detail": "Publishes the endpoint, terminates TLS, applies coarse protection, and steers traffic only to a region declared ready.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 22,
+      "y": 40
+    },
+    {
+      "id": "load-balancer",
+      "label": "Regional balancer",
+      "eyebrow": "Health routing",
+      "detail": "Routes requests across healthy zone endpoints. Platform owners define checks, draining, and the capacity required after a target is removed.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 38,
+      "y": 40
+    },
+    {
+      "id": "service-a",
+      "label": "Service in zone A",
+      "eyebrow": "Fault domain A",
+      "detail": "Runs stateless business logic with bounded calls. It can be replaced only if state, sessions, and deployment artifacts are outside the host.",
+      "kind": "service",
+      "tone": "green",
+      "x": 56,
+      "y": 20
+    },
+    {
+      "id": "service-b",
+      "label": "Service in zone B",
+      "eyebrow": "Fault domain B",
+      "detail": "Carries normal traffic and enough reserved capacity to accept work when the other zone is removed.",
+      "kind": "service",
+      "tone": "green",
+      "x": 56,
+      "y": 50
+    },
+    {
+      "id": "database",
+      "label": "Authoritative database",
+      "eyebrow": "Durable state",
+      "detail": "Owns acknowledged records, replication, failover fencing, backups, and proof that restored data satisfies application invariants.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 75,
+      "y": 20
+    },
+    {
+      "id": "queue",
+      "label": "Durable work queue",
+      "eyebrow": "Async boundary",
+      "detail": "Buffers accepted background work with explicit retention, redelivery, poison-message, lag, and overload policies.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 74,
+      "y": 53
+    },
+    {
+      "id": "worker",
+      "label": "Background worker",
+      "eyebrow": "Deferred effect",
+      "detail": "Consumes durable work idempotently. A worker outage should increase queue age rather than erase accepted jobs or block unrelated requests.",
+      "kind": "service",
+      "tone": "neutral",
+      "x": 91,
+      "y": 53
+    },
+    {
+      "id": "telemetry",
+      "label": "Telemetry pipeline",
+      "eyebrow": "Operational evidence",
+      "detail": "Collects metrics, logs, and traces and confirms its own freshness. Observability owners keep a separate signal for pipeline failure.",
+      "kind": "analytics",
+      "tone": "cyan",
+      "x": 74,
+      "y": 83
+    },
+    {
+      "id": "recovery-region",
+      "label": "Recovery region",
+      "eyebrow": "Independent path",
+      "detail": "Provides separately tested traffic entry, compute, data, secrets, and observability. It is usable only after failover authority and data state are verified.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 92,
+      "y": 20
+    }
+  ],
+  "edges": [
+    { "id": "client-edge", "from": "client", "to": "edge", "label": "HTTPS" },
+    { "id": "edge-balancer", "from": "edge", "to": "load-balancer", "label": "primary region" },
+    { "id": "edge-recovery", "from": "edge", "to": "recovery-region", "label": "verified failover", "via": { "x": 56, "y": 7 } },
+    { "id": "balancer-a", "from": "load-balancer", "to": "service-a", "label": "healthy target" },
+    { "id": "balancer-b", "from": "load-balancer", "to": "service-b", "label": "healthy target" },
+    { "id": "a-database", "from": "service-a", "to": "database", "label": "bounded write" },
+    { "id": "b-database", "from": "service-b", "to": "database", "label": "bounded write" },
+    { "id": "a-queue", "from": "service-a", "to": "queue", "label": "durable job", "mode": "async" },
+    { "id": "b-queue", "from": "service-b", "to": "queue", "label": "durable job", "mode": "async" },
+    { "id": "queue-worker", "from": "queue", "to": "worker", "label": "consume", "mode": "async" },
+    { "id": "a-telemetry", "from": "service-a", "to": "telemetry", "label": "evidence", "mode": "async" },
+    { "id": "b-telemetry", "from": "service-b", "to": "telemetry", "label": "evidence", "mode": "async" },
+    { "id": "database-telemetry", "from": "database", "to": "telemetry", "label": "health", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy spread",
+      "summary": "Traffic is spread across two zones, acknowledged state goes to the database, deferred work enters the queue, and evidence leaves the response path asynchronously.",
+      "activeEdges": ["client-edge", "edge-balancer", "balancer-a", "balancer-b", "a-database", "b-database", "a-queue", "b-queue", "queue-worker", "a-telemetry", "b-telemetry", "database-telemetry"],
+      "focusNode": "load-balancer",
+      "result": "Customers receive the normal response. Platform, application, data, and observability owners can each point to the signal and recovery action they own."
+    },
+    {
+      "id": "host-loss",
+      "label": "Host loss",
+      "summary": "The zone A service endpoint fails its health check. The balancer removes it and surviving capacity in zone B carries the request path.",
+      "activeEdges": ["client-edge", "edge-balancer", "balancer-b", "b-database", "b-queue", "queue-worker", "b-telemetry", "database-telemetry"],
+      "failedNodes": ["service-a"],
+      "focusNode": "service-a",
+      "result": "The blast radius is one endpoint if health removal is fast and zone B has enough headroom. The platform owner replaces capacity while the application owner watches objective burn."
+    },
+    {
+      "id": "zone-loss",
+      "label": "Zone loss",
+      "summary": "Zone A disappears and the database runs in a degraded cross-zone state. All customer and background traffic now depends on zone B capacity.",
+      "activeEdges": ["client-edge", "edge-balancer", "balancer-b", "b-database", "b-queue", "queue-worker", "b-telemetry", "database-telemetry"],
+      "failedNodes": ["service-a"],
+      "degradedNodes": ["service-b", "database"],
+      "focusNode": "service-b",
+      "result": "Customers stay online only if compute and data were provisioned and tested for the remaining zone. Freeze risky releases, restore redundancy, and verify backlog and replication health."
+    },
+    {
+      "id": "region-loss",
+      "label": "Region loss",
+      "summary": "The primary regional entry, both service zones, database, and queue are unavailable. The edge can steer only after the recovery region is declared correct and ready.",
+      "activeEdges": ["client-edge", "edge-recovery"],
+      "failedNodes": ["load-balancer", "service-a", "service-b", "database", "queue", "worker"],
+      "focusNode": "recovery-region",
+      "result": "The blast radius is every primary-region user until failover completes. The incident commander verifies data authority and invokes the regional runbook; DNS or edge steering alone cannot make an untested stack recover."
+    },
+    {
+      "id": "telemetry-loss",
+      "label": "Telemetry loss",
+      "summary": "Customer traffic, durable writes, and background work continue, but metrics, logs, and traces are no longer arriving reliably.",
+      "activeEdges": ["client-edge", "edge-balancer", "balancer-a", "balancer-b", "a-database", "b-database", "a-queue", "b-queue", "queue-worker", "a-telemetry", "b-telemetry", "database-telemetry"],
+      "failedNodes": ["telemetry"],
+      "focusNode": "telemetry",
+      "result": "Immediate customer impact may be zero, but detection and diagnosis blast radius is broad. Stop promotion, use independent health evidence, restore the pipeline, and reconcile the missing interval."
+    }
+  ]
+}

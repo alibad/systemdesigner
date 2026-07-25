@@ -1,0 +1,299 @@
+{
+  "title": "Trace a base multi-region write quorum",
+  "description": "Inject voting and region failures in a five-voter base multi-region model. Active routes show who participates; selecting a component explains its role.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Application",
+      "eyebrow": "Transaction client",
+      "detail": "Uses the Spanner client library. Place latency-sensitive writers near the default leader region and keep retried transaction functions idempotent.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 34
+    },
+    {
+      "id": "leader",
+      "label": "Leader replica",
+      "eyebrow": "Read-write region A",
+      "detail": "Processes writes for its split first, logs the mutation, and forwards it in parallel to the other voting replicas.",
+      "kind": "database",
+      "tone": "blue",
+      "x": 29,
+      "y": 34
+    },
+    {
+      "id": "region-a-peer",
+      "label": "Region A peer",
+      "eyebrow": "Voting read-write",
+      "detail": "Maintains a full copy, serves reads, votes on writes, and can assume leadership when the current leader replica fails.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 50,
+      "y": 12
+    },
+    {
+      "id": "region-b-one",
+      "label": "Region B replica 1",
+      "eyebrow": "Voting read-write",
+      "detail": "Maintains a full copy, serves reads, votes on writes, and is eligible for leadership if the default leader region is lost.",
+      "kind": "database",
+      "tone": "green",
+      "x": 71,
+      "y": 18
+    },
+    {
+      "id": "region-b-two",
+      "label": "Region B replica 2",
+      "eyebrow": "Voting read-write",
+      "detail": "Provides the second read-write copy in the non-default region and participates in write quorum and leader election.",
+      "kind": "database",
+      "tone": "green",
+      "x": 71,
+      "y": 51
+    },
+    {
+      "id": "witness",
+      "label": "Witness replica",
+      "eyebrow": "Third voting region",
+      "detail": "Votes on writes and leader elections but does not maintain a full data copy, serve reads, or become leader.",
+      "kind": "allocator",
+      "tone": "amber",
+      "x": 91,
+      "y": 34
+    },
+    {
+      "id": "read-only",
+      "label": "Read-only replica",
+      "eyebrow": "Optional read region",
+      "detail": "Maintains a full copy and serves reads. It does not vote, increase the write quorum, or become leader.",
+      "kind": "database",
+      "tone": "neutral",
+      "x": 49,
+      "y": 78
+    }
+  ],
+  "edges": [
+    {
+      "id": "client-leader",
+      "from": "client",
+      "to": "leader",
+      "label": "write"
+    },
+    {
+      "id": "leader-region-a-peer",
+      "from": "leader",
+      "to": "region-a-peer",
+      "label": "vote"
+    },
+    {
+      "id": "leader-region-b-one",
+      "from": "leader",
+      "to": "region-b-one",
+      "label": "vote",
+      "via": {
+        "x": 48,
+        "y": 24
+      }
+    },
+    {
+      "id": "leader-region-b-two",
+      "from": "leader",
+      "to": "region-b-two",
+      "label": "vote",
+      "via": {
+        "x": 49,
+        "y": 48
+      }
+    },
+    {
+      "id": "leader-witness",
+      "from": "leader",
+      "to": "witness",
+      "label": "vote",
+      "via": {
+        "x": 61,
+        "y": 65
+      }
+    },
+    {
+      "id": "leader-read-only",
+      "from": "leader",
+      "to": "read-only",
+      "label": "replicate",
+      "mode": "async",
+      "via": {
+        "x": 34,
+        "y": 65
+      }
+    },
+    {
+      "id": "client-read-only",
+      "from": "client",
+      "to": "read-only",
+      "label": "stale read",
+      "via": {
+        "x": 19,
+        "y": 78
+      }
+    },
+    {
+      "id": "client-region-a-peer",
+      "from": "client",
+      "to": "region-a-peer",
+      "label": "new leader",
+      "via": {
+        "x": 28,
+        "y": 7
+      }
+    },
+    {
+      "id": "client-region-b-one",
+      "from": "client",
+      "to": "region-b-one",
+      "label": "new leader",
+      "via": {
+        "x": 37,
+        "y": 2
+      }
+    },
+    {
+      "id": "region-a-peer-region-b-one",
+      "from": "region-a-peer",
+      "to": "region-b-one",
+      "label": "vote"
+    },
+    {
+      "id": "region-a-peer-region-b-two",
+      "from": "region-a-peer",
+      "to": "region-b-two",
+      "label": "vote"
+    },
+    {
+      "id": "region-a-peer-witness",
+      "from": "region-a-peer",
+      "to": "witness",
+      "label": "vote",
+      "via": {
+        "x": 70,
+        "y": 4
+      }
+    },
+    {
+      "id": "region-b-one-region-b-two",
+      "from": "region-b-one",
+      "to": "region-b-two",
+      "label": "vote"
+    },
+    {
+      "id": "region-b-one-witness",
+      "from": "region-b-one",
+      "to": "witness",
+      "label": "vote"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-write",
+      "label": "Healthy write",
+      "summary": "The split leader forwards the mutation to the four other voting replicas in parallel. Commit can finish after the leader and enough additional voters form a three-vote majority.",
+      "activeEdges": [
+        "client-leader",
+        "leader-region-a-peer",
+        "leader-region-b-one",
+        "leader-region-b-two",
+        "leader-witness"
+      ],
+      "focusNode": "leader",
+      "result": "The application receives a committed result after a majority agrees; the write does not wait for the optional read-only replica to vote."
+    },
+    {
+      "id": "one-voter-down",
+      "label": "One voter down",
+      "summary": "One read-write replica is unavailable. The leader can still collect a majority from the remaining voting replicas.",
+      "activeEdges": [
+        "client-leader",
+        "leader-region-b-one",
+        "leader-region-b-two",
+        "leader-witness"
+      ],
+      "failedNodes": [
+        "region-a-peer"
+      ],
+      "degradedNodes": [
+        "leader"
+      ],
+      "focusNode": "leader",
+      "result": "Writes remain possible because four voters are available and only three votes are required in this five-voter model."
+    },
+    {
+      "id": "leader-replica-down",
+      "label": "Leader replica down",
+      "summary": "The current leader replica fails, but the second read-write replica in the default leader region is healthy and can assume leadership.",
+      "activeEdges": [
+        "client-region-a-peer",
+        "region-a-peer-region-b-one",
+        "region-a-peer-region-b-two",
+        "region-a-peer-witness"
+      ],
+      "failedNodes": [
+        "leader"
+      ],
+      "degradedNodes": [
+        "region-a-peer"
+      ],
+      "focusNode": "region-a-peer",
+      "result": "Transactions can resume after leader change and routing recovery. Retried application work must not duplicate external side effects."
+    },
+    {
+      "id": "leader-region-down",
+      "label": "Leader region down",
+      "summary": "Both read-write replicas in the default leader region are unavailable. A replica in the second read-write region can become leader and form a majority with its peer and the witness.",
+      "activeEdges": [
+        "client-region-b-one",
+        "region-b-one-region-b-two",
+        "region-b-one-witness"
+      ],
+      "failedNodes": [
+        "leader",
+        "region-a-peer"
+      ],
+      "degradedNodes": [
+        "region-b-one"
+      ],
+      "focusNode": "region-b-one",
+      "result": "Read and write service moves to the second read-write region; client latency and error behavior can change during detection, election, and rerouting."
+    },
+    {
+      "id": "majority-down",
+      "label": "Majority down",
+      "summary": "Three voting replicas are unavailable. The two remaining full read-write copies cannot form a majority to order new commits.",
+      "activeEdges": [
+        "client-region-b-one",
+        "region-b-one-region-b-two"
+      ],
+      "failedNodes": [
+        "leader",
+        "region-a-peer",
+        "witness"
+      ],
+      "degradedNodes": [
+        "region-b-one",
+        "region-b-two"
+      ],
+      "focusNode": "region-b-one",
+      "result": "New writes cannot commit until quorum returns. Existing copies are not permission to accept divergent writes."
+    },
+    {
+      "id": "nearby-stale-read",
+      "label": "Nearby stale read",
+      "summary": "A sufficiently stale read can use a nearby caught-up read-only replica without making that replica part of the write quorum.",
+      "activeEdges": [
+        "leader-read-only",
+        "client-read-only"
+      ],
+      "focusNode": "read-only",
+      "result": "Read locality can improve while the five-voter write path stays unchanged; the application must explicitly accept the selected historical timestamp."
+    }
+  ]
+}

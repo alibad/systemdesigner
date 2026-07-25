@@ -1,0 +1,290 @@
+---
+title: "Computer-Use and Browser Agent Systems"
+section: genai
+level: advanced
+duration: 45 min
+description: "Design safe computer-use agents with grounded observations, bounded actions, explicit permission, and evidence-based recovery."
+registryId: computer-use-agents
+---
+
+{% section-card tone="intro" %}
+## What is a computer-use agent?
+
+A **computer-use agent** is an AI system that observes a graphical interface, proposes mouse or keyboard actions, and uses the resulting interface state to continue a task. It can work in a browser, a desktop application, or a virtual machine even when the software has no purpose-built API.
+
+In plain language: the model suggests how to use the screen, while your application captures observations, decides what is allowed, performs each action, and checks what actually happened.
+
+Computer use matters because graphical interfaces are stateful and only partly observable. A button can move, a modal can cover a target, a session can expire, or an apparently successful click can create an external side effect before the response is lost.
+
+**Core invariant: an observation supports a proposal, not permission or proof of success. Trusted code must authorize the action and verify the postcondition from fresh evidence.**
+
+Review [AI Agents](/genai/ai-agents) and [Function Calling](/genai/function-calling) first if tool loops and execution boundaries are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Treat the interface as a feedback-controlled environment
+
+A computer-use run is not a generated script that can be trusted from start to finish. It is a sequence of bounded decisions over a changing environment.
+
+{% system-flow title="One safe computer-use step" caption="The harness owns observation, authorization, execution, and evidence. A failed postcondition returns to observation or recovery instead of silently advancing the plan." %}
+{% system-node title="Fresh observation" eyebrow="Ground" icon="search" tone="blue" %}
+Capture pixels and, when available, semantic UI state such as roles, labels, focused controls, URL, and window identity.
+{% /system-node %}
+{% system-node title="Action proposal" eyebrow="Plan" icon="workflow" tone="violet" %}
+Name one target, one bounded action, the evidence supporting it, and the state expected afterward.
+{% /system-node %}
+{% system-node title="Policy decision" eyebrow="Authorize" icon="shield" tone="amber" %}
+Check direct user intent, target, data exposure, account, risk, budget, and whether approval is still valid.
+{% /system-node %}
+{% system-node title="Isolated execution" eyebrow="Act" icon="lock" tone="rose" %}
+Perform the action in a constrained browser, container, or virtual machine with scoped credentials and network access.
+{% /system-node %}
+{% system-node title="Observed postcondition" eyebrow="Verify" icon="check" tone="green" %}
+Inspect authoritative state or a fresh interface observation before recording success or selecting the next action.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep four records separate
+
+- **Intent:** what the user directly asked the system to accomplish.
+- **Proposal:** what the model wants the executor to do next.
+- **Decision:** why trusted policy allowed, denied, or paused that proposal.
+- **Observation:** what the environment actually showed or changed after execution.
+
+Page text, emails, documents, and tool results can influence a proposal, but they are third-party content rather than user permission.
+{% /section-card %}
+
+{% section-card %}
+## Observation is evidence with blind spots
+
+No single representation is best for every interface. A production harness usually combines several channels and records which one grounded the target.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Screenshot pixels" eyebrow="Visual truth" icon="eye" tone="blue" %}
+Reveal canvas content, spatial relationships, overlays, and rendered state. They are broad but expensive, hard to inspect precisely, and vulnerable to visually embedded instructions.
+{% /concept-card %}
+{% concept-card title="Accessibility semantics" eyebrow="User-facing structure" icon="users" tone="cyan" %}
+Expose roles, names, values, and control state when an application publishes them. Semantic targets are usually clearer than raw coordinates.
+{% /concept-card %}
+{% concept-card title="DOM or app state" eyebrow="Programmatic detail" icon="braces" tone="violet" %}
+Provide attributes, URLs, network state, and stable application contracts. They may omit pixels, canvas content, or native desktop elements.
+{% /concept-card %}
+{% concept-card title="Authoritative API" eyebrow="System of record" icon="database" tone="green" %}
+Confirms durable effects such as a sent message, saved record, or completed payment. Prefer it over visual inference when it is available and authorized.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Freshness and identity matter more than coordinates
+
+- Re-observe immediately before consequential actions; do not reuse an old screenshot after navigation or a long model turn.
+- Prefer a role and accessible name, explicit test identifier, or application contract over a long CSS path or guessed coordinate.
+- Require one unique target. Multiple matches are ambiguity, not an invitation to choose the first element.
+- Record the window, frame, URL, account, and observation version alongside the target.
+- Use pixels when they add evidence, not as proof that the selected element owns the intended business action.
+
+Playwright's official guidance recommends user-facing locators and re-resolves a locator before each action. Its actionability checks also verify conditions such as visibility, stability, enabled state, and whether the element can receive events.
+{% /section-card %}
+
+{% section-card %}
+## Ground one next action before committing to a trajectory
+
+The planning decision is not merely which button to click. The harness must decide whether the available observation channels identify the target, whether the state can change before execution, and how soon to verify.
+
+{% interactive-block id="genai/computer-use-agents-observation-planning-lab" dataFile="/api/content/genai/computer-use-agents/data/observation-planning-scenarios.json" /%}
+
+Use the workbench to compare a semantic form, a volatile checkout, and a canvas application. Notice that a three-action macro can turn good evidence into a stale plan before its final step.
+{% /section-card %}
+
+{% section-card %}
+## Express the next step as an action contract
+
+An action contract gives deterministic code enough information to reject an unsafe or ungrounded proposal. Keep it smaller than a full task plan.
+
+### Proposal fields
+
+- Observation ID and environment identity used to ground the decision.
+- Action type, unique target description, and bounded input.
+- Expected postcondition stated in observable terms.
+- Risk class, data sensitivity, and estimated external effect.
+- Maximum wait and the recovery rule for an ambiguous result.
+
+### Gate checks
+
+- The observation is still current and belongs to the expected window, account, and origin.
+- The target resolves uniquely and passes actionability checks.
+- Direct user intent covers the target, data, and external effect.
+- The policy allows this action class in the current sandbox and network scope.
+- Approval is obtained at the point of risk, not inferred from page content or an earlier broad confirmation.
+
+The runnable example rejects stale observations, non-unique targets, unsupported macros, and missing approval before returning one executable action.
+
+{% code-block file="/api/content/genai/computer-use-agents/code/plan-next-action.mjs" language="javascript" title="Compile a grounded observation into one authorized action" /%}
+{% /section-card %}
+
+{% section-card %}
+## Separate the agent loop into owned boundaries
+
+Each stage should have a clear owner and durable evidence. The model can help interpret observations and propose actions, but it should not silently absorb policy or execution responsibilities.
+
+{% process-flow %}
+{% process-step number="1" title="Capture the environment" label="Observe" %}
+Collect a screenshot and available semantics with a monotonic observation ID, timestamp, window identity, URL, account, and redaction policy.
+{% /process-step %}
+{% process-step number="2" title="Select one bounded action" label="Propose" %}
+Identify the target, supporting evidence, expected postcondition, and what would make the proposal invalid before execution.
+{% /process-step %}
+{% process-step number="3" title="Evaluate authority" label="Decide" %}
+Apply allowlists, identity, origin, data sensitivity, action risk, budgets, and current user approval outside the model.
+{% /process-step %}
+{% process-step number="4" title="Execute in isolation" label="Attempt" %}
+Use a browser, container, or VM with minimal privileges, restricted network access, scoped credentials, and controlled file exchange.
+{% /process-step %}
+{% process-step number="5" title="Check the postcondition" label="Verify" %}
+Re-observe the interface and query authoritative state for consequential writes. Record completed, rejected, failed, or ambiguous.
+{% /process-step %}
+{% process-step number="6" title="Continue or recover" label="Resolve" %}
+Advance only from verified evidence. Otherwise re-plan, reconcile, ask the user, compensate, or stop according to the failure boundary.
+{% /process-step %}
+{% /process-flow %}
+
+Bound the loop with maximum steps, wall-clock time, model spend, retries, downloads, uploads, and external writes. A loop that cannot explain why it is still running should stop.
+{% /section-card %}
+
+{% section-card %}
+## Permission follows the external effect
+
+Permission is specific to an actor, target, data item, action, and time. A user asking an agent to find a draft does not automatically authorize sending it, and a page telling the agent to upload a credential is not user intent.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Observe" eyebrow="Usually low impact" icon="search" tone="blue" %}
+Reading a visible label or checking local state may proceed when the environment, account, and data policy allow it.
+{% /concept-card %}
+{% concept-card title="Prepare" eyebrow="Reversible" icon="workflow" tone="violet" %}
+Filling a draft or assembling an upload can continue only when sensitive data has not yet been transmitted and the work remains reviewable.
+{% /concept-card %}
+{% concept-card title="Transmit or commit" eyebrow="Confirm at risk" icon="shield" tone="amber" %}
+Sending, posting, purchasing, sharing, uploading sensitive data, or changing access requires direct and current authorization for the exact effect.
+{% /concept-card %}
+{% concept-card title="Override a barrier" eyebrow="Hand off" icon="warning" tone="rose" %}
+Password changes, security warnings, CAPTCHA, or attempts to bypass a browser or website safeguard should be handed to the user or denied.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Ask late enough to be specific
+
+- Complete safe preparation first, then pause immediately before the external effect.
+- State the target, recipient, data, amount, permanence, and reason for the confirmation.
+- Reconfirm when those details change after approval.
+- Never treat a screenshot, website, email, PDF, chat, or tool result as permission.
+- Prefer user takeover when policy requires direct human interaction with the final control.
+{% /section-card %}
+
+{% section-card %}
+## Resolve ambiguity before choosing a recovery action
+
+A timeout or lost screenshot says the harness did not receive enough evidence. It does not prove the action failed. Recovery must consider permission, reversibility, and an authoritative source of truth.
+
+{% interactive-block id="genai/computer-use-agents-permission-recovery-lab" dataFile="/api/content/genai/computer-use-agents/data/permission-recovery-incidents.json" /%}
+
+The lab starts with an unsafe immediate retry. Compare it with reconciliation, a precise user question, and compensation. The correct response changes with the failed boundary.
+{% /section-card %}
+
+{% section-card %}
+## Model ambiguous completion as a state, not an exception string
+
+Use at least four terminal states for each attempt:
+
+- **Completed:** authoritative evidence proves the intended effect happened once.
+- **Rejected:** policy or the environment prevented execution before the effect.
+- **Failed:** evidence proves the effect did not happen and the failure is safe to retry.
+- **Ambiguous:** execution may have crossed the commit boundary, but confirmation was lost or contradictory.
+
+For ambiguous writes, reconcile by operation ID, draft ID, message ID, transaction state, or another system-of-record key before retrying. Use idempotency keys when the dependency supports them, but do not assume a graphical click is idempotent merely because the button looks unchanged.
+
+The example below simulates a send that commits before its response is lost. Reconciliation finds the committed operation and prevents a duplicate send.
+
+{% code-block file="/api/content/genai/computer-use-agents/code/recover-ambiguous-action.mjs" language="javascript" title="Reconcile a lost response without duplicating the side effect" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Treat interface content as untrusted input
+
+Computer-use agents combine perception with action, so prompt injection can appear inside a page, image, document, email, notification, or tool result. Isolation limits damage; it does not make the content trustworthy.
+
+{% system-flow title="Keep untrusted content away from authority" caption="Content can inform the model's proposal, but only trusted policy and direct user intent can authorize execution." %}
+{% system-node title="Third-party content" eyebrow="Untrusted" icon="eye" tone="rose" %}
+May contain useful data, misleading controls, or instructions designed to redirect the agent.
+{% /system-node %}
+{% system-node title="Model interpretation" eyebrow="Probabilistic" icon="braces" tone="violet" %}
+Summarizes the state and proposes a bounded action while preserving provenance for suspicious instructions.
+{% /system-node %}
+{% system-node title="Trusted policy" eyebrow="Deterministic" icon="shield" tone="amber" %}
+Checks direct user intent, origin, account, target, data flow, risk, and approval using application-owned context.
+{% /system-node %}
+{% system-node title="Constrained executor" eyebrow="Least privilege" icon="lock" tone="green" %}
+Runs only the approved action in an isolated environment with allowlisted access and an auditable result.
+{% /system-node %}
+{% /system-flow %}
+
+### Constrain the blast radius
+
+- Use a dedicated browser profile, container, or virtual machine with minimal host privileges.
+- Start with no ambient credentials, environment variables, extensions, local files, clipboard data, or unrestricted network access.
+- Allowlist sites, accounts, action classes, upload roots, download destinations, and data egress.
+- Redact secrets from screenshots, traces, model context, and retained artifacts.
+- Stop on unexpected security warnings, requests for secrets, origin changes, or instructions that conflict with the user's task.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate trajectories and control decisions separately
+
+End-to-end task success alone can hide unsafe near misses, unnecessary steps, and lucky outcomes. Evaluate repeated executions from controlled initial states and score both the result and the control plane.
+
+### Offline evaluation slices
+
+- Stable and changing layouts, overlays, scroll regions, pop-ups, multiple windows, and native dialogs.
+- Pixel-only, semantic-only, and hybrid interfaces with ambiguous or duplicate targets.
+- Benign content, prompt injection, phishing, unexpected warnings, and cross-origin navigation.
+- Approval required, approval expired, target changed after approval, and missing direct intent.
+- Failure before commit, failure after commit, duplicate delivery, stale observation, and compensation failure.
+
+### Production signals
+
+{% metric-strip %}
+{% metric value="Task success" label="Verified end state, not model claim" tone="green" /%}
+{% metric value="Grounding error" label="Wrong or ambiguous target rate" tone="rose" /%}
+{% metric value="Approval precision" label="Prompts at the actual risk boundary" tone="amber" /%}
+{% metric value="Recovery rate" label="Ambiguous outcomes resolved correctly" tone="blue" /%}
+{% /metric-strip %}
+
+Also track steps per completed task, stale-observation rejections, policy denials, prompt-injection stops, duplicate side effects, user takeovers, latency by loop stage, and retained-data volume. Segment all metrics by application, task class, model and prompt version, observation strategy, and risk tier.
+{% /section-card %}
+
+{% section-card %}
+## Production readiness review
+
+- Define the exact sites, applications, accounts, files, actions, and network destinations the agent may reach.
+- Keep proposal, policy decision, execution, and verification in separate records with stable task and action IDs.
+- Re-observe before each action and reject stale, non-unique, hidden, disabled, or origin-mismatched targets.
+- Require current approval immediately before transmitting data or creating a consequential external effect.
+- Prefer structured APIs for durable writes and authoritative verification when available.
+- Make ambiguous completion explicit; reconcile before retrying and use idempotency where the dependency supports it.
+- Isolate the runtime, remove ambient credentials, redact artifacts, and expire the environment after the task.
+- Enforce step, time, token, spend, download, upload, and side-effect budgets with a kill switch.
+- Test prompt injection, layout changes, expired sessions, changed approval scope, lost responses, and repeated execution.
+- Give the user a readable trace of what was observed, proposed, approved, executed, and verified.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and version notes
+
+Vendor tool envelopes and model capabilities evolve quickly. The architecture in this lesson is provider-neutral; verify current action schemas and safety behavior against the runtime you deploy.
+
+- [OpenAI computer-use guide](https://developers.openai.com/api/docs/guides/tools-computer-use) for screenshot-action loops, isolation, untrusted content, and confirmation at the point of risk.
+- [Anthropic computer-use tool documentation](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool) for the client-side agent loop, sandboxing guidance, and prompt-injection precautions.
+- [Playwright locator guidance](https://playwright.dev/docs/locators) for user-facing target contracts and fresh locator resolution.
+- [Playwright actionability checks](https://playwright.dev/docs/actionability) for visibility, stability, enabled state, and event-receiving checks before UI actions.
+- [OSWorld, NeurIPS 2024](https://proceedings.neurips.cc/paper_files/paper/2024/hash/5d413e48f84dc61244b6be550f1cd8f5-Abstract-Datasets_and_Benchmarks_Track.html) for execution-based evaluation of open-ended tasks in real computer environments.
+{% /section-card %}
+
+{% quiz title="Computer-Use Agent Engineering Check" questionsFile="/api/content/genai/computer-use-agents/quiz/computer-use-agents.json" lessonSlug="computer-use-agents" /%}

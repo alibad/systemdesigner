@@ -1,0 +1,229 @@
+{
+  "title": "Trace one shard through replication and failure",
+  "description": "This conceptual model follows one affected shard in a cluster. It assumes replicationFactor 3 and writeConcern 2 unless a scenario says otherwise. It shows acknowledgement and availability boundaries, not timing or benchmark performance.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Application client",
+      "eyebrow": "Request owner",
+      "detail": "Sends reads and writes to a Coordinator. It must treat timeouts and leadership changes as unknown outcomes until an idempotent read or reconciliation proves the result.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 46
+    },
+    {
+      "id": "coordinator",
+      "label": "Coordinator",
+      "eyebrow": "Stateless router",
+      "detail": "Uses cluster metadata to locate the responsible shard and route work to its current leader. Clients do not address DB-Server shards directly.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 29,
+      "y": 46
+    },
+    {
+      "id": "agency",
+      "label": "Agency + Supervision",
+      "eyebrow": "Cluster control plane",
+      "detail": "The Raft-backed Agency stores cluster configuration. Supervision detects unhealthy DB-Servers, updates the plan, and promotes an in-sync follower when a shard leader is lost.",
+      "kind": "allocator",
+      "tone": "amber",
+      "x": 49,
+      "y": 12
+    },
+    {
+      "id": "leader",
+      "label": "Shard leader",
+      "eyebrow": "Affected shard",
+      "detail": "Owns the ordered write path for this shard. It applies document operations and synchronously replicates changes to follower copies before reporting the configured acknowledgement.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 53,
+      "y": 46
+    },
+    {
+      "id": "follower-a",
+      "label": "Follower A",
+      "eyebrow": "Synchronous copy",
+      "detail": "Maintains an in-sync replica of the shard. It can be promoted after leader failure if Supervision selects it and updates cluster routing.",
+      "kind": "database",
+      "tone": "green",
+      "x": 78,
+      "y": 29
+    },
+    {
+      "id": "follower-b",
+      "label": "Follower B",
+      "eyebrow": "Synchronous copy",
+      "detail": "Provides another shard copy under replicationFactor 3. If it falls out of sync, the cluster can continue with reduced redundancy and later resynchronize or replace it.",
+      "kind": "database",
+      "tone": "green",
+      "x": 78,
+      "y": 64
+    },
+    {
+      "id": "backup",
+      "label": "Independent backup",
+      "eyebrow": "Recovery boundary",
+      "detail": "Protects against deletion, corruption, and operator mistakes that synchronous replicas can copy. Restore tests, not replica health, prove recoverability.",
+      "kind": "cache",
+      "tone": "neutral",
+      "x": 45,
+      "y": 84
+    }
+  ],
+  "edges": [
+    {
+      "id": "client-coordinator",
+      "from": "client",
+      "to": "coordinator",
+      "label": "read or write"
+    },
+    {
+      "id": "coordinator-leader",
+      "from": "coordinator",
+      "to": "leader",
+      "label": "route to leader"
+    },
+    {
+      "id": "leader-follower-a",
+      "from": "leader",
+      "to": "follower-a",
+      "label": "sync replica"
+    },
+    {
+      "id": "leader-follower-b",
+      "from": "leader",
+      "to": "follower-b",
+      "label": "sync replica"
+    },
+    {
+      "id": "agency-coordinator",
+      "from": "agency",
+      "to": "coordinator",
+      "label": "cluster plan",
+      "mode": "async"
+    },
+    {
+      "id": "agency-follower-a",
+      "from": "agency",
+      "to": "follower-a",
+      "label": "promote",
+      "via": {
+        "x": 65,
+        "y": 9
+      }
+    },
+    {
+      "id": "coordinator-follower-a",
+      "from": "coordinator",
+      "to": "follower-a",
+      "label": "new leader",
+      "via": {
+        "x": 52,
+        "y": 23
+      }
+    },
+    {
+      "id": "follower-a-follower-b",
+      "from": "follower-a",
+      "to": "follower-b",
+      "label": "new sync path"
+    },
+    {
+      "id": "leader-backup",
+      "from": "leader",
+      "to": "backup",
+      "label": "backup boundary",
+      "mode": "async",
+      "via": {
+        "x": 53,
+        "y": 69
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "acknowledged-write",
+      "label": "Acknowledged write",
+      "summary": "Assume replicationFactor 3 and writeConcern 2. The Coordinator reaches the shard leader, and the operation has at least two in-sync copies before the configured write acknowledgement can succeed.",
+      "activeEdges": [
+        "client-coordinator",
+        "coordinator-leader",
+        "leader-follower-a",
+        "leader-follower-b"
+      ],
+      "focusNode": "leader",
+      "result": "The write crosses the configured two-copy acknowledgement boundary. A third configured replica increases redundancy, but the application should still record whether its own request received a definitive success."
+    },
+    {
+      "id": "follower-loss",
+      "label": "One follower lost",
+      "summary": "Follower B is unavailable. The leader and Follower A remain in sync, so the assumed writeConcern 2 can still be fulfilled while the cluster rebuilds the missing replica when capacity is available.",
+      "activeEdges": [
+        "client-coordinator",
+        "coordinator-leader",
+        "leader-follower-a",
+        "agency-coordinator"
+      ],
+      "failedNodes": [
+        "follower-b"
+      ],
+      "degradedNodes": [
+        "leader"
+      ],
+      "focusNode": "follower-b",
+      "result": "Reads and writes for the shard can continue under the stated assumptions, but failure tolerance is reduced until an in-sync follower is restored. Alert on under-replicated shards rather than waiting for user errors."
+    },
+    {
+      "id": "leader-loss",
+      "label": "Leader lost",
+      "summary": "The shard leader stops responding. Supervision changes the cluster plan and promotes an in-sync follower; Coordinators then route eligible retries to the new leader.",
+      "activeEdges": [
+        "agency-follower-a",
+        "agency-coordinator",
+        "client-coordinator",
+        "coordinator-follower-a",
+        "follower-a-follower-b"
+      ],
+      "failedNodes": [
+        "leader"
+      ],
+      "degradedNodes": [
+        "follower-a"
+      ],
+      "focusNode": "follower-a",
+      "result": "The affected shard has a temporary interruption while failure is detected and leadership changes. Retry only idempotent operations, because a client timeout does not prove whether the former leader applied the write."
+    },
+    {
+      "id": "write-concern-block",
+      "label": "Write concern blocks",
+      "summary": "Assume replicationFactor 3 and writeConcern 2, but both followers are unavailable. The remaining leader still has one readable copy, yet it cannot satisfy the two-copy write acknowledgement.",
+      "activeEdges": [
+        "client-coordinator",
+        "coordinator-leader",
+        "agency-coordinator"
+      ],
+      "failedNodes": [
+        "follower-a",
+        "follower-b"
+      ],
+      "degradedNodes": [
+        "leader"
+      ],
+      "focusNode": "leader",
+      "result": "Reads from the surviving shard copy can continue, but writes that require two in-sync replicas fail until redundancy is restored or an operator deliberately changes the durability contract."
+    },
+    {
+      "id": "backup-proof",
+      "label": "Recovery proof",
+      "summary": "A backup leaves the live replica topology and is restored in isolation. Synchronous followers alone cannot protect against a valid delete, bad application write, or corruption copied to every replica.",
+      "activeEdges": [
+        "leader-backup"
+      ],
+      "focusNode": "backup",
+      "result": "A useful restore test records the recovered point in time, validates documents and graph edges, checks access controls, and proves that the application can use the restored database."
+    }
+  ]
+}

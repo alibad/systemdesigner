@@ -1,0 +1,171 @@
+{
+  "defaultChangeId": "add-optional-field",
+  "defaultContractId": "nullable-union",
+  "contracts": [
+    {
+      "id": "nullable-union",
+      "label": "Nullable union",
+      "detail": "Merge fields by name and return null when a file does not contain an optional field. Physical types must remain compatible."
+    },
+    {
+      "id": "strict",
+      "label": "Exact schema",
+      "detail": "Reject a dataset scan when file field names, physical types, or nullability differ from the registered contract."
+    }
+  ],
+  "changes": [
+    {
+      "id": "add-optional-field",
+      "label": "Add an optional field",
+      "detail": "New producers append campaign_id while old files remain unchanged.",
+      "changedFieldIds": ["campaign-id"],
+      "before": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "after": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" },
+        { "id": "campaign-id", "name": "campaign_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "outcomes": {
+        "nullable-union": {
+          "status": "compatible",
+          "headline": "Old files can contribute null for campaign_id",
+          "explanation": "The new field is optional, so a dataset reader that deliberately unions schemas can expose one campaign_id column and materialize null for files written before the change.",
+          "actions": [
+            "Verify the target engines use the same schema-merge behavior.",
+            "Keep the field optional until every required historical value has been backfilled.",
+            "Track the first partition or snapshot where producers populate the field."
+          ]
+        },
+        "strict": {
+          "status": "review",
+          "headline": "The exact schema gate rejects mixed files",
+          "explanation": "Both file schemas are valid Parquet, but the dataset contract requires one exact schema. Register a versioned change or rewrite old files before scanning them together.",
+          "actions": [
+            "Publish a new dataset schema version before the producer rollout.",
+            "Decide whether old files are rewritten, isolated, or read through an explicit compatibility view.",
+            "Canary the new files against every strict reader."
+          ]
+        }
+      }
+    },
+    {
+      "id": "rename-field",
+      "label": "Rename a field",
+      "detail": "customer_id becomes account_id without a table-layer mapping.",
+      "changedFieldIds": ["customer-id", "account-id"],
+      "before": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "after": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "account-id", "name": "account_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "outcomes": {
+        "nullable-union": {
+          "status": "review",
+          "headline": "Name-based merging creates two sparse columns",
+          "explanation": "A file-local rename does not move historical values. A name-based union sees customer_id in old files and account_id in new files unless a table format, view, or rewrite provides an explicit mapping.",
+          "actions": [
+            "Add account_id while continuing to write customer_id during a transition window.",
+            "Backfill or map historical values before removing the old field.",
+            "Test filters, joins, and null counts across the transition boundary."
+          ]
+        },
+        "strict": {
+          "status": "incompatible",
+          "headline": "The registered field name no longer exists",
+          "explanation": "Strict readers resolve the expected customer_id path and fail or reject new files that only contain account_id.",
+          "actions": [
+            "Stop the producer rollout until a versioned migration is approved.",
+            "Use a compatibility view or rewrite so one logical name resolves across all files.",
+            "Do not treat a rename as a metadata-only cosmetic change."
+          ]
+        }
+      }
+    },
+    {
+      "id": "change-physical-type",
+      "label": "Change a physical type",
+      "detail": "event_day changes from INT32 with DATE semantics to INT64.",
+      "changedFieldIds": ["event-day"],
+      "before": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "after": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT64", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "outcomes": {
+        "nullable-union": {
+          "status": "incompatible",
+          "headline": "Null filling cannot reconcile different meanings",
+          "explanation": "A nullable union handles missing fields, not an incompatible physical and logical type change. Engines may reject the scan or coerce values differently, so the date contract is no longer portable.",
+          "actions": [
+            "Write a new field with one documented unit and logical type.",
+            "Backfill historical values with an explicit conversion.",
+            "Compare results across every production reader before cutover."
+          ]
+        },
+        "strict": {
+          "status": "incompatible",
+          "headline": "The physical and logical type contract changed",
+          "explanation": "The exact schema gate correctly rejects the new files because INT64 without DATE semantics is not the registered INT32 DATE field.",
+          "actions": [
+            "Block the producer change at schema validation.",
+            "Introduce a versioned replacement field instead of mutating event_day.",
+            "Validate units, bounds, and null handling during backfill."
+          ]
+        }
+      }
+    },
+    {
+      "id": "tighten-nullability",
+      "label": "Make optional data required",
+      "detail": "New files require customer_id even though old files can contain null.",
+      "changedFieldIds": ["customer-id"],
+      "before": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "optional" }
+      ],
+      "after": [
+        { "id": "event-id", "name": "event_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" },
+        { "id": "event-day", "name": "event_day", "type": "INT32 (DATE)", "mode": "required" },
+        { "id": "customer-id", "name": "customer_id", "type": "BYTE_ARRAY (STRING)", "mode": "required" }
+      ],
+      "outcomes": {
+        "nullable-union": {
+          "status": "review",
+          "headline": "New enforcement does not repair historical nulls",
+          "explanation": "The union must keep customer_id nullable while older files remain in scope. Marking only new files required changes future writes, not the facts already stored.",
+          "actions": [
+            "Measure historical nulls and define a valid backfill source.",
+            "Keep the dataset-level field optional until the rewrite is complete.",
+            "Add producer validation before tightening the published contract."
+          ]
+        },
+        "strict": {
+          "status": "incompatible",
+          "headline": "Old and new repetition rules disagree",
+          "explanation": "A strict schema cannot scan the mixed files as one exact contract because customer_id is optional in one file set and required in another.",
+          "actions": [
+            "Rewrite or isolate old files before registering required nullability.",
+            "Reject missing customer_id at ingestion before writing required files.",
+            "Run a full-history validation, not only a new-partition check."
+          ]
+        }
+      }
+    }
+  ]
+}

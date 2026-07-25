@@ -1,0 +1,228 @@
+{
+  "Comment": "Standard order saga with stable operation keys and explicit compensation",
+  "StartAt": "ClaimOrder",
+  "TimeoutSeconds": 86400,
+  "States": {
+    "ClaimOrder": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${OrderOperationsTable}",
+        "Item": {
+          "orderId": {"S.$": "$.orderId"},
+          "status": {"S": "STARTED"},
+          "executionArn": {"S.$": "$$.Execution.Id"}
+        },
+        "ConditionExpression": "attribute_not_exists(orderId)"
+      },
+      "ResultPath": "$.claim",
+      "Catch": [
+        {
+          "ErrorEquals": ["DynamoDB.ConditionalCheckFailedException"],
+          "Next": "DuplicateOrder"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.failure",
+          "Next": "TerminalInfrastructureFailure"
+        }
+      ],
+      "Next": "ReserveInventory"
+    },
+    "ReserveInventory": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "TimeoutSeconds": 20,
+      "Parameters": {
+        "FunctionName": "${ReserveInventoryFunctionArn}",
+        "Payload": {
+          "orderId.$": "$.orderId",
+          "items.$": "$.items",
+          "idempotencyKey.$": "States.Format('{}:reserve', $.orderId)"
+        }
+      },
+      "ResultSelector": {
+        "reservationId.$": "$.Payload.reservationId",
+        "status.$": "$.Payload.status"
+      },
+      "ResultPath": "$.inventory",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 8,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.failure",
+          "Next": "MarkOrderFailed"
+        }
+      ],
+      "Next": "ChargePayment"
+    },
+    "ChargePayment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "TimeoutSeconds": 30,
+      "Parameters": {
+        "FunctionName": "${ChargePaymentFunctionArn}",
+        "Payload": {
+          "orderId.$": "$.orderId",
+          "amount.$": "$.amount",
+          "currency.$": "$.currency",
+          "paymentMethodToken.$": "$.paymentMethodToken",
+          "idempotencyKey.$": "States.Format('{}:charge', $.orderId)"
+        }
+      },
+      "ResultSelector": {
+        "chargeId.$": "$.Payload.chargeId",
+        "status.$": "$.Payload.status"
+      },
+      "ResultPath": "$.payment",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 12,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.paymentFailure",
+          "Next": "ReleaseInventory"
+        }
+      ],
+      "Next": "MarkOrderComplete"
+    },
+    "MarkOrderComplete": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${OrderOperationsTable}",
+        "Key": {"orderId": {"S.$": "$.orderId"}},
+        "UpdateExpression": "SET #status = :completed, chargeId = :chargeId, reservationId = :reservationId",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {
+          ":completed": {"S": "COMPLETED"},
+          ":chargeId": {"S.$": "$.payment.chargeId"},
+          ":reservationId": {"S.$": "$.inventory.reservationId"}
+        }
+      },
+      "ResultPath": null,
+      "Next": "OrderCompleted"
+    },
+    "ReleaseInventory": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "TimeoutSeconds": 20,
+      "Parameters": {
+        "FunctionName": "${ReleaseInventoryFunctionArn}",
+        "Payload": {
+          "orderId.$": "$.orderId",
+          "reservationId.$": "$.inventory.reservationId",
+          "idempotencyKey.$": "States.Format('{}:release', $.orderId)"
+        }
+      },
+      "ResultPath": "$.compensation",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 20,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.compensationFailure",
+          "Next": "MarkManualRecovery"
+        }
+      ],
+      "Next": "MarkOrderCompensated"
+    },
+    "MarkOrderCompensated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${OrderOperationsTable}",
+        "Key": {"orderId": {"S.$": "$.orderId"}},
+        "UpdateExpression": "SET #status = :compensated",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {":compensated": {"S": "COMPENSATED"}}
+      },
+      "ResultPath": null,
+      "Next": "OrderCompensated"
+    },
+    "MarkOrderFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${OrderOperationsTable}",
+        "Key": {"orderId": {"S.$": "$.orderId"}},
+        "UpdateExpression": "SET #status = :failed",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {":failed": {"S": "FAILED"}}
+      },
+      "ResultPath": null,
+      "Next": "TerminalOrderFailure"
+    },
+    "MarkManualRecovery": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${OrderOperationsTable}",
+        "Key": {"orderId": {"S.$": "$.orderId"}},
+        "UpdateExpression": "SET #status = :manualRecovery",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {":manualRecovery": {"S": "MANUAL_RECOVERY"}}
+      },
+      "ResultPath": null,
+      "Next": "TerminalCompensationFailure"
+    },
+    "DuplicateOrder": {"Type": "Succeed"},
+    "OrderCompleted": {"Type": "Succeed"},
+    "OrderCompensated": {"Type": "Succeed"},
+    "TerminalOrderFailure": {
+      "Type": "Fail",
+      "Error": "OrderFailed",
+      "Cause": "Inventory could not be reserved"
+    },
+    "TerminalCompensationFailure": {
+      "Type": "Fail",
+      "Error": "ManualRecoveryRequired",
+      "Cause": "Payment failed and inventory release did not complete"
+    },
+    "TerminalInfrastructureFailure": {
+      "Type": "Fail",
+      "Error": "OrderClaimUnavailable",
+      "Cause": "The order idempotency record could not be claimed"
+    }
+  }
+}

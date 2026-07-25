@@ -1,0 +1,209 @@
+{
+  "title": "Rebuild state from history, not process memory",
+  "description": "Inject a failure, scrub the recorded timeline, and change replay compatibility and external idempotency. The model separates Workflow recovery from business side effects.",
+  "defaults": {
+    "incidentId": "activity-completion-lost",
+    "codeContractId": "compatible",
+    "idempotencyGuard": true
+  },
+  "codeContracts": [
+    {
+      "id": "compatible",
+      "label": "Replay-compatible Workflow code",
+      "detail": "The same history produces the same command sequence."
+    },
+    {
+      "id": "unversioned-change",
+      "label": "Unversioned command change",
+      "detail": "New code inserts or removes a command that old history did not record."
+    }
+  ],
+  "incidents": [
+    {
+      "id": "workflow-worker-crash",
+      "label": "Workflow Worker crashes",
+      "detail": "The Activity result is already recorded when the Workflow Worker process disappears.",
+      "failureBoundary": "After ActivityTaskCompleted is recorded",
+      "mismatchAtStep": 4,
+      "events": [
+        {
+          "id": "workflow-started",
+          "number": 1,
+          "kind": "history",
+          "label": "WorkflowExecutionStarted",
+          "detail": "The order input and Workflow type are durable.",
+          "state": "Order accepted",
+          "attempt": 0
+        },
+        {
+          "id": "activity-scheduled",
+          "number": 2,
+          "kind": "history",
+          "label": "ActivityTaskScheduled",
+          "detail": "The Workflow commands one logical payment Activity.",
+          "state": "Waiting for payment",
+          "attempt": 0
+        },
+        {
+          "id": "activity-completed",
+          "number": 3,
+          "kind": "history",
+          "label": "ActivityTaskCompleted",
+          "detail": "The charge result is recorded in Event History.",
+          "state": "Payment result durable",
+          "attempt": 1,
+          "guardedEffects": 1,
+          "unguardedEffects": 1
+        },
+        {
+          "id": "workflow-worker-stopped",
+          "number": 4,
+          "kind": "failure",
+          "label": "Workflow Worker process stops",
+          "detail": "Cached Workflow state is lost, but Event History remains.",
+          "state": "Awaiting another Worker",
+          "attempt": 1
+        },
+        {
+          "id": "workflow-replayed",
+          "number": 5,
+          "kind": "replay",
+          "label": "History replays on another Worker",
+          "detail": "The recorded Activity result is returned without charging again.",
+          "state": "Payment confirmed",
+          "attempt": 1
+        }
+      ]
+    },
+    {
+      "id": "activity-completion-lost",
+      "label": "Activity completion is not recorded",
+      "detail": "The provider accepted the charge, but the Activity Worker stops before Temporal records completion.",
+      "failureBoundary": "After external commit, before ActivityTaskCompleted",
+      "mismatchAtStep": 6,
+      "events": [
+        {
+          "id": "workflow-started",
+          "number": 1,
+          "kind": "history",
+          "label": "WorkflowExecutionStarted",
+          "detail": "The order input and Workflow type are durable.",
+          "state": "Order accepted",
+          "attempt": 0
+        },
+        {
+          "id": "activity-scheduled",
+          "number": 2,
+          "kind": "history",
+          "label": "ActivityTaskScheduled",
+          "detail": "The Workflow schedules one logical charge Activity.",
+          "state": "Waiting for payment",
+          "attempt": 0
+        },
+        {
+          "id": "attempt-one",
+          "number": 3,
+          "kind": "history",
+          "label": "ActivityTaskStarted",
+          "detail": "A payments Worker starts attempt 1.",
+          "state": "Charge in progress",
+          "attempt": 1
+        },
+        {
+          "id": "provider-commit",
+          "number": 4,
+          "kind": "external",
+          "label": "Payment provider commits",
+          "detail": "The side effect exists outside Temporal, but completion is not durable yet.",
+          "state": "Outcome ambiguous to Temporal",
+          "attempt": 1,
+          "guardedEffects": 1,
+          "unguardedEffects": 1
+        },
+        {
+          "id": "attempt-timeout",
+          "number": 5,
+          "kind": "failure",
+          "label": "Attempt times out",
+          "detail": "The missing completion is detected and the Retry Policy permits another attempt.",
+          "state": "Retry scheduled",
+          "attempt": 1
+        },
+        {
+          "id": "attempt-two",
+          "number": 6,
+          "kind": "history",
+          "label": "ActivityTaskStarted",
+          "detail": "Another Worker starts attempt 2 with the same business operation ID.",
+          "state": "Charge retry in progress",
+          "attempt": 2
+        },
+        {
+          "id": "activity-completed",
+          "number": 7,
+          "kind": "history",
+          "label": "ActivityTaskCompleted",
+          "detail": "The provider result from the guarded retry is recorded.",
+          "state": "Payment result durable",
+          "attempt": 2,
+          "guardedEffects": 1,
+          "unguardedEffects": 2
+        }
+      ]
+    },
+    {
+      "id": "workflow-code-change",
+      "label": "New Workflow code meets old history",
+      "detail": "A running execution is picked up by a deployment whose command sequence changed without versioning.",
+      "failureBoundary": "During replay on the new Worker deployment",
+      "mismatchAtStep": 4,
+      "events": [
+        {
+          "id": "workflow-started",
+          "number": 1,
+          "kind": "history",
+          "label": "WorkflowExecutionStarted",
+          "detail": "Version 1 of the Workflow began the order.",
+          "state": "Order accepted",
+          "attempt": 0
+        },
+        {
+          "id": "timer-started",
+          "number": 2,
+          "kind": "history",
+          "label": "TimerStarted",
+          "detail": "Version 1 recorded a wait before scheduling payment.",
+          "state": "Waiting for approval window",
+          "attempt": 0
+        },
+        {
+          "id": "timer-fired",
+          "number": 3,
+          "kind": "history",
+          "label": "TimerFired",
+          "detail": "The durable timer completed.",
+          "state": "Ready to schedule payment",
+          "attempt": 0
+        },
+        {
+          "id": "new-worker",
+          "number": 4,
+          "kind": "replay",
+          "label": "Version 2 Worker replays",
+          "detail": "The Worker must emit commands compatible with the events produced by version 1.",
+          "state": "Compatibility check",
+          "attempt": 0
+        },
+        {
+          "id": "next-command",
+          "number": 5,
+          "kind": "history",
+          "label": "Next command matches",
+          "detail": "Worker Versioning or a recorded patch keeps the execution on a compatible branch.",
+          "state": "Execution can continue",
+          "attempt": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,293 @@
+---
+registryId: practice-content-moderation
+---
+
+{% section-card tone="intro" %}
+## What is a content moderation system?
+
+A content moderation system decides whether user-generated text, images, audio, and video may stay visible, needs limited distribution, requires human review, or must be removed. The model supplies evidence; a versioned policy makes the enforcement decision.
+
+For this interview, design a global service for **10 million posts per day**, bursts up to **100 million posts per day**, **50+ languages**, and a **sub-second automated path**. The core invariant is stronger than model accuracy: every enforcement action must be explainable, auditable, and reversible through an appeal.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Separate score from policy" eyebrow="Decision" icon="scale" tone="blue" %}
+Models estimate risk. A policy engine combines those scores with content type, region, user context, and enforcement history.
+{% /concept-card %}
+{% concept-card title="Spend humans on ambiguity" eyebrow="Operations" icon="users" tone="violet" %}
+Clear cases take the automated path; uncertain, high-impact, and appealed decisions enter bounded specialist queues.
+{% /concept-card %}
+{% concept-card title="Degrade visibility, not safety" eyebrow="Reliability" icon="shield" tone="green" %}
+When a classifier or review queue is unhealthy, quarantine risky content and preserve evidence instead of silently allowing it.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the Use Case and Guardrails" %}
+
+
+### Define what the system decides
+
+The first version supports posts, comments, images, and short videos. It returns one of four product actions:
+
+1. **Allow:** publish normally because risk is below the allow threshold.
+2. **Limit:** keep the content available but reduce recommendations or age-gate it.
+3. **Review:** quarantine or restrict the content until a trained reviewer decides.
+4. **Remove:** block visibility and trigger any required user, safety, or legal workflow.
+
+The system also accepts user reports and appeals. It does not train a foundation model from scratch, moderate encrypted private messages, or make law-enforcement decisions.
+
+### State goals that can conflict
+
+{% metric-strip %}
+{% metric value="<1s" label="Automated p95" detail="Ingest through policy decision for ordinary posts." tone="blue" /%}
+{% metric value="<0.1%" label="False-positive target" detail="Legitimate content incorrectly removed or restricted." tone="violet" /%}
+{% metric value="<4h" label="Review target" detail="Average age for ordinary escalations; urgent threats are faster." tone="green" /%}
+{% metric value="100%" label="Decision trace" detail="Policy, model, evidence, action, and appeal state are versioned." tone="rose" /%}
+{% /metric-strip %}
+
+These goals cannot be compressed into a single **99.5% accuracy** number. A rare but severe policy category can have high aggregate accuracy while still missing most violations. Measure precision, recall, latency, and impact separately for each category, language, region, and content modality.
+
+### Ask the questions that change the design
+
+- **Surface:** Is the content public, recommended, monetized, live, or private?
+- **Policy:** Which harms require immediate removal, limited distribution, or specialist review?
+- **Context:** Which decisions depend on conversation history, quoted speech, satire, age, or region?
+- **Impact:** Can an automated decision suspend an account or only restrict one item?
+- **Recovery:** What evidence must an appeal reviewer see, and how quickly must a mistaken action be reversed?
+- **Privacy and welfare:** How long may sensitive evidence be retained, who may view it, and how is repeated reviewer exposure limited?
+
+{% callout variant="info" %}
+**Design principle:**
+
+Use stricter evidence and human oversight as the consequence becomes more severe. An automated ranking reduction and a permanent account ban should not share the same decision threshold.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Traffic and Review Capacity" %}
+
+
+### Turn daily volume into an online rate
+
+Ten million posts per day is about **116 posts per second** on average. A 10x event burst reaches roughly **1,160 posts per second** before regional and failure headroom. With a 60/30/10 text-image-video mix, the system must route each post to different preprocessing and model pools rather than send everything through the most expensive multimodal model.
+
+### Size the human system as a queue
+
+If 5% of baseline traffic is uncertain, reviewers receive **500,000 items per day**. At 45 decisions per productive hour and seven productive hours per reviewer, one reviewer clears about **315 items per day**. That means the baseline needs around **1,600 reviewers** before shrinkage, specialization, quality sampling, regional coverage, or event headroom.
+
+The review threshold is therefore an operational control. Sending more ambiguity to humans can improve decision quality, but only while the queue remains within its service-level objective.
+
+{% interactive-block id="practice/content-moderation-triage-capacity-lab" /%}
+
+### Budget storage around evidence, not only posts
+
+- Store the original content in object storage under its product retention policy.
+- Store compact model scores, extracted features, and policy decisions in an auditable decision record.
+- Retain reviewer-visible evidence only as long as policy and regulation require.
+- Model report and appeal traffic separately because one viral incident can create many reports for one content ID.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the Decision Architecture" %}
+
+
+### Keep the online path short and the decision durable
+
+{% system-flow title="Content decision path" caption="Cheap checks reject obvious abuse early. The policy engine owns the action, while queues carry uncertain and follow-up work." %}
+{% system-node title="Ingest and normalize" eyebrow="Accept" icon="route" tone="blue" %}
+Authenticate the actor, assign a content ID, extract text and frames, detect language, and remove duplicate work.
+{% /system-node %}
+{% system-node title="Risk cascade" eyebrow="Score" icon="search" tone="cyan" %}
+Run hashes and rules first, then specialist text, vision, audio, or multimodal models only when needed.
+{% /system-node %}
+{% system-node title="Policy engine" eyebrow="Decide" icon="scale" tone="violet" %}
+Combine calibrated evidence with jurisdiction, surface, age, reach, history, and the active policy version.
+{% /system-node %}
+{% system-node title="Action and trace" eyebrow="Enforce" icon="shield" tone="amber" %}
+Publish, limit, quarantine, or remove idempotently, then persist the evidence and explanation.
+{% /system-node %}
+{% system-node title="Review and appeal" eyebrow="Recover" icon="users" tone="green" %}
+Route ambiguous, severe, sampled, and appealed cases to the right specialist queue and feed corrections back safely.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate responsibilities
+
+- **Model service:** returns calibrated risk scores and evidence references; it does not decide the product action.
+- **Policy engine:** maps evidence and context to a versioned action; the same score may produce different actions by surface or jurisdiction.
+- **Decision store:** records content, actor, policy, model, scores, action, reason codes, timestamps, and appeal lineage.
+- **Queue router:** partitions review by urgency, language, modality, expertise, and exposure limits.
+- **Enforcement service:** applies idempotent product changes and can reverse them after an appeal.
+
+### Make repeated delivery harmless
+
+Every stage uses the content ID plus decision version as an idempotency key. A retry may rerun inference or redeliver an event, but it must not suspend an account twice, duplicate a reviewer task, or overwrite a newer appeal outcome.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep Dive on Models, Policy, and Human Review" %}
+
+
+### Use a cascade instead of one universal model
+
+{% process-flow %}
+{% process-step number="1" title="Reject known abuse" label="Rules" %}
+Match cryptographic and perceptual hashes, spam signatures, blocked links, and exact policy rules at low cost.
+{% /process-step %}
+{% process-step number="2" title="Score each modality" label="Models" %}
+Run language, vision, audio, OCR, and temporal models with calibrated category-specific confidence.
+{% /process-step %}
+{% process-step number="3" title="Fuse context" label="Meaning" %}
+Combine text and media with conversation, account, reach, and regional context when the category requires it.
+{% /process-step %}
+{% process-step number="4" title="Apply policy" label="Action" %}
+Choose the least severe action that contains the risk, preserve evidence, and expose an appeal path.
+{% /process-step %}
+{% /process-flow %}
+
+### Treat context as evidence, not an excuse for a larger model
+
+- A meme can be harmless in image and text isolation but violating when the two are combined.
+- Quoted hate speech may be condemnation, reporting, education, or targeted abuse depending on surrounding conversation.
+- Livestream violence requires frame sampling plus audio and temporal signals; a single still image loses the event sequence.
+- Regional policy changes the allowed action, but global child-safety and imminent-harm rules remain non-negotiable.
+
+### Practice the policy decision
+
+Select a scenario, choose an enforcement action, and decide which safeguards are required. The lab scores both immediate harm containment and the ability to explain or reverse the decision.
+
+{% interactive-block id="practice/content-moderation-policy-response-lab" /%}
+
+### Keep human feedback from poisoning the system
+
+Reviewer decisions are labels with provenance, not unquestionable truth. Measure inter-reviewer agreement, sample decisions for quality review, separate policy disagreement from model error, and quarantine coordinated or compromised feedback. Train on adjudicated outcomes, not raw clicks from the review tool.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define Evaluation and Launch Gates" %}
+
+
+### Evaluate the whole decision system
+
+**Model quality**
+
+- Precision and recall per policy category, modality, language, region, and severity.
+- Calibration error so a 0.9 score has comparable meaning across important slices.
+- Robustness against spacing, encoding, adversarial overlays, slang, and multimodal composition.
+
+**Product impact**
+
+- Harmful-content prevalence and time to remove, weighted by impressions before action.
+- False enforcement rate, appeal rate, overturn rate, and time to restore content.
+- Creator and user impact by surface, account size, and enforcement severity.
+
+**Operational health**
+
+- Automated-path p50, p95, and p99 latency by model tier.
+- Review queue age, arrival rate, service rate, abandonment, and urgent-case SLA.
+- Reviewer agreement, quality-sample accuracy, exposure load, and escalation rate.
+
+### Use hard release gates
+
+{% metric-strip %}
+{% metric value="0" label="Critical regressions" detail="No known increase in severe-harm escapes on the red-team set." tone="rose" /%}
+{% metric value="At baseline" label="False actions" detail="No material regression for any protected language or demographic slice." tone="violet" /%}
+{% metric value="<1s" label="Online p95" detail="Measured end to end under production-shaped peak load." tone="blue" /%}
+{% metric value="<80%" label="Queue utilization" detail="Enough review headroom for spikes, absence, and specialist routing." tone="green" /%}
+{% /metric-strip %}
+
+Ship through offline evaluation, adversarial tests, shadow scoring, a small reversible canary, and gradual expansion. Never launch only because aggregate accuracy improved.
+
+{% /accordion-item %}
+
+{% accordion-item id="cost-governance" title="6. Control Cost and Governance" %}
+
+
+### Spend expensive resources only where they change the decision
+
+1. Deduplicate reports and known content before inference.
+2. Run hashes, rules, and small specialist models before multimodal or generative reasoning.
+3. Cache immutable model evidence by content hash and model version, never by policy action alone.
+4. Sample clear cases for quality control rather than sending all of them to reviewers.
+5. Re-evaluate only when policy, model, context, or distribution changes materially.
+
+Track cost per ingested item, per automated decision, per reviewed decision, per appeal, and per prevented impression. A cheap classifier that generates an enormous review queue is not a cheap system.
+
+### Give governance concrete owners
+
+- **Policy team:** owns definitions, reason codes, jurisdiction mappings, and effective dates.
+- **ML team:** owns training data, model cards, calibration, slice performance, and rollback.
+- **Trust operations:** owns reviewer queues, quality assurance, training, and welfare controls.
+- **Product enforcement:** owns action semantics, notification, restoration, and account state.
+- **Privacy and legal:** own access, retention, residency, transparency, and regulator workflows.
+
+Every decision trace should answer: what was observed, which policy applied, which action followed, who or what made it, whether it changed on appeal, and when retained evidence will be deleted.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Plan Scaling and Degraded Modes" %}
+
+
+### Scale each pool independently
+
+- Partition ingest by region and content ID while keeping one durable decision lineage.
+- Autoscale text, image, audio, and video inference pools from queue age and accelerator saturation.
+- Reserve capacity for urgent threats, livestreams, appeals, and legal deadlines.
+- Route review work by skill and jurisdiction; do not treat all reviewers as interchangeable capacity.
+- Reprocess viral content when reach or new context raises expected harm, without duplicating enforcement.
+
+### Define failure behavior before the incident
+
+| Failure | Safe degraded behavior | Recovery evidence |
+| --- | --- | --- |
+| Specialist model unavailable | Use a validated fallback for low-risk content; quarantine high-risk uncertainty | Scores, fallback version, queue age |
+| Review queue overloaded | Prioritize severe and high-reach cases; limit uncertain distribution | SLA by severity and dropped deferrals |
+| Policy rollout is wrong | Stop the policy version and replay affected decisions | Policy diff and impacted decision IDs |
+| Decision store is unavailable | Fail closed for severe categories and buffer idempotent decisions | Durable event log and reconciliation count |
+| Regional partition | Continue local decisions within bounded policy staleness | Version lag and post-recovery conflicts |
+
+### Observe decisions, not only services
+
+Alert on category-specific escape rates, false-action spikes, score-distribution drift, language slice regressions, queue age, reviewer disagreement, appeal overturns, and action failures. Infrastructure can be healthy while a policy version causes widespread user harm.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Compare Trade-offs and Extend the Design" %}
+
+
+### Defend the design in one minute
+
+The service uses cheap checks and specialist models to produce calibrated evidence, then a versioned policy engine chooses allow, limit, review, or remove. Automated decisions stay under one second; ambiguous and high-impact cases enter specialist queues sized from measured arrival and service rates. Every action is idempotent, auditable, and reversible. Under failure, the system limits or quarantines uncertain high-risk content instead of bypassing safety.
+
+### Name the major trade-offs
+
+- **Precision versus recall:** severe harms justify higher recall, while permanent account actions require stronger evidence.
+- **Latency versus context:** fast models handle obvious cases; deeper multimodal and conversational context is reserved for ambiguity.
+- **Automation versus review:** humans improve judgment only while queue age, training, agreement, and welfare remain controlled.
+- **Global consistency versus local policy:** share evidence and core safety invariants globally, but evaluate jurisdiction-specific actions locally.
+- **Learning speed versus feedback integrity:** update quickly from incidents, but train only from versioned and adjudicated outcomes.
+
+### Explore credible extensions
+
+- Add livestream moderation with temporal windows, urgent intervention, and evidence retention.
+- Add coordinated-abuse detection that joins behavior across accounts without turning the online classifier into a graph query.
+- Add transparent creator explanations that reveal reason codes without publishing evasion thresholds.
+- Add policy simulation that estimates user impact before a new rule or threshold reaches production.
+- Add reviewer-assist generation only after measuring hallucination, anchoring bias, and decision independence.
+
+{% callout variant="tip" %}
+**Interview close:**
+
+End by naming the highest-risk assumption: the review arrival rate is not fixed. Viral events, policy changes, and model drift can multiply ambiguity, so review capacity, prioritization, and safe degraded behavior are part of the correctness design.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/content-moderation/quiz/content-moderation-design-review.json"
+   lessonSlug="practice-content-moderation"
+   title="Content Moderation Design Review" /%}

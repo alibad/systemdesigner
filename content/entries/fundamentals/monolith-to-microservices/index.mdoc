@@ -1,0 +1,157 @@
+---
+registryId: monolith-to-microservices
+---
+
+{% section-card tone="intro" %}
+## What is a monolith-to-microservices migration?
+
+A **monolith** is one application that is built and deployed as one unit. A **microservice** is a smaller application with a clear business responsibility, its own deployable boundary, and an explicit contract with other services. A migration moves selected responsibilities out of a monolith gradually; it is not a rewrite and it is not a goal to maximize service count.
+
+The useful question is: **which boundary will remove a measurable constraint without creating more operational cost than it removes?** Start with a modular monolith when the domain is still changing. Extract only when a team, scaling profile, release cadence, or reliability requirement needs independent control.
+{% /section-card %}
+
+{% process-flow %}
+{% process-step number="1" title="Name the constraint" label="Measure" %}
+Capture the blocked release, overloaded capability, ownership conflict, or reliability target. A service boundary must solve one of these concrete problems.
+{% /process-step %}
+{% process-step number="2" title="Prove a boundary in-process" label="Modularize" %}
+Give a module one vocabulary, one write owner, and an interface that other modules use instead of reaching into its tables.
+{% /process-step %}
+{% process-step number="3" title="Extract a narrow path" label="Strangle" %}
+Put a router in front of one capability, retain the previous path, and move traffic only after behavior and operations are observable.
+{% /process-step %}
+{% process-step number="4" title="Transfer ownership" label="Operate" %}
+Move deployment, on-call, data ownership, service objectives, and recovery responsibility with the extracted capability.
+{% /process-step %}
+{% /process-flow %}
+
+{% section-card %}
+## Decide whether a boundary earns its cost
+
+Microservices add network calls, partial failures, deployment surfaces, data synchronization, tracing, and more on-call work. They are justified when that cost buys a specific capability the monolith cannot provide economically.
+
+### Signals that support extraction
+
+- **Independent change:** one team repeatedly waits for unrelated releases or must coordinate changes across an unclear code area.
+- **Independent load:** a bounded capability consumes a very different amount of CPU, memory, storage, or traffic than the rest of the application.
+- **Independent risk:** a non-critical task can fail or be delayed without blocking a critical customer action.
+- **Stable language:** the capability has durable business terms, a clear owner, and a small enough API to explain to another team.
+
+### Signals to keep the monolith
+
+- The business rules are still being discovered, so any boundary would encode guesses as network contracts.
+- A single transaction protects the core invariant and there is no accepted compensation or reconciliation model yet.
+- The team cannot yet observe, deploy, alert on, and restore an independently running production service.
+
+{% callout variant="warn" %}
+### A service count is not an architecture metric
+
+Ten services owned by ten teams can be simpler to change than ten services owned by two teams. Count independently managed contracts, dependencies, and recovery paths instead of treating more services as maturity.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Estimate the extraction before building it
+
+An extraction changes more than request latency. Estimate the call volume, data movement, and failure budget first, then choose the smallest scope that gives useful evidence.
+
+For a checkout application with **2,000 requests per second** at peak, suppose 30% of requests need a shipping quote. A synchronous shipping call adds 600 downstream requests per second. If the new service needs 40% headroom, plan for at least `600 / 0.60 = 1,000 requests per second` of sustainable capacity before retries. A retry policy that doubles calls during a timeout can consume that headroom immediately.
+
+Use three explicit budgets:
+
+- **Latency:** reserve a deadline for every remote call. A 250 ms checkout target cannot safely spend 240 ms waiting on one optional dependency.
+- **Availability:** decide what the customer sees when the new path fails. For example, show a conservative shipping estimate, defer fulfillment selection, or block only the action that needs a confirmed quote.
+- **Consistency:** write down which fact has one authoritative owner and how other services learn it. A replicated copy is not a second write owner.
+{% /section-card %}
+
+{% section-card %}
+## Decomposition and boundary lab
+
+Try each scenario, then select a node to inspect its responsibility. The goal is to distinguish a useful business boundary from a shared-database split that only adds network hops.
+
+{% topology-lab dataFile="/api/content/fundamentals/monolith-to-microservices/data/decomposition-boundary-lab.json" /%}
+
+### Boundary rules that survive extraction
+
+- A service owns its writes and publishes facts that other services may consume. Other services request behavior through its API or subscribe to its events; they do not query its tables.
+- Keep a business invariant with the service that can enforce it. For example, order placement owns the decision that an order is accepted; inventory owns whether stock can be reserved.
+- Let read models duplicate data deliberately. A shipping screen may store an asynchronous copy of an order address, but it must tolerate staleness and know its source.
+{% /section-card %}
+
+{% section-card %}
+## Design the first distributed contract
+
+Start with a small capability that has an understandable fallback. In this example, the order module asks a fulfillment service to reserve stock. The command has an idempotency key because a caller can time out after the remote service commits the reservation.
+
+{% code-block file="/api/content/fundamentals/monolith-to-microservices/code/fulfillment-extraction-contract.ts" language="ts" title="An idempotent reservation contract" /%}
+
+The response is not a distributed transaction. The order module records the reservation identifier and later reacts to `reservation.rejected` or `reservation.expired` through a durable event. This makes the failure mode explicit: a confirmed order may need compensation, but it never silently assumes stock was reserved.
+{% /section-card %}
+
+{% section-card %}
+## Migrate with a reversible failure sequence
+
+The strangler pattern routes one narrow path through a new service while the old implementation remains available. Move reads before irreversible writes when possible. Before raising traffic, prove that the new path has a deadline, bounded retries, correlated logs, metrics, and a rollback switch.
+
+{% topology-lab dataFile="/api/content/fundamentals/monolith-to-microservices/data/migration-failure-sequencing-lab.json" /%}
+
+### A safe promotion sequence
+
+1. **Mirror or shadow:** send a copy of eligible reads to the candidate and compare results without changing the customer response.
+2. **Canary:** route a small, identifiable cohort to the candidate. Alert on its error rate, latency, domain correctness, and fallback volume.
+3. **Expand with a stop rule:** increase traffic only after a defined observation window is healthy. Keep the previous release and its data path compatible.
+4. **Roll back before repair:** if a guardrail breaches, stop promotion and route back first. Diagnose from request IDs, versioned events, and retained comparison data.
+
+{% callout variant="tip" %}
+### Failure isolation is a product decision
+
+If fulfillment is slow, a checkout can show a delayed promise and capture the order for review. If payment authorization is unavailable, it should not claim that an order is paid. Degrade the optional path; fail closed on the business invariant.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate the boundary, not just the code
+
+An extraction is complete when the owning team can answer these questions during an incident:
+
+- **Who owns the fact?** Name the service that can create, update, and correct each business record.
+- **What is the dependency contract?** Record deadline, retry limit, idempotency behavior, fallback response, and the version compatibility window.
+- **How do we know it is healthy?** Track request rate, success rate, latency percentiles, saturation, queue age, and business outcomes such as reservation confirmation rate.
+- **How do we recover?** Test traffic rollback, replay or reconciliation of events, and repair of records that entered an intermediate state.
+
+Keep a lightweight service catalog with the owner, API or event contract, data store, objectives, dashboards, runbook, and last recovery exercise. This is operational information, not documentation ceremony: it shortens the time between an alert and a correct decision.
+
+Verify the conditions for one real extraction. The checklist persists its progress locally so it can serve as a preparation aid before a rollout review.
+
+{% interactive-checklist checklistId="monolith-to-microservices-readiness" dataFile="/api/content/fundamentals/monolith-to-microservices/data/extraction-readiness-checklist.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose the architecture that fits the organization
+
+### Modular monolith
+
+Best when a team needs faster delivery and clearer ownership but still benefits from one deployment and local transactions. Enforce module APIs and prohibit cross-module table access so future extraction remains possible.
+
+### Selective microservices
+
+Best when a few stable capabilities need independent scaling or release control. Keep the rest of the product together; a hybrid system is often the steady state, not a temporary failure.
+
+### Broad decomposition
+
+Only consider this when teams have mature delivery automation, observability, incident response, contract testing, and a domain model stable enough to support many long-lived APIs. The gain is autonomy; the price is continuous distributed-systems work.
+
+The invariant across all three options is the same: each critical fact has one write owner and each failure has an intentional customer-visible outcome.
+{% /section-card %}
+
+{% section-card %}
+## Before you extract the next service
+
+- State the current bottleneck and the metric that proves the extraction helped.
+- Confirm the candidate owns a cohesive business capability rather than a database table or technical layer.
+- Define API or event compatibility, idempotency, deadlines, and a fallback before sending production traffic.
+- Keep old and new paths runnable long enough to compare, roll back, and reconcile.
+- Transfer alerts, dashboard ownership, on-call responsibility, and a tested recovery runbook with the service.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/monolith-to-microservices/quiz/monolith-to-microservices-review.json" lessonSlug="monolith-to-microservices" title="Monolith to Microservices Decision Review" /%}

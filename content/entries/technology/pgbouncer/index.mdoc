@@ -1,0 +1,345 @@
+---
+registryId: pgbouncer
+---
+
+{% section-card tone="intro" %}
+## What is PgBouncer?
+
+**PgBouncer is a lightweight proxy that accepts PostgreSQL client connections and
+reuses a smaller, bounded set of connections to PostgreSQL.** Applications connect to
+PgBouncer as if it were the database. PgBouncer authenticates each client, waits until
+a server connection is available, forwards PostgreSQL protocol messages, and returns
+that server connection to a pool at a configured boundary.
+
+This matters because PostgreSQL normally starts a backend process for each server
+connection. A large fleet of mostly idle application connections can therefore consume
+connection slots and memory before useful queries arrive. PgBouncer keeps inexpensive
+client sockets separate from the scarcer PostgreSQL backend budget.
+
+{% callout variant="info" %}
+The core invariant is **many client connections, few controlled server connections**.
+PgBouncer protects PostgreSQL only when every pool, every PgBouncer instance, direct
+database access, and emergency reserves fit inside the database's connection budget.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Client connection" eyebrow="Application side" icon="users" tone="cyan" %}
+A TCP or Unix-socket session from a driver to PgBouncer. `max_client_conn` limits these
+connections, but each one still consumes a file descriptor and PgBouncer memory.
+{% /concept-card %}
+{% concept-card title="Server connection" eyebrow="Database side" icon="database" tone="blue" %}
+A connection from PgBouncer to PostgreSQL. It owns one PostgreSQL backend process and is
+the expensive resource the pool must bound.
+{% /concept-card %}
+{% concept-card title="Pool" eyebrow="Scheduling boundary" icon="layers" tone="violet" %}
+A queue plus reusable server connections for one `(database, user)` pair. More users,
+databases, or PgBouncer instances create more independent pools.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Understand the connection cost before sizing a pool
+
+A direct PostgreSQL connection performs network setup, optional TLS negotiation,
+authentication, and backend-process startup. The backend then remains allocated until
+the client disconnects, even while the client is idle. Raising PostgreSQL
+`max_connections` can admit more backends, but PostgreSQL also sizes some resources
+from that setting and active backends can compete for CPU, memory, locks, and I/O.
+
+PgBouncer changes the shape, not the capacity, of the database:
+
+{% process-flow %}
+{% process-step number="1" title="Clients connect" label="Cheap fan-in" %}
+Application pools keep long-lived connections to PgBouncer, avoiding repeated
+authentication and setup on the request path.
+{% /process-step %}
+{% process-step number="2" title="Queries wait" label="Admission queue" %}
+When no server connection is free, the client waits in PgBouncer instead of creating an
+unbounded PostgreSQL backend.
+{% /process-step %}
+{% process-step number="3" title="A server is assigned" label="Bounded concurrency" %}
+PgBouncer links one client to one server connection for a session, transaction, or
+statement according to `pool_mode`.
+{% /process-step %}
+{% process-step number="4" title="The server is reused" label="Release boundary" %}
+After the configured boundary, PgBouncer returns the server connection to its
+`(database, user)` pool for another client.
+{% /process-step %}
+{% /process-flow %}
+
+Pooling does not make slow SQL faster. It makes excess concurrency wait outside
+PostgreSQL, where pressure is observable and bounded. The useful server pool is usually
+the concurrency the database can execute efficiently, not the number of clients that
+might connect.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Model pool width, reserve use, and queue pressure
+
+Start from a database-wide budget:
+
+- `safe server budget = max_connections - PostgreSQL reserved slots - direct connections`
+- `configured base = PgBouncer instances * distinct pools * pool_size`
+- `configured reserve = PgBouncer instances * distinct pools * reserve_pool_size`
+
+The multiplication is easy to miss. Two PgBouncer instances, three database/user pairs,
+and `pool_size = 20` can request 120 server connections before reserve pools or direct
+administrative connections.
+
+The lab treats active demand as an even distribution across pools so the arithmetic is
+visible. Real traffic is rarely even; one hot tenant, role, or database can queue while
+another pool is idle.
+
+{% interactive-block id="technology/pgbouncer-performance" dataFile="/api/content/technology/pgbouncer/data/connection-capacity-model.json" /%}
+
+### Read the queue as a capacity signal
+
+- A short queue during a burst is deliberate admission control.
+- Sustained `cl_waiting`, increasing `maxwait`, or rising `total_wait_time` means the
+  workload wants more database concurrency than the current pools release.
+- A larger pool can reduce pool wait only while PostgreSQL has useful headroom. Past
+  that point, it moves the queue into CPU, locks, storage, or scheduler contention.
+- `reserve_pool_size` is temporary overflow after a client has waited for
+  `reserve_pool_timeout`; it is not free steady-state capacity.
+- `query_wait_timeout` bounds how long a query may wait for assignment. When it expires,
+  PgBouncer disconnects that client, so application retry and load-shedding policy must
+  be explicit.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the release boundary before choosing a pool size
+
+Pooling mode controls how long one client owns one PostgreSQL server session. It is a
+correctness decision before it is a performance decision.
+
+{% interactive-block id="technology/pgbouncer-pooling-mode-lab" dataFile="/api/content/technology/pgbouncer/data/pooling-compatibility-model.json" /%}
+
+### Session pooling
+
+One server connection stays assigned until the client disconnects. It preserves
+PostgreSQL session semantics, including session-level `SET`, `LISTEN`, SQL
+`PREPARE`, session advisory locks, and long-lived temporary tables. It is the safest
+compatibility baseline, but idle clients pin server connections and reduce
+multiplexing.
+
+### Transaction pooling
+
+One server connection is assigned for a transaction and returned after `COMMIT` or
+`ROLLBACK`. Different transactions from the same client may run on different
+PostgreSQL sessions. This mode gives strong reuse for short transactions, but the
+application must keep state inside each transaction.
+
+### Statement pooling
+
+The server connection is returned after each statement. PgBouncer rejects
+multi-statement transactions because the client cannot retain one server connection
+across statements. This aggressive mode fits only autocommit workloads whose complete
+unit of work is one statement.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make session state and prepared statements explicit
+
+Transaction pooling breaks any assumption that state set in one transaction will be
+present in the next. Common hazards include:
+
+- session-level `SET` and `RESET`, including an untracked `search_path`;
+- `LISTEN`, session-level advisory locks, and cursors declared `WITH HOLD`;
+- temporary tables that preserve rows beyond transaction end;
+- SQL-level `PREPARE`, `EXECUTE`, and `DEALLOCATE`;
+- application code that starts a transaction, returns the connection to a client-side
+  pool, and later expects to continue the same transaction.
+
+Prefer transaction-scoped state:
+
+{% code-block file="/api/content/technology/pgbouncer/code/transaction-pool-safe.sql" language="sql" title="Keep request-specific state inside one explicit transaction" /%}
+
+Protocol-level named prepared statements are a special case. Current PgBouncer releases
+can track and rewrite them in transaction and statement pooling when
+`max_prepared_statements` is non-zero. This support does **not** make SQL
+`PREPARE`/`EXECUTE` compatible, and driver/protocol combinations still need integration
+tests. Schema changes that alter prepared result types may require `RECONNECT` so
+server-side plans are rebuilt.
+
+{% callout variant="warn" %}
+Do not use `server_reset_query_always` to make a session-dependent application appear
+transaction-safe. Resetting after every transaction makes state loss deterministic; it
+does not restore the missing session contract.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Configure explicit budgets and bounded waiting
+
+The following baseline makes the important contracts visible. Its numbers are examples,
+not universal defaults: measure PostgreSQL's useful concurrency, count every pool and
+PgBouncer instance, and keep separate database slots for administration, migrations,
+replication, and direct health checks.
+
+{% code-block file="/api/content/technology/pgbouncer/code/production-pgbouncer.ini" language="ini" title="Transaction-pooling baseline with explicit security and pressure limits" /%}
+
+### Timeout ownership
+
+- Put normal query execution limits in PostgreSQL `statement_timeout` or transaction
+  policy. PgBouncer's `query_timeout` is documented as a dangerous timeout and is better
+  reserved for network-failure containment.
+- Keep `query_wait_timeout` below the user-facing deadline so a saturated pool fails
+  predictably instead of consuming the entire request budget.
+- Keep transactions short. An idle transaction retains a server connection in
+  transaction pooling and can hold locks or snapshots; use database and pooler idle
+  transaction limits appropriate to the workload.
+- Treat `server_lifetime` and `server_idle_timeout` as connection rotation controls, not
+  database failover guarantees.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Secure both sides of the proxy
+
+PgBouncer terminates one connection and creates another, so there are two independent
+trust boundaries:
+
+{% system-flow title="Authentication and TLS boundaries" caption="Encryption on one hop does not automatically protect or authenticate the other hop." %}
+{% system-node title="Application client" eyebrow="Identity" icon="users" tone="cyan" %}
+Use a least-privilege database role, verify the PgBouncer certificate, and keep
+credentials in a secret manager rather than a connection string committed to source.
+{% /system-node %}
+{% system-node title="PgBouncer listener" eyebrow="Client boundary" icon="shield" tone="violet" %}
+Require client TLS where the network is not already protected, authenticate with SCRAM,
+certificate, HBA, LDAP, or another reviewed method, and restrict the admin console.
+{% /system-node %}
+{% system-node title="PgBouncer server connection" eyebrow="Server boundary" icon="lock" tone="blue" %}
+Configure `server_tls_sslmode = verify-full` with the correct CA when hostname
+verification is required. `require` encrypts but does not validate server identity.
+{% /system-node %}
+{% system-node title="PostgreSQL" eyebrow="Authorization" icon="database" tone="green" %}
+Enforce role privileges, database access, row policies, and PostgreSQL connection
+reserves. PgBouncer authentication does not replace database authorization.
+{% /system-node %}
+{% /system-flow %}
+
+`auth_file` stores usernames and password verifiers used by PgBouncer. Protect its file
+permissions and reload it through the normal configuration path. For dynamic users,
+prefer an `auth_user` that calls a tightly scoped `SECURITY DEFINER` function instead
+of granting a pooler account broad direct access to `pg_authid`.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design failover around connection replacement
+
+PgBouncer does not promote PostgreSQL replicas or decide which node is writable. It
+opens server connections to the configured host or hosts and can react when connection
+parameters or DNS results change.
+
+### DNS and endpoint behavior
+
+- Hostnames are resolved when PgBouncer needs a server connection and cached according
+  to `dns_max_ttl`; PgBouncer does not use the DNS record's own TTL as that cache limit.
+- When a hostname resolves to a changed address, released server connections to the old
+  address are closed and new connections use the new resolution.
+- Existing work does not teleport to the new primary. During gradual replacement, old
+  and new destinations can coexist until old server connections reach their release
+  boundary.
+- A DNS name with multiple addresses is not a complete write-primary election strategy.
+  Understand the endpoint provider, cancellation routing, read/write role, and
+  split-brain behavior.
+
+### Planned and emergency changes
+
+Use the admin console deliberately:
+
+{% code-block file="/api/content/technology/pgbouncer/code/operations-console.sql" language="sql" title="Observe pools and coordinate a planned endpoint change" /%}
+
+`RELOAD` applies a changed database connection string and marks old server connections
+for closure when released. `RECONNECT` is useful when another downstream router changes
+its destination without changing PgBouncer's own configuration. Use `PAUSE` when a
+planned change requires all old server connections to drain before work resumes. An
+emergency `KILL` is disruptive and requires clients to reconnect and retry safely.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Observe the queue, database, and application together
+
+Connect to PgBouncer's virtual `pgbouncer` database with a restricted stats or admin
+role. Build time-series collection from stable console views rather than scraping log
+phrases.
+
+{% metric-strip %}
+{% metric label="Demand" value="cl_active + cl_waiting" detail="Clients using or waiting for a server connection" tone="cyan" /%}
+{% metric label="Supply" value="sv_active + sv_idle" detail="Busy and immediately reusable server connections" tone="blue" /%}
+{% metric label="Pressure" value="maxwait" detail="Age of the oldest queued client in SHOW POOLS" tone="amber" /%}
+{% metric label="Wait cost" value="total_wait_time" detail="Cumulative assignment wait in SHOW STATS" tone="violet" /%}
+{% /metric-strip %}
+
+Correlate these signals:
+
+- **PgBouncer:** `SHOW POOLS`, `SHOW STATS`, `SHOW SERVERS`, login failures, client
+  disconnects, server assignment rate, and per-database/user pool counts.
+- **PostgreSQL:** active backends, transaction duration, idle-in-transaction sessions,
+  lock waits, CPU, memory, storage latency, checkpoints, and query latency by shape.
+- **Application:** request rate, driver-pool occupancy, connect latency, timeout budget,
+  retries, and errors split by PgBouncer instance and database role.
+- **Failover:** `SHOW DNS_HOSTS`, server `addr`, `close_needed`, endpoint generation,
+  reconnect rate, and time until every connection reaches the intended node.
+
+A pool is undersized only when PostgreSQL has headroom and queue wait violates the
+service objective. If PostgreSQL is saturated, increasing `pool_size` amplifies the
+incident.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Roll out with a direct path as the fallback
+
+{% process-flow %}
+{% process-step number="1" title="Inventory behavior" label="Compatibility" %}
+Record driver versions, prepared-statement protocol, session-level SQL, long
+transactions, database/user pairs, direct connections, and peak client concurrency.
+{% /process-step %}
+{% process-step number="2" title="Shadow and canary" label="Evidence" %}
+Deploy PgBouncer beside the direct endpoint, validate TLS and authentication, then move
+one stateless workload while comparing errors, waits, and PostgreSQL backends.
+{% /process-step %}
+{% process-step number="3" title="Expand by workload" label="Containment" %}
+Increase traffic in bounded steps. Hold when `cl_waiting`, `maxwait`, transaction time,
+prepared-plan errors, or database saturation exceed the release gate.
+{% /process-step %}
+{% process-step number="4" title="Retain rollback" label="Recovery" %}
+Keep the tested direct endpoint and prior PgBouncer configuration available until peak
+traffic, failover, schema migration, and reconnect behavior have all passed.
+{% /process-step %}
+{% /process-flow %}
+
+Rollback changes the connection endpoint, so clients must establish new connections.
+Drain or restart client-side pools in a controlled way, avoid retry storms, and preserve
+idempotency for transactions whose commit result is unknown after a disconnect.
+Session-dependent workloads can remain on session pooling or the direct endpoint while
+transaction-safe workloads gain stronger multiplexing.
+{% /section-card %}
+
+{% section-card %}
+## Read the current primary documentation
+
+- [PgBouncer features and pooling compatibility](https://www.pgbouncer.org/features.html)
+  defines release boundaries and the official SQL feature matrix.
+- [PgBouncer configuration reference](https://www.pgbouncer.org/config.html) documents
+  pool limits, prepared-statement tracking, authentication, TLS, DNS, and timeouts.
+- [PgBouncer administration console](https://www.pgbouncer.org/usage.html) defines
+  `SHOW` fields and operational commands such as `PAUSE`, `RECONNECT`, and `WAIT_CLOSE`.
+- [PgBouncer FAQ](https://www.pgbouncer.org/faq.html) records current driver caveats and
+  prepared-statement guidance.
+- [PostgreSQL connection settings](https://www.postgresql.org/docs/current/runtime-config-connection.html)
+  explains `max_connections` and PostgreSQL-reserved slots.
+
+Check the documentation and release notes for the exact PgBouncer version you deploy.
+Defaults and compatibility support can change across upgrades; production configuration
+should make important behavior explicit.
+{% /section-card %}
+
+{% section-card %}
+## Test the production decisions
+
+The assessment checks connection-budget arithmetic, pooling boundaries, prepared
+statements, queue behavior, security, failover, and observability.
+
+{% quiz questionsFile="/api/content/technology/pgbouncer/quiz/pgbouncer-production.json" lessonSlug="pgbouncer" title="PgBouncer Production Quiz" /%}
+{% /section-card %}

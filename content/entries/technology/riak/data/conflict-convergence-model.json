@@ -1,0 +1,458 @@
+{
+  "blockId": "technology/riak-convergence-lab",
+  "title": "Resolve siblings without confusing repair with meaning",
+  "description": "Choose an update history, apply a domain policy, and decide whether to write the result back with causal context. The lab shows when the cluster converges, waits for a decision, or silently loses a valid change.",
+  "defaults": {
+    "caseId": "concurrent-cart-additions",
+    "resolverId": "domain-merge",
+    "completionId": "write-back"
+  },
+  "resolvers": [
+    {
+      "id": "domain-merge",
+      "label": "Domain merge",
+      "detail": "Combine only changes whose business meaning has a deterministic merge rule."
+    },
+    {
+      "id": "timestamp-winner",
+      "label": "Newest timestamp wins",
+      "detail": "Choose one whole value by wall-clock order. Simple, but concurrent valid changes can disappear."
+    },
+    {
+      "id": "review",
+      "label": "Explicit review",
+      "detail": "Preserve both branches until a person or domain workflow chooses a defensible result."
+    }
+  ],
+  "completionModes": [
+    {
+      "id": "write-back",
+      "label": "Write resolved descendant",
+      "detail": "Store the chosen value with the causal context returned by Riak.",
+      "writesResolvedDescendant": true,
+      "convergenceLabel": "Resolved context is stored",
+      "explanation": "When the policy can commit, the write descends from every observed sibling and collapses the set to one stored version."
+    },
+    {
+      "id": "return-only",
+      "label": "Return merge only",
+      "detail": "Compute a response for this caller but do not store it back.",
+      "writesResolvedDescendant": false,
+      "convergenceLabel": "Sibling set remains",
+      "explanation": "The next read can return the same siblings because the application never recorded a causal descendant."
+    },
+    {
+      "id": "wait-for-aae",
+      "label": "Wait for anti-entropy",
+      "detail": "Do not resolve at the application boundary; expect background repair to decide.",
+      "writesResolvedDescendant": false,
+      "convergenceLabel": "Replica repair only",
+      "explanation": "AAE can synchronize missing or divergent stored versions, but it cannot invent the business rule that selects or merges concurrent siblings."
+    }
+  ],
+  "cases": [
+    {
+      "id": "concurrent-cart-additions",
+      "label": "Concurrent cart additions",
+      "detail": "Two clients read the same cart context and independently add a different item.",
+      "location": "type carts / bucket active / key cart-1842",
+      "causalRelation": "Concurrent",
+      "siblings": [
+        {
+          "id": "mobile-write",
+          "label": "Mobile client sibling",
+          "context": "Descends from base context C4",
+          "fields": [
+            {
+              "name": "items",
+              "value": "camera, battery",
+              "source": "mobile add"
+            },
+            {
+              "name": "delivery",
+              "value": "standard",
+              "source": "unchanged"
+            }
+          ]
+        },
+        {
+          "id": "web-write",
+          "label": "Web client sibling",
+          "context": "Also descends from base context C4",
+          "fields": [
+            {
+              "name": "items",
+              "value": "camera, tripod",
+              "source": "web add"
+            },
+            {
+              "name": "delivery",
+              "value": "standard",
+              "source": "unchanged"
+            }
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "domain-merge",
+          "status": "safe",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "items",
+              "value": "camera, battery, tripod",
+              "source": "add-only union"
+            },
+            {
+              "name": "delivery",
+              "value": "standard",
+              "source": "agreed value"
+            }
+          ],
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "explanation": "An add-only item set has a deterministic union, so both independently added item identifiers can be preserved."
+        },
+        {
+          "resolverId": "timestamp-winner",
+          "status": "lossy",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "items",
+              "value": "camera, tripod",
+              "source": "web timestamp won"
+            },
+            {
+              "name": "delivery",
+              "value": "standard",
+              "source": "winning object"
+            }
+          ],
+          "preservedChanges": 1,
+          "lostChanges": 1,
+          "explanation": "Selecting the web object as a whole drops the battery addition even though it was a valid concurrent update."
+        },
+        {
+          "resolverId": "review",
+          "status": "review",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "items",
+              "value": "camera, battery, tripod",
+              "source": "review approved"
+            },
+            {
+              "name": "delivery",
+              "value": "standard",
+              "source": "agreed value"
+            }
+          ],
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "explanation": "Review preserves both additions, but it adds latency and operational work to a conflict that has an automatic domain merge."
+        }
+      ]
+    },
+    {
+      "id": "conflicting-delivery-choice",
+      "label": "Conflicting delivery choice",
+      "detail": "Two clients change the same single-choice field from one shared causal ancestor.",
+      "location": "type carts / bucket active / key cart-1842",
+      "causalRelation": "Concurrent",
+      "siblings": [
+        {
+          "id": "home-write",
+          "label": "Checkout sibling",
+          "context": "Descends from base context C8",
+          "fields": [
+            {
+              "name": "items",
+              "value": "camera",
+              "source": "unchanged"
+            },
+            {
+              "name": "delivery",
+              "value": "home",
+              "source": "checkout choice"
+            }
+          ]
+        },
+        {
+          "id": "locker-write",
+          "label": "Account sibling",
+          "context": "Also descends from base context C8",
+          "fields": [
+            {
+              "name": "items",
+              "value": "camera",
+              "source": "unchanged"
+            },
+            {
+              "name": "delivery",
+              "value": "locker",
+              "source": "account choice"
+            }
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "domain-merge",
+          "status": "review",
+          "canCommit": false,
+          "resultFields": [
+            {
+              "name": "items",
+              "value": "camera",
+              "source": "agreed value"
+            },
+            {
+              "name": "delivery",
+              "value": "home OR locker",
+              "source": "unresolved choice"
+            }
+          ],
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "explanation": "A single-choice delivery field has no valid set union. The domain policy must obtain a tie-breaker or escalate instead of storing both."
+        },
+        {
+          "resolverId": "timestamp-winner",
+          "status": "lossy",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "items",
+              "value": "camera",
+              "source": "winning object"
+            },
+            {
+              "name": "delivery",
+              "value": "locker",
+              "source": "later wall clock"
+            }
+          ],
+          "preservedChanges": 1,
+          "lostChanges": 1,
+          "explanation": "Wall-clock order chooses locker without proving that it reflects the customer's final intent or that the clocks were comparable."
+        },
+        {
+          "resolverId": "review",
+          "status": "review",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "items",
+              "value": "camera",
+              "source": "agreed value"
+            },
+            {
+              "name": "delivery",
+              "value": "home",
+              "source": "customer confirmed"
+            }
+          ],
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "explanation": "A review workflow can ask for current intent, record why home won, and then write one defensible descendant."
+        }
+      ]
+    },
+    {
+      "id": "stale-profile-retry",
+      "label": "Retry with stale context",
+      "detail": "An offline client retries a profile value based on an ancestor that predates the current stored version.",
+      "location": "type profiles / bucket customers / key customer-73",
+      "causalRelation": "Stale branch",
+      "siblings": [
+        {
+          "id": "current-plan",
+          "label": "Current service sibling",
+          "context": "Descends from context P11",
+          "fields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "billing service"
+            },
+            {
+              "name": "region",
+              "value": "eu-west",
+              "source": "current profile"
+            }
+          ]
+        },
+        {
+          "id": "offline-retry",
+          "label": "Offline retry sibling",
+          "context": "Descends from older context P7",
+          "fields": [
+            {
+              "name": "plan",
+              "value": "free",
+              "source": "stale mobile cache"
+            },
+            {
+              "name": "region",
+              "value": "eu-west",
+              "source": "unchanged"
+            }
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "domain-merge",
+          "status": "safe",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "billing authority"
+            },
+            {
+              "name": "region",
+              "value": "eu-west",
+              "source": "agreed value"
+            }
+          ],
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "explanation": "The domain assigns plan authority to the billing service, so the stale client cannot downgrade the account."
+        },
+        {
+          "resolverId": "timestamp-winner",
+          "status": "lossy",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "plan",
+              "value": "free",
+              "source": "retry arrived later"
+            },
+            {
+              "name": "region",
+              "value": "eu-west",
+              "source": "winning object"
+            }
+          ],
+          "preservedChanges": 1,
+          "lostChanges": 1,
+          "explanation": "Arrival time allows an older causal branch to overwrite the billing authority's valid upgrade."
+        },
+        {
+          "resolverId": "review",
+          "status": "review",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "billing record verified"
+            },
+            {
+              "name": "region",
+              "value": "eu-west",
+              "source": "agreed value"
+            }
+          ],
+          "preservedChanges": 2,
+          "lostChanges": 0,
+          "explanation": "Review reaches the same safe value, but the billing-authority rule should normally resolve this case automatically."
+        }
+      ]
+    },
+    {
+      "id": "causal-profile-update",
+      "label": "Causal read-modify-write",
+      "detail": "The client reads the latest object, changes one field, and sends the returned context with the write.",
+      "location": "type profiles / bucket customers / key customer-73",
+      "causalRelation": "Descendant",
+      "siblings": [
+        {
+          "id": "causal-descendant",
+          "label": "Stored descendant",
+          "context": "P12 descends from observed P11",
+          "fields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "preserved"
+            },
+            {
+              "name": "region",
+              "value": "us-east",
+              "source": "causal update"
+            }
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "resolverId": "domain-merge",
+          "status": "safe",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "stored descendant"
+            },
+            {
+              "name": "region",
+              "value": "us-east",
+              "source": "stored descendant"
+            }
+          ],
+          "preservedChanges": 1,
+          "lostChanges": 0,
+          "explanation": "There is only one causal descendant, so no sibling merge is required."
+        },
+        {
+          "resolverId": "timestamp-winner",
+          "status": "safe",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "only version"
+            },
+            {
+              "name": "region",
+              "value": "us-east",
+              "source": "only version"
+            }
+          ],
+          "preservedChanges": 1,
+          "lostChanges": 0,
+          "explanation": "A timestamp tie-breaker has nothing to discard when the read returns one version, but it adds no causal safety."
+        },
+        {
+          "resolverId": "review",
+          "status": "review",
+          "canCommit": true,
+          "resultFields": [
+            {
+              "name": "plan",
+              "value": "pro",
+              "source": "reviewed"
+            },
+            {
+              "name": "region",
+              "value": "us-east",
+              "source": "reviewed"
+            }
+          ],
+          "preservedChanges": 1,
+          "lostChanges": 0,
+          "explanation": "Manual review is unnecessary for a single descendant unless another business control requires it."
+        }
+      ]
+    }
+  ]
+}

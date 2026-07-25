@@ -1,0 +1,164 @@
+{
+  "title": "Which response policy contains the dependency failure?",
+  "description": "Select an injected incident and an application response. The visible outcomes come from a fixed game-day fixture, so the comparison teaches causality without pretending to forecast your workload.",
+  "evidenceNotice": "These are synthetic, internally consistent fixture observations from the same 200 req/s workload and 100-worker pool. A real experiment must preserve the workload, build, topology, and measurement window when comparing policies.",
+  "objective": {
+    "successPct": 98,
+    "p95LatencyMs": 500,
+    "workerUtilizationPct": 80
+  },
+  "defaults": {
+    "scenarioId": "latency-spike",
+    "policyId": "wait-and-retry"
+  },
+  "scenarios": [
+    {
+      "id": "latency-spike",
+      "label": "Payment calls stall for 1.8 seconds",
+      "detail": "Forty percent of payment requests reach a slow dependency path.",
+      "injectedFault": "1.8s dependency latency on 40% of calls"
+    },
+    {
+      "id": "connection-resets",
+      "label": "Payment connections reset",
+      "detail": "Half of new dependency connections fail before a response is returned.",
+      "injectedFault": "Connection reset on 50% of new calls"
+    },
+    {
+      "id": "zone-capacity-loss",
+      "label": "One payment zone disappears",
+      "detail": "Healthy traffic shifts to fewer instances while existing connections drain.",
+      "injectedFault": "One of three dependency zones unavailable"
+    }
+  ],
+  "policies": [
+    {
+      "id": "wait-and-retry",
+      "label": "Wait and retry twice",
+      "detail": "Use a long timeout and retry inside the same request path without isolation.",
+      "path": "Long wait → two retries → shared worker pool"
+    },
+    {
+      "id": "bounded-timeout",
+      "label": "Bound the timeout",
+      "detail": "Fail the dependency call at 350ms and do not retry synchronously.",
+      "path": "350ms timeout → explicit dependency error"
+    },
+    {
+      "id": "breaker-fallback",
+      "label": "Breaker plus bounded fallback",
+      "detail": "Open after the error threshold, isolate probes, and return a degraded but valid response.",
+      "path": "350ms timeout → open breaker → bounded fallback"
+    }
+  ],
+  "outcomes": [
+    {
+      "scenarioId": "latency-spike",
+      "policyId": "wait-and-retry",
+      "status": "unsafe",
+      "successPct": 99.2,
+      "p95LatencyMs": 2600,
+      "workerUtilizationPct": 132,
+      "attemptsPerRequest": 1.8,
+      "title": "Retries preserve some successes but exhaust the worker budget",
+      "explanation": "Slow attempts remain in flight, retries add more work, and the shared worker pool queues unrelated checkouts. A high success rate hides an unsafe latency and saturation boundary.",
+      "userResult": "Checkout stalls spread beyond the faulty dependency calls"
+    },
+    {
+      "scenarioId": "latency-spike",
+      "policyId": "bounded-timeout",
+      "status": "degraded",
+      "successPct": 76,
+      "p95LatencyMs": 420,
+      "workerUtilizationPct": 58,
+      "attemptsPerRequest": 1,
+      "title": "The timeout protects capacity but exposes dependency failure",
+      "explanation": "Workers return quickly enough to avoid saturation, but affected users receive an error because no alternate response exists. Capacity protection and product continuity are separate decisions.",
+      "userResult": "Affected checkouts fail quickly instead of hanging"
+    },
+    {
+      "scenarioId": "latency-spike",
+      "policyId": "breaker-fallback",
+      "status": "contained",
+      "successPct": 98.7,
+      "p95LatencyMs": 210,
+      "workerUtilizationPct": 42,
+      "attemptsPerRequest": 1,
+      "title": "The breaker prevents repeated waits and the fallback preserves the user path",
+      "explanation": "A small probe set tests recovery while most affected calls take a bounded degraded path. The result stays inside the fixture's success, latency, and utilization objectives.",
+      "userResult": "Checkout continues with a clearly degraded payment option"
+    },
+    {
+      "scenarioId": "connection-resets",
+      "policyId": "wait-and-retry",
+      "status": "unsafe",
+      "successPct": 92,
+      "p95LatencyMs": 780,
+      "workerUtilizationPct": 108,
+      "attemptsPerRequest": 2,
+      "title": "Immediate retries amplify the reset storm",
+      "explanation": "Every failed connection creates another attempt while the dependency is already unstable. Recovery traffic competes with fresh work and pushes the shared pool beyond its guardrail.",
+      "userResult": "Retries turn a partial reset fault into broad checkout delay"
+    },
+    {
+      "scenarioId": "connection-resets",
+      "policyId": "bounded-timeout",
+      "status": "degraded",
+      "successPct": 75,
+      "p95LatencyMs": 180,
+      "workerUtilizationPct": 32,
+      "attemptsPerRequest": 1,
+      "title": "Fast failure keeps the service responsive but loses the affected operation",
+      "explanation": "The service remains available to healthy requests because it does not retry. Without a fallback or asynchronous recovery path, the dependency error is still user-visible.",
+      "userResult": "Healthy calls remain fast while reset calls fail"
+    },
+    {
+      "scenarioId": "connection-resets",
+      "policyId": "breaker-fallback",
+      "status": "contained",
+      "successPct": 98.4,
+      "p95LatencyMs": 150,
+      "workerUtilizationPct": 35,
+      "attemptsPerRequest": 1,
+      "title": "Isolation stops the reset loop and preserves bounded service",
+      "explanation": "The breaker stops most connection attempts, controlled probes detect recovery, and the fallback handles the product path without adding a retry wave.",
+      "userResult": "Most users receive the bounded fallback while recovery is probed"
+    },
+    {
+      "scenarioId": "zone-capacity-loss",
+      "policyId": "wait-and-retry",
+      "status": "unsafe",
+      "successPct": 90,
+      "p95LatencyMs": 1800,
+      "workerUtilizationPct": 126,
+      "attemptsPerRequest": 1.9,
+      "title": "Retries consume the reserve capacity needed for failover",
+      "explanation": "Traffic shifts to surviving zones while retries duplicate work. The policy makes the capacity loss harder to recover from and expands the incident beyond the failed zone.",
+      "userResult": "Surviving zones saturate and all checkout traffic slows"
+    },
+    {
+      "scenarioId": "zone-capacity-loss",
+      "policyId": "bounded-timeout",
+      "status": "degraded",
+      "successPct": 82,
+      "p95LatencyMs": 450,
+      "workerUtilizationPct": 72,
+      "attemptsPerRequest": 1,
+      "title": "The timeout limits queue growth but cannot replace missing capacity",
+      "explanation": "The service stays below the utilization guardrail, yet the remaining zones cannot meet the success objective. Capacity reserve and placement must be tested separately from timeout behavior.",
+      "userResult": "The service stays responsive but rejects excess demand"
+    },
+    {
+      "scenarioId": "zone-capacity-loss",
+      "policyId": "breaker-fallback",
+      "status": "degraded",
+      "successPct": 96,
+      "p95LatencyMs": 320,
+      "workerUtilizationPct": 68,
+      "attemptsPerRequest": 1,
+      "title": "The fallback protects users, but the capacity objective still fails",
+      "explanation": "Isolation contains repeated calls and keeps latency bounded. The fixture remains below its success objective, showing that an application policy cannot substitute for independent capacity and placement.",
+      "userResult": "Most users continue, but some requests exceed available capacity"
+    }
+  ]
+}

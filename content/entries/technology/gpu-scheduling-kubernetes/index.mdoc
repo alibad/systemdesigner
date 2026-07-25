@@ -1,0 +1,216 @@
+---
+registryId: gpu-scheduling-kubernetes
+---
+
+{% section-card tone="intro" %}
+## What is GPU scheduling in Kubernetes?
+
+**GPU scheduling in Kubernetes is the process of admitting a Pod only onto a node that
+advertises enough compatible accelerator resources and satisfies the rest of the Pod's
+placement contract.** A vendor device plugin registers resources such as
+`nvidia.com/gpu`, reports healthy devices to the kubelet, and supplies device allocation
+instructions when a container starts.
+
+In plain language, Kubernetes schedules an integer resource name. It does not infer GPU
+memory requirements from a model, guarantee fast interconnects, reserve proportional
+compute under time slicing, or recover a training process when a device fails. Those
+properties require explicit resource types, labels, policies, workload behavior, and
+measurement.
+
+{% callout variant="info" %}
+### Core invariant
+
+A GPU Pod is placeable only when one eligible node can satisfy the complete request at
+the same time: accelerator resource, host CPU and memory, hardware profile, taints and
+tolerations, affinity, topology, and admission policy.
+{% /callout %}
+
+Review [Kubernetes](/technology/kubernetes) first if Pods, nodes, kubelets, requests, or
+limits are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Separate inventory, placement, and runtime readiness
+
+Four layers cooperate, but each proves something different.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Node software" eyebrow="Make hardware usable" icon="settings" tone="blue" %}
+The vendor driver, container runtime integration, and supporting libraries must match
+the host, kernel, device, and workload. An operator can automate this lifecycle, but its
+deployed versions remain an operational dependency.
+{% /concept-card %}
+{% concept-card title="Device plugin" eyebrow="Advertise health" icon="radio-tower" tone="green" %}
+The plugin registers a vendor-qualified extended resource with the kubelet, reports
+healthy device IDs, and handles allocation for admitted containers.
+{% /concept-card %}
+{% concept-card title="Scheduler" eyebrow="Choose one node" icon="route" tone="violet" %}
+The scheduler filters and scores nodes from declared resources and policy, then binds
+the Pod. It does not run a CUDA health check or choose internal GPU links by intuition.
+{% /concept-card %}
+{% concept-card title="Workload" eyebrow="Prove useful readiness" icon="activity" tone="amber" %}
+The application loads its model or checkpoint, initializes collectives, exposes a real
+readiness signal, handles interruption, and reports useful throughput and latency.
+{% /concept-card %}
+{% /concept-grid %}
+
+Kubernetes documents GPU support through the stable
+[device-plugin framework](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/)
+and [GPU scheduling task](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/).
+Vendor resources are integer extended resources and cannot be overcommitted by the core
+resource model. For GPUs, a container normally specifies the vendor resource in
+`limits`; if it also specifies a request, the request and limit must be equal.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 1: calculate fit from declared resources
+
+The lab models identical nodes and one Pod shape. It calculates the per-node minimum of
+accelerator fit and host-memory fit, so aggregate capacity cannot hide a Pod that is too
+large for every individual node. It does not estimate utilization or throughput.
+
+{% interactive-block id="technology/gpu-scheduling-kubernetes-cluster" /%}
+
+Read the outputs as a feasibility envelope:
+
+- **Physical GPUs** describe hardware count, not usable training throughput.
+- **Advertised units** are scheduler resource tokens. Their meaning depends on whole
+  GPU, MIG-profile, or time-sliced configuration.
+- **Pods per node** is the smaller of integer accelerator fit and host-memory fit for
+  the selected uniform Pod shape.
+- **Unassigned units** can be genuine spare capacity or unusable fragments. Another Pod
+  shape, label, taint, topology constraint, or unavailable device can change the fit.
+- **Pending Pods** need a reason from scheduler events. The remedy may be a compatible
+  node, a smaller request, a corrected policy, or workload queueing rather than simply
+  more aggregate GPUs.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose isolation semantics before increasing resource count
+
+{% concept-grid columns="3" %}
+{% concept-card title="Whole device" eyebrow="Exclusive integer resource" icon="cpu" tone="blue" %}
+Use when the workload needs the full device or the strongest simple ownership boundary.
+One Pod can request multiple whole devices, but every requested device must be free on
+one eligible node.
+{% /concept-card %}
+{% concept-card title="MIG profile" eyebrow="Hardware partition" icon="boxes" tone="green" %}
+On supported hardware, expose named MIG profile resources whose memory and compute
+shape matches the workload. Profiles are not interchangeable; schedule the exact name
+and validate reconfiguration and drain behavior.
+{% /concept-card %}
+{% concept-card title="Time-sliced access" eyebrow="Shared process time" icon="users" tone="amber" %}
+Use for workloads that tolerate contention and do not require device-memory or fault
+isolation. More advertised replicas mean more admitted sharers, not proportional GPU
+compute or memory reservations.
+{% /concept-card %}
+{% /concept-grid %}
+
+NVIDIA's current
+[GPU Operator documentation](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html)
+describes the managed software components. Its
+[GPU sharing guidance](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html)
+states that time slicing multiplexes access without MIG-style memory and fault
+isolation. Validate the documentation for the exact operator and device-plugin release
+you deploy.
+
+{% code-block file="/api/content/technology/gpu-scheduling-kubernetes/code/example-02.yaml" language="yaml" title="Declare explicit shared-GPU resource names" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Make the Pod contract complete and inspectable
+
+Request the accelerator together with the host resources and placement properties that
+make it useful. Do not set `NVIDIA_VISIBLE_DEVICES=all` or hard-code
+`CUDA_VISIBLE_DEVICES` to bypass the device allocation supplied by the runtime.
+
+{% code-block file="/api/content/technology/gpu-scheduling-kubernetes/code/example-03.yaml" language="yaml" title="A bounded whole-GPU batch Pod" /%}
+
+{% process-flow %}
+{% process-step number="1" title="Select the resource type" label="Admission" %}
+Name a whole GPU, shared resource, or MIG profile explicitly. Add a namespace quota and
+queue policy so teams cannot turn scarce hardware into an unbounded first-come race.
+{% /process-step %}
+{% process-step number="2" title="Constrain eligibility" label="Hardware fit" %}
+Use trusted hardware labels and required node affinity for model, memory class, profile,
+driver capability, or zone. Tolerate the GPU taint only for workloads that need it.
+{% /process-step %}
+{% process-step number="3" title="Shape placement" label="Resilience or locality" %}
+Spread replicas across failure domains for online availability. Co-locate tightly
+coupled workers only when the training topology and network measurements justify it.
+{% /process-step %}
+{% process-step number="4" title="Prove readiness" label="Runtime" %}
+Load the model, allocate device memory, initialize collectives, run a bounded health
+operation, and expose readiness only after the service can perform useful work.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/gpu-scheduling-kubernetes/code/example-04.yaml" language="yaml" title="Hardware affinity and zone spread for inference replicas" /%}
+
+Kubernetes
+[topology spread constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/)
+can distribute Pods across labeled failure domains. They do not describe NVLink,
+NUMA, PCIe, or network-fabric locality unless the platform publishes trustworthy labels
+and the scheduling policy consumes them.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: diagnose where placement or startup stops
+
+Switch among a healthy exclusive allocation, an impossible eligibility intersection, a
+device health loss, and time-slice contention. The selected path distinguishes a
+Pending scheduling failure from a Running workload that is unhealthy or contended.
+
+{% topology-lab dataFile="/api/content/technology/gpu-scheduling-kubernetes/data/gpu-placement-paths.json" /%}
+
+### Read the state before changing policy
+
+1. **Pending:** inspect scheduler events, requested resource names, per-node allocatable
+   values, labels, taints, affinity, topology, quotas, and any external queue admission.
+2. **ContainerCreating:** inspect device-plugin registration, kubelet and runtime events,
+   image pulls, volume mounts, allocation responses, and node software health.
+3. **Running but not ready:** inspect application initialization, device visibility,
+   model load, memory allocation, collective setup, and readiness-probe output.
+4. **Ready but slow:** inspect queue delay, GPU duty cycle, device memory, throttling,
+   host CPU and memory pressure, data loading, interconnect traffic, batching, and
+   co-tenant behavior.
+
+Do not respond to every slow workload by increasing GPU requests. The bottleneck may be
+input processing, host memory, storage, network collectives, an unsuitable profile,
+small batches, or shared-device contention.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Govern queues, quotas, rollout, and recovery
+
+Scarce accelerators need explicit ownership and an overload policy.
+
+{% code-block file="/api/content/technology/gpu-scheduling-kubernetes/code/example-05.yaml" language="yaml" title="Namespace GPU quota and Pod priority classes" /%}
+
+Production controls should cover:
+
+- **Admission:** namespace quotas, maximum Pod shapes, approved resource types, queue
+  fairness, priority classes, and controlled preemption.
+- **Provisioning:** immutable node pools by accelerator and driver compatibility,
+  startup-time objectives, image pre-pulling, warm capacity, and scale-down protection
+  for active training jobs.
+- **Reliability:** periodic checkpoints, restartable data input, idempotent output,
+  disruption budgets for online replicas, node drain tests, and device-error runbooks.
+- **Observability:** Pending age by reason, allocatable and allocated resources by type,
+  node readiness, device health and errors, duty cycle, memory use, throttling, queue
+  depth, startup duration, useful request latency, and job completion time.
+- **Change control:** canary node pools for driver, plugin, operator, runtime, or MIG
+  changes; compatibility tests with representative images; and a rollback path that
+  accounts for workloads already bound to the old resource contract.
+
+For distributed training, ordinary Deployment replica semantics do not guarantee that
+all workers become ready together. Use a queue or job controller with gang-style
+admission when partial allocation would reserve GPUs without making progress. Define
+what happens when one worker or device fails: restart all workers from a checkpoint,
+shrink elastically, or fail the job visibly.
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/gpu-scheduling-kubernetes/quiz/gpu-scheduling-kubernetes.json"
+   lessonSlug="gpu-scheduling-kubernetes"
+   title="GPU Scheduling and Isolation Decisions" /%}

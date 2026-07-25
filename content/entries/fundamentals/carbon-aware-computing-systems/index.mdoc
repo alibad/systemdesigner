@@ -1,0 +1,193 @@
+---
+registryId: carbon-aware-computing-systems
+---
+
+{% section-card tone="intro" %}
+## What is carbon-aware computing?
+
+**Carbon-aware computing is the practice of changing when, where, or how flexible software work runs in response to an electricity-emissions signal, while keeping the workload's correctness, deadline, reliability, security, and placement requirements intact.**
+
+In plain language, some compute must happen immediately, but a batch report, model refresh, or backup check may have several acceptable execution slots. A carbon-aware scheduler filters out the unsafe slots, estimates the remaining options with one declared accounting boundary, and chooses the lowest-emissions feasible option.
+
+{% callout variant="warn" %}
+### Core invariant
+
+Optimize carbon only inside the workload contract. A lower grid-intensity number does not justify a missed deadline, an unapproved region, unavailable capacity, stale data, or an uncounted transfer.
+{% /callout %}
+
+This lesson estimates **operational electricity emissions** for scheduling decisions. A complete product footprint may also include embodied hardware emissions and other lifecycle sources. Keep the scope of every claim explicit.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start with a measurable decision boundary
+
+Carbon-aware scheduling needs three different kinds of evidence. Treating them as one vague "green" score hides where uncertainty enters the decision.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Workload contract" eyebrow="What must remain true?" icon="shield" tone="blue" %}
+Record runtime, latest safe start, required completion reserve, energy estimate, data location, approved regions, capacity needs, and fallback. These constraints determine feasibility before carbon ranking begins.
+{% /concept-card %}
+{% concept-card title="Grid signal" eyebrow="When and where?" icon="activity" tone="green" %}
+Use a time-stamped signal for the electricity zone that serves the workload. Label whether it is measured or forecast, average or marginal, its interval, source, and uncertainty.
+{% /concept-card %}
+{% concept-card title="Accounting boundary" eyebrow="What is counted?" icon="database" tone="violet" %}
+Count the workload energy and any material data movement, duplicated capacity, or catch-up work introduced by the decision. Compare every candidate against the same run-now baseline.
+{% /concept-card %}
+{% /concept-grid %}
+
+For the operational estimate used in this lesson:
+
+- `compute kg CO2e = job energy (kWh) x grid intensity (gCO2e/kWh) / 1,000`
+- `transfer kg CO2e = data moved (GB) x transfer energy (kWh/GB) x transfer intensity (gCO2e/kWh) / 1,000`
+- `candidate total = compute kg CO2e + transfer kg CO2e`
+- `modeled difference = run-now baseline - candidate total`
+
+{% metric-strip %}
+{% metric value="kWh" label="Workload energy" detail="Measured or estimated electricity used by the job" tone="blue" /%}
+{% metric value="gCO2e/kWh" label="Grid intensity" detail="Time- and zone-specific signal with named provenance" tone="green" /%}
+{% metric value="kg CO2e" label="Operational estimate" detail="Energy multiplied by intensity inside the declared boundary" tone="violet" /%}
+{% metric value="hours" label="Scheduling slack" detail="Latest safe start minus runtime and reliability reserve" tone="amber" /%}
+{% /metric-strip %}
+
+Do not report more precision than the inputs support. A job-energy estimate rounded to tens of kWh and a forecast rounded to tens of gCO2e/kWh do not produce a defensible emissions result with six decimal places.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Lab 1: shift only the work that still fits
+
+The first decision is **where and when the workload may run**. Use the lab to compare temporal shifting, regional shifting, and their combination.
+
+Every number in the lab is an illustrative assumption:
+
+- Grid intensities are scenario values, not claims about named real regions.
+- Job energy is adjustable in `kWh`; data moved is adjustable in `GB`.
+- Cross-region transfer uses an explicit `kWh/GB` assumption and a separate `gCO2e/kWh` signal.
+- A candidate is ranked only after its start time and region are allowed.
+
+{% interactive-block id="fundamentals/carbon-aware-computing-systems-calculator" dataFile="/api/content/fundamentals/carbon-aware-computing-systems/data/time-region-shift-model.json" /%}
+
+### Read the result as a decision, not a promise
+
+- If the cleanest slot is in the home region later, temporal shifting is enough; avoid unnecessary data movement.
+- If a secondary region wins, confirm that the data, runtime, capacity, residency, security, and failover controls already work there.
+- If no slot fits, run the reliable baseline or reject explicitly. Silently extending the deadline is not carbon optimization.
+- Reconcile the forecast after execution. Record the actual start, energy, signal interval, transfer, fallback, and final estimate.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build carbon into admission, dispatch, and accounting
+
+A scheduler should not bolt one carbon score onto an existing queue. It needs an explicit control loop with separate owners and failure behavior.
+
+{% process-flow %}
+{% process-step number="1" title="Classify flexibility" label="Admission" %}
+Attach runtime, latest start, required reserve, placement boundary, energy evidence, data volume, and fallback to the job. Interactive and safety-critical work normally receives no shift budget.
+{% /process-step %}
+{% process-step number="2" title="Create feasible candidates" label="Planning" %}
+Join capacity and residency policy with time- and zone-specific grid forecasts. Eliminate candidates that cannot satisfy the workload contract.
+{% /process-step %}
+{% process-step number="3" title="Dispatch with a guardrail" label="Execution" %}
+Reserve capacity, stage data if allowed, and commit the selected slot. Fall back before dispatch if the path is unavailable or consumes the required completion reserve.
+{% /process-step %}
+{% process-step number="4" title="Reconcile evidence" label="Accounting" %}
+Measure job energy, actual timing, transfer, retries, and the final grid signal. Compare with the declared run-now baseline and retain uncertainty and provenance.
+{% /process-step %}
+{% /process-flow %}
+
+The scheduler should degrade safely when the carbon signal is stale or missing:
+
+1. Keep the last signal only for a bounded freshness window.
+2. Mark the candidate as uncertain rather than treating missing data as zero.
+3. Preserve the normal capacity, deadline, placement, and retry policies.
+4. Fall back to the reliable baseline when evidence is too stale to support a shift.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 2: stress carbon savings against reliability
+
+The second decision is **whether to commit the greener plan when its assumptions fail**. Choose a workload contract and strategy, then inject forecast error, target-capacity delay, or a cross-region network partition.
+
+The admission guard uses one clear rule:
+
+`completion margin = deadline - planned delay - observed extra delay - runtime`
+
+The greener plan is admitted only when its placement is allowed, its path is available, and its completion margin remains at or above the workload's required reserve.
+
+{% interactive-block id="fundamentals/carbon-aware-computing-systems-reliability-lab" dataFile="/api/content/fundamentals/carbon-aware-computing-systems/data/carbon-reliability-tradeoff-model.json" /%}
+
+### Interpret the trade-off
+
+- **Forecast error:** the job may finish correctly but save less carbon than expected. Reconcile the result; do not preserve the original forecast as "measured savings."
+- **Capacity delay:** a lower-intensity slot can consume the reserve needed for queueing, retries, or recovery. The guardrail should reject it before dispatch.
+- **Network partition:** a regional move can become unavailable even while local execution remains healthy. A tested home fallback protects completion.
+- **Placement violation:** a lower-emissions region is not feasible when residency, security, or data-governance policy excludes it.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Implement transparent candidate selection
+
+Keep units in field names and pass signal assumptions explicitly. The Python example filters placement and latest-start constraints before ranking candidates; it includes transfer energy only for cross-region work.
+
+{% code-block file="/api/content/fundamentals/carbon-aware-computing-systems/code/select-carbon-window.py" language="python" title="Select the lowest-emissions feasible slot" /%}
+
+The TypeScript policy starts at admission. It refuses a candidate that violates placement, is unavailable, or consumes the required completion reserve. A fallback is an explicit result, not an invisible exception.
+
+{% code-block file="/api/content/fundamentals/carbon-aware-computing-systems/code/evaluate-carbon-dispatch.ts" language="typescript" title="Enforce placement and completion reserve" /%}
+
+In production, keep these responsibilities separate:
+
+- A **signal adapter** normalizes provider timestamps, zones, units, forecast horizons, and data quality.
+- An **energy estimator** versions measured or modeled job energy by workload and hardware.
+- A **constraint service** owns placement, residency, deadline, reserve, and capacity policy.
+- A **scheduler** ranks only feasible candidates and records why it selected or rejected each one.
+- An **accounting pipeline** reconciles actual execution evidence and preserves the original baseline.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate claims, fallbacks, and uncertainty together
+
+### Before enabling shifting
+
+- Start with genuinely flexible batch work and a tested run-now fallback.
+- Measure workload energy at the same functional unit used by the product, such as one report, training run, or verified backup.
+- Validate time zones, daylight-saving behavior, forecast intervals, missing values, stale data, and provider outages.
+- Pre-provision approved regions; do not discover data, key, quota, or runtime incompatibility during dispatch.
+- Define a maximum transfer overhead and minimum material improvement before moving data.
+
+### Monitor the control loop
+
+- Track candidate acceptance, fallback, rejection, deadline margin, queue delay, capacity failure, and regional transfer.
+- Compare forecast and reconciled intensity by horizon and zone; alert when forecast error erases expected benefits.
+- Version energy models, signal adapters, placement rules, and workload contracts so historical claims remain explainable.
+- Report both absolute `kg CO2e` and the functional unit. A percentage without baseline, boundary, and workload volume is incomplete.
+- Exercise missing-signal, stale-signal, full-target, network-partition, deadline-pressure, and home-fallback scenarios.
+
+### Avoid these failure modes
+
+- Calling annual renewable matching a time-specific workload measurement.
+- Picking the lowest grid number before checking deadline, capacity, residency, or reliability.
+- Counting destination compute but ignoring required transfer, replication, retries, or duplicate execution.
+- Reporting forecast savings as observed savings after the workload runs.
+- Shifting interactive traffic whose latency and availability requirements leave no real flexibility.
+- Optimizing operational emissions while claiming a complete lifecycle footprint.
+{% /section-card %}
+
+{% section-card %}
+## Use a reporting method that matches the claim
+
+The [Green Software Foundation Software Carbon Intensity specification](https://sci.greensoftware.foundation/) provides a method for expressing carbon emissions per functional unit and distinguishes operational energy emissions from embodied hardware emissions. The lab uses only the operational electricity term so that its boundary stays visible.
+
+For a production review, attach:
+
+- the workload and functional unit;
+- job energy source and measurement interval;
+- grid-signal provider, zone, timestamp, forecast horizon, and signal type;
+- data-transfer and duplicated-capacity assumptions;
+- feasibility constraints and fallback behavior;
+- run-now baseline and selected candidate;
+- reconciled result, uncertainty, exclusions, and accountable owner.
+
+Carbon-aware systems are useful when they make flexibility operational and auditable. They are misleading when they reduce a multi-constraint scheduling decision to one unexplained green score.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/carbon-aware-computing-systems/quiz/carbon-aware-computing-systems.json" lessonSlug="carbon-aware-computing-systems" title="Carbon-Aware Computing Decisions" /%}

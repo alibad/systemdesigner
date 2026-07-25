@@ -1,0 +1,314 @@
+---
+registryId: varnish
+---
+
+{% section-card tone="intro" %}
+## What is Varnish Cache?
+
+**Varnish Cache is an HTTP reverse proxy that can store reusable responses in memory.**
+It sits between clients and an origin application. When a request matches a fresh
+cached object, Varnish returns that object without asking the origin to repeat the
+work.
+
+Varnish matters when many clients request the same public representation. It can
+reduce origin CPU, database queries, network transfer, and tail latency. It is not a
+database, a browser cache, or an automatic guarantee that every response is safe to
+share.
+
+The core invariant is:
+
+> A cached object may be reused only when its identity, freshness, and privacy
+> contract match the incoming request.
+
+{% callout variant="warn" %}
+Performance comes after correctness. A high hit rate is harmful if the cache key
+collapses two users, languages, encodings, or authorization states that require
+different responses.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Reverse proxy" eyebrow="Placement" icon="route" tone="blue" %}
+Clients connect to Varnish. Varnish either answers from its object store or forwards
+the request to an HTTP origin.
+{% /concept-card %}
+{% concept-card title="Shared object cache" eyebrow="Reuse" icon="storage" tone="green" %}
+A cache key identifies one representation. Freshness and invalidation determine how
+long that representation may be reused.
+{% /concept-card %}
+{% concept-card title="VCL policy" eyebrow="Control" icon="code" tone="violet" %}
+Varnish Configuration Language decides pass, lookup, hashing, backend selection,
+response storage, grace, invalidation, and delivery behavior.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one request through Varnish
+
+A request does not simply become a hit or miss. Policy first decides whether the
+request is eligible for shared caching. Only then can Varnish compute an object
+identity and look for a reusable response.
+
+{% system-flow title="One Varnish request path" caption="Pass and miss both reach the origin, but only an eligible response may populate the shared object store." %}
+{% system-node title="Client request" eyebrow="Input contract" icon="client" tone="neutral" %}
+The method, host, URL, headers, cookies, and authorization state describe what the
+client is asking for.
+{% /system-node %}
+{% system-node title="VCL decision" eyebrow="Eligibility and hash" icon="code" tone="violet" %}
+`vcl_recv` can pass unsafe traffic or continue to lookup. `vcl_hash` adds only the
+dimensions that define a distinct representation.
+{% /system-node %}
+{% system-node title="Object lookup" eyebrow="Memory cache" icon="storage" tone="blue" %}
+A fresh matching object becomes a hit. A missing, expired, or evicted object requires
+origin work unless bounded stale delivery is allowed.
+{% /system-node %}
+{% system-node title="Origin application" eyebrow="Authority" icon="server" tone="amber" %}
+The origin creates the response and emits headers that influence storage, freshness,
+variation, and downstream cache behavior.
+{% /system-node %}
+{% /system-flow %}
+
+### Name the outcomes precisely
+
+- **Hit:** Varnish serves a reusable object without waiting for the origin.
+- **Miss:** no reusable object exists, so Varnish fetches one from the origin.
+- **Pass:** policy deliberately bypasses shared storage for this request.
+- **Hit-for-miss:** Varnish remembers that an object is temporarily uncacheable so
+  concurrent requests can still be coordinated.
+- **Hit-for-pass:** Varnish remembers that requests for the object should pass.
+
+A falling hit rate is a symptom. These outcomes reveal whether the cause is policy,
+identity, freshness, capacity, or origin headers.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Define cache identity before tuning TTL
+
+The default object identity starts with the URL and host. Applications often need a
+small number of additional dimensions, such as a supported language or content
+encoding. Every extra dimension multiplies the object space.
+
+### Lab 1: expose unsafe sharing and key fragmentation
+
+Choose a route and identity policy. Then change traffic and TTL. The lab shows when a
+simple URL key is unsafe, when cookie variation destroys reuse, and how cache policy
+changes origin demand.
+
+{% interactive-block id="technology/varnish-cache-policy-lab" dataFile="/api/content/technology/varnish/data/cache-policy-model.json" /%}
+
+### Build eligibility from explicit rules
+
+- Pass methods that mutate state, including `POST`, `PUT`, `PATCH`, and `DELETE`.
+- Pass authorization and session-bearing requests unless a reviewed design proves
+  tenant or user isolation.
+- Respect `Cache-Control: private` and `no-store`, and treat `Set-Cookie` as a strong
+  signal that the response is not a shared public representation.
+- Normalize tracking parameters before hashing only when they cannot change content.
+- Whitelist representation headers instead of hashing every header and cookie.
+- Keep the host in the key when one Varnish fleet serves multiple domains.
+
+{% code-block file="/api/content/technology/varnish/code/public-cache-policy.vcl" language="vcl" title="Cache public responses without collapsing user identity" /%}
+
+{% callout variant="info" %}
+`Vary` is part of the representation contract, but an unbounded `Vary` value can
+fragment the cache. Make supported dimensions explicit in the application and test
+the resulting key cardinality.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Treat freshness as a product contract
+
+Freshness answers a user-visible question: how old may this representation be before
+the origin must revalidate or regenerate it?
+
+{% metric-strip %}
+{% metric value="TTL" label="Fresh lifetime" detail="The object can be served normally until this interval ends." tone="blue" /%}
+{% metric value="Grace" label="Bounded stale delivery" detail="An expired object may protect clients while origin work is slow or unavailable." tone="green" /%}
+{% metric value="Keep" label="Revalidation window" detail="An older object can remain available for conditional backend validation." tone="violet" /%}
+{% metric value="Age" label="Observed lifetime" detail="The response age helps operators and downstream caches explain freshness." tone="amber" /%}
+{% /metric-strip %}
+
+### Assign freshness by consequence
+
+- **Versioned static assets:** use a long TTL because a new content hash creates a new
+  URL rather than mutating the old object.
+- **Public catalog pages:** use a bounded TTL plus targeted invalidation when business
+  changes must appear sooner.
+- **Search results:** use a shorter TTL and control query cardinality so one-off
+  searches do not displace popular objects.
+- **Inventory or price:** decide the maximum acceptable staleness with the product
+  owner; never infer it from a cache benchmark.
+- **Private account state:** pass unless the architecture provides an explicit
+  isolated cache boundary and revocation model.
+
+Longer TTL usually improves reuse, but it also increases how long incorrect or
+withdrawn content can remain visible. That is a correctness trade-off, not only a
+performance setting.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Absorb refresh pressure without hiding failure
+
+When a popular object expires, many clients can arrive before one origin response
+completes. Sending every equivalent request to the origin creates a **cache stampede**.
+Varnish can collapse equivalent misses and can serve an object inside its grace window
+while a refresh runs.
+
+### Lab 2: inject an outage or invalidation storm
+
+Choose a failure condition, duplicate-miss policy, traffic level, and grace window.
+The result shows whether the origin stays within capacity and whether clients receive
+bounded stale content or errors.
+
+{% interactive-block id="technology/varnish-origin-pressure-lab" dataFile="/api/content/technology/varnish/data/origin-pressure-model.json" /%}
+
+### Grace is controlled degradation
+
+- Grace must be longer than the failure or refresh delay it is expected to absorb.
+- Stale delivery is appropriate only when the product can tolerate that age.
+- A failed background refresh should leave the stale object available until its
+  allowed grace ends.
+- Backend probes and timeouts must detect failure quickly enough to avoid tying up
+  worker resources.
+- Request coalescing reduces duplicate work for one object; it does not protect the
+  origin from a broad set of different cold objects.
+
+{% callout variant="warn" %}
+Do not use an extremely long grace window to conceal an unhealthy origin. Emit cache
+status, age, backend health, refresh errors, and stale-delivery metrics so operators
+can distinguish resilience from silent data drift.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Invalidate narrowly and refill deliberately
+
+Invalidation removes the origin shield. The broader the invalidation, the larger the
+possible refill wave.
+
+{% process-flow %}
+{% process-step number="1" title="Prefer immutable identity" label="Version" %}
+Put a content hash or release version in static asset URLs. New content creates a new
+object and old references expire naturally.
+{% /process-step %}
+{% process-step number="2" title="Target mutable objects" label="Purge or ban" %}
+Purge an exact object when its key is known. Use a bounded ban expression for a
+reviewed group, with stored metadata that makes the match explicit.
+{% /process-step %}
+{% process-step number="3" title="Keep stale safety" label="Soft transition" %}
+Where tooling supports it, expire an object while preserving grace so the first
+refresh does not turn every waiter into origin work.
+{% /process-step %}
+{% process-step number="4" title="Warm and observe" label="Release" %}
+Roll invalidation through cohorts, prefetch the hottest objects when justified, and
+watch origin saturation, miss rate, and refresh latency.
+{% /process-step %}
+{% /process-flow %}
+
+### Secure the control plane
+
+- Restrict invalidation methods with network ACLs and authenticated application
+  control paths.
+- Never expose arbitrary ban expressions to public clients.
+- Record actor, reason, target, estimated object count, start time, and result.
+- Rate-limit broad invalidations and require additional review above a defined scope.
+- Test invalidation against multiple cache nodes; each process has its own in-memory
+  object state.
+
+{% code-block file="/api/content/technology/varnish/code/resilient-origin.vcl" language="vcl" title="Add backend health, grace, and a restricted ban path" /%}
+{% /section-card %}
+
+{% section-card %}
+## Scale Varnish as a disposable cache tier
+
+Multiple Varnish instances can sit behind a load balancer, but their memory stores are
+independent. Losing one node should reduce cache warmth, not lose authoritative data.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Independent cache nodes" eyebrow="State boundary" icon="server" tone="blue" %}
+Each process owns its objects, bans, memory pressure, and restart lifecycle. The origin
+or another durable system remains authoritative.
+{% /concept-card %}
+{% concept-card title="Origin pool" eyebrow="Backend selection" icon="network" tone="green" %}
+Directors and health probes can choose among origins. Retry and timeout policy must
+remain bounded so a failing pool does not consume every worker.
+{% /concept-card %}
+{% concept-card title="Load-balancer policy" eyebrow="Warmth versus balance" icon="route" tone="violet" %}
+Random distribution balances traffic but duplicates hot objects across nodes. Stable
+routing can improve warmth but must handle node churn without severe skew.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Plan for cold capacity
+
+- Verify the origin survives a Varnish restart or rolling deployment at expected peak
+  traffic.
+- Stagger cache-node restarts so the complete working set does not go cold at once.
+- Size memory from live object bytes, metadata overhead, working-set churn, and
+  eviction evidence rather than response count alone.
+- Keep VCL, VMODs, runtime parameters, and secret-free backend configuration versioned
+  and reproducible.
+- Validate configuration before reload and preserve a known-good rollback.
+- Terminate TLS at a supported proxy or load balancer in front of Varnish when the
+  deployment requires HTTPS.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Design around failure modes
+
+### Private response enters the shared cache
+
+The impact is a data leak, not merely stale content. Default to pass for authenticated
+traffic, test cache keys with multiple identities, and alert on responses that combine
+session signals with shared-cache status.
+
+### Hit rate collapses after a release
+
+Compare pass, miss, expiry, and eviction reasons. A new cookie, query parameter, `Vary`
+header, TTL, response header, or object-size distribution may have changed the object
+space.
+
+### Origin overload follows invalidation
+
+Stop or stage further invalidations, preserve grace where safe, collapse duplicate
+misses, and recover the hottest object groups first. Increasing client retries usually
+makes the surge worse.
+
+### Cache node restarts repeatedly
+
+Treat memory exhaustion, storage mode, process limits, VCL/VMOD mismatch, and health
+probe behavior as separate hypotheses. Restart loops repeatedly erase cache warmth and
+can transfer the incident to the origin.
+{% /section-card %}
+
+{% section-card %}
+## Operate with request-level evidence
+
+### Monitor causes, not only averages
+
+- Client request rate, status, method, host, route, and response bytes
+- Hit, miss, pass, hit-for-miss, hit-for-pass, and stale-delivery counts
+- Object age, TTL, grace, keep, bans, purges, eviction, and cache memory pressure
+- Origin request rate, connection failures, first-byte latency, timeouts, and health
+- Cache-key dimensions and variant cardinality for high-traffic routes
+- VCL reload success, active version, worker queues, thread exhaustion, and restarts
+- Invalidation actor, scope, duration, object impact, and refill pressure
+
+### Production readiness checklist
+
+- [ ] Public, private, and mutating routes have explicit eligibility rules.
+- [ ] Cache-key dimensions are bounded and tested with multiple users and languages.
+- [ ] Origin `Cache-Control`, `Set-Cookie`, `Vary`, and error responses are reviewed.
+- [ ] TTL and acceptable staleness are owned as product decisions.
+- [ ] Grace, keep, backend probes, and timeouts are tested during real failure drills.
+- [ ] Broad invalidation is restricted, audited, staged, and recoverable.
+- [ ] The origin survives cold-cache peak traffic and rolling cache-node restarts.
+- [ ] Logs can explain why one request hit, missed, passed, or received stale content.
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/varnish/quiz/varnish-production-decisions.json"
+   lessonSlug="varnish"
+   title="Varnish Cache Architecture and Operations Review"
+/%}

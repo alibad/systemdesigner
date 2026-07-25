@@ -1,0 +1,78 @@
+{
+  "title": "Put policy around the agent loop",
+  "description": "Inject a realistic failure, choose a control profile, and decide whether retries preserve the business invariant.",
+  "defaults": {
+    "incidentId": "ambiguous-refund",
+    "policyId": "approval-boundary",
+    "retries": 0
+  },
+  "stages": ["Model proposes", "Schema validates", "Policy decides", "Tool executes", "Result records"],
+  "policies": [
+    {
+      "id": "permissive",
+      "label": "Permissive loop",
+      "detail": "Expose every tool and execute valid-looking calls immediately.",
+      "controls": []
+    },
+    {
+      "id": "bounded-loop",
+      "label": "Bounded loop",
+      "detail": "Validate schemas, restrict tools, and cap model and tool calls.",
+      "controls": ["schema", "allowlist", "call-limit"]
+    },
+    {
+      "id": "approval-boundary",
+      "label": "Approval boundary",
+      "detail": "Add human review, idempotency, and outcome reconciliation around writes.",
+      "controls": ["schema", "allowlist", "call-limit", "approval", "idempotency", "reconcile"]
+    },
+    {
+      "id": "sensitive-data",
+      "label": "Sensitive-data boundary",
+      "detail": "Redact protected values and retain metadata-only traces.",
+      "controls": ["schema", "allowlist", "call-limit", "redaction", "safe-trace"]
+    }
+  ],
+  "incidents": [
+    {
+      "id": "ambiguous-refund",
+      "label": "Refund response is lost",
+      "detail": "The payment service may have committed the write before the connection closed.",
+      "failureStage": 4,
+      "requiredControls": ["approval", "idempotency", "reconcile"],
+      "retryRisk": true,
+      "safeResult": "Reconcile the operation key before deciding whether another write is legal.",
+      "unsafeResult": "A blind retry can issue a second refund because transport failure does not prove rollback."
+    },
+    {
+      "id": "retrieval-injection",
+      "label": "Retrieved text requests a tool call",
+      "detail": "An untrusted document tells the model to export customer records.",
+      "failureStage": 2,
+      "requiredControls": ["allowlist", "approval"],
+      "retryRisk": false,
+      "safeResult": "Treat retrieved instructions as data and require policy approval for the requested action.",
+      "unsafeResult": "The agent confuses retrieved content with authority and can invoke an unrelated privileged tool."
+    },
+    {
+      "id": "runaway-search",
+      "label": "Search loop does not converge",
+      "detail": "The model repeatedly calls search without improving its answer.",
+      "failureStage": 3,
+      "requiredControls": ["call-limit"],
+      "retryRisk": true,
+      "safeResult": "Stop at the configured call budget and return an explicit incomplete outcome.",
+      "unsafeResult": "Retries multiply latency and spend while the trajectory remains unchanged."
+    },
+    {
+      "id": "pii-trace",
+      "label": "Sensitive data reaches traces",
+      "detail": "A tool result includes an email address and payment identifier.",
+      "failureStage": 5,
+      "requiredControls": ["redaction", "safe-trace"],
+      "retryRisk": false,
+      "safeResult": "Redact protected values before export and keep only operational metadata required for diagnosis.",
+      "unsafeResult": "Useful observability becomes an uncontrolled secondary store for customer data."
+    }
+  ]
+}

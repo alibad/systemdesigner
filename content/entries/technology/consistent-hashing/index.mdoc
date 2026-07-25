@@ -1,0 +1,217 @@
+---
+registryId: consistent-hashing
+---
+
+{% section-card tone="intro" %}
+## What is consistent hashing?
+
+**Consistent hashing is a placement technique for choosing an owner from a changing
+set of nodes.** It hashes both keys and node positions into the same ordered space.
+A key belongs to the first node position reached while walking around that space.
+
+Its core invariant is **limited movement during membership change**. Adding or
+removing one node should transfer only the ranges whose owner changed, rather than
+recomputing almost every key as `hash(key) % nodeCount` usually does.
+
+{% callout variant="info" %}
+Consistent hashing answers **where a key should go**. It does not copy data, reach
+consensus, detect failures, move bytes, or make a write strongly consistent. Those
+behaviors need separate replication, membership, streaming, and consistency protocols.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Put keys and owners in one ordered space
+
+{% concept-grid columns="4" %}
+{% concept-card title="Hash space" eyebrow="Stable coordinate system" icon="hash" tone="blue" %}
+A deterministic hash turns each key and node identity into a position. The production
+hash space is large; lesson diagrams use a small circle so ownership is visible.
+{% /concept-card %}
+{% concept-card title="Token" eyebrow="Node position" icon="key" tone="violet" %}
+A token is one position owned by a physical node. One node may own many tokens, which
+split its responsibility into smaller ranges.
+{% /concept-card %}
+{% concept-card title="Successor owner" eyebrow="Clockwise lookup" icon="route" tone="amber" %}
+Hash the key, find the first token at or after that position, and wrap to the first
+token when the lookup passes the end of the space.
+{% /concept-card %}
+{% concept-card title="Token range" eyebrow="Movement unit" icon="layers" tone="green" %}
+The interval after one token and through the next token shares an owner. Membership
+change transfers ranges, not arbitrary individual keys.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="One consistent-hash lookup" caption="Every participant must use the same hash, token map, and ownership direction for the result to be deterministic." %}
+{% system-node title="Stable key" eyebrow="Identity" icon="key" tone="blue" %}
+Choose the business identity that must keep the same owner, such as a cache key,
+tenant ID, or session ID.
+{% /system-node %}
+{% system-node title="Hash position" eyebrow="Coordinate" icon="hash" tone="violet" %}
+Apply the agreed hash function and map the result into the ring's numeric range.
+{% /system-node %}
+{% system-node title="First token clockwise" eyebrow="Lookup" icon="route" tone="amber" %}
+Use a sorted token map and a successor search. Wrap around when no larger token exists.
+{% /system-node %}
+{% system-node title="Physical owner" eyebrow="Route" icon="server" tone="green" %}
+Send the request to the node behind that token, or begin a replica walk when the
+system stores more than one copy.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## See what moves when membership changes
+
+The lab uses the same 72 deterministic key hashes for every comparison. Change the
+number of virtual positions, then add node D or remove node C. The before and after
+bars show measured ownership of this fixture, while the modulo baseline shows how many
+of those exact keys would change owners under `hash % nodeCount`.
+
+{% interactive-block id="technology/consistent-hashing-calculator" dataFile="/api/content/technology/consistent-hashing/data/membership-movement-model.json" /%}
+
+### Read the result correctly
+
+- The moved percentage is an observation from the fixed sample, not a universal
+  promise for every key distribution.
+- Adding one equally weighted node to `N` balanced nodes tends toward moving about
+  `1 / (N + 1)` of keys to the new node.
+- Removing one balanced node tends toward moving that node's prior share.
+- More virtual positions usually reduce ownership variance, but they add token-map,
+  maintenance, and failure-neighbor overhead.
+- Weighted placement should be modeled through explicit capacity weights and measured
+  distribution, not by assuming every physical node is identical.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement the lookup as a small deterministic contract
+
+The essential data structure is a sorted token list. A binary successor search makes
+lookup `O(log T)` for `T` token positions. Membership updates can be less frequent and
+more expensive, but every client or coordinator must converge on the same token map
+before routing safely.
+
+{% code-block file="/api/content/technology/consistent-hashing/code/hash-ring.py" language="python" title="A compact consistent-hash ring with virtual positions" /%}
+
+### Treat membership as a control-plane change
+
+{% process-flow %}
+{% process-step number="1" title="Publish the new token map" label="Version" %}
+Give the membership view an epoch or version so stale routers can be detected instead
+of silently disagreeing about ownership.
+{% /process-step %}
+{% process-step number="2" title="Stream the changing ranges" label="Transfer" %}
+Copy or rebuild the affected data while the old owner can still serve it. Bound
+bandwidth so rebalancing does not consume the live request budget.
+{% /process-step %}
+{% process-step number="3" title="Switch authoritative routing" label="Cut over" %}
+Move reads and writes under an explicit handoff contract. Define how concurrent writes,
+retries, and a failed transfer are reconciled.
+{% /process-step %}
+{% process-step number="4" title="Retire the old ownership" label="Verify" %}
+Delete old copies only after integrity, replica count, and request routing are proven
+for the new map.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Walk replicas across distinct failure boundaries
+
+A ring can nominate several tokens for one key, but several adjacent tokens may belong
+to the same physical node. Counting those token positions as independent replicas
+creates false durability. Production storage systems therefore skip duplicate physical
+owners, and topology-aware strategies can also spread replicas across racks or
+datacenters.
+
+Use the lab to change the replication factor, placement policy, key position, and
+failure. The trace shows which tokens are selected or skipped and whether the remaining
+copies survive the injected boundary.
+
+{% interactive-block id="technology/consistent-hashing-replica-lab" dataFile="/api/content/technology/consistent-hashing/data/replica-failure-model.json" /%}
+
+{% code-block file="/api/content/technology/consistent-hashing/code/replica-walk.py" language="python" title="Skip duplicate nodes and failure domains during replica selection" /%}
+
+{% callout variant="warn" %}
+Replication factor is not a consistency level. Three placed copies do not say how many
+must acknowledge a write, how reads reconcile versions, or what happens during a
+partition. Define those rules independently.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose the placement family deliberately
+
+{% concept-grid columns="3" %}
+{% concept-card title="Ring-based consistent hashing" eyebrow="Elastic key ownership" icon="repeat" tone="green" %}
+Use a ring when keys or requests need stable affinity while a node set changes and the
+system can operate token metadata plus controlled movement.
+{% /concept-card %}
+{% concept-card title="Fixed hash slots" eyebrow="Explicit resharding" icon="database" tone="blue" %}
+Use a fixed slot space when operators should move named slot ranges explicitly.
+Redis Cluster uses 16,384 hash slots and states that it does **not** use consistent
+hashing.
+{% /concept-card %}
+{% concept-card title="Round robin or least request" eyebrow="Stateless balancing" icon="route" tone="amber" %}
+Use ordinary load balancing when requests do not need key affinity. It can respond to
+live load more directly than a deterministic hash.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Do not reach for a ring when the real requirement is different
+
+- Use range partitioning when ordered scans and adjacent-key locality dominate.
+- Use a partition directory when placement must reflect changing, explicit metadata.
+- Use rendezvous or jump hashing when their membership and storage contracts fit
+  better than maintaining a token ring.
+- Use a topology-aware database strategy rather than a home-grown ring when the system
+  also needs repair, replica consistency, failure detection, and safe rebalancing.
+- Treat a hot key separately. Virtual nodes improve aggregate ownership distribution;
+  they do not split one key across owners.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the movement, not only the hash function
+
+{% metric-strip %}
+{% metric value="Range share" label="Ownership balance" detail="Bytes, keys, and requests per physical node" tone="blue" /%}
+{% metric value="Moved bytes" label="Membership cost" detail="Transfer rate, duration, retries, and foreground impact" tone="violet" /%}
+{% metric value="Map epoch" label="Routing agreement" detail="Stale clients, rejected versions, and ownership mismatches" tone="amber" /%}
+{% metric value="Replica health" label="Failure coverage" detail="Distinct nodes and failure domains for every range" tone="green" /%}
+{% /metric-strip %}
+
+### Production checklist
+
+- Choose the routing key from the affinity contract and document how multi-key
+  operations behave.
+- Use a stable, well-tested hash implementation across languages and versions.
+- Measure key count, bytes, request rate, and hot-key skew by owner; none alone proves
+  balance.
+- Version membership and define behavior for stale routers during a rollout.
+- Throttle range movement and reserve foreground CPU, disk, and network capacity.
+- Place replicas on distinct physical nodes and, where required, distinct failure
+  domains.
+- Exercise node join, graceful removal, abrupt loss, partial transfer, stale
+  membership, and rollback.
+- Verify ownership and checksums before deleting the prior copy of a moved range.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Verify the claims against primary references
+
+- The original [ACM consistent hashing paper](https://doi.org/10.1145/258533.258660)
+  defines the technique in the context of changing cache populations.
+- Apache Cassandra's current [Dynamo architecture documentation](https://cassandra.apache.org/doc/stable/cassandra/architecture/dynamo.html)
+  explains token rings, virtual nodes, distinct physical replicas, and topology-aware
+  placement.
+- Cassandra's [production token guidance](https://cassandra.apache.org/doc/stable/cassandra/getting-started/production.html)
+  describes the balance between expansion flexibility, streaming peers, and
+  availability.
+- Envoy's current [ring-hash load-balancer documentation](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/load_balancers.html)
+  documents host weights, ring sizing, and the expected `1 / N` disruption for one
+  host change.
+- Redis documents its different [fixed hash-slot model](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/)
+  explicitly, including the 16,384-slot key space and operator-driven resharding.
+{% /section-card %}
+
+{% quiz lessonSlug="consistent-hashing" title="Consistent Hashing Design Review" questionsFile="/api/content/technology/consistent-hashing/quiz/consistent-hashing-design-review.json" /%}

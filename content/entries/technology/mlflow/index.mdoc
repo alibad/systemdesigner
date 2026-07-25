@@ -1,0 +1,387 @@
+---
+registryId: mlflow
+---
+
+{% section-card tone="intro" %}
+## What is MLflow?
+
+**MLflow is an open-source platform for recording machine learning work and carrying
+its evidence from an experiment to a packaged, evaluated, and registered model.** Its
+APIs and UI help teams track runs, store artifacts, package models behind a common
+interface, compare evaluation results, and manage named registry references.
+
+MLflow does not train a model by itself, schedule every pipeline, or operate a
+production serving fleet for you. A training framework creates the model; workflow
+automation runs the jobs; deployment infrastructure routes traffic. MLflow connects
+those systems through durable metadata and model artifacts.
+
+The core invariant is: **a production decision should resolve to an immutable model
+version backed by traceable data, code, configuration, evaluation, and release
+evidence.** A mutable registry alias is a pointer to that evidence, not evidence by
+itself.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Record the execution" eyebrow="Tracking" icon="activity" tone="blue" %}
+An experiment groups comparable runs. Each run captures one execution's parameters,
+metrics, tags, dataset inputs, timestamps, and artifacts.
+{% /concept-card %}
+{% concept-card title="Package the contract" eyebrow="Models" icon="package" tone="violet" %}
+An MLflow Model bundles model data with flavor metadata, an inference signature, an
+input example, dependencies, and any required code.
+{% /concept-card %}
+{% concept-card title="Control the reference" eyebrow="Registry" icon="workflow" tone="green" %}
+A registered model has immutable numbered versions plus mutable aliases such as
+`candidate` or `champion` that automation can move after policy passes.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow the evidence from training to serving
+
+Treat MLflow as an evidence and packaging plane. The useful path is not "train, click
+Production, and hope." It is a sequence of boundaries with different owners and
+failure modes.
+
+{% system-flow title="MLflow model lifecycle" caption="Each boundary adds evidence. The serving platform consumes an immutable package and remains responsible for runtime health." %}
+{% system-node title="Experiment and run" eyebrow="Observe" icon="activity" tone="blue" %}
+Record one execution, its dataset references, code identity, configuration, metrics,
+and ordinary artifacts.
+{% /system-node %}
+{% system-node title="Logged MLflow Model" eyebrow="Package" icon="package" tone="violet" %}
+Persist model files, flavors, signature, example payload, dependencies, and a stable
+model URI.
+{% /system-node %}
+{% system-node title="Evaluation and registry" eyebrow="Decide" icon="shield" tone="amber" %}
+Evaluate a fixed candidate, apply release policy, create or copy a model version, and
+move an alias only when the evidence is complete.
+{% /system-node %}
+{% system-node title="Deployment controller" eyebrow="Operate" icon="workflow" tone="green" %}
+Resolve the alias to one immutable version, verify the package, canary it, observe it,
+and retain a tested rollback version.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep these identities distinct
+
+- **Experiment:** a logical grouping for runs that answer one comparable ML task.
+- **Run:** one execution with a unique run ID, lifecycle status, metadata, inputs, and
+  artifacts. A repeated job should create a new run rather than overwrite history.
+- **Logged model:** a model artifact with model-specific metadata and a model URI. In
+  current MLflow tracking, logged models can be searched separately from runs.
+- **Registered model version:** an immutable numbered registry entry backed by a model
+  source.
+- **Alias:** a mutable name that points to one registered model version. Moving it is
+  a release action.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Make experiments answer lineage questions
+
+Logging more fields is not the goal. The goal is to answer a concrete question after
+the training process, notebook state, and temporary compute are gone.
+
+1. Put comparable executions in one experiment and use stable tags for task, owner,
+   pipeline, branch, and data-contract identity.
+2. Create one run per execution. Use parent and child runs when a search, fold, or
+   distributed job needs a visible grouping.
+3. Log parameters as configuration, metrics as measured outcomes, and tags as
+   searchable operational context. Do not encode all three into a run name.
+4. Log dataset inputs with source, digest, name, schema, target, and context such as
+   training or evaluation. A file path alone is weak identity when its contents can
+   change.
+5. Link immutable code or build identity and capture the resolved environment. A
+   mutable branch name and `requirements.txt` with open ranges do not reconstruct an
+   execution.
+6. Keep sensitive rows, secrets, tokens, and personal data out of parameters, tags,
+   examples, and unrestricted artifacts.
+
+{% interactive-block id="technology/mlflow-experiment-lineage-lab" dataFile="/api/content/technology/mlflow/data/experiment-lineage-model.json" /%}
+
+The lab is a review model, not a claim that every field has equal value. Capture the
+minimum evidence that answers your workflow's reproducibility, comparison, and audit
+questions.
+
+{% code-block file="/api/content/technology/mlflow/code/track-training-lineage.py" language="python" title="Track data, code, metrics, and a packaged model" /%}
+
+Run the example with `--dry-run` first to validate the co-located dataset contract
+without MLflow dependencies. A real run needs a pinned MLflow and scikit-learn
+environment and a configured tracking URI.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Package a model as an inference contract
+
+An arbitrary pickle is a serialized object. An **MLflow Model** is a directory with an
+`MLmodel` metadata file and one or more flavors describing how a tool can load or use
+the model. The common `python_function` flavor exposes a uniform `predict` interface;
+framework flavors can preserve native loading behavior.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Signature and example" eyebrow="Interface" icon="file" tone="blue" %}
+The signature describes input, output, and optional inference-parameter schemas. The
+input example makes the contract concrete and supports serving-payload validation.
+{% /concept-card %}
+{% concept-card title="Dependencies and code" eyebrow="Runtime" icon="package" tone="violet" %}
+Captured environment files and intentional code paths help recreate loading and
+prediction behavior. Inference is useful, but a locked and scanned environment is
+stronger evidence.
+{% /concept-card %}
+{% concept-card title="Artifacts and provenance" eyebrow="Payload" icon="database" tone="green" %}
+Weights, tokenizer files, encoders, lookup data, and other required assets must travel
+with stable provenance and remain readable by the deployment identity.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Test the package, not only the in-memory model
+
+- Load the logged model in a clean environment using its model URI.
+- Validate a serving-compatible example plus malformed, missing, extra, and boundary
+  inputs against the signature.
+- Confirm dependency installation, import behavior, artifact checksums, startup time,
+  memory use, and prediction parity.
+- Scan serialized model files, bundled code, and dependencies as untrusted supply-chain
+  inputs. Loading a model can execute framework or custom Python code.
+- Keep training-only files out of the serving package and do not embed credentials in
+  model artifacts.
+
+{% callout variant="warn" %}
+Packaging improves portability; it does not prove behavioral equivalence on every
+target. Native libraries, CPU instructions, accelerators, locale, and dependency
+resolution can still change results or prevent loading.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Evaluate a fixed candidate before promotion
+
+Evaluation measures a model; promotion changes shared state. Keep them as separate,
+retryable pipeline steps so a successful evaluation call cannot accidentally imply
+production readiness.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the candidate" label="Identify" %}
+Resolve one logged-model or registered-model version and one versioned evaluation
+dataset. Record both immutable identities.
+{% /process-step %}
+{% process-step number="2" title="Measure behavior" label="Evaluate" %}
+Use `mlflow.models.evaluate` for classic classification or regression metrics and
+artifacts, then add business, slice, robustness, calibration, and safety checks that
+match the product risk.
+{% /process-step %}
+{% process-step number="3" title="Validate policy" label="Gate" %}
+Apply absolute floors, regression limits, latency and resource ceilings, contract
+checks, approvals, and operational readiness outside the training code.
+{% /process-step %}
+{% process-step number="4" title="Persist the decision" label="Audit" %}
+Store the policy version, evaluation run, candidate version, result, approver or
+automation identity, timestamp, and failure reason before any alias moves.
+{% /process-step %}
+{% /process-flow %}
+
+Overall accuracy can hide a failing region, account tier, device, or rare class. A
+production gate should therefore include three layers:
+
+- **Model behavior:** overall metrics, worst important slice, calibration, robustness,
+  and comparison with the current champion on the same data.
+- **Serving behavior:** signature compatibility, clean-environment loading, valid and
+  invalid payloads, latency, throughput, memory, and dependency policy.
+- **Operational behavior:** canary scope, dashboards, alerts, ownership, rollback,
+  artifact availability, and a failure drill.
+
+{% code-block file="/api/content/technology/mlflow/code/evaluate-model-candidate.py" language="python" title="Evaluate and validate a classifier candidate" /%}
+
+The classic evaluation and GenAI evaluation APIs have different scorers and result
+types. Choose the system that matches the workload and do not mix their metric
+contracts in one release rule.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Promote with aliases and an explicit handoff
+
+MLflow model stages are deprecated. Current registry workflows use model-version tags
+for status evidence and aliases for named references such as `candidate` or `champion`.
+An alias URI has the form `models:/<registered-model-name>@<alias>`.
+
+Use separate registered model names when development, staging, and production need
+different permissions or ownership boundaries. Copy a validated version across that
+boundary, then apply an environment-local alias. Do not treat one alias on one global
+model as an access-control system.
+
+{% interactive-block id="technology/mlflow-release-gate-lab" dataFile="/api/content/technology/mlflow/data/release-gate-model.json" /%}
+
+The deployment controller should resolve `champion` once, record the returned model
+name, version, source, and package digest, and deploy that immutable result. Runtime
+workers that repeatedly poll a mutable alias can silently diverge during a rollout.
+
+{% code-block file="/api/content/technology/mlflow/code/apply-release-policy.py" language="python" title="Gate a candidate and move champion with a stale-read check" /%}
+
+The example evaluates the external policy without MLflow. `--apply` connects to the
+registry, checks that `champion` still matches the version used by the decision, tags
+the candidate, and moves the alias. In a real release service, make this operation
+idempotent, authenticated, audited, and serialized per registered model.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Contain deployment and runtime failures
+
+MLflow can serve a model locally and can package containers or integrate with
+deployment targets, but the production handoff still needs a controller that owns
+routing and runtime state.
+
+### Deployment handoff contract
+
+1. Resolve an approved alias to an immutable version and verify the expected source,
+   signature, package digest, and policy evidence.
+2. Fetch and load the package with a least-privilege deployment identity in a clean,
+   isolated environment.
+3. Run startup, prediction-contract, dependency, and health smoke tests before adding
+   traffic.
+4. Send a bounded canary or shadow workload and compare candidate and champion quality,
+   errors, latency, saturation, and business guardrails.
+5. Increase traffic in explicit steps. Record the deployed version at every step; do
+   not infer it later from the current alias.
+6. Keep the previous immutable package warm or quickly loadable until the rollback
+   window closes.
+
+### Failure containment rules
+
+- If the artifact store is unavailable, stop the new deployment and keep already
+  loaded champion replicas serving. Do not evict healthy capacity to retry forever.
+- If signature rejection, error rate, or a protected slice regresses, route candidate
+  traffic to zero before investigating. Preserve bounded diagnostic samples with
+  sensitive values removed.
+- If an alias changes concurrently, fail the stale promotion rather than overwrite the
+  newer decision. Refresh evidence against the new champion.
+- If tracking is unavailable, training may buffer or fail according to policy, but
+  serving an already loaded model should not depend on a live tracking-server request.
+- If rollback cannot load, halt expansion and restore known-good capacity before
+  attempting another candidate.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Secure and observe the MLflow control plane
+
+A shared tracking deployment has three distinct storage and trust surfaces:
+
+- **Tracking server:** accepts API and UI requests, authenticates callers, authorizes
+  experiments and registry actions, and may proxy artifact traffic.
+- **Backend store:** persists run, experiment, registry, and related metadata. Use a
+  supported database, backups, tested restoration, connection limits, and restricted
+  credentials for a team deployment.
+- **Artifact store:** holds larger files such as models, plots, and datasets. Decide
+  whether clients access it directly or through the tracking server; this changes
+  where storage credentials and authorization must exist.
+
+### Security baseline
+
+- Put remote traffic behind TLS and explicit authentication; grant separate read,
+  write, promotion, and administration permissions according to role.
+- Restrict network reachability. For the default FastAPI server, configure allowed
+  hosts and CORS origins when listening beyond localhost.
+- Prefer proxied artifact access when clients should not hold broad object-store
+  credentials. If clients write directly, scope and rotate those credentials.
+- Treat model packages, custom code, and serialized objects as executable supply-chain
+  inputs. Scan before promotion and isolate loading.
+- Redact secrets and sensitive feature values from parameters, tags, examples,
+  evaluation tables, traces, logs, and failure payloads.
+- Audit model-version creation, tag changes, alias moves, deletions, permission changes,
+  and administrative actions with actor and timestamp.
+
+### Observe both control plane and model behavior
+
+- Track API request rate, error rate, latency, authentication failures, database pool
+  pressure, migration state, artifact transfer failures, queueing, and storage growth.
+- Alert on failed or unusually long runs, missing metrics, incomplete artifacts,
+  evaluation failures, alias churn, and versions whose source artifacts are unreadable.
+- At serving time, emit the resolved registered-model name and immutable version with
+  latency, errors, resource saturation, schema rejection, data quality, drift, and
+  product-quality signals.
+- Keep high-cardinality run and model IDs searchable without turning all of them into
+  unbounded time-series labels.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Migrate as a controlled system change
+
+MLflow server, client, database schema, artifact routing, and model package behavior
+can evolve independently. A package upgrade is therefore a release, not routine image
+refresh.
+
+### Upgrade the tracking service
+
+1. Inventory server and client versions, backend and artifact stores, authentication
+   plugins, registry usage, and deployment consumers.
+2. Back up metadata and verify artifact references. Rehearse restoration before
+   changing the production database.
+3. Test the target server against pinned training, evaluation, registry, and deployment
+   clients. Newer clients may call endpoints an older server does not expose.
+4. For a database backend, stop writes according to the migration plan and run
+   `mlflow db upgrade <backend-store-url>`. Official guidance warns that schema
+   migrations can be slow and are not guaranteed to be transactional.
+5. Verify representative experiments, model downloads, registry aliases, permissions,
+   and evaluation workflows before reopening all writers.
+
+### Migrate lifecycle conventions
+
+- Replace stage-based URIs and transition calls with aliases, version tags, and
+  environment boundaries. Run old and new readers in shadow mode before removing stage
+  assumptions from deployment code.
+- When changing from direct to proxied artifact access, remember that existing
+  experiments retain the artifact location recorded when they were created. Test old
+  and new experiments instead of assuming one server flag rewrites history.
+- Rebuild and smoke-test representative model packages when dependency capture,
+  signatures, flavors, or Python versions change. Metadata migration does not prove
+  runtime compatibility.
+- Preserve immutable version references in deployment records so a registry migration
+  cannot erase what was actually serving.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Use a production release checklist
+
+A model is ready for an alias move only when the release record can answer all of the
+following:
+
+- **Identity:** Which run, logged model, registered version, code commit, dataset
+  digest, feature contract, and environment produced this candidate?
+- **Package:** Does a clean runtime load it, enforce its signature, reproduce expected
+  predictions, and pass dependency and artifact scanning?
+- **Evaluation:** Which versioned dataset and policy produced the overall, slice,
+  robustness, safety, latency, and comparison results?
+- **Registry:** Which alias will move, what immutable version does it currently point
+  to, who may change it, and how is a concurrent promotion detected?
+- **Handoff:** Which deployment controller resolves the alias, verifies the package,
+  records the immutable version, and controls canary expansion?
+- **Observability:** Can operators query version-specific quality, input rejection,
+  latency, errors, saturation, artifact health, and alias audit events?
+- **Containment:** What stops expansion, what keeps the champion available, how fast is
+  rollback, and when does a human take control?
+- **Migration:** Are server, client, database, artifact, and model-package changes
+  tested independently with backup and restoration evidence?
+
+Promotion should fail closed when required evidence is missing. That policy is less
+convenient than moving an alias from a notebook, but it makes a production decision
+repeatable and reviewable.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+MLflow APIs and defaults evolve. These links are current primary documentation used
+for the lifecycle claims in this lesson; pin an exact MLflow release and verify its API
+reference and migration notes before adopting the examples.
+
+- [MLflow Tracking concepts and architecture](https://mlflow.org/docs/latest/ml/tracking/)
+- [MLflow dataset tracking](https://mlflow.org/docs/latest/ml/dataset/)
+- [MLflow Model format, signatures, and input examples](https://mlflow.org/docs/latest/ml/model/)
+- [Managing model dependencies](https://mlflow.org/docs/latest/ml/model/dependencies/)
+- [Classic ML model evaluation and validation](https://mlflow.org/docs/latest/ml/evaluation/)
+- [Model Registry workflows, aliases, and stage migration](https://mlflow.org/docs/latest/ml/model-registry/workflow/)
+- [MLflow model deployment overview](https://mlflow.org/docs/latest/ml/deployment/)
+- [Tracking server and artifact access architecture](https://mlflow.org/docs/latest/self-hosting/architecture/tracking-server/)
+- [Self-hosted network security](https://mlflow.org/docs/latest/self-hosting/security/network/)
+- [Self-hosted MLflow upgrade and database migration](https://mlflow.org/docs/latest/self-hosting/migration/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/mlflow/quiz/mlflow-production-workflows.json" lessonSlug="mlflow" title="MLflow Production Workflow Review" /%}

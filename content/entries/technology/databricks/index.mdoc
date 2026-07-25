@@ -1,0 +1,266 @@
+---
+registryId: databricks
+---
+
+{% section-card tone="intro" %}
+## What is Databricks?
+
+**Databricks is a managed data and AI platform built around a lakehouse architecture.**
+It gives data engineers, analysts, and machine-learning teams shared storage,
+transactional tables, governed data assets, and workload-specific compute without
+requiring every team to assemble those layers independently.
+
+The beginner mental model is simple: cloud object storage holds durable data; Delta
+Lake adds a transaction log and table semantics; Unity Catalog governs named data and
+AI assets; Spark, Photon, SQL warehouses, and other compute execute work against those
+assets.
+
+{% callout variant="info" %}
+The core invariant is **storage, governance, and compute remain separate contracts**.
+Stopping compute must not remove durable tables. A fast query does not prove the data is
+correct or authorized, and one shared platform does not mean every workload should run
+on one shared cluster.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build one governed data path, not one giant workspace
+
+A lakehouse can let BI, data engineering, and ML use the same governed tables, but only
+when each layer has an explicit responsibility.
+
+{% system-flow title="A production lakehouse data path" caption="Each boundary improves a different property: recoverability, correctness, usability, or governed consumption." %}
+{% system-node title="Sources" eyebrow="Files, databases, events" icon="cloud" tone="blue" %}
+Applications and external systems produce records with source-specific schemas,
+arrival behavior, and failure modes.
+{% /system-node %}
+{% system-node title="Bronze tables" eyebrow="Replayable ingestion" icon="archive" tone="cyan" %}
+Persist source-shaped records, ingestion metadata, and checkpoints so a failed
+transformation can be replayed without asking the source to resend history.
+{% /system-node %}
+{% system-node title="Silver tables" eyebrow="Validated entities" icon="shield-check" tone="violet" %}
+Enforce schemas, deduplicate business keys, quarantine invalid records, and make update
+semantics explicit.
+{% /system-node %}
+{% system-node title="Gold products" eyebrow="Consumer contract" icon="database" tone="amber" %}
+Publish stable facts, dimensions, features, or aggregates designed for a named set of
+downstream questions.
+{% /system-node %}
+{% system-node title="BI, ML, and apps" eyebrow="Governed use" icon="users" tone="green" %}
+Consumers query cataloged assets through compute chosen for their latency, language,
+isolation, and operational requirements.
+{% /system-node %}
+{% /system-flow %}
+
+The bronze, silver, and gold names describe **data quality and contract maturity**, not
+required physical buckets or a promise that every dataset needs exactly three copies.
+Use fewer layers when they add no independently testable contract; add domain-specific
+products when one gold table cannot serve incompatible consumers safely.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose compute from the workload contract
+
+Databricks currently recommends serverless compute for most notebooks, automated jobs,
+and pipelines, and a serverless SQL warehouse for most BI and SQL workloads. Classic
+compute remains important when a required feature, runtime, language, networking
+boundary, or low-level setting is not available in the serverless option.
+
+Select a workload, then challenge the default with alternative compute. The planner is
+rule-based: it does not invent a universal DBU price or predict performance without a
+measured job.
+
+{% interactive-block id="technology/databricks-calculator" dataFile="/api/content/technology/databricks/data/compute-selection-model.json" /%}
+
+Before standardizing a compute type, capture:
+
+- the task type, supported language, libraries, and runtime features;
+- startup and completion targets, concurrency, and expected idle periods;
+- isolation, data-access mode, network, and regional requirements;
+- autoscaling behavior under representative skew and shuffle;
+- measured runtime, reliability, and account-specific billing output.
+
+The current [compute selection guide](https://docs.databricks.com/aws/en/compute/choose-compute)
+is the source of truth for supported choices. Availability and limitations vary by
+cloud, region, workspace configuration, and release.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make ingestion replayable before making it fast
+
+Auto Loader incrementally discovers new files in cloud object storage. A Structured
+Streaming checkpoint records progress so a restarted query can continue from its
+known state. The destination table still needs an explicit schema, stable naming, data
+quality policy, and an owner.
+
+{% process-flow %}
+{% process-step number="1" title="Land source records" label="Preserve" %}
+Retain enough source identity and ingestion metadata to explain where a record came
+from and to replay transformations after a defect.
+{% /process-step %}
+{% process-step number="2" title="Enforce a schema" label="Reject ambiguity" %}
+Define types for production streams. Decide whether new columns fail, are rescued, or
+enter an explicit evolution workflow.
+{% /process-step %}
+{% process-step number="3" title="Checkpoint progress" label="Recover" %}
+Give each streaming query a durable, unique checkpoint path. Treat changing or deleting
+that state as a migration, not routine cleanup.
+{% /process-step %}
+{% process-step number="4" title="Publish a named table" label="Govern" %}
+Write to a Unity Catalog table so access, ownership, discovery, and lineage attach to a
+stable object rather than an undocumented storage path.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/databricks/code/ingest-orders.py" language="python" title="Auto Loader into a governed bronze table" /%}
+
+The example uses an `availableNow` trigger: it processes the files currently available
+and stops, which fits a scheduled incremental job. A continuously running stream has a
+different latency and operating contract. In both cases, alert on source backlog,
+processing duration, rejected records, checkpoint failure, and destination freshness.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat Delta tables as transaction logs plus data files
+
+Delta Lake extends Parquet data files with a transaction log. Readers use a consistent
+table snapshot while concurrent writers commit in a serial order, but conflicting
+writes can still fail and must be retried deliberately. Do not edit files inside a
+Delta table directory directly; a storage listing is not the table state.
+
+### Correctness controls
+
+- Enforce schema on write and add constraints for invariants the engine can check.
+- Give incremental records a deterministic business key and event or update time.
+- Make `MERGE` sources unique per target key before modifying the destination.
+- Treat schema, protocol, table-property, and clustering changes as reviewed releases.
+- Use table history and time travel for investigation; do not confuse them with a
+  separately tested backup and disaster-recovery plan.
+
+### Layout controls
+
+- Start from selective query predicates and file-scan evidence, not a habitual
+  partition column.
+- For new Delta tables, prefer liquid clustering when its current runtime and feature
+  requirements are satisfied.
+- Enable predictive optimization on eligible Unity Catalog managed tables so file
+  maintenance and statistics do not depend on ad hoc notebook runs.
+- Keep manual `OPTIMIZE` and `ZORDER` plans only where the current table design and
+  measured workload justify them.
+
+{% code-block file="/api/content/technology/databricks/code/merge-orders.sql" language="sql" title="Idempotent silver-table upsert with liquid clustering" /%}
+
+Databricks currently recommends
+[liquid clustering](https://docs.databricks.com/aws/en/delta/clustering) instead of new
+partitioning or `ZORDER` strategies, and
+[predictive optimization](https://docs.databricks.com/aws/en/optimizations/predictive-optimization)
+for eligible Unity Catalog managed tables. Check the current runtime and table-feature
+requirements before migration.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Diagnose the stage before resizing compute
+
+Distributed jobs do not speed up linearly when the work is serial, badly skewed, or
+dominated by reading unnecessary data. Start with the job timeline, query profile, or
+Spark UI. Find the long stage, compare task distributions, and inspect scan, shuffle,
+spill, driver, and executor evidence before changing compute.
+
+Choose a synthetic observed run and then select the first action you would take. The
+lab does not predict a speedup; it grades whether the action tests the bottleneck shown
+by the evidence.
+
+{% interactive-block id="technology/databricks-job-diagnostics-lab" dataFile="/api/content/technology/databricks/data/job-diagnostic-scenarios.json" /%}
+
+### Read symptoms as hypotheses
+
+- **High scan time and bytes read:** inspect filters, file pruning, table statistics,
+  file count, and data layout before adding workers.
+- **One task far slower than the median:** inspect key distribution and skew handling;
+  average CPU can hide one straggler that gates the stage.
+- **Large shuffle read and spill:** verify join shape, aggregation cardinality, fresh
+  statistics, adaptive execution, and executor memory pressure.
+- **Busy driver with idle executors:** look for `collect`, `toPandas`, local loops,
+  oversized plans, or excessive task scheduling on the driver.
+- **Many tiny files:** measure file-open and listing overhead, then use supported table
+  maintenance rather than blindly repartitioning every read.
+
+Adaptive query execution can change join strategy, coalesce post-shuffle partitions,
+and handle some skew using runtime statistics. It reduces manual tuning; it does not
+repair an incorrect join key, unbounded data movement, or driver-side code.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Put governance in the execution path
+
+Unity Catalog organizes governed assets under catalogs and schemas and supports
+privileges, ownership, discovery, lineage, workspace restrictions, and fine-grained
+policies. Governance is effective only when production code reads and writes named,
+cataloged assets through approved identities and compute.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Identity" eyebrow="Who runs the work?" icon="users" tone="blue" %}
+Use account-level groups for people and service principals for automation. Avoid
+production jobs owned by a departing individual.
+{% /concept-card %}
+{% concept-card title="Access" eyebrow="What may it do?" icon="lock" tone="violet" %}
+Grant the narrow catalog, schema, table, volume, function, or model privileges required
+by the workload. Parent `USE` privileges do not themselves grant table data access.
+{% /concept-card %}
+{% concept-card title="Lineage" eyebrow="What depends on it?" icon="git-branch" tone="amber" %}
+Use captured table and column lineage for impact analysis, while documenting workloads
+outside supported capture paths and known lineage limitations.
+{% /concept-card %}
+{% concept-card title="Policy" eyebrow="Where may it run?" icon="shield" tone="green" %}
+Use workspace bindings, compute policies, governed tags, and centralized policies to
+keep isolation rules consistent as teams and assets grow.
+{% /concept-card %}
+{% /concept-grid %}
+
+Review these boundaries before production:
+
+- **Catalog design:** align catalogs and schemas with isolation, ownership, region, and
+  lifecycle boundaries rather than copying the organization chart mechanically.
+- **Deployment identity:** run jobs with an intentional service principal and audit
+  ownership, grants, secrets, and workspace access.
+- **Data quality:** publish freshness, completeness, uniqueness, and quarantine metrics
+  alongside the table, not only inside notebook output.
+- **Change control:** deploy jobs and pipelines from versioned source, keep parameters
+  environment-specific, and prevent UI edits from silently diverging from code.
+- **Recovery:** test checkpoint loss, failed merges, schema changes, source replay,
+  table restoration, and regional dependencies with explicit recovery objectives.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate data products through measurable contracts
+
+One platform does not remove ownership. Assign each production data product a source
+contract, transformation owner, data-quality objectives, freshness objective,
+authorized consumers, and retirement path.
+
+Monitor both orchestration and data state:
+
+- run and task status, retries, queue time, startup time, and end-to-end duration;
+- source backlog, event-time delay, checkpoint progress, and late-data behavior;
+- records accepted, rejected, deduplicated, updated, and quarantined;
+- table freshness, schema drift, file count, bytes scanned, and query latency;
+- compute utilization, shuffle, spill, skew, driver pressure, and account billing data;
+- downstream lineage, dashboard freshness, model-feature freshness, and consumer errors.
+
+Lakeflow Jobs exposes run history, task graphs, timelines, logs, and metrics. System
+tables can support account-wide job and billing analysis. Use those records to compare
+releases and find recurring waste; do not treat a successful leaf task as proof that a
+published dataset is complete and correct.
+
+### Current primary references
+
+- [What is Databricks?](https://docs.databricks.com/aws/en/introduction)
+- [Databricks compute choices](https://docs.databricks.com/aws/en/compute)
+- [Delta Lake on Databricks](https://docs.databricks.com/aws/en/delta)
+- [Unity Catalog access control](https://docs.databricks.com/aws/en/data-governance/unity-catalog/access-control)
+- [Unity Catalog lineage](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage)
+- [Debugging with the Spark UI](https://docs.databricks.com/aws/en/compute/troubleshooting/debugging-spark-ui)
+- [Monitor Lakeflow Jobs](https://docs.databricks.com/aws/en/jobs/monitor)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/databricks/quiz/databricks-production-decisions.json" lessonSlug="databricks" title="Databricks Production Decisions" /%}

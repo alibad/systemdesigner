@@ -1,0 +1,169 @@
+{
+  "title": "Repair delivery without weakening identity or encryption",
+  "description": "Inject a failure, choose a recovery contract, and change the retry count. The topology shows where progress stops and whether recovery creates duplicates, misses a device, or breaks the privacy boundary.",
+  "retryAttempts": {
+    "default": 3,
+    "min": 1,
+    "max": 5,
+    "step": 1
+  },
+  "stages": [
+    {
+      "id": "sender",
+      "label": "Sender device",
+      "role": "Creates one logical message ID and encrypts separately for recipient devices."
+    },
+    {
+      "id": "router",
+      "label": "Encrypted ingest",
+      "role": "Authenticates the command and accepts ciphertext without possessing content keys."
+    },
+    {
+      "id": "queue",
+      "label": "Per-device queues",
+      "role": "Tracks independent delivery state for phone, tablet, web, and desktop sessions."
+    },
+    {
+      "id": "recipient",
+      "label": "Recipient device",
+      "role": "Authenticates, decrypts, persists locally, and suppresses an already-seen message ID."
+    },
+    {
+      "id": "ack",
+      "label": "Device acknowledgement",
+      "role": "Removes only that device's queue item; read state remains a separate event."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "ack-lost",
+      "label": "Acknowledgement is lost",
+      "detail": "The recipient persists the message, but its delivery ACK never reaches the service.",
+      "event": "The service cannot tell whether the final network hop failed or the ACK was lost after persistence.",
+      "userImpact": "A retry is required, but it must not create another visible bubble.",
+      "retryBehavior": "Retry the same device queue item with the same logical message ID after bounded backoff.",
+      "dedupeBehavior": "The recipient checks its durable seen-ID set before display and ACKs an already-seen retry.",
+      "queueBehavior": "Only the unacknowledged device retains work; other device queues stay complete.",
+      "keyBehavior": "The existing authenticated session remains valid, so no key repair is needed.",
+      "recovery": [
+        "Retry the ciphertext envelope with the original message ID.",
+        "Suppress the repeated display on the recipient device.",
+        "Record the device ACK and remove only that queue item."
+      ],
+      "stageStates": {
+        "sender": "active",
+        "router": "active",
+        "queue": "degraded",
+        "recipient": "active",
+        "ack": "failed"
+      },
+      "requirements": ["stable-id"]
+    },
+    {
+      "id": "phone-offline",
+      "label": "One recipient device is offline",
+      "detail": "The tablet receives the message while the phone remains disconnected.",
+      "event": "A user-level success signal is ambiguous because one device completed and another still has no copy.",
+      "userImpact": "The phone should catch up after reconnect without redelivering a second copy to the tablet.",
+      "retryBehavior": "Retry only the phone's pending queue when its session reconnects.",
+      "dedupeBehavior": "Each device suppresses retries against its own durable seen-ID set.",
+      "queueBehavior": "Phone and tablet delivery records advance independently under one logical message ID.",
+      "keyBehavior": "Each device uses its own encrypted envelope and session state.",
+      "recovery": [
+        "Keep the phone queue item after the tablet ACK arrives.",
+        "Bind the reconnect to the phone's device identity and cursor.",
+        "Deliver and ACK the phone envelope without reopening the tablet queue."
+      ],
+      "stageStates": {
+        "sender": "active",
+        "router": "active",
+        "queue": "degraded",
+        "recipient": "failed",
+        "ack": "degraded"
+      },
+      "requirements": ["per-device-queue"]
+    },
+    {
+      "id": "stale-session",
+      "label": "Encryption session is stale",
+      "detail": "The recipient reinstalled the app, so a queued envelope targets an obsolete device session.",
+      "event": "Routing succeeds, but the recipient cannot authenticate or decrypt ciphertext created for the old session.",
+      "userImpact": "Delivery pauses for that device while clients establish a fresh authenticated session.",
+      "retryBehavior": "Do not repeat the same undecryptable bytes indefinitely; classify the failure and repair the session.",
+      "dedupeBehavior": "Preserve the logical message ID when the sender creates a replacement envelope for the new session.",
+      "queueBehavior": "Other device queues continue; only the stale device envelope is blocked.",
+      "keyBehavior": "Fetch the current device key bundle, establish a new session on the sender, and encrypt again client-side.",
+      "recovery": [
+        "Mark the obsolete session envelope as requiring key repair.",
+        "Fetch and verify the recipient device's current key bundle.",
+        "Re-encrypt on the sender under the same logical message ID, then resume that device queue."
+      ],
+      "stageStates": {
+        "sender": "degraded",
+        "router": "active",
+        "queue": "degraded",
+        "recipient": "failed",
+        "ack": "idle"
+      },
+      "requirements": ["stable-id", "session-repair"]
+    },
+    {
+      "id": "prekey-shortage",
+      "label": "New-device keys are unavailable",
+      "detail": "The sender cannot establish an authenticated session for a newly linked recipient device.",
+      "event": "The privacy boundary blocks envelope creation before the server can accept a deliverable payload.",
+      "userImpact": "That device waits for key material; the system must not silently downgrade to plaintext.",
+      "retryBehavior": "Back off key-bundle fetches separately from ciphertext delivery retries.",
+      "dedupeBehavior": "Once encryption succeeds, enqueue one envelope under the original logical message ID.",
+      "queueBehavior": "Existing recipient devices can proceed while the new device remains pending key setup.",
+      "keyBehavior": "Replenish and verify signed prekeys, then let the sender establish the session and encrypt locally.",
+      "recovery": [
+        "Expose a key-setup delay instead of claiming delivery.",
+        "Replenish and verify the recipient device's signed key material.",
+        "Create ciphertext on the sender and start the new device queue only after verification."
+      ],
+      "stageStates": {
+        "sender": "failed",
+        "router": "idle",
+        "queue": "idle",
+        "recipient": "degraded",
+        "ack": "idle"
+      },
+      "requirements": ["session-repair"]
+    }
+  ],
+  "policies": [
+    {
+      "id": "bounded-per-device",
+      "label": "Bounded per-device recovery",
+      "detail": "Reuse the logical ID, retain independent device queues, and repair key sessions at the clients.",
+      "preservesMessageId": true,
+      "queueScope": "device",
+      "keyAction": "repair-session"
+    },
+    {
+      "id": "retry-as-new",
+      "label": "Retry as a new message",
+      "detail": "Create a new message ID for every uncertain attempt.",
+      "preservesMessageId": false,
+      "queueScope": "device",
+      "keyAction": "repair-session"
+    },
+    {
+      "id": "first-device-wins",
+      "label": "First device ACK completes the user",
+      "detail": "Keep one user-level queue and drop blocked device envelopes.",
+      "preservesMessageId": true,
+      "queueScope": "user",
+      "keyAction": "drop-device"
+    },
+    {
+      "id": "plaintext-fallback",
+      "label": "Server plaintext fallback",
+      "detail": "Ask the service to bypass a failed key session by delivering readable content.",
+      "preservesMessageId": true,
+      "queueScope": "device",
+      "keyAction": "plaintext"
+    }
+  ]
+}

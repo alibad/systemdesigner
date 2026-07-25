@@ -1,0 +1,359 @@
+---
+registryId: webrtc
+---
+
+{% section-card tone="intro" %}
+## What is WebRTC?
+
+**WebRTC is a set of browser and native APIs for carrying real-time audio, video, and
+application data between endpoints.** It captures local media, negotiates compatible
+formats, finds a network path, encrypts the transport, and continuously adapts to
+changing bandwidth.
+
+WebRTC matters when delay changes the experience: a conversation, remote consultation,
+multiplayer interaction, screen share, or collaborative cursor cannot wait for the
+store-and-forward path used by ordinary uploads. It can connect two peers directly,
+but production group calls usually introduce media servers for scale and control.
+
+{% callout variant="info" %}
+The core invariant is **one authenticated session must negotiate a reachable, encrypted
+media or data path and keep that path usable as the network changes**. WebRTC secures
+the transport, but the application still owns identity, room authorization, signaling,
+TURN credentials, topology, abuse controls, and recovery behavior.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Capture" eyebrow="Media devices" icon="activity" tone="blue" %}
+`getUserMedia()` and `getDisplayMedia()` create audio, camera, and screen tracks after
+the user grants permission. The application owns device selection and mute state.
+{% /concept-card %}
+{% concept-card title="Negotiate" eyebrow="Session contract" icon="workflow" tone="violet" %}
+`RTCPeerConnection` exchanges offers and answers that describe codecs, tracks,
+directions, extensions, and transport parameters.
+{% /concept-card %}
+{% concept-card title="Connect" eyebrow="ICE + STUN + TURN" icon="route" tone="amber" %}
+ICE gathers candidate addresses and tests candidate pairs. STUN can expose a public
+mapping; TURN relays traffic when no direct pair works.
+{% /concept-card %}
+{% concept-card title="Protect + adapt" eyebrow="Live transport" icon="shield" tone="green" %}
+DTLS establishes keys, SRTP protects media, and feedback loops adjust bitrate and
+quality as loss, jitter, delay, and available bandwidth change.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate signaling from the media path
+
+WebRTC does not define signaling. The application must provide an authenticated control
+channel, often HTTPS plus WebSocket, that exchanges session descriptions, ICE
+candidates, room membership, and call state. Review [WebSocket](/technology/websocket)
+first if a long-lived bidirectional control channel is unfamiliar.
+
+Signaling messages help endpoints agree on a path; they do not have to carry the media
+after the connection is established. A signaling outage and a media-path outage are
+therefore different failures.
+
+{% system-flow title="Control plane establishes the media plane" caption="The signaling service coordinates identity and negotiation. ICE selects the reachable transport path, which may be direct, relayed through TURN, or terminated by a media server." %}
+{% system-node title="Authenticated client" eyebrow="Capture + intent" icon="users" tone="blue" %}
+Join an authorized room, request device permission, add tracks, and express the desired
+send and receive directions.
+{% /system-node %}
+{% system-node title="Signaling service" eyebrow="Control messages" icon="workflow" tone="violet" %}
+Route offers, answers, candidates, membership changes, and negotiation state to the
+correct session. Reject messages from unauthorized participants.
+{% /system-node %}
+{% system-node title="ICE services" eyebrow="Connectivity" icon="route" tone="amber" %}
+Use STUN to discover public mappings and TURN to provide a relay candidate. Credentials
+should be scoped and short-lived.
+{% /system-node %}
+{% system-node title="Selected transport" eyebrow="DTLS + SRTP" icon="shield" tone="green" %}
+Run connectivity checks, establish cryptographic keys, then carry protected media or a
+data channel over the nominated candidate pair.
+{% /system-node %}
+{% system-node title="Media server or peer" eyebrow="Receive + adapt" icon="server" tone="cyan" %}
+Forward, mix, decode, or render media while transport feedback changes the sender's
+rate and the receiver's selected quality.
+{% /system-node %}
+{% /system-flow %}
+
+### Follow one connection from permission to first media
+
+{% process-flow %}
+{% process-step number="1" title="Authorize the room" label="Application" %}
+Authenticate the user, verify room membership and role, issue scoped signaling and TURN
+credentials, and decide which tracks the participant may publish.
+{% /process-step %}
+{% process-step number="2" title="Capture and add tracks" label="Browser" %}
+Request only the devices needed for the current action. Add each `MediaStreamTrack` to
+the peer connection and expose clear mute and stop controls.
+{% /process-step %}
+{% process-step number="3" title="Exchange offer and answer" label="SDP" %}
+Negotiate media sections, codecs, directions, header extensions, and transport
+parameters. Serialize concurrent negotiation so crossed offers do not corrupt state.
+{% /process-step %}
+{% process-step number="4" title="Trickle ICE candidates" label="Network" %}
+Send candidates as they are discovered. The remote endpoint adds them and ICE tests
+candidate pairs according to priority.
+{% /process-step %}
+{% process-step number="5" title="Select and secure a pair" label="Transport" %}
+Nominate a working pair, complete the DTLS handshake, derive SRTP keys, and begin media
+or data flow. A relay candidate means TURN stays on that path.
+{% /process-step %}
+{% process-step number="6" title="Observe and adapt" label="Runtime" %}
+Read connection state and statistics, preserve audio under pressure, change layers or
+bitrate, and recover deliberately when the path fails.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/webrtc/code/negotiate-peer-connection.js" language="javascript" title="Create a peer connection and keep signaling application-owned" /%}
+
+The example injects the peer-connection constructor and signaling function so its
+control boundary is testable outside a browser. Real signaling messages also need a
+session ID, sender identity, authorization check, schema version, ordering strategy,
+and replay or duplicate protection.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make ICE fallback an explicit reliability contract
+
+A candidate is one possible address and transport for an endpoint. ICE gathers several
+candidate classes, exchanges them through signaling, and checks pairs until it finds a
+working route.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Host candidate" eyebrow="Local interface" icon="database" tone="blue" %}
+A local address can be the best path on the same network. It usually cannot cross the
+public internet, and browsers may obscure local addresses for privacy.
+{% /concept-card %}
+{% concept-card title="Server-reflexive candidate" eyebrow="STUN mapping" icon="route" tone="violet" %}
+STUN reveals the public IP and port mapping created by a NAT. ICE still has to prove
+that the remote endpoint can reach that mapping.
+{% /concept-card %}
+{% concept-card title="Relay candidate" eyebrow="TURN allocation" icon="server" tone="amber" %}
+TURN allocates a reachable relay address and forwards packets. It improves connection
+success while adding infrastructure cost, another failure domain, and path latency.
+{% /concept-card %}
+{% /concept-grid %}
+
+STUN is not a media relay, and TURN is not a signaling server. A production design
+normally offers TURN/UDP plus a carefully tested restrictive-network fallback such as
+TURN over TLS/TCP 443. Relay-only policy can hide peer addresses or enforce a network
+boundary, but every session then consumes relay capacity.
+
+Use the lab to move from a local network to home NAT, symmetric NAT, an UDP-blocking
+firewall, and a TURN outage. Then change candidate and relay policy rather than assuming
+one fallback works everywhere.
+
+{% interactive-block id="technology/webrtc-ice-path-lab" dataFile="/api/content/technology/webrtc/data/ice-path-scenarios.json" /%}
+
+### Engineer TURN as part of the availability path
+
+- Deploy relays in the regions where users connect, and steer allocations by measured
+  network path rather than account geography alone.
+- Budget both ingress and egress bandwidth, concurrent allocations, port ranges, and
+  loss of one relay node or availability zone.
+- Issue short-lived credentials after room authorization; never embed a permanent
+  relay secret in client code.
+- Monitor allocation failures, relay share, transport mix, packet loss, RTT, throughput,
+  and regional saturation.
+- Test direct-path failure, blocked UDP, expired credentials, DNS failure, certificate
+  rotation, and relay-region evacuation before an incident.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose topology before multiplying participants
+
+The phrase "peer to peer" describes one possible WebRTC path, not a complete group-call
+architecture. With `n` participants, a full mesh creates `n x (n - 1) / 2` peer
+connections. Each publisher sends a separate copy to every other participant, so client
+upload and encoding work grow with room size.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Peer mesh" eyebrow="No media server" icon="network" tone="violet" %}
+Every endpoint connects to every other endpoint. It is simple for very small rooms and
+keeps the media path direct, but weak clients and uplinks become the scale limit.
+{% /concept-card %}
+{% concept-card title="SFU" eyebrow="Select + forward" icon="route" tone="blue" %}
+Each publisher sends one or more encoded layers to a selective forwarding unit. The SFU
+forwards the layers each receiver needs without composing one shared frame.
+{% /concept-card %}
+{% concept-card title="MCU" eyebrow="Decode + mix" icon="server" tone="amber" %}
+A multipoint control unit decodes inputs and produces a composed output. Clients receive
+one stream, while the server pays central decode, layout, and encode cost.
+{% /concept-card %}
+{% /concept-grid %}
+
+Topology is a product decision as well as an infrastructure choice. An SFU preserves
+independent participant streams for active-speaker layouts and adaptation. An MCU can
+simplify constrained endpoints or produce a canonical composite, but it centralizes
+compute and can remove receiver-side layout flexibility.
+
+{% interactive-block id="technology/webrtc-performance" dataFile="/api/content/technology/webrtc/data/conference-capacity-model.json" /%}
+
+{% callout variant="warn" %}
+The capacity lab exposes assumptions instead of claiming universal limits. Codec,
+content motion, screen sharing, simulcast configuration, receiver layout, hardware,
+packet loss, regional fan-out, and implementation quality all change the measured
+envelope. Benchmark representative calls and preserve failure headroom.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Adapt media before the network drops the call
+
+Real-time media cannot wait for perfect delivery. The sender, receiver, and media server
+must trade visual quality for bounded delay while keeping audio intelligible.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Congestion control" eyebrow="Protect the path" icon="gauge" tone="blue" %}
+Transport feedback estimates available bandwidth. The sender changes bitrate and may
+reduce resolution or frame rate before queues create seconds of latency.
+{% /concept-card %}
+{% concept-card title="Simulcast" eyebrow="Several encodings" icon="layers" tone="violet" %}
+A sender publishes multiple spatial qualities. An SFU can forward a thumbnail layer to
+one receiver and a larger layer to another without transcoding each view.
+{% /concept-card %}
+{% concept-card title="Scalable coding" eyebrow="Layered stream" icon="archive" tone="cyan" %}
+Temporal or spatial enhancement layers build on a base layer. Dropping enhancements can
+reduce rate while preserving the decodable base, when the codec path supports it.
+{% /concept-card %}
+{% concept-card title="Audio priority" eyebrow="Conversation first" icon="activity" tone="green" %}
+Preserve voice continuity before high-resolution video. Apply audio processing and
+packet-loss strategies carefully, then validate with real devices and noisy networks.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Treat screen share as a different workload
+
+- Text and diagrams need sharp detail but often tolerate a lower frame rate.
+- Camera video usually values motion continuity more than perfectly crisp individual
+  frames.
+- A receiver layout should subscribe only to visible or important streams and reduce
+  off-screen work.
+- Pausing a track, disabling a sender, and replacing a track have different negotiation
+  and resource consequences; define the product behavior explicitly.
+- Codec choice must account for browser and device support, hardware acceleration,
+  quality at the target rate, decode power, and media-server capabilities.
+
+WebRTC data channels use SCTP over the secured peer-connection transport. Reliable,
+ordered delivery fits chat and control messages. Unordered delivery with a bounded
+retransmission policy can fit rapidly superseded game or cursor updates. A data channel
+still needs message-size limits, backpressure through `bufferedAmount`, authorization,
+and an application schema.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Recover the right layer instead of restarting everything
+
+Connection state is a diagnostic input, not a complete recovery policy. The signaling
+channel, ICE transport, DTLS transport, individual tracks, decoder, and media server can
+fail independently.
+
+{% process-flow %}
+{% process-step number="1" title="Detect user-visible degradation" label="Observe" %}
+Combine join time, connection state, inbound and outbound statistics, freeze signals,
+and user actions. One packet-loss sample should not trigger a call rebuild.
+{% /process-step %}
+{% process-step number="2" title="Adapt inside the current path" label="Reduce" %}
+Lower sender rate, request a different layer, reduce visible subscriptions, and protect
+audio while the congestion controller and jitter buffer respond.
+{% /process-step %}
+{% process-step number="3" title="Restart ICE when connectivity failed" label="Re-route" %}
+Gather fresh candidates and renegotiate transport when the network interface, NAT
+mapping, or selected pair is no longer usable. Keep the room identity stable.
+{% /process-step %}
+{% process-step number="4" title="Rebuild only when state is unrecoverable" label="Replace" %}
+Create a new peer connection after bounded recovery attempts, clean up every sender and
+track deliberately, and reject stale signaling from the replaced generation.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/webrtc/code/measure-call-quality.js" language="javascript" title="Turn two RTC statistics snapshots into an actionable quality signal" /%}
+
+### Monitor outcomes and causes together
+
+{% metric-strip %}
+{% metric label="Join success" value="connected / attempted" detail="Segment by browser, device, network, region, and direct versus relay path" tone="green" /%}
+{% metric label="Time to first media" value="permission to decoded frame" detail="Separate signaling, ICE, DTLS, and media-start delays" tone="blue" /%}
+{% metric label="Network quality" value="RTT + jitter + loss" detail="Correlate with bitrate, frames, freezes, and selected candidate type" tone="violet" /%}
+{% metric label="Recovery" value="restored / disrupted" detail="Track adaptation, ICE restart, rebuild, and permanent failure outcomes" tone="amber" /%}
+{% /metric-strip %}
+
+- Sample `RTCPeerConnection.getStats()` at a bounded interval and calculate deltas;
+  cumulative counters alone hide when degradation happened.
+- Record the selected candidate type and transport without logging raw peer addresses
+  unless the privacy and retention need is explicit.
+- Correlate client quality with SFU, MCU, and TURN region metrics using a call-scoped
+  trace identifier.
+- Measure percentiles and failure cohorts. Fleet averages hide one browser version,
+  mobile radio, ISP, or relay region that cannot connect.
+- Preserve enough diagnostic context to reproduce negotiation and routing decisions,
+  but do not log SDP, access tokens, room secrets, or media payloads indiscriminately.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Secure the room, not only the packets
+
+WebRTC media transport is encrypted, but transport encryption does not decide who may
+join a room or what an authorized participant may publish, subscribe to, record, or
+forward.
+
+### Define the trust boundary
+
+- Authenticate every signaling connection and authorize every room action on the
+  server; do not trust a client-supplied participant or room identifier.
+- Bind offers, answers, candidates, and renegotiation messages to one authorized
+  session generation so stale or cross-room messages are rejected.
+- Use short-lived TURN credentials and rate limits to prevent the relay fleet from
+  becoming an open proxy or bandwidth theft target.
+- Make screen sharing, recording, transcription, bots, and server-side media processing
+  visible product states with explicit authorization and audit trails.
+- Apply origin controls, content security policy, dependency review, and narrow device
+  permissions around the web application that can access camera and microphone data.
+
+### Be precise about end-to-end encryption
+
+DTLS-SRTP protects media on each WebRTC transport. In a multi-party architecture, that
+does not automatically protect media from every forwarding, recording, or processing
+service in the trust boundary. If the product requires media to remain opaque to the
+SFU, it needs a compatible encoded-media encryption design, separate key management,
+participant verification, recovery rules, and feature trade-offs for recording,
+moderation, and server-side processing.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Use WebRTC when interactivity justifies the control plane
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Human-scale latency" icon="check" tone="green" %}
+Use WebRTC for calls, live collaboration, interactive support, remote control, cloud
+gaming inputs, and peer data where low latency and continuous adaptation matter.
+{% /concept-card %}
+{% concept-card title="Use broadcast delivery" eyebrow="One to very many" icon="activity" tone="blue" %}
+Segmented HTTP streaming plus a CDN is often simpler and cheaper when viewers can
+tolerate more delay and do not need to send media back interactively.
+{% /concept-card %}
+{% concept-card title="Use ordinary APIs" eyebrow="Durable messages or files" icon="database" tone="amber" %}
+HTTP uploads, object storage, WebSocket messages, or a queue are better when data must
+be durably stored, retried, audited, and processed rather than consumed as a live path.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before launch, prove the whole operating contract:
+
+1. Join succeeds across home NAT, mobile networks, enterprise firewalls, and TURN-only
+   policy at the supported browser and device matrix.
+2. The topology survives the largest room, concurrent-room peak, one media-node loss,
+   and one relay-region loss without saturating remaining capacity.
+3. Audio remains usable under constrained bandwidth, loss, jitter, handoff between
+   networks, backgrounding, and device changes.
+4. Renegotiation, ICE restart, signaling reconnect, and complete peer-connection rebuild
+   are bounded, observable, and protected from stale messages.
+5. Room authorization, publishing permissions, TURN credentials, recording state,
+   abuse controls, privacy retention, and incident access are reviewed together.
+6. Support teams can connect a user's symptom to signaling, selected candidate path,
+   browser statistics, and the responsible media or relay region.
+{% /section-card %}
+
+{% quiz quizId="webrtc" lessonSlug="webrtc" title="WebRTC Production Design Review" questionsFile="/api/content/technology/webrtc/quiz/webrtc-production-design.json" /%}

@@ -1,0 +1,302 @@
+---
+registryId: video-generation
+---
+
+{% section-card tone="intro" %}
+## What is video generation?
+
+**Video generation** is the use of a learned generative model to synthesize a sequence of related frames from text, images, video, motion controls, or a combination of those signals. The result is not just a stack of good images. It is a timeline in which subjects, scene state, motion, lighting, and camera behavior should evolve coherently.
+
+In plain language: an image model must make one moment believable. A video model must make every moment believable **and** make the changes between moments make sense.
+
+The core invariant is **controlled continuity**. A subject should change when the brief calls for action, occlusion, or a shot cut, but it should not change accidentally because the model lost track of identity or scene state.
+
+- **Prerequisite:** Review [text-to-image generation](/genai/text-to-image) if latent diffusion, denoising, or conditioning are unfamiliar.
+- **Production goal:** Treat generation as an asynchronous media job with explicit quality, rights, safety, capacity, and provenance gates.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Generate space and time" eyebrow="Model" icon="film" tone="violet" %}
+The model must represent appearance inside each frame and motion across frames. Temporal context is part of the sample, not a post-processing detail.
+{% /concept-card %}
+{% concept-card title="Condition the timeline" eyebrow="Control" icon="sliders-horizontal" tone="blue" %}
+Prompts describe intent; reference frames, poses, depth, camera paths, and storyboards constrain details that prose cannot specify precisely.
+{% /concept-card %}
+{% concept-card title="Release an asset" eyebrow="System" icon="shield-check" tone="green" %}
+The service must admit, schedule, evaluate, encode, sign, store, and observe a video before a user can publish it.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card %}
+## A video is a coupled space-time sample
+
+Represent a clip as a tensor with a time axis: `T x H x W x C`. `T` is the frame count, `H x W` is the spatial resolution, and `C` holds color channels. A six-second clip at 12 generated frames per second has `72` generated frames before optional interpolation.
+
+Most modern systems compress frames into a lower-dimensional latent representation, perform expensive generation in that space, and decode the final latents back to pixels. The denoiser or next-state predictor must exchange information across both spatial and temporal positions.
+
+{% process-flow %}
+{% process-step number="1" title="Parse the brief" label="Condition" %}
+Normalize the prompt, references, aspect ratio, duration, shot plan, motion controls, and policy context.
+{% /process-step %}
+{% process-step number="2" title="Plan temporal work" label="Schedule" %}
+Choose a native clip length or overlapping windows, reserve accelerator memory, and estimate service time before admission.
+{% /process-step %}
+{% process-step number="3" title="Generate latents" label="Synthesize" %}
+Run the model across space-time patches or windows while carrying anchors and overlap state through the timeline.
+{% /process-step %}
+{% process-step number="4" title="Decode and inspect" label="Evaluate" %}
+Measure per-frame quality, motion, continuity, identity, prompt alignment, policy risk, and transition failures.
+{% /process-step %}
+{% process-step number="5" title="Encode and attest" label="Release" %}
+Encode the approved frames, attach provenance, persist decision evidence, store the asset, and return a durable URL.
+{% /process-step %}
+{% /process-flow %}
+
+Three broad generation patterns explain many implementations:
+
+1. **Joint clip generation** creates a bounded duration as one space-time sample. It exposes broad temporal context, but memory and compute grow with frame count and resolution.
+2. **Hierarchical generation** creates keyframes or a low-resolution timeline, then adds frames and spatial detail. Each stage needs its own consistency checks because errors can be amplified during upsampling.
+3. **Windowed extension** generates overlapping temporal chunks and carries shared state across boundaries. It supports longer clips and bounded retries, but seams become an explicit failure mode.
+
+Research systems demonstrate several versions of this idea. [Video Diffusion Models](https://arxiv.org/abs/2204.03458) extends image diffusion with temporal modeling and conditional extension. [Lumiere](https://arxiv.org/abs/2401.12945) explores a space-time U-Net that generates a full frame-rate low-resolution clip before spatial enhancement.
+
+The [Sora technical report](https://openai.com/index/video-generation-models-as-world-simulators/) describes diffusion over space-time patches in a compressed latent space. These are architectural examples, not interchangeable product guarantees.
+{% /section-card %}
+
+{% section-card %}
+## Conditioning turns intent into constraints
+
+A text prompt is an important condition, but it is not a complete timeline specification. Production systems combine conditions according to what the creator must control.
+
+- **Text and negative policy constraints** describe subjects, actions, setting, style, and content to avoid.
+- **Image or identity references** anchor appearance, materials, wardrobe, product geometry, or the first frame.
+- **Spatial controls** such as pose, depth, masks, edges, and segmentation constrain where entities appear.
+- **Temporal controls** such as motion vectors, trajectories, keyframes, beat markers, or reference video constrain how state changes.
+- **Camera controls** describe pan, tilt, dolly, orbit, focal behavior, and shot boundaries separately from subject motion.
+- **Generation controls** include seed, duration, frame rate, aspect ratio, sampling steps, guidance, and model version.
+
+Condition fusion is a trade-off. Stronger controls can improve adherence while reducing variation or creating conflicts. The system should preserve the full condition manifest so an evaluator can explain which contract the candidate was expected to satisfy. [VideoComposer](https://arxiv.org/abs/2306.02018) is one research example that combines textual, spatial, and temporal conditions rather than treating text as the only control surface.
+
+{% callout variant="info" %}
+Separate **subject motion** from **camera motion** in the request contract. A prompt such as "the camera circles a stationary sculpture" is harder to validate when both motions are compressed into one free-form string.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Continuity is a state-management problem
+
+Temporal consistency asks whether adjacent frames form plausible motion. Identity consistency asks whether the same entity preserves defining attributes through motion, occlusion, and viewpoint changes. Shot consistency also includes background layout, props, lighting, and camera intent.
+
+A useful continuity plan has several layers:
+
+- **Within a window:** Temporal attention, convolution, recurrence, or space-time patch mixing shares evidence across nearby frames.
+- **Across windows:** Overlap frames, cached latents, seeds, reference embeddings, and approved keyframes carry state across a bounded generation boundary.
+- **Across shots:** A storyboard and entity manifest preserve identity while allowing intentional changes in camera, location, or time.
+- **After generation:** Sequence-aware evaluators detect flicker, object disappearance, texture crawling, duplicated limbs, geometry changes, and abrupt motion.
+
+Do not hide a real cut with an ever-longer context window. Long-form products usually plan shots, generate them as bounded units, and evaluate transitions separately. This also gives retries a precise scope: regenerate the failed shot plus enough overlap to verify the seam.
+{% /section-card %}
+
+{% interactive-block id="genai/video-generation-continuity-lab" dataFile="/api/content/genai/video-generation/data/continuity-scenarios.json" /%}
+
+{% section-card %}
+## Training data needs a rights and lineage contract
+
+Video datasets combine visual content, motion, audio, captions, identities, locations, and embedded metadata. Collection scale does not remove the need to know where an item came from or what uses are permitted.
+
+For every source or dataset version, retain a machine-queryable manifest with:
+
+- source owner, acquisition path, collection date, and immutable content identifier;
+- license or other documented rights basis for training, evaluation, and derived outputs;
+- consent and identity restrictions, including handling for minors, private individuals, performers, and biometric likeness;
+- allowed purposes, territories, retention period, deletion path, and downstream redistribution terms;
+- captioning, filtering, deduplication, transformation, and reviewer lineage;
+- dataset version, train-validation-test membership, and contamination checks;
+- revocation, dispute, and removal workflow with evidence that descendants were located.
+
+[Datasheets for Datasets](https://arxiv.org/abs/1803.09010) provides a general documentation framework. For current legal and policy questions, consult the relevant jurisdiction and counsel; the [U.S. Copyright Office AI study](https://www.copyright.gov/ai/) separates digital replicas, output copyrightability, and generative-model training into distinct analyses rather than treating "AI rights" as one question.
+
+{% callout variant="warn" %}
+Public availability is not a rights grant. Keep provenance and allowed-use decisions explicit, and make dataset removal a tested operational path rather than a spreadsheet promise.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Evaluation must cover frames, time, and use cases
+
+No single score proves that a generated clip is good. A release suite should separate dimensions so an average cannot hide a critical failure.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Frame quality" eyebrow="Appearance" icon="image" tone="blue" %}
+Inspect sharpness, composition, artifacts, text rendering, anatomy, and aesthetic quality on sampled and worst-case frames.
+{% /concept-card %}
+{% concept-card title="Temporal quality" eyebrow="Motion" icon="activity" tone="violet" %}
+Measure flicker, motion smoothness, object permanence, identity drift, physics, camera adherence, and transition seams.
+{% /concept-card %}
+{% concept-card title="Contract quality" eyebrow="Intent" icon="clipboard-check" tone="green" %}
+Score prompt alignment, reference fidelity, spatial relations, requested actions, duration, shot plan, and policy compliance.
+{% /concept-card %}
+{% /concept-grid %}
+
+Build the evaluation set from product slices, not only generic prompts:
+
+- single and multiple subjects, with occlusion and re-entry;
+- people, animals, products, rigid objects, liquids, and text;
+- static, slow, fast, periodic, and interacting motion;
+- locked, panning, tracking, and orbiting cameras;
+- short native clips, extended windows, and multi-shot transitions;
+- different aspect ratios, resolutions, languages, regions, and safety categories;
+- known hard cases and regressions from production incidents.
+
+[FVD](https://arxiv.org/abs/1812.01717) introduced a distribution-level video metric, but later research documents limitations that make it unsuitable as a standalone release gate. [VBench](https://arxiv.org/abs/2311.17982) instead decomposes quality into dimensions such as subject consistency, motion smoothness, flicker, and spatial relationships. Use automated metrics for coverage and regression detection, then calibrate them against blinded human review for the actual product domain.
+
+Record confidence intervals, evaluator versions, sample counts, and slice results. A change that improves the mean but regresses a required identity or safety slice should not pass.
+{% /section-card %}
+
+{% section-card %}
+## Safety and provenance are independent controls
+
+Video generation can create harmful content over time even when a sampled thumbnail looks acceptable. Apply controls before compute, across the decoded sequence, and at publication.
+
+1. **Input gate:** Classify the prompt and reference media; enforce age, identity, impersonation, sexual-content, violence, and customer-specific policies before GPU admission.
+2. **Generation boundary:** Isolate untrusted intermediate assets, limit tool and network access, and make cancellation and timeout behavior deterministic.
+3. **Output gate:** Inspect frames and transitions, audio when present, identity similarity, text overlays, and temporal combinations that frame-only filters miss.
+4. **Escalation:** Route uncertain or high-impact cases to trained reviewers with minimized exposure and a documented decision policy.
+5. **Provenance:** Attach model, edit, and origin assertions to the released asset, retain signing evidence, and verify that transformations preserve or intentionally update provenance.
+6. **Response:** Support takedown, credential revocation, abuse investigation, model rollback, and affected-output discovery.
+
+The [NIST Generative AI Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) identifies risks including intellectual property, abusive imagery, information integrity, and opaque upstream components. [C2PA Content Credentials 2.3](https://spec.c2pa.org/specifications/specifications/2.3/specs/C2PA_Specification.html) defines a cryptographically bound provenance structure for media assets.
+
+{% callout variant="info" %}
+Valid provenance can show that signed assertions were bound to an asset and have not been tampered with. It does not, by itself, prove that a depicted event is true, that all rights were cleared, or that the content is safe.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Serving is an asynchronous capacity problem
+
+Video jobs vary sharply by duration, frame rate, resolution, sampling steps, model, and control stack. Admit work from a normalized generation profile rather than treating every request as one queue item.
+
+{% system-flow %}
+{% system-node title="API and policy" eyebrow="Request" icon="shield-check" tone="blue" %}
+Validate tenant limits, references, conditions, rights attestations, and input policy.
+{% /system-node %}
+{% system-node title="Planner" eyebrow="Estimate" icon="calculator" tone="violet" %}
+Choose model, windows, preview path, expected service time, memory class, and budget.
+{% /system-node %}
+{% system-node title="Durable scheduler" eyebrow="Admit" icon="list-ordered" tone="amber" %}
+Apply priority, quotas, deadlines, leases, cancellation, and backpressure before dispatch.
+{% /system-node %}
+{% system-node title="GPU workers" eyebrow="Generate" icon="cpu" tone="cyan" %}
+Checkpoint bounded windows and emit progress without exposing incomplete assets.
+{% /system-node %}
+{% system-node title="Evaluation and media" eyebrow="Publish" icon="film" tone="green" %}
+Decode, evaluate, encode, sign, store, and deliver only approved candidates.
+{% /system-node %}
+{% /system-flow %}
+
+Start with four quantities:
+
+- `frame_count = duration_seconds x generated_fps`
+- `offered_gpu_seconds_per_hour = arrivals_per_hour x service_seconds_per_job`
+- `required_gpus = ceil(offered_gpu_seconds_per_hour / (3600 x target_utilization))`
+- `compute_cost_per_job = service_seconds_per_job / 3600 x gpu_hourly_price`
+
+`service_seconds_per_job` must come from measured profiles for the exact model and hardware. Pixel count, frames, and sampling steps provide a useful planning approximation, but attention, memory pressure, decoding, safety evaluation, and encoding create nonlinear effects. Keep target utilization below saturation so retries and burst traffic do not turn directly into unbounded queue delay.
+
+{% code-block file="/api/content/genai/video-generation/code/video-serving-envelope.py" language="python" title="Executable serving-envelope model" /%}
+{% /section-card %}
+
+{% interactive-block id="genai/video-generation-production-gate-lab" dataFile="/api/content/genai/video-generation/data/production-gates.json" /%}
+
+{% section-card %}
+## Cost and latency are product decisions
+
+The user-visible latency is more than model execution:
+
+`total_latency = admission + queue_wait + generation + decode + evaluation + encode + storage`
+
+Control each term deliberately:
+
+- **Preview-first:** Generate a lower-cost candidate, then spend on final quality only after approval. Measure the approval rate because rejected previews still consume capacity.
+- **Tiered profiles:** Bound duration, resolution, frame rate, and steps into benchmarked products instead of accepting arbitrary combinations.
+- **Batching:** Batch compatible model profiles when it improves throughput without violating cancellation or deadline behavior.
+- **Window checkpoints:** Retry a failed window plus overlap instead of restarting the whole clip. Verify deterministic ownership and idempotent writes.
+- **Reserved and elastic pools:** Reserve capacity for predictable paid demand; use a bounded overflow pool for bursts when startup time and model loading permit.
+- **Admission control:** Return an honest queued estimate, offer a cheaper profile, or reject before work when the service-level objective cannot be met.
+
+Track cost per **released** second, not only cost per submitted job. Retries, blocked outputs, abandoned previews, and post-processing failures are real product costs.
+{% /section-card %}
+
+{% section-card %}
+## Observability follows one job from request to asset
+
+Give every job a stable identifier and record state transitions such as `accepted`, `planned`, `queued`, `leased`, `generating`, `evaluating`, `encoding`, `released`, `blocked`, `failed`, and `cancelled`. A worker lease and idempotency key prevent duplicate publication when retries overlap.
+
+**Metrics to operate the service**
+
+- arrival rate, admission rejection, queue depth, oldest-job age, and queue wait percentiles by priority and profile;
+- generation, decode, evaluation, and encode latency percentiles by model, hardware, duration, and resolution;
+- GPU utilization, memory headroom, out-of-memory rate, worker eviction, retry scope, and checkpoint recovery;
+- cost per submitted job, generated second, accepted preview, and released second;
+- prompt alignment, temporal consistency, identity, flicker, seam, and human-review rates by evaluation slice;
+- input blocks, output blocks, reviewer overrides, provenance attachment failures, takedowns, and abuse reports;
+- completion, cancellation, preview approval, regeneration, download, and publication rates.
+
+**Traces and logs**
+
+- Trace planner, queue, window generation, decode, evaluator, encoder, signer, and storage spans under the job ID.
+- Log model and evaluator versions, normalized profile, decision codes, timing, resource class, and asset hashes.
+- Avoid logging raw prompts, private references, biometric embeddings, or generated frames by default. Store sensitive evidence in access-controlled systems with explicit retention.
+
+Alert on symptoms users feel: queue-age budget burn, stuck-state duration, repeated window failure, evaluation backlog, and release without provenance. GPU utilization alone cannot tell you whether the product is healthy.
+{% /section-card %}
+
+{% section-card %}
+## Release gates turn evidence into a decision
+
+A production release needs both a **model gate** and a **service gate**. The model gate proves required quality and safety slices. The service gate proves the system can schedule, evaluate, roll back, and investigate the new version under expected load.
+
+Block promotion when any required condition fails:
+
+- temporal, identity, prompt-alignment, and transition-seam floors pass on versioned evaluation slices;
+- critical safety categories have zero-tolerance or explicitly approved thresholds, with reviewer calibration where required;
+- training and evaluation data versions have documented rights, lineage, deletion, and contamination checks;
+- Content Credentials or the selected provenance mechanism attach and validate through the delivery path;
+- peak-load tests meet queue, latency, error, cancellation, checkpoint, and cost budgets with headroom;
+- dashboards, alerts, audit evidence, incident runbooks, rollback, and output discovery are exercised;
+- canary exposure is bounded by tenant, geography, profile, and time, with automatic rollback triggers.
+
+Do not let an aggregate quality score override a failed critical slice. The release decision should identify the exact evidence, owner, exception, expiration, and rollback version.
+
+{% code-block file="/api/content/genai/video-generation/code/video-release-gates.py" language="python" title="Executable release-gate policy" /%}
+{% /section-card %}
+
+{% section-card %}
+## Production checklist
+
+Before launch, verify that the system can answer these questions:
+
+- What exact condition manifest, model version, seed, and evaluator version produced this asset?
+- Which temporal window failed, and can it be retried without publishing duplicate or inconsistent output?
+- Which identity, rights, and safety policies applied to the references and decoded sequence?
+- What is the measured service-time distribution for every sellable generation profile?
+- How many accelerators are required at peak while preserving retry and incident headroom?
+- Which quality slice, policy gate, or provenance check blocked a candidate?
+- Can operators discover affected assets, revoke credentials, roll back the model, and notify users?
+- Does the next release improve released-output quality without hiding cost in retries or human review?
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and further study
+
+- [Video Diffusion Models](https://arxiv.org/abs/2204.03458) for temporal diffusion and conditional video extension.
+- [Lumiere](https://arxiv.org/abs/2401.12945) for full-frame-rate space-time generation before spatial enhancement.
+- [VideoComposer](https://arxiv.org/abs/2306.02018) for compositional spatial and temporal conditioning.
+- [VBench](https://arxiv.org/abs/2311.17982) for decomposed video-generation evaluation dimensions.
+- [Datasheets for Datasets](https://arxiv.org/abs/1803.09010) for accountable dataset documentation.
+- [NIST AI 600-1](https://doi.org/10.6028/NIST.AI.600-1) for generative-AI risk management across the lifecycle.
+- [C2PA Content Credentials 2.3](https://spec.c2pa.org/specifications/specifications/2.3/specs/C2PA_Specification.html) for the current provenance data model and validation contract.
+{% /section-card %}
+
+{% quiz title="Video Generation Production Review" questionsFile="/api/content/genai/video-generation/quiz/video-generation-review.json" lessonSlug="video-generation" /%}

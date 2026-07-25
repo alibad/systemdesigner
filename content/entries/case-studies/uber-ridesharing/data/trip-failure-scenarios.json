@@ -1,0 +1,255 @@
+{
+  "title": "Protect one trip while a region degrades",
+  "description": "Inject a dispatch, freshness, regional, or duplicate-command failure, then choose a recovery policy. The lab shows which path remains authoritative and what the rider actually experiences.",
+  "nodes": [
+    {
+      "id": "gateway",
+      "label": "Regional gateway",
+      "responsibility": "Admits rider and driver commands into the rider's home region."
+    },
+    {
+      "id": "location",
+      "label": "Location index",
+      "responsibility": "Holds expiring driver coordinates for nearby-candidate search."
+    },
+    {
+      "id": "dispatch",
+      "label": "Dispatch",
+      "responsibility": "Scores candidates and creates bounded driver offers."
+    },
+    {
+      "id": "trip",
+      "label": "Trip authority",
+      "responsibility": "Serializes the trip state, assigned driver, and version."
+    },
+    {
+      "id": "events",
+      "label": "Regional event log",
+      "responsibility": "Publishes committed trip changes for local consumers and replay."
+    },
+    {
+      "id": "peer",
+      "label": "Peer region",
+      "responsibility": "Receives asynchronous summaries without owning the active trip."
+    }
+  ],
+  "responses": [
+    {
+      "id": "retry-everywhere",
+      "label": "Retry through every path",
+      "detail": "Keep sending the command to local and remote dependencies until one answers."
+    },
+    {
+      "id": "gate-and-isolate",
+      "label": "Gate and isolate",
+      "detail": "Reject unsafe inputs, fence the affected boundary, and preserve a local authoritative state."
+    },
+    {
+      "id": "idempotent-replay",
+      "label": "Replay by identity and version",
+      "detail": "Retry the durable command with the same key and expected trip version."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "dispatch-failure",
+      "label": "Dispatch service unavailable",
+      "detail": "Candidate scoring times out before any driver offer is committed.",
+      "recommendedResponse": "gate-and-isolate",
+      "route": ["gateway", "location", "dispatch"],
+      "statuses": {
+        "gateway": "healthy",
+        "location": "healthy",
+        "dispatch": "failed",
+        "trip": "healthy",
+        "events": "degraded",
+        "peer": "healthy"
+      },
+      "outcomes": {
+        "retry-everywhere": {
+          "tone": "danger",
+          "title": "Retries turn one dispatch outage into regional overload",
+          "detail": "The request fans out while the scoring dependency is still unavailable. Queues grow, remote capacity is consumed, and the rider still has no authoritative assignment.",
+          "authority": "No assignment",
+          "freshness": "Fresh inputs",
+          "blastRadius": "Multiple regions",
+          "duplicateRisk": "Medium",
+          "tripState": "requested v7",
+          "riderState": "Searching indefinitely"
+        },
+        "gate-and-isolate": {
+          "tone": "healthy",
+          "title": "The rider sees a bounded delay and trip state stays clean",
+          "detail": "The gateway stops new offers in the affected cell, keeps the trip requested, and returns a retryable unavailable result instead of inventing an assignment.",
+          "authority": "Preserved",
+          "freshness": "Fresh inputs",
+          "blastRadius": "Affected cells",
+          "duplicateRisk": "Low",
+          "tripState": "requested v7",
+          "riderState": "Dispatch temporarily unavailable"
+        },
+        "idempotent-replay": {
+          "tone": "warning",
+          "title": "Replay is safe but cannot replace a failed scorer",
+          "detail": "Stable identity prevents duplicate trip writes, yet no candidate can be selected until dispatch recovers or traffic moves to a rehearsed local fallback.",
+          "authority": "Preserved",
+          "freshness": "Fresh inputs",
+          "blastRadius": "One region",
+          "duplicateRisk": "Low",
+          "tripState": "requested v7",
+          "riderState": "Waiting for dispatch recovery"
+        }
+      }
+    },
+    {
+      "id": "stale-location",
+      "label": "Driver location is stale",
+      "detail": "A candidate has not published a coordinate within the location freshness bound.",
+      "recommendedResponse": "gate-and-isolate",
+      "route": ["gateway", "location", "dispatch"],
+      "statuses": {
+        "gateway": "healthy",
+        "location": "degraded",
+        "dispatch": "degraded",
+        "trip": "healthy",
+        "events": "healthy",
+        "peer": "healthy"
+      },
+      "outcomes": {
+        "retry-everywhere": {
+          "tone": "danger",
+          "title": "A ghost candidate produces a bad pickup promise",
+          "detail": "Retrying the same stale coordinate makes it look available without making it true. The rider can receive an offer for a driver who has moved or gone offline.",
+          "authority": "At risk",
+          "freshness": "27 seconds old",
+          "blastRadius": "One trip",
+          "duplicateRisk": "Medium",
+          "tripState": "offer_pending v11",
+          "riderState": "Misleading pickup ETA"
+        },
+        "gate-and-isolate": {
+          "tone": "healthy",
+          "title": "Freshness wins over a fast but false match",
+          "detail": "Dispatch removes the stale driver, expands within the bounded regional search policy, and reports a longer wait if no fresh candidate remains.",
+          "authority": "Preserved",
+          "freshness": "Stale candidate rejected",
+          "blastRadius": "One candidate",
+          "duplicateRisk": "Low",
+          "tripState": "requested v10",
+          "riderState": "Longer but honest wait"
+        },
+        "idempotent-replay": {
+          "tone": "warning",
+          "title": "Command identity cannot make a coordinate fresh",
+          "detail": "The replay is deduplicated, but the original candidate evidence is still outside its freshness bound. The location must be refreshed or excluded.",
+          "authority": "Preserved",
+          "freshness": "27 seconds old",
+          "blastRadius": "One trip",
+          "duplicateRisk": "Low",
+          "tripState": "requested v10",
+          "riderState": "Waiting on fresh candidates"
+        }
+      }
+    },
+    {
+      "id": "region-isolation",
+      "label": "Region loses its peer link",
+      "detail": "The active region can reach local trip storage but cannot replicate events to a peer.",
+      "recommendedResponse": "gate-and-isolate",
+      "route": ["gateway", "location", "dispatch", "trip", "events"],
+      "statuses": {
+        "gateway": "healthy",
+        "location": "healthy",
+        "dispatch": "healthy",
+        "trip": "healthy",
+        "events": "degraded",
+        "peer": "isolated"
+      },
+      "outcomes": {
+        "retry-everywhere": {
+          "tone": "danger",
+          "title": "Cross-region retries threaten two writers for one trip",
+          "detail": "Routing active-trip commands to a peer without transferring ownership can create competing state histories while the replication link is uncertain.",
+          "authority": "Ambiguous",
+          "freshness": "Local is fresh",
+          "blastRadius": "Two regions",
+          "duplicateRisk": "High",
+          "tripState": "assigned v14 in conflict",
+          "riderState": "Conflicting trip updates"
+        },
+        "gate-and-isolate": {
+          "tone": "healthy",
+          "title": "Local trips continue and replication waits behind a fence",
+          "detail": "The home region remains the only writer, stores local events durably, and queues peer replication. Cross-region analytics may be stale, but the rider and driver share one trip state.",
+          "authority": "Local region",
+          "freshness": "Local is fresh",
+          "blastRadius": "Replication only",
+          "duplicateRisk": "Low",
+          "tripState": "assigned v14",
+          "riderState": "Trip continues locally"
+        },
+        "idempotent-replay": {
+          "tone": "warning",
+          "title": "Replay must wait until regional ownership is fenced",
+          "detail": "Stable event IDs help reconciliation, but replaying into an unfenced peer can still apply legal-looking transitions under the wrong regional owner.",
+          "authority": "Unproven",
+          "freshness": "Local is fresh",
+          "blastRadius": "Peer consumer",
+          "duplicateRisk": "Medium",
+          "tripState": "assigned v14",
+          "riderState": "Local trip continues"
+        }
+      }
+    },
+    {
+      "id": "duplicate-transition",
+      "label": "Assignment acknowledgement is lost",
+      "detail": "The trip commit succeeded, but dispatch timed out and retries the assignment command.",
+      "recommendedResponse": "idempotent-replay",
+      "route": ["gateway", "dispatch", "trip", "events"],
+      "statuses": {
+        "gateway": "healthy",
+        "location": "healthy",
+        "dispatch": "degraded",
+        "trip": "degraded",
+        "events": "healthy",
+        "peer": "healthy"
+      },
+      "outcomes": {
+        "retry-everywhere": {
+          "tone": "danger",
+          "title": "A new retry identity can repeat assignment side effects",
+          "detail": "The trip is already assigned. Treating the timeout as a new command can notify another driver, charge twice, or publish a second assignment event.",
+          "authority": "Committed once",
+          "freshness": "Fresh inputs",
+          "blastRadius": "Trip and consumers",
+          "duplicateRisk": "High",
+          "tripState": "assigned v18 plus duplicate attempt",
+          "riderState": "Conflicting driver notifications"
+        },
+        "gate-and-isolate": {
+          "tone": "warning",
+          "title": "Stopping retries protects consumers but leaves uncertainty",
+          "detail": "The caller avoids another side effect, yet it still needs to read the authoritative trip by command identity to learn whether the assignment committed.",
+          "authority": "Committed once",
+          "freshness": "Fresh inputs",
+          "blastRadius": "One caller",
+          "duplicateRisk": "Low",
+          "tripState": "assigned v18, caller uncertain",
+          "riderState": "Assignment confirmation delayed"
+        },
+        "idempotent-replay": {
+          "tone": "healthy",
+          "title": "The same command returns the committed assignment",
+          "detail": "Trip authority recognizes the idempotency key and expected version, returns the existing result, and emits no second assignment side effect.",
+          "authority": "Committed once",
+          "freshness": "Fresh inputs",
+          "blastRadius": "One command",
+          "duplicateRisk": "Low",
+          "tripState": "assigned v18, duplicate is a no-op",
+          "riderState": "One confirmed driver"
+        }
+      }
+    }
+  ]
+}

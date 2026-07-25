@@ -1,0 +1,429 @@
+---
+registryId: etcd
+---
+
+{% section-card tone="intro" %}
+## What is etcd?
+
+**etcd is a strongly consistent, replicated key-value store for small pieces of
+coordination state.** Distributed systems use it for configuration, service
+registration, leader election, ownership, and other decisions where two clients must
+not observe conflicting committed answers.
+
+etcd matters because coordination data is small but disproportionately important. A
+wrong owner record can produce duplicate work. A stale configuration can route traffic
+to a retired service. A lost control-plane key can make an otherwise healthy fleet
+unmanageable.
+
+{% callout variant="info" %}
+The core invariant is **one durable order of committed key-value operations while a
+voting majority can communicate**. etcd uses Raft for that order and MVCC revisions for
+the observable history. It prefers temporary unavailability over split-brain writes
+when quorum is lost.
+{% /callout %}
+
+etcd is not a general document database, blob store, analytics engine, queue, or cache.
+Keep values and transactions small, keyspaces bounded, and application data in systems
+designed for that workload.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace one operation through the cluster
+
+A client can connect to any advertised client endpoint. Voting members use Raft to
+elect one leader and agree on ordered mutations. Each member persists the log and
+applies committed entries to its MVCC backend.
+
+{% system-flow title="etcd coordination path" caption="Client endpoints, peer consensus, and storage persistence are separate failure and security boundaries." %}
+{% system-node title="Application or controller" eyebrow="Intent" icon="activity" tone="cyan" %}
+Issues a range, put, transaction, watch, lease, or maintenance request with a deadline
+and retry policy.
+{% /system-node %}
+{% system-node title="Client endpoint" eyebrow="gRPC and TLS" icon="route" tone="blue" %}
+Authenticates the caller and serves or forwards the request. Clients should know
+multiple endpoints so one member failure does not pin them to an outage.
+{% /system-node %}
+{% system-node title="Raft leader and voters" eyebrow="Global order" icon="users" tone="violet" %}
+The leader orders mutations and a voting majority acknowledges durable progress.
+Followers can serve explicitly serializable local reads.
+{% /system-node %}
+{% system-node title="WAL and MVCC backend" eyebrow="Durable state" icon="database" tone="green" %}
+The write-ahead log persists consensus entries. The backend stores key versions,
+revisions, leases, and the state needed by range and watch APIs.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate the roles
+
+- A **leader** orders proposals for the current Raft term. Leadership can move without
+  changing the keyspace contract.
+- A **voting follower** replicates state and participates in elections and quorum.
+- A **learner** catches up without voting. It reduces the risk of adding an
+  uninitialized voter, but it does not increase failure tolerance until promoted.
+- A **client endpoint** is where an application connects. Endpoint reachability is not
+  the same thing as cluster quorum.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Test quorum, endpoint reachability, and read freshness
+
+Odd voter counts make the failure budget explicit: three voters need two; five need
+three. A two-member cluster still needs both members and therefore tolerates no failure.
+Adding voters also adds coordination and operational cost, so use measured requirements
+rather than treating member count as horizontal data scaling.
+
+{% interactive-block id="technology/etcd-quorum-contract-lab" dataFile="/api/content/technology/etcd/data/quorum-contract-model.json" /%}
+
+### Linearizable and serializable are different product contracts
+
+- A default linearizable read returns state current in the global order, but depends on
+  a live consensus path.
+- A serializable read can be served from one member's local applied state. It is
+  cheaper and may remain available from an isolated member, but the result can be stale.
+- Writes and transactions require the leader and a voting majority to make progress.
+- Watch streams are ordered by revision but are not linearizable reads. Reconcile them
+  with an explicit list-and-watch revision boundary.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Use revisions as the coordination clock
+
+Every key mutation advances the cluster-wide MVCC revision. A key also carries its
+create revision, modification revision, version count, and optional lease. These fields
+are safer coordination inputs than wall-clock timestamps from different machines.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Range" eyebrow="Read a snapshot" icon="search" tone="blue" %}
+Read one key or a byte range at the current or an available historical revision. Use
+the response header revision as a cache or multi-request snapshot boundary.
+{% /concept-card %}
+{% concept-card title="Transaction" eyebrow="Compare then mutate" icon="check" tone="green" %}
+Evaluate version, revision, lease, or value comparisons and atomically run the success
+or failure branch. All writes in one transaction share one revision.
+{% /concept-card %}
+{% concept-card title="Watch" eyebrow="Observe ordered change" icon="activity" tone="cyan" %}
+Stream events from a chosen revision. Reconnect from the last processed revision and
+relist when required history has already been compacted.
+{% /concept-card %}
+{% concept-card title="Lease" eyebrow="Bind data to liveness" icon="timer" tone="amber" %}
+Attach keys to a server-managed TTL. Expiry or revoke deletes every attached key and
+produces delete events, but external side effects still need fencing or idempotency.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Build a correct list-and-watch client
+
+{% process-flow %}
+{% process-step number="1" title="Read a complete prefix" label="Snapshot" %}
+Use the required consistency mode, validate the response, and record its header
+revision with the returned key-value set.
+{% /process-step %}
+{% process-step number="2" title="Install the local snapshot" label="Cache" %}
+Replace local state atomically so readers never observe a half-rebuilt cache.
+{% /process-step %}
+{% process-step number="3" title="Watch after that revision" label="Stream" %}
+Start from the next revision, apply events in order, deduplicate reconnects, and monitor
+watch progress against a current read when freshness matters.
+{% /process-step %}
+{% process-step number="4" title="Relist after compaction" label="Recovery" %}
+If the start revision is no longer retained, discard the incomplete cache, read a new
+snapshot, and establish a new watch boundary.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/etcd/code/coordination-contract.sh" language="bash" title="Revision boundary, lease-backed registration, and compare-and-swap" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design leases and locks around stale owners
+
+A lease answers whether etcd is still receiving keep-alives. It does not stop an old
+process from writing to an external database after a pause, network partition, or long
+garbage-collection stall.
+
+For exclusive work:
+
+- Attach the ownership key to a lease and renew it with a bounded client deadline.
+- Use a transaction to acquire ownership only when the key does not exist or still has
+  the expected revision.
+- Treat the ownership key's creation or modification revision as a monotonic fencing
+  token when the protected resource can validate one.
+- Stop work when keep-alive or watch progress is uncertain; do not wait until a best
+  guess about TTL expiry.
+- Make the external action idempotent or reject stale fencing tokens at the destination.
+- Reconcile abandoned work after process or network failure.
+
+{% callout variant="warn" %}
+A successful lease or mutex API call does not make arbitrary external side effects
+exactly once. Correctness crosses two systems, so the destination must participate with
+fencing, idempotency, or a transaction it owns.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Keep the keyspace small and predictable
+
+Current etcd documentation describes a default maximum request size and conservative
+backend quota intended for metadata, not bulk payloads. Limits and defaults are
+versioned, so set stricter application budgets and verify the exact release you run.
+
+Use these design rules:
+
+- Store compact coordination facts or references to larger objects, not the objects
+  themselves.
+- Bound key count, value size, transaction operation count, range result size, watch
+  fan-out, lease count, and update frequency per owner.
+- Namespace keys by environment and owner, such as
+  `/prod/payments/services/instance-a`, with an explicit retention policy.
+- Avoid hot keys whose high-frequency updates force every watcher and member to process
+  unnecessary revisions.
+- Paginate broad ranges and prohibit unbounded prefix scans from request paths.
+- Do not put secrets in plaintext values. etcd TLS protects transport; etcd does not
+  provide built-in encryption for key-value data on disk.
+
+{% metric-strip %}
+{% metric label="Request" value="Small" detail="Metadata-sized key, value, and transaction payloads" tone="cyan" /%}
+{% metric label="History" value="Bounded" detail="Retention chosen from watcher recovery needs" tone="violet" /%}
+{% metric label="Backend" value="< quota" detail="Alert before NOSPACE maintenance mode" tone="amber" /%}
+{% metric label="Ranges" value="Limited" detail="Explicit prefixes, pagination, and deadlines" tone="green" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Distinguish compaction from defragmentation
+
+These maintenance operations solve different problems:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Delete" eyebrow="Remove live keys" icon="x" tone="rose" %}
+Deletes current application data. Old MVCC revisions can remain until compaction, so a
+delete alone does not necessarily reduce backend history or filesystem size.
+{% /concept-card %}
+{% concept-card title="Compact" eyebrow="Discard old revisions" icon="layers" tone="violet" %}
+Marks historical revisions before a boundary unavailable and lets the backend reuse
+their pages. Watchers behind that boundary must relist.
+{% /concept-card %}
+{% concept-card title="Defragment" eyebrow="Return file space" icon="database" tone="amber" %}
+Rebuilds one member's backend to release reusable pages to the filesystem.
+Defragmenting a live member blocks its reads and writes, so schedule members separately.
+{% /concept-card %}
+{% /concept-grid %}
+
+A NOSPACE alarm is cluster-wide. Stop unbounded growth, remove safe live data, compact
+history, defragment one member at a time, verify backend usage and health, and only then
+disarm the alarm. Increasing the quota without fixing growth postpones the incident.
+
+{% code-block file="/api/content/technology/etcd/code/maintenance-observability.sh" language="bash" title="Health, snapshot, compaction, per-member defrag, and alarm evidence" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Match the recovery action to the failure boundary
+
+The same symptom, such as a timeout, can come from stale client state, lost quorum,
+slow storage, or a cluster-wide alarm. Choose a scenario and test an operator response
+before using it in a runbook.
+
+{% interactive-block id="technology/etcd-operations-recovery-lab" dataFile="/api/content/technology/etcd/data/operations-recovery-model.json" /%}
+
+The lab intentionally rejects "restart everything" as a universal response. Preserve
+quorum, evidence, and authoritative identity before changing cluster state.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Reconfigure membership one member at a time
+
+Membership changes alter the quorum that authorizes future changes. Never remove a
+second member because the first is slow to catch up.
+
+{% process-flow %}
+{% process-step number="1" title="Prove the current majority" label="Preflight" %}
+Record member IDs, leader, Raft term and index, endpoint health, alarms, database size,
+peer latency, snapshot integrity, and the tested rollback path.
+{% /process-step %}
+{% process-step number="2" title="Add a learner or replace one voter" label="Change" %}
+For expansion, add a non-voting learner when supported. For replacement, preserve the
+remaining majority and use exact peer URLs, TLS identity, and cluster state.
+{% /process-step %}
+{% process-step number="3" title="Wait for catch-up" label="Evidence" %}
+Verify applied index, data integrity, peer traffic, and stable leader behavior. A
+started process is not proof that the member is ready to vote.
+{% /process-step %}
+{% process-step number="4" title="Promote or finish removal" label="Commit" %}
+Promote the learner or complete the one-member replacement only after the release gate
+passes. Then refresh the snapshot and membership inventory.
+{% /process-step %}
+{% /process-flow %}
+
+Use three voters for the common single-failure requirement and five only when the
+second failure tolerance justifies the extra write path and operator surface. Seven or
+more voters rarely improve a small coordination store enough to offset their cost.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Secure client, peer, and disk boundaries
+
+Client-to-server and peer-to-peer traffic are independent TLS boundaries. Configure
+both with trusted certificate authorities and authenticated identities. Restrict
+network reachability to known clients and peers.
+
+{% code-block file="/api/content/technology/etcd/code/etcd-production.yaml" language="yaml" title="Three-member TLS baseline with bounded history and backend quota" /%}
+
+### Authorization is not enabled by TLS alone
+
+- Enable etcd authentication deliberately, create named users and roles, grant the
+  narrow key ranges they need, and test denial paths before enabling auth.
+- Separate maintenance, snapshot, membership, and application identities.
+- Rotate client and peer certificates with a staged procedure that preserves quorum.
+- Protect certificate keys and snapshot files as highly sensitive data.
+- Use host or volume encryption, or encrypt values before they reach etcd, when
+  at-rest confidentiality is required.
+- Audit direct etcd access. Most application teams should use a service API rather than
+  receive broad key-range credentials.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Understand etcd's Kubernetes role
+
+Kubernetes commonly uses etcd as the durable backing store for API objects and control
+plane state. The Kubernetes API server owns API validation, admission, authorization,
+version conversion, watch behavior exposed to Kubernetes clients, and optional
+encryption of selected resources before persistence.
+
+etcd owns the replicated key-value and revision contract beneath that API server. It
+does not schedule Pods, run controllers, implement Kubernetes RBAC, or understand
+Kubernetes object semantics.
+
+For Kubernetes operations:
+
+- back up the etcd cluster that actually serves the API servers;
+- coordinate etcd and Kubernetes version compatibility through the distribution's
+  supported upgrade path;
+- protect API-server-to-etcd client certificates separately from peer certificates;
+- test restore with Kubernetes controllers and informer caches, not only `endpoint
+  health`;
+- use the version-supported revision-bump and mark-compacted restore procedure when a
+  restored revision could make informer caches appear newer than the cluster.
+
+Applications running on Kubernetes should normally use the Kubernetes API or an
+application service, not connect directly to the control plane's etcd cluster.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Observe latency before it becomes lost quorum
+
+Raft commit latency is constrained by peer network round-trip time and durable disk
+commit latency. A slow WAL device can increase request latency, create pending
+proposals, trigger leader elections, and make a healthy-looking process operationally
+unavailable.
+
+Correlate these signals:
+
+- **Consensus:** `etcd_server_leader_changes_seen_total`,
+  `etcd_server_proposals_pending`, failed proposals, and the gap between committed and
+  applied proposal counters.
+- **Disk:** `etcd_disk_wal_fsync_duration_seconds` and
+  `etcd_disk_backend_commit_duration_seconds` distributions per member.
+- **Network:** peer send and receive failures, peer round-trip latency, retransmits,
+  and packet loss.
+- **MVCC and quota:** `etcd_mvcc_db_total_size_in_bytes`,
+  `etcd_mvcc_db_total_size_in_use_in_bytes`, database growth rate, compaction revision,
+  alarms, and time to the configured quota.
+- **API:** request rate, gRPC method latency and errors, range size, transaction size,
+  active watches, watch lag, lease expiry, and client retries.
+- **Host:** CPU throttling, memory pressure, disk queue depth, filesystem space, clock
+  health, and co-located noisy workloads.
+
+Alert on trends and service objectives, not only process liveness. Benchmark the exact
+value sizes, transaction shapes, watcher counts, disks, peer network, TLS settings, and
+failure modes that production will use.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Back up and restore the coordination contract
+
+A snapshot captures committed key-value state at one revision. It does not preserve
+writes committed after that revision, external system state, certificates, deployment
+configuration, DNS, load balancers, or client caches.
+
+Define:
+
+- **RPO:** how much committed coordination state can be lost since the last verified
+  snapshot.
+- **RTO:** how long fencing old members, restoring all replacement members, validating
+  the cluster, reconciling dependents, and reopening writes may take.
+- **Authority:** which snapshot, membership plan, cluster token, certificates, and
+  operator approval establish the recovered cluster.
+- **Isolation:** how every old member and endpoint is fenced so it cannot reappear.
+- **Reconciliation:** how applications detect state written after the snapshot or side
+  effects that no longer have matching coordination records.
+
+Restoring a snapshot creates new member IDs and a new cluster ID, even when the logical
+member names and peer URLs resemble the old deployment. This prevents restored members
+from accidentally joining the old cluster.
+
+{% code-block file="/api/content/technology/etcd/code/restore-new-cluster.sh" language="bash" title="Offline snapshot restore into a new cluster identity" /%}
+
+Run restore drills on the exact etcd version and orchestration method you operate.
+Verify snapshot integrity, member hashes, alarms, TLS, auth, revision behavior, client
+cache invalidation, RPO reconciliation, and the ability to keep every old endpoint
+fenced.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Roll out changes with an evidence gate
+
+- Take and verify a fresh snapshot before upgrades, TLS conversion, membership changes,
+  and risky maintenance.
+- Review the supported version-skew and downgrade rules for the exact release path.
+- Change one member at a time and keep a voting majority healthy throughout.
+- Hold the rollout when leader changes, proposal backlog, fsync latency, peer errors,
+  database growth, alarms, or client errors exceed the release gate.
+- Do not combine a binary upgrade, storage migration, certificate rotation, and
+  membership change into one step.
+- Keep the prior binary, configuration, certificates, and recovery instructions until
+  the upgraded cluster has passed peak load and a failure drill.
+- After completion, refresh snapshots, inventories, dashboards, alerts, and the tested
+  restore procedure.
+{% /section-card %}
+
+{% section-card %}
+## Read the current primary documentation
+
+- [etcd API guarantees](https://etcd.io/docs/v3.7/learning/api_guarantees/)
+  defines strict serializability, linearizable and serializable reads, watch ordering,
+  and lease guarantees.
+- [etcd v3 API design](https://etcd.io/docs/v3.7/learning/api/) documents response
+  revisions, transactions, watches, leases, cluster services, and maintenance APIs.
+- [Interacting with etcd](https://etcd.io/docs/v3.7/dev-guide/interacting_v3/) shows
+  revision reads, historical watches, progress notifications, compaction, and leases.
+- [System limits](https://etcd.io/docs/v3.7/dev-guide/limit/) records versioned request,
+  transaction, and backend guidance for metadata-sized workloads.
+- [Maintenance](https://etcd.io/docs/v3.7/op-guide/maintenance/) distinguishes history
+  compaction, defragmentation, quotas, alarms, and snapshot backup.
+- [Runtime reconfiguration](https://etcd.io/docs/v3.7/op-guide/runtime-configuration/)
+  covers one-at-a-time membership changes and learner members.
+- [Performance](https://etcd.io/docs/v3.7/op-guide/performance/) and
+  [metrics](https://etcd.io/docs/v3.7/metrics/) connect Raft latency to network, fsync,
+  backend commit, proposals, and leadership signals.
+- [Transport security](https://etcd.io/docs/v3.7/op-guide/security/) and
+  [authentication](https://etcd.io/docs/v3.7/op-guide/authentication/) define TLS,
+  users, roles, and key-range permissions.
+- [Disaster recovery](https://etcd.io/docs/v3.7/op-guide/recovery/) explains snapshot
+  restore, new cluster identity, revision bump, and mark-compacted recovery.
+- [Kubernetes etcd operations](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/)
+  explains the backing-store role and Kubernetes-specific backup considerations.
+- [The Raft paper](https://www.usenix.org/conference/atc14/technical-sessions/presentation/ongaro)
+  is the primary consensus reference for leader election, log replication, and safety.
+
+Always use documentation and release notes matching the exact etcd and Kubernetes
+versions you deploy.
+{% /section-card %}
+
+{% section-card %}
+## Test the production decisions
+
+The assessment checks quorum arithmetic, read contracts, revision-safe watches, lease
+fencing, maintenance, storage latency, security, membership, and disaster recovery.
+
+{% quiz questionsFile="/api/content/technology/etcd/quiz/etcd-production-design.json" lessonSlug="etcd" title="etcd Production Design Review" /%}
+{% /section-card %}

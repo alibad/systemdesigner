@@ -1,0 +1,209 @@
+---
+title: "Token Management for GenAI Systems"
+section: genai
+level: intermediate
+duration: 35 min
+description: "Allocate context deliberately, choose truncation and retrieval policies, and operate token throughput without creating latency or retry incidents."
+registryId: token-management
+---
+
+{% section-card tone="intro" %}
+## What is token management?
+
+**Token management** is the control system that decides how a finite model context is allocated, how much output may be generated, and how token demand is admitted, measured, and stopped in production.
+
+Tokens are model-specific units, not fixed words. A request may spend them on instructions, tool definitions, conversation history, retrieved evidence, the current user input, hidden or visible reasoning, and the response. The core invariant is simple: **every token must fit inside an explicit request envelope and remain attributable to a useful outcome**.
+
+This matters for more than cost. A poor token policy can remove the evidence needed for a correct answer, leave too little room for the output, overflow a context window, exhaust token-per-minute capacity, increase queue latency, or amplify an outage through retries.
+{% /section-card %}
+
+{% system-flow title="Control one request from evidence to outcome" caption="The model call is only one stage. A deterministic controller owns admission, context assembly, output limits, and final usage accounting." %}
+{% system-node title="Classify the task" eyebrow="Intent" icon="scan" tone="blue" %}
+Identify required evidence, answer shape, risk, latency objective, and whether the request may be degraded.
+{% /system-node %}
+{% system-node title="Assemble the envelope" eyebrow="Budget" icon="layers" tone="violet" %}
+Reserve fixed instructions and output space before selecting history, tools, documents, or images.
+{% /system-node %}
+{% system-node title="Admit bounded work" eyebrow="Capacity" icon="gauge" tone="amber" %}
+Check context size, rate limits, concurrency, deadline, and retry allowance before calling the provider.
+{% /system-node %}
+{% system-node title="Reconcile actual usage" eyebrow="Outcome" icon="receipt" tone="green" %}
+Record provider usage, stop reason, cache details, latency, cost, and whether the request achieved its task.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Treat the context window as shared working memory
+
+A context window includes the information available while the model produces the next response. Its exact accounting is provider and model specific, but the engineering budget can be written as:
+
+`fixed instructions + tools + history + retrieved evidence + current input + output reserve <= context window`
+
+### Give every token class an owner
+
+{% concept-grid columns="3" %}
+{% concept-card title="Fixed policy" eyebrow="Protect" icon="shield" tone="blue" %}
+System instructions, safety rules, output schemas, and required tool contracts should be versioned and measured. Do not silently truncate them.
+{% /concept-card %}
+{% concept-card title="Current intent" eyebrow="Protect" icon="message" tone="cyan" %}
+The latest user request and any required attachments define the task. Reject or clarify if they cannot fit safely.
+{% /concept-card %}
+{% concept-card title="Output reserve" eyebrow="Reserve first" icon="square-pen" tone="green" %}
+Allocate enough space for the requested answer, structured object, tool call, and any provider-side reasoning that shares the limit.
+{% /concept-card %}
+{% concept-card title="Conversation history" eyebrow="Compressible" icon="history" tone="violet" %}
+Recent turns preserve continuity, while older turns can be summarized only when the summary is traceable and evaluated.
+{% /concept-card %}
+{% concept-card title="Retrieved evidence" eyebrow="Selectable" icon="search" tone="amber" %}
+Rank chunks by authorization, relevance, freshness, diversity, and source authority instead of filling the window by count alone.
+{% /concept-card %}
+{% concept-card title="Tool results" eyebrow="Expiring" icon="wrench" tone="rose" %}
+Keep the fields needed for the next decision. Move bulky, reproducible results to durable state and retain a reference.
+{% /concept-card %}
+{% /concept-grid %}
+
+Local tokenizers are useful admission estimates, not timeless billing guarantees. Message wrappers, tools, images, model revisions, and provider-specific accounting can change the final count. Reconcile each completed request against the provider's returned usage.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Allocate the answer before optional context
+
+Use the context lab to vary history, retrieval, and output reserve. Compare policies by what they preserve, not only by whether the arithmetic fits.
+{% /section-card %}
+
+{% interactive-block id="genai/token-management-context-budget-lab" dataFile="/api/content/genai/token-management/data/context-budget-scenarios.json" /%}
+
+{% section-card %}
+## Choose truncation by information value
+
+Blind truncation is an availability mechanism, not a relevance policy. Dropping the oldest tokens may work for a casual conversation, but it can delete an early constraint, a security boundary, or the evidence that explains a later decision.
+
+### Apply a typed overflow policy
+
+{% process-flow %}
+{% process-step number="1" title="Protect non-negotiable content" label="Contract" %}
+Keep required instructions, the current request, authorization context, and the minimum output reserve intact.
+{% /process-step %}
+{% process-step number="2" title="Remove reproducible bulk" label="State" %}
+Replace old tool payloads and documents with stable references when they can be fetched again under the same permissions.
+{% /process-step %}
+{% process-step number="3" title="Select evidence by utility" label="Retrieval" %}
+Deduplicate overlapping chunks, preserve source diversity, and require the essential evidence set for grounded tasks.
+{% /process-step %}
+{% process-step number="4" title="Compact with a loss contract" label="History" %}
+Summarize older turns only when the system tracks provenance, unresolved commitments, and the summary version.
+{% /process-step %}
+{% /process-flow %}
+
+Reject or ask for clarification when protected content cannot fit. Silent clipping is especially dangerous for structured output, legal or policy constraints, tool arguments, and multi-step workflows whose earlier state changes later authority.
+
+{% code-block file="/api/content/genai/token-management/code/request-budget.py" language="python" title="Deterministic context admission and allocation" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Caching changes price and latency, not context capacity
+
+Prompt caching can avoid recomputing an identical prefix, but cached tokens still occupy the model's context. Structure stable instructions and examples before variable user content when the provider matches exact prefixes, then measure cache reads and writes from returned usage.
+
+- Version cached prefixes with the prompt, tool schema, policy, tenant boundary, and model.
+- Never treat a cache hit as authorization to reuse private content for another principal.
+- Measure task quality alongside cache hit rate; a cheap stale prefix can still produce a wrong answer.
+- Keep pricing and cache multipliers in configuration because provider terms change.
+{% /section-card %}
+
+{% section-card %}
+## Convert request budgets into service capacity
+
+Context fit is a per-request constraint. Production capacity couples many requests through token-per-minute limits, concurrency, generation speed, queues, and retries.
+
+For an initial planning model:
+
+- `token demand per minute = requests per minute x expected tokens per attempt x attempts per request`
+- `required concurrency ~= requests per second x service time in seconds`
+- `service time ~= time to first token + generated tokens / generation rate`
+- `cost per successful task = all attempt costs / successful task count`
+
+These equations are estimates. Calibrate them with p50, p95, and p99 measurements by route and output profile. Output length often dominates generation time, while streaming improves perceived latency without reducing the underlying work already generated.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Put a failure boundary around token pressure
+
+The capacity lab connects output length, traffic, provider limits, queues, and retry behavior. Push the workload past its envelope and compare bounded admission with retry amplification.
+{% /section-card %}
+
+{% interactive-block id="genai/token-management-capacity-boundary-lab" dataFile="/api/content/genai/token-management/data/capacity-boundary-scenarios.json" /%}
+
+{% section-card %}
+## Build one admission ledger for every attempt
+
+The application should make one deterministic decision before a provider call and another after it completes.
+
+{% code-block file="/api/content/genai/token-management/code/capacity-envelope.py" language="python" title="Throughput, latency, and retry-boundary planner" /%}
+
+### Before the call, record
+
+- request, tenant, feature, model, prompt, tool, and policy versions;
+- estimated input tokens, output reserve, deadline, and maximum attempts;
+- the selected truncation, compaction, retrieval, cache, and degradation policies;
+- reserved token-rate and concurrency capacity;
+- a cancellation token shared by the queue, provider call, and any downstream tools.
+
+### After the call, reconcile
+
+- actual input, cached input, reasoning, output, and total tokens when exposed;
+- queue time, time to first token, generation time, and end-to-end latency;
+- provider request ID, finish or stop reason, retry count, and ambiguous completion state;
+- estimated price from versioned rate configuration;
+- task outcome, quality signals, and whether the user abandoned the response.
+
+Do not charge only the winning attempt. Retries, rejected candidates, timed-out calls, and work completed after client cancellation all consume capacity.
+{% /section-card %}
+
+{% section-card %}
+## Operate on outcomes, not token totals alone
+
+### Monitor four views together
+
+- **Context health:** preflight estimate error, overflow rejection, truncation volume, summary age, retrieved evidence retained, and output-limit stop reasons.
+- **Capacity health:** input and output tokens per minute, active generation concurrency, queue age, admission rate, shedding, cancellations, and retries.
+- **Unit economics:** cost per request, successful task, tenant, feature, route, cache state, and model-policy version.
+- **Quality:** task success, grounded evidence coverage, schema validity, human escalation, rework, and abandonment by token-budget band.
+
+### Alert on coupled failures
+
+- token demand rises while request rate stays flat, indicating prompt, retrieval, tool, or output growth;
+- p95 output length approaches the configured maximum, suggesting frequent clipping or uncontrolled verbosity;
+- queue age and retries rise together, which can turn a slow dependency into a retry storm;
+- cache hit rate rises while quality falls, suggesting stale or incorrectly scoped prefixes;
+- local estimates drift from billed usage after a model or tool-schema change;
+- cost per request falls while cost per successful task rises, indicating harmful degradation.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recognize the common failure modes
+
+- **No output reserve:** input fits, but generation ends early or cannot emit the required schema. Reserve the answer before optional context.
+- **Newest-is-best truncation:** an early constraint disappears. Rank content by decision value and protect typed invariants.
+- **Retrieval stuffing:** similar chunks crowd out diverse evidence. Deduplicate and cap per-source contribution.
+- **Summary drift:** repeated compaction turns a mistaken summary into durable state. Keep provenance and periodically rebuild from authoritative events.
+- **Caching as capacity:** cached prefixes are assumed not to count toward the window or rate limit. Treat caching as a provider-specific compute and billing optimization.
+- **Unbounded retries:** timeouts create more token demand against an already saturated dependency. Use retry budgets, jitter, cancellation, and load shedding.
+- **Static price constants:** a model launch changes economics without a code deployment. Load effective rates from versioned configuration.
+- **Token-only optimization:** shorter context reduces cost but removes the fact needed to succeed. Measure cost per successful, policy-compliant outcome.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources behind the design
+
+- [OpenAI's token-counting cookbook](https://developers.openai.com/cookbook/examples/how_to_count_tokens_with_tiktoken) explains model-specific encoding and warns that local chat counts are estimates that can change with message and tool formatting.
+- [OpenAI prompt caching guidance](https://developers.openai.com/api/docs/guides/prompt-caching) documents exact-prefix matching and usage fields for cached tokens; it also makes clear that caching behavior and billing must be measured rather than assumed.
+- [OpenAI latency optimization guidance](https://developers.openai.com/api/docs/guides/latency-optimization) identifies output generation as a major latency driver and distinguishes real streaming improvements from cosmetic loading states.
+- [OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits) describes request and token limits as separate operating constraints that applications must handle.
+- [Anthropic's context-window documentation](https://platform.claude.com/docs/en/build-with-claude/context-windows) defines the context as working memory, shows that inputs and outputs share it, and states that cached prefixes still occupy context capacity.
+- [Anthropic's token-counting documentation](https://platform.claude.com/docs/en/build-with-claude/token-counting) demonstrates provider-side preflight counting and warns that tokenization can change across model families.
+
+The numerical scenarios in the two labs are illustrative system envelopes, not claims about a current commercial model or price. Replace them with measured route data before capacity planning.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/token-management/quiz/token-management-review.json" lessonSlug="token-management" /%}

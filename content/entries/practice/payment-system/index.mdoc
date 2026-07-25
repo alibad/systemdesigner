@@ -1,0 +1,480 @@
+---
+title: "Design Payment System"
+section: practice
+level: advanced
+duration: 60 min
+description: "Design a global payment platform with idempotent transaction processing, a durable ledger, fraud controls, settlement, and compliance."
+registryId: practice-payment-system
+---
+
+{% section-card tone="intro" %}
+## What is a payment system?
+
+**A payment system turns a customer's instruction to pay into a controlled, auditable movement of money.** It creates a durable payment intent, asks an external payment provider to authorize or capture funds, records the financial effect in a balanced ledger, and later verifies that provider and bank records agree.
+
+A beginner can picture three records with different jobs:
+
+- The **payment intent** tracks what the customer and merchant are trying to do.
+- The **provider attempt** tracks one request to an external processor and its uncertain outcome.
+- The **ledger journal** records money owed or moved; every journal must balance to zero.
+
+The central rule is stronger than "the API returned success": **one business operation may create at most one intended charge, and every completed monetary effect must be explainable from immutable records.** Availability matters, but an ambiguous result must become `processing` and enter recovery rather than be guessed into success or failure.
+
+{% callout variant="info" %}
+This walkthrough sizes a card-payment platform for 100 million attempts per day and a 10x peak. It uses one currency per payment and delegates raw card collection to a tokenization provider. Marketplace splits, foreign exchange, subscriptions, and dispute evidence are extensions, not hidden assumptions.
+{% /callout %}
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Control the command" eyebrow="Intent" icon="route" tone="blue" %}
+Authenticate the merchant, validate amount and currency, bind an idempotency key to the request fingerprint, and permit only legal state transitions.
+{% /concept-card %}
+{% concept-card title="Separate truth" eyebrow="Accounting" icon="database" tone="green" %}
+Operational status explains workflow. The append-only double-entry ledger explains balances. Neither a cache nor a provider webhook is the sole source of financial truth.
+{% /concept-card %}
+{% concept-card title="Resolve uncertainty" eyebrow="Recovery" icon="shield" tone="amber" %}
+Timeouts, duplicate messages, and late webhooks are normal. Stable provider references, monotonic handlers, and reconciliation turn them into bounded work.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements, guarantees, and scope" %}
+
+### What is the payment contract?
+
+The payment contract states what callers may request, what result they can rely on, and which failures remain uncertain. Clarify it before choosing databases or providers because a small product change, such as delayed capture, adds states, timers, ledger effects, and recovery paths.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Customer and merchant actions" eyebrow="Functional" icon="workflow" tone="blue" %}
+- Create and retrieve a payment intent.
+- Confirm a tokenized card for authorization.
+- Capture an authorization immediately or later.
+- Cancel before capture and issue full or partial refunds after capture.
+- Receive signed, replayable status webhooks.
+{% /concept-card %}
+{% concept-card title="Correctness promises" eyebrow="Invariant" icon="shield" tone="green" %}
+- One merchant-scoped idempotency key maps to one request fingerprint and one result.
+- State transitions are monotonic unless an explicit reversal creates a new operation.
+- Every posted journal balances within one currency.
+- A refund cannot exceed the captured amount minus earlier refunds.
+- Unknown provider outcomes are reconciled, never guessed.
+{% /concept-card %}
+{% concept-card title="Service objectives" eyebrow="Non-functional" icon="gauge" tone="amber" %}
+- 100 million attempts per day with a 10x peak-to-average factor.
+- API availability target of 99.99%, measured separately from provider success.
+- P99 platform overhead below 250 ms, excluding customer challenge time.
+- No acknowledged ledger write may be lost; recovery point objective is zero for committed journals.
+- Webhook delivery is at least once and normally begins within 30 seconds.
+{% /concept-card %}
+{% concept-card title="Version-one boundary" eyebrow="Scope" icon="boxes" tone="neutral" %}
+- Card payments through two payment service providers.
+- One currency per payment; no internal foreign-exchange conversion.
+- No marketplace split payouts, recurring billing scheduler, or cryptocurrency.
+- Dispute intake is recorded, but evidence management is deferred.
+- Hosted fields or provider tokens keep raw card numbers out of application services.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Define lifecycle terms precisely
+
+- **Authorize:** ask the card network and issuer to reserve spending capacity. Authorization may expire and is not the same as settlement.
+- **Capture:** request completion of an authorized payment. Capture creates the merchant-facing financial obligation represented in the ledger.
+- **Settle:** exchange funds between institutions later. Settlement is asynchronous and can disagree temporarily with capture status.
+- **Refund:** create a new reversal operation against captured value. It does not erase the original payment or ledger journal.
+- **Reconcile:** compare internal attempts and journals with provider transactions and settlement reports, then investigate differences.
+
+### Establish compliance ownership
+
+- Use provider-hosted fields or tokenization so application servers never receive the primary account number or card security code.
+- Encrypt payment tokens and personal data, restrict access by service identity, and record administrative reads.
+- Keep card security codes out of logs and storage. Apply retention and deletion policy to customer data without deleting required financial records.
+- Treat PCI DSS, privacy, sanctions, anti-money-laundering, and strong-customer-authentication obligations as legal and security workstreams. Architecture can reduce scope; it cannot declare the organization compliant.
+- Document which party owns cardholder authentication, fraud decisions, dispute handling, merchant onboarding, and regulatory reporting.
+
+{% callout variant="tip" %}
+State the failure contract in the interview: `succeeded` and `failed` are final only with evidence; `processing` means the platform has durable ownership of an unresolved outcome.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate scale and constraints" %}
+
+### What is a capacity estimate?
+
+A capacity estimate converts product volume into rates, storage, concurrency, and queue pressure. It is a model to test, not a server-shopping list. State units and assumptions so another engineer can recalculate it.
+
+The baseline uses 86,400 seconds per day, 100 million attempts per day, a 10x peak, 85% capture completion, a 3% refund rate on captures, and four asynchronous event deliveries per attempt.
+
+{% metric-strip %}
+{% metric value="1.16K/s" label="Average attempts" detail="100M / 86,400 seconds" tone="blue" /%}
+{% metric value="11.6K/s" label="Peak attempts" detail="Average multiplied by 10" tone="violet" /%}
+{% metric value="20.4K/s" label="Peak ledger rows" detail="Two capture rows plus refund reversals under stated assumptions" tone="green" /%}
+{% metric value="46.3K/s" label="Async deliveries" detail="Four event deliveries per peak attempt" tone="amber" /%}
+{% /metric-strip %}
+
+### Change the assumptions and find the bottleneck
+
+The provider, ledger, and event pipeline scale differently. Increase volume, retry pressure, or event fanout and identify which capacity limit fails first.
+
+{% interactive-block id="practice/payment-system-capacity-lab" /%}
+
+### Size durable storage and network edges
+
+- **Payment records:** at 1.5 KB per intent plus attempts and indexes, 100 million attempts produce roughly 150 GB/day before replication and backups.
+- **Ledger rows:** about 176 million rows/day under the baseline capture and refund assumptions. At 300 bytes per row, that is roughly 53 GB/day before indexes and replicas.
+- **Audit and event records:** retain security, state-transition, webhook, and operator evidence according to distinct legal policies. Do not assume every log needs seven years.
+- **Provider concurrency:** Little's Law gives in-flight requests as throughput multiplied by latency. At 12.2K provider calls/s and 800 ms average provider time, plan for roughly 9.8K concurrent calls before headroom.
+- **Queue recovery:** if consumers fall 20K events/s behind for five minutes, they accumulate 6 million deliveries. Recovery capacity must exceed live arrivals or the queue never drains.
+
+### Convert estimates into experiments
+
+1. Benchmark idempotency lookup, intent transition, ledger commit, and outbox insert as one representative transaction.
+2. Load test provider adapters with realistic latency distributions and bounded connection pools, without contacting production providers.
+3. Burst webhook and reconciliation workers with duplicated and out-of-order events.
+4. Measure partition skew by merchant, account book, provider, and region rather than relying on global averages.
+5. Repeat with one region, one queue partition, and one provider unavailable.
+
+{% callout variant="warn" %}
+Provider retries amplify external calls but do not increase legitimate payment intents. Track both rates. A system that reports only request throughput can hide duplicate-charge risk.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### What is the high-level payment architecture?
+
+The high-level architecture separates the synchronous decision path from asynchronous completion work. The caller waits for authentication, idempotency, policy, provider authorization or capture, and a durable local result. Settlement, merchant webhooks, analytics, and reconciliation continue from committed events.
+
+{% callout variant="info" %}
+Draw your design before opening the reference flow. Show where the idempotency decision becomes durable, where an external timeout becomes `processing`, and which commit lets the API acknowledge success.
+{% /callout %}
+
+{% design-challenge
+   challengeId="payment-system"
+   title="Design the payment write path"
+   prompt="A client may retry and a provider may time out after approving a charge. Connect the API, payment orchestrator, risk service, provider adapter, intent store, ledger, outbox, and reconciliation worker. Show the durable boundary that prevents a second charge." /%}
+
+### Reference request path
+
+{% system-flow title="Confirm a payment intent" caption="The response is backed by a committed intent result; all downstream delivery is replayable." %}
+{% system-node title="API edge" eyebrow="Authenticate" icon="shield" tone="blue" %}
+Authenticate the merchant, enforce quotas, validate the request envelope, and attach a trace ID.
+{% /system-node %}
+{% system-node title="Payment orchestrator" eyebrow="Own state" icon="workflow" tone="violet" %}
+Reserve the idempotency key, lock the intent version, evaluate legal transitions, and coordinate the attempt.
+{% /system-node %}
+{% system-node title="Risk decision" eyebrow="Bounded call" icon="search" tone="amber" %}
+Return `allow`, `challenge`, `review`, or `block` with versioned reason codes and a strict latency budget.
+{% /system-node %}
+{% system-node title="Provider adapter" eyebrow="External effect" icon="network" tone="rose" %}
+Map the canonical command to one PSP, preserve a stable merchant reference, and classify definite versus ambiguous outcomes.
+{% /system-node %}
+{% system-node title="Intent, ledger, outbox" eyebrow="Durable result" icon="database" tone="green" %}
+Commit the state transition, balanced journal when applicable, idempotency result, and event outbox atomically.
+{% /system-node %}
+{% system-node title="Async workers" eyebrow="Recover and deliver" icon="activity" tone="cyan" %}
+Publish events, deliver signed merchant webhooks, reconcile providers and banks, and materialize reports.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate responsibilities and failure domains
+
+- **Tokenization boundary:** browser or mobile SDK exchanges card details for a provider token. Payment services receive only the token and safe card metadata.
+- **Orchestration boundary:** the payment service owns intent state and operation identity; provider adapters do not invent business states.
+- **Accounting boundary:** the ledger accepts balanced journals with a unique source operation. Reporting reads derived balances, never edits journal lines.
+- **Integration boundary:** each provider adapter normalizes request, response, error, timeout, and webhook semantics into the canonical model.
+- **Recovery boundary:** reconciliation consumes authoritative provider and settlement reports. It may repair workflow state through audited commands, not direct row edits.
+- **Notification boundary:** an outbox publishes committed changes. Merchant webhook delivery has its own retries, signatures, endpoint health, and dead-letter review.
+
+### Choose a multi-region ownership model
+
+Accept API traffic in multiple regions, but assign each payment intent a home region and fence concurrent writers. Route retries to that owner or fail over ownership with an epoch. Replicate read models and immutable events across regions; do not use last-write-wins for payment state or ledger journals.
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Model state, storage, and contracts" %}
+
+### What is a payment intent state machine?
+
+A payment intent state machine is the list of legal states and transitions for one requested payment. It prevents an out-of-order webhook, repeated API call, or operator action from inventing an impossible history.
+
+{% process-flow %}
+{% process-step number="1" title="Requires method" label="Draft" %}
+The amount, currency, merchant, and capture policy are fixed; no provider side effect exists.
+{% /process-step %}
+{% process-step number="2" title="Requires confirmation" label="Ready" %}
+A tokenized payment method is attached and the caller may confirm with an idempotency key.
+{% /process-step %}
+{% process-step number="3" title="Processing" label="Uncertain" %}
+The provider request is in flight or timed out without definitive evidence. Recovery owns the next decision.
+{% /process-step %}
+{% process-step number="4" title="Authorized" label="Reserved" %}
+The provider confirmed an authorization. Capture or cancellation must reference this attempt.
+{% /process-step %}
+{% process-step number="5" title="Succeeded" label="Captured" %}
+Capture evidence and the balanced ledger journal are committed. Refunds become separate child operations.
+{% /process-step %}
+{% /process-flow %}
+
+Definitive declines transition to `failed`. A cancellation before capture transitions to `canceled`. Neither state may be overwritten by a stale webhook; later financial changes create explicit refund, dispute, or adjustment records.
+
+### Store records by responsibility
+
+- **Payment intent:** merchant, order reference, amount, currency, capture policy, current state, version, and timestamps.
+- **Payment attempt:** operation type, provider, stable provider request reference, request fingerprint, normalized outcome, provider transaction ID, and raw-response reference.
+- **Idempotency record:** merchant, API operation, idempotency key, request hash, status, and durable response reference.
+- **Ledger journal and entries:** unique source operation, effective time, account, currency, signed amount, and immutable audit metadata.
+- **Refund:** payment ID, requested amount, reserved refundable amount, provider attempt, state, and its own idempotency key.
+- **Outbox event:** aggregate version, event type, payload reference, and publication status.
+- **Provider event inbox:** provider event ID, signature result, normalized type, processing result, and receipt time.
+- **Reconciliation exception:** compared sources, mismatch class, evidence, owner, resolution command, and audit trail.
+
+{% code-block file="/api/content/practice/payment-system/code/payment-ledger-schema.sql" language="sql" title="Payment intent, attempts, and balanced ledger schema" /%}
+
+### Make idempotency a durable API contract
+
+The key is scoped to a merchant and operation. The first request stores a hash of all business-relevant fields. A retry with the same hash returns the original status and body; the same key with a different amount, currency, intent, or payment method returns a conflict.
+
+{% code-block file="/api/content/practice/payment-system/code/idempotent-payment-confirmation.js" language="javascript" title="Executable idempotent confirmation model" /%}
+
+### Keep the public contract explicit
+
+{% code-block file="/api/content/practice/payment-system/code/payment-intent-api.json" language="json" title="Create and confirm request contracts" /%}
+
+### Partition without breaking accounting
+
+- Route intent commands by a stable hash of payment ID after creation; keep the merchant lookup in a secondary index or read model.
+- Co-locate all lines of one ledger journal and verify their signed sum before commit. Partition journals by legal entity, currency, and stable book shard when scale requires it.
+- Serialize competing captures and refunds with intent version checks or atomic reservations; cache locks alone are not a correctness boundary.
+- Use read replicas and analytical exports for dashboards. Never let reporting queries contend with payment commits.
+- Archive provider payloads and audit evidence under retention policy while preserving identifiers needed to explain every ledger journal.
+
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="5. Deep-dive critical payment components" %}
+
+### What makes a money-moving component correct?
+
+A component is correct when retries, timeouts, duplication, reordering, and operator actions preserve the same business invariant as the healthy path. "Exactly once" is not a transport feature; the observable effect comes from stable operation IDs, durable deduplication, conditional state transitions, and reconciliation.
+
+### Resolve ambiguous outcomes without double charging
+
+Select a failure and then choose a recovery action. The trace shows whether payment state, provider evidence, and ledger effects remain consistent.
+
+{% interactive-block id="practice/payment-system-state-recovery-lab" /%}
+
+{% tabs %}
+{% tab title="Provider adapter" %}
+### Normalize without hiding evidence
+
+- Send a stable merchant reference that survives transport retries.
+- Record an attempt before the external call, then persist the normalized response and provider transaction ID.
+- Distinguish a definitive decline from a timeout, malformed response, or connection reset after send.
+- Retry only when the provider documents idempotent semantics for that operation and key.
+- Use circuit breakers for availability, but do not reroute an ambiguous charge to another provider until its first outcome is resolved.
+- Preserve redacted raw evidence for support and reconciliation without leaking cardholder data.
+{% /tab %}
+{% tab title="Webhooks" %}
+### Treat every delivery as duplicated and out of order
+
+- Verify the signature over the exact request bytes and enforce a bounded timestamp tolerance.
+- Insert the provider event ID into a durable inbox with a unique constraint before applying effects.
+- Map the provider object to the internal intent using stored references, not customer-supplied metadata alone.
+- Apply only legal, version-aware transitions; a late `authorized` event cannot regress a captured payment.
+- Commit state, ledger effect when applicable, and outbox notification together.
+- Return success only after durable acceptance. Retry internal processing separately.
+
+{% code-block file="/api/content/practice/payment-system/code/verified-webhook-consumer.js" language="javascript" title="Executable signed and idempotent webhook model" /%}
+{% /tab %}
+{% tab title="Ledger and reconciliation" %}
+### Record truth, then compare independent evidence
+
+- Post immutable double-entry journals with a unique source operation; corrections use reversing journals.
+- Derive balances from entries or transactionally maintained snapshots that can be rebuilt.
+- Reconcile internal attempts to provider transaction reports throughout the day.
+- Reconcile captured provider transactions to settlement files and bank deposits on their slower schedule.
+- Classify missing internal, missing provider, amount, currency, fee, duplicate, and timing differences.
+- Auto-resolve understood timing gaps; route financial mismatches to a controlled queue with dual approval for manual adjustments.
+{% /tab %}
+{% tab title="Risk decisions" %}
+### Put policy inside a bounded decision
+
+- Combine cheap velocity rules, merchant policy, device and account signals, and a versioned model score.
+- Return explainable outcomes: `allow`, `challenge`, `review`, or `block` with reason codes.
+- Measure fraud loss, approval rate, challenge completion, review delay, and false-decline proxies by cohort.
+- Define degradation by segment. A risk timeout may permit a low-value known customer, require authentication, or pause a high-risk payment; there is no universal fail-open rule.
+- Keep the risk service outside raw-card scope by using tokens and approved derived features.
+{% /tab %}
+{% tab title="Refunds" %}
+### Model each refund as a new operation
+
+- Reserve refundable value atomically before contacting the provider so concurrent requests cannot exceed captured value.
+- Give every refund its own state, idempotency key, provider reference, and ledger reversal.
+- Leave a timed-out refund in `processing`; query or reconcile before retrying externally.
+- Support partial refunds by calculating `captured - reserved refunds - completed refunds` inside one transaction.
+- Notify the merchant from the outbox and expose the expected bank-posting delay separately from internal success.
+{% /tab %}
+{% /tabs %}
+
+{% callout variant="warn" %}
+Do not edit a successful payment into a refunded payment or delete the original ledger lines. A refund is a linked operation and a new balanced journal, preserving the complete financial history.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability, reliability, and operations" %}
+
+### What is payment reliability?
+
+Payment reliability means the platform remains honest and recoverable when dependencies fail. It may return `processing`, delay optional work, or reject new commands under pressure, but it must not acknowledge an effect that can disappear or create a second effect to improve availability.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Provider timeout after send" eyebrow="Ambiguous" icon="timer" tone="amber" %}
+Persist `processing`, keep the same provider reference, poll or await a signed event, and escalate stale attempts to reconciliation. Do not blind-reroute.
+{% /concept-card %}
+{% concept-card title="Database commit is unknown" eyebrow="Read back" icon="database" tone="rose" %}
+Read the idempotency record from the authoritative store before repeating any external effect. A client timeout never proves rollback.
+{% /concept-card %}
+{% concept-card title="Webhook queue is delayed" eyebrow="Degrade" icon="activity" tone="blue" %}
+Payment state remains queryable. Preserve outbox and inbox records, expose delivery lag, add consumers, and prioritize terminal financial events.
+{% /concept-card %}
+{% concept-card title="Region loses ownership" eyebrow="Fence" icon="shield" tone="green" %}
+Promote a replica only with a higher ownership epoch. Replay durable commands and outbox events; reject stale writers and rebuild read models.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Apply bounded retries and backpressure
+
+1. Retry transient internal reads with exponential backoff, jitter, deadlines, and a small attempt budget.
+2. Retry money-moving provider calls only with a stable provider idempotency reference and documented guarantees.
+3. Stop retry storms with per-provider concurrency limits, circuit breakers, and admission control.
+4. Preserve critical state and reconciliation events before optional analytics, receipts, or merchant convenience notifications.
+5. Dead-letter exhausted webhook deliveries with enough evidence to replay after correction; never treat a dead letter as successful delivery.
+
+### Operate user-visible service levels
+
+- **Platform decision latency:** P50, P95, and P99 from API admission to durable local result, split by provider and authentication path.
+- **Outcome quality:** authorization rate, capture success, refund success, challenge completion, and ambiguous-outcome rate by provider and merchant cohort.
+- **Correctness:** duplicate external effects, illegal transition attempts, unbalanced-journal rejection, over-refund rejection, and idempotency conflicts.
+- **Recovery:** oldest unresolved attempt, reconciliation mismatch count and value, settlement lag, outbox age, webhook delivery age, and dead-letter volume.
+- **Capacity:** per-partition transaction latency, provider connection saturation, queue ingress and egress, consumer lag, and regional ownership changes.
+- **Security:** signature failures, token access, privileged data reads, key rotation, policy denials, and audit-log delivery gaps.
+
+### Alert on symptoms with financial impact
+
+- Page when duplicate-effect count or unbalanced-journal acceptance is nonzero.
+- Page on a sharp rise in ambiguous outcomes, reconciliation mismatch value, or oldest unresolved high-value attempt.
+- Ticket slower settlement timing gaps that remain within provider agreements.
+- Compare authorization changes with provider, issuer response code, region, card network, risk model, and release version before blaming availability.
+- Include payment ID, attempt ID, provider reference, idempotency key hash, state version, journal ID, and trace ID in support tooling without exposing secrets.
+
+### Test recovery, not only uptime
+
+- Kill the orchestrator after the provider receives a request but before the local response commits.
+- Deliver the same webhook concurrently and then deliver an older event after a terminal event.
+- Exhaust one provider's connection pool while another remains healthy.
+- Pause the outbox publisher, rebuild it from committed rows, and measure catch-up time.
+- Fail the home region during active payments and prove fencing prevents two writers.
+- Restore ledger data and replay projections to verify balances and reconciliation totals.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Evaluate trade-offs and alternatives" %}
+
+### What is an architectural trade-off?
+
+An architectural trade-off accepts a specific cost to protect a more important requirement. Name the decision, the rejected alternative, and the signal that would justify revisiting it.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Transactional intent plus ledger commit" eyebrow="Chosen" icon="database" tone="green" %}
+A relational transaction gives conditional state updates, unique idempotency records, balanced journals, and an outbox boundary. It costs cross-shard planning and careful hot-partition control.
+{% /concept-card %}
+{% concept-card title="Fully event-sourced payment state" eyebrow="Alternative" icon="repeat" tone="neutral" %}
+An event log can preserve history and rebuild projections, but adds versioning, replay, and projection complexity. Immutable ledger journals already provide accounting history without requiring every workflow field to be event sourced.
+{% /concept-card %}
+{% concept-card title="Home-region writer per intent" eyebrow="Chosen" icon="globe" tone="blue" %}
+This limits coordination and makes retries deterministic. Cross-region failover is slower because ownership must be fenced before writes resume.
+{% /concept-card %}
+{% concept-card title="Globally writable last-write-wins state" eyebrow="Rejected" icon="globe" tone="rose" %}
+It improves write locality but can lose legal transitions or accept conflicting captures and refunds. Last-write-wins is unsuitable for financial state.
+{% /concept-card %}
+{% concept-card title="PSP abstraction with evidence escape hatch" eyebrow="Chosen" icon="workflow" tone="violet" %}
+A canonical interface simplifies orchestration and failover policy, while adapter-specific evidence remains available for disputes and reconciliation. The abstraction must not flatten ambiguous outcomes.
+{% /concept-card %}
+{% concept-card title="Direct network integrations" eyebrow="Later" icon="network" tone="amber" %}
+Direct connections may reduce unit cost and improve control at high scale, but add certification, regional coverage, settlement, and on-call burden. Start with PSPs unless economics and product needs justify ownership.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep consistency boundaries narrow
+
+- Use strong consistency for idempotency ownership, legal intent transitions, refundable-value reservations, ledger journals, and outbox creation.
+- Accept eventual consistency for merchant dashboards, search indexes, analytics, notification delivery, and provider-health aggregates.
+- Keep risk evaluation synchronous only when it changes authorization policy; move feature enrichment and model training off the payment path.
+- Return `processing` rather than block indefinitely for an external answer. This preserves a truthful state while recovery continues.
+
+### Record conditions that would change the design
+
+- Add a third provider when approval uplift, regional coverage, or outage isolation exceeds integration and reconciliation cost.
+- Split ledger books by legal entity and currency when regulatory ownership or commit throughput requires it.
+- Move from delayed capture to immediate capture for merchants whose fulfillment model does not need an authorization hold.
+- Add active-active ownership within a region only after measured home-shard hotspots justify the coordination complexity.
+- Build an internal risk platform when provider tools cannot meet loss, explanation, latency, or experimentation requirements.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrapup" title="8. Wrap up risks and extensions" %}
+
+### What should the final design summary prove?
+
+The summary should prove that the architecture connects requirements to invariants, scale, failure behavior, and operations. A component list is not enough.
+
+### Restate the design in one minute
+
+1. A payment intent owns the business state; merchant-scoped idempotency binds retries to one operation.
+2. The orchestrator makes a bounded risk decision and calls one provider through a normalized adapter with a stable reference.
+3. A definitive result commits intent state, a balanced ledger journal when money moves, and an outbox event atomically.
+4. Ambiguous results remain `processing`; verified webhooks, provider queries, and reconciliation resolve them without creating a second charge.
+5. Refunds and adjustments are new idempotent operations with new journals, never edits to history.
+6. Multi-region ownership is fenced per intent, while asynchronous workers independently scale event delivery, settlement, reporting, and recovery.
+
+### Carry a production risk register
+
+- **Duplicate provider effects:** detected by provider-reference reconciliation and duplicate-effect metrics; prevented with stable operation IDs and no blind rerouting.
+- **Ledger/provider divergence:** detected by intraday and settlement reconciliation; repaired with audited reversal or adjustment commands.
+- **Over-refund race:** detected by negative refundable balance attempts; prevented with atomic reservation and unique refund operations.
+- **Risk-model regression:** detected through approval, fraud loss, challenge, and cohort drift; controlled with versioning, shadow evaluation, and rollback.
+- **Webhook forgery or replay:** detected through signature and inbox metrics; contained by raw-body verification, timestamp tolerance, and event-ID deduplication.
+- **Regional split brain:** detected through conflicting ownership epochs; prevented by fencing and a single writer per intent.
+- **Compliance-scope expansion:** detected through data-flow inventory and access review; reduced with tokenization, minimization, segmentation, and controlled retention.
+
+### Extend the design deliberately
+
+- Add delayed and partial capture with authorization-expiry scheduling.
+- Add recurring payments with mandate records and customer-initiated versus merchant-initiated transaction policy.
+- Add marketplace splits with connected accounts, reserves, payout schedules, and a multi-party ledger.
+- Add multi-currency pricing with immutable quoted rates, rounding policy, and separate settlement books.
+- Add disputes with evidence deadlines, provisional credits, representment, and chargeback journals.
+- Add offline payment methods whose confirmation arrives hours or days later.
+
+### Final review checklist
+
+- Can every API retry return the original result or a clear idempotency conflict?
+- Can every provider timeout be recovered without guessing or blind rerouting?
+- Can every balance be rebuilt from balanced, immutable entries?
+- Can concurrent captures and refunds prove they never exceed authorized or captured value?
+- Can duplicate and out-of-order webhooks be applied safely?
+- Can operators find unresolved money by count, value, age, provider, region, and merchant?
+- Can the team explain which data crosses the cardholder-data boundary and why?
+- Can a region fail without two writers owning the same payment intent?
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/payment-system/quiz/payment-system-design-review.json"
+   lessonSlug="practice-payment-system"
+   title="Payment System Design Review" /%}

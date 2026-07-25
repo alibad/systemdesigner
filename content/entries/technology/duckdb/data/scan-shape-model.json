@@ -1,0 +1,123 @@
+{
+  "kind": "duckdb-scan-shape",
+  "blockId": "technology/duckdb-scan-shape-lab",
+  "title": "Budget the bytes and the blocking state",
+  "description": "Change the source layout, projection, predicate, operator, and memory budget. The model exposes why a selective result can still require a broad scan or a spill.",
+  "defaults": {
+    "sourceId": "clustered-parquet",
+    "datasetGb": 120,
+    "columnsPercent": 25,
+    "filterId": "clustered-range",
+    "operatorId": "grouped-aggregate",
+    "memoryGb": 8
+  },
+  "bounds": {
+    "datasetGb": {
+      "min": 20,
+      "max": 500,
+      "step": 20
+    },
+    "columnsPercent": {
+      "min": 10,
+      "max": 100,
+      "step": 10
+    },
+    "memoryGb": {
+      "min": 2,
+      "max": 32,
+      "step": 2
+    }
+  },
+  "sources": [
+    {
+      "id": "clustered-parquet",
+      "label": "Ordered Parquet",
+      "detail": "Compressed columns with row groups ordered on the common filter key.",
+      "storageRatio": 0.35,
+      "projectionPushdown": true,
+      "zoneMapPruning": true,
+      "sourceNote": "The teaching model assumes physical Parquet bytes are 35% of logical values."
+    },
+    {
+      "id": "scattered-parquet",
+      "label": "Scattered Parquet",
+      "detail": "Compressed columns, but matching values appear across almost every row group.",
+      "storageRatio": 0.35,
+      "projectionPushdown": true,
+      "zoneMapPruning": false,
+      "sourceNote": "Projection still helps, but the modeled predicate cannot skip row groups."
+    },
+    {
+      "id": "csv",
+      "label": "CSV files",
+      "detail": "Row-oriented text requires a broad byte scan and parsing before typed operators run.",
+      "storageRatio": 1,
+      "projectionPushdown": false,
+      "zoneMapPruning": false,
+      "sourceNote": "The model uses the logical dataset size as the CSV byte baseline."
+    },
+    {
+      "id": "native-table",
+      "label": "DuckDB table",
+      "detail": "Persistent columnar storage with compression and zonemap metadata.",
+      "storageRatio": 0.45,
+      "projectionPushdown": true,
+      "zoneMapPruning": true,
+      "sourceNote": "The model assumes physical table bytes are 45% of logical values."
+    }
+  ],
+  "filters": [
+    {
+      "id": "none",
+      "label": "No filter",
+      "detail": "Every row contributes to the operator.",
+      "selectivityPercent": 100,
+      "prunedFraction": 0
+    },
+    {
+      "id": "scattered-match",
+      "label": "2% match, scattered",
+      "detail": "Few rows match, but those values are distributed across all row groups.",
+      "selectivityPercent": 2,
+      "prunedFraction": 0
+    },
+    {
+      "id": "clustered-range",
+      "label": "2% clustered range",
+      "detail": "The source is ordered on the predicate key, so useful metadata can skip most row groups.",
+      "selectivityPercent": 2,
+      "prunedFraction": 0.9
+    }
+  ],
+  "operators": [
+    {
+      "id": "streaming-filter",
+      "label": "Filter and project",
+      "detail": "Rows can flow to the result without retaining the complete input.",
+      "workingSetFactor": 0.05,
+      "blocking": false
+    },
+    {
+      "id": "grouped-aggregate",
+      "label": "High-cardinality GROUP BY",
+      "detail": "Group state grows with distinct keys and may spill when the state exceeds memory.",
+      "workingSetFactor": 0.35,
+      "blocking": true
+    },
+    {
+      "id": "global-sort",
+      "label": "Global ORDER BY",
+      "detail": "The selected rows must participate in a blocking sort before the final order is known.",
+      "workingSetFactor": 1,
+      "blocking": true
+    },
+    {
+      "id": "many-to-many-join",
+      "label": "Many-to-many JOIN",
+      "detail": "Join output can exceed both inputs when key multiplicity is not bounded.",
+      "workingSetFactor": 1.8,
+      "blocking": true
+    }
+  ],
+  "notice": "This is an arithmetic teaching model, not a DuckDB benchmark. Compression, row-group pruning, join cardinality, cache state, and spill behavior must be measured with the real plan and files."
+}

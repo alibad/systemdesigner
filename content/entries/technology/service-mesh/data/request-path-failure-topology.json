@@ -1,0 +1,198 @@
+{
+  "title": "Trace where a mesh request succeeds or stops",
+  "description": "Switch scenarios to compare configuration distribution with the live request path. Select any component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "caller",
+      "label": "Caller workload",
+      "eyebrow": "Application",
+      "detail": "Starts the request and owns its business deadline, idempotency contract, fallback, and interpretation of the final response.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "source-enforcer",
+      "label": "Outbound enforcer",
+      "eyebrow": "Data plane",
+      "detail": "Discovers an endpoint, applies client-side route and retry policy, and presents the caller workload identity to a meshed peer.",
+      "kind": "security",
+      "tone": "cyan",
+      "x": 27,
+      "y": 50
+    },
+    {
+      "id": "control-plane",
+      "label": "Mesh control plane",
+      "eyebrow": "Desired state",
+      "detail": "Combines service discovery, identity, and policy, then distributes configuration. It is not a synchronous hop in the application request.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 48,
+      "y": 15
+    },
+    {
+      "id": "destination-enforcer",
+      "label": "Inbound enforcer",
+      "eyebrow": "Data plane",
+      "detail": "Authenticates the presented peer identity, evaluates destination authorization, records network evidence, and forwards only allowed traffic.",
+      "kind": "security",
+      "tone": "green",
+      "x": 68,
+      "y": 50
+    },
+    {
+      "id": "destination",
+      "label": "Orders workload",
+      "eyebrow": "Application",
+      "detail": "Owns order validation, durable state, business authorization, and correctness. A successful proxy hop does not prove the order operation is correct.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 91,
+      "y": 50
+    },
+    {
+      "id": "telemetry",
+      "label": "Telemetry pipeline",
+      "eyebrow": "Operational evidence",
+      "detail": "Receives bounded metrics, traces, and access logs. It should not be required to acknowledge each request before the application can respond.",
+      "kind": "analytics",
+      "tone": "neutral",
+      "x": 51,
+      "y": 87
+    }
+  ],
+  "edges": [
+    {
+      "id": "control-source",
+      "from": "control-plane",
+      "to": "source-enforcer",
+      "label": "config",
+      "mode": "async"
+    },
+    {
+      "id": "control-destination",
+      "from": "control-plane",
+      "to": "destination-enforcer",
+      "label": "policy + identity",
+      "mode": "async"
+    },
+    {
+      "id": "caller-source",
+      "from": "caller",
+      "to": "source-enforcer",
+      "label": "request"
+    },
+    {
+      "id": "source-destination",
+      "from": "source-enforcer",
+      "to": "destination-enforcer",
+      "label": "authenticated channel"
+    },
+    {
+      "id": "destination-service",
+      "from": "destination-enforcer",
+      "to": "destination",
+      "label": "allowed request"
+    },
+    {
+      "id": "destination-telemetry",
+      "from": "destination-enforcer",
+      "to": "telemetry",
+      "label": "network evidence",
+      "mode": "async",
+      "via": {
+        "x": 70,
+        "y": 84
+      }
+    },
+    {
+      "id": "unmeshed-destination",
+      "from": "caller",
+      "to": "destination-enforcer",
+      "label": "no mesh identity",
+      "via": {
+        "x": 39,
+        "y": 72
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy request",
+      "summary": "Both enforcement points have accepted current configuration and the caller identity is authorized for the destination operation.",
+      "activeEdges": [
+        "control-source",
+        "control-destination",
+        "caller-source",
+        "source-destination",
+        "destination-service",
+        "destination-telemetry"
+      ],
+      "focusNode": "source-enforcer",
+      "result": "The request follows the data plane and reaches the Orders workload. Control-plane distribution and telemetry export are related paths, not synchronous application hops."
+    },
+    {
+      "id": "control-plane-outage",
+      "label": "Control plane down",
+      "summary": "The control plane is unavailable after both data-plane components accepted a usable configuration snapshot.",
+      "activeEdges": [
+        "caller-source",
+        "source-destination",
+        "destination-service",
+        "destination-telemetry"
+      ],
+      "failedNodes": [
+        "control-plane"
+      ],
+      "focusNode": "control-plane",
+      "result": "Existing traffic can continue with the last accepted state in this model. New discovery, policy, or identity changes may be delayed or fail, so operators must restore the control plane before relying on a rollout."
+    },
+    {
+      "id": "authorization-denied",
+      "label": "Policy denies",
+      "summary": "The caller has a valid mesh identity, but the destination policy does not allow that identity to perform this operation.",
+      "activeEdges": [
+        "control-source",
+        "control-destination",
+        "caller-source",
+        "source-destination",
+        "destination-telemetry"
+      ],
+      "focusNode": "destination-enforcer",
+      "result": "The inbound enforcement point rejects the request and records the decision. The Orders workload is not reached; authentication succeeded, while authorization failed."
+    },
+    {
+      "id": "unmeshed-caller",
+      "label": "Unmeshed caller",
+      "summary": "A caller reaches the destination network path without a workload identity accepted by the strict destination policy.",
+      "activeEdges": [
+        "control-destination",
+        "unmeshed-destination",
+        "destination-telemetry"
+      ],
+      "degradedNodes": [
+        "caller"
+      ],
+      "focusNode": "destination-enforcer",
+      "result": "The strict destination rejects the call before the application. Roll out strict enforcement only after every legitimate caller can present an accepted identity."
+    },
+    {
+      "id": "data-plane-failure",
+      "label": "Outbound proxy fails",
+      "summary": "The caller's outbound traffic enforcement point is unavailable, even though the control plane and destination remain healthy.",
+      "activeEdges": [
+        "control-source",
+        "control-destination",
+        "caller-source"
+      ],
+      "failedNodes": [
+        "source-enforcer"
+      ],
+      "focusNode": "source-enforcer",
+      "result": "The request cannot leave the caller through the modeled mesh path. Data-plane health is an application availability dependency and needs resource limits, probes, dashboards, and a tested recovery path."
+    }
+  ]
+}

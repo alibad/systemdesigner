@@ -1,0 +1,434 @@
+---
+registryId: practice-url-shortener
+---
+
+{% section-card tone="intro" %}
+## What is a URL shortener?
+
+**A URL shortener stores a mapping from a compact code to a longer destination URL.**
+Creating a link writes that mapping; opening the short link reads it and returns an
+HTTP redirect.
+
+That simple contract produces an interesting design problem because redirects vastly
+outnumber creations. The read path must be globally fast and highly available, while
+the write path must prevent duplicate codes, support custom aliases, and stop harmful
+destinations from abusing the service.
+
+{% callout variant="info" %}
+This walkthrough uses a deliberately large target: 100 million creations and 10
+billion redirects per day. The goal is not to memorize a vendor stack. It is to turn
+requirements into estimates, make the critical path visible, and defend each trade-off.
+{% /callout %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify requirements and scope" %}
+
+### Begin with the contract, not the components
+
+An interviewer can change one requirement and invalidate half the architecture. Ask
+which actions matter, which guarantees users can observe, and which capabilities are
+explicitly outside the first version.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Core user actions" eyebrow="Functional" icon="route" tone="blue" %}
+- Create a short link from a valid `http` or `https` URL.
+- Redirect a short code to its current destination.
+- Optionally choose a custom alias and expiration time.
+- Disable a link and view delayed aggregate analytics.
+{% /concept-card %}
+
+{% concept-card title="Service promises" eyebrow="Non-functional" icon="gauge" tone="green" %}
+- Redirect P95 below 100 ms for the target regions.
+- Redirect availability of 99.99%; creation availability of 99.9%.
+- No two active mappings may own the same short code.
+- Analytics may be delayed and may occasionally lose events.
+{% /concept-card %}
+
+{% concept-card title="Safety and tenancy" eyebrow="Guardrails" icon="shield" tone="amber" %}
+- Reject malformed and blocked destinations.
+- Rate-limit creation by account, API key, IP, and risk score.
+- Prevent easy enumeration of sequential internal IDs.
+- Isolate branded domains and quotas by tenant.
+{% /concept-card %}
+
+{% concept-card title="First-version boundary" eyebrow="Out of scope" icon="boxes" tone="neutral" %}
+- No destination content hosting or proxying.
+- No strongly consistent real-time analytics dashboard.
+- No arbitrary destination rewriting at the edge.
+- No promise that deleted codes can be immediately reused.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Four decisions that shape the design
+
+- **Redirect behavior:** start with `302 Found` so links can be disabled or changed;
+  control caching explicitly with response headers.
+- **Anonymous access:** allow a small creation quota with stricter abuse checks; require an
+  account for bulk APIs, custom domains, and long retention.
+- **Expiration policy:** expired links return `410 Gone`; do not immediately recycle codes.
+- **Consistency boundary:** creation and custom-alias reservation are strongly consistent;
+  analytics and most read replicas may be eventually consistent.
+
+{% callout variant="tip" %}
+The hardest invariant is code ownership: at most one active mapping for a short code.
+The highest-volume path is redirect lookup. Keep those two concerns separate as the
+design develops.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Estimate scale and constraints" %}
+
+### Back-of-the-envelope workload
+
+Use decimal units and state the traffic multiplier. These estimates use 86,400 seconds
+per day and a 3x peak-to-average factor.
+
+{% metric-strip %}
+{% metric value="1.2K/s" label="Average creations" detail="100M / 86,400; plan near 3.5K/s peak" tone="blue" /%}
+{% metric value="116K/s" label="Average redirects" detail="10B / 86,400; plan near 350K/s peak" tone="violet" /%}
+{% metric value="100:1" label="Read-to-write ratio" detail="Protect the redirect path from write-path work" tone="green" /%}
+{% metric value="<100 ms" label="Redirect P95" detail="Measured from supported user regions" tone="amber" /%}
+{% /metric-strip %}
+
+### Stress the cache boundary
+
+The cache hit rate is not a vanity metric. It determines how much peak redirect traffic
+reaches the authoritative store and how dangerous a cache incident becomes.
+
+{% traffic-split dataFile="/api/content/practice/url-shortener/data/redirect-traffic-split.json" /%}
+
+### Storage and bandwidth assumptions
+
+- A mapping record averaging **500 bytes** produces about **50 GB/day** or **18.25
+  TB/year** of raw mapping data. Five years is about **91 TB** before indexes,
+  replication, backups, and growth.
+- A compact redirect event averaging **200 bytes** produces about **2 TB/day** at full
+  capture. This is a stream and analytical-storage problem, not an OLTP-table problem.
+- A small redirect response averaging **500 bytes** produces about **5 TB/day** of
+  service egress. The destination page is served by its owner, not the shortener.
+- With a **90% cache hit rate**, 350K peak redirects become roughly **35K mapping-store
+  reads per second**. The database must still survive lower hit rates during cache loss.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Do not invent server counts" icon="server" tone="neutral" %}
+Benchmark a representative handler, cache client, and storage query. Instance count is
+`peak load / tested capacity`, with headroom for failure and deployment.
+{% /concept-card %}
+{% concept-card title="Size the hot set" icon="cache" tone="green" %}
+Measure popularity distribution and object overhead. Cache the frequently requested
+fraction, not all 91 TB of historical mappings.
+{% /concept-card %}
+{% concept-card title="Separate event economics" icon="activity" tone="violet" %}
+Sample, aggregate, compress, and tier click events. Redirect correctness must never
+depend on the analytics pipeline accepting an event.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+Capacity estimates are inputs to load tests, not procurement facts. Recalculate when
+record size, retention, regions, traffic skew, or service-level targets change.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Draw the high-level architecture" %}
+
+### Sketch before reading the reference design
+
+Build the redirect path first. It should make the cache hit, cache miss, storage
+fallback, and asynchronous click event obvious.
+
+{% callout variant="info" %}
+Use the whiteboard now. Submit a redirect-path design, then compare it with the flows
+below. The rubric values a short critical path, failure isolation, and a credible cache
+strategy more than a specific vendor name.
+{% /callout %}
+
+{% design-challenge
+   challengeId="url-shortener"
+   title="Design the redirect read path"
+   prompt="Redirects dominate writes about 100:1. Connect the browser, edge, redirect service, cache, mapping store, and event pipeline. Keep the user-facing path below 100 ms and show what happens on a cache miss or analytics failure." /%}
+
+### Explore the reference topology
+
+The same components behave differently under a cache miss, a write, or a dependency
+failure. Trace each scenario and inspect the component that owns the critical decision.
+
+{% topology-lab dataFile="/api/content/practice/url-shortener/data/url-shortener-topology.json" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="data" title="4. Model data and choose storage" %}
+
+### Keep the redirect lookup narrow
+
+The redirect service needs one key lookup: `short_code -> destination and policy`.
+Owner-facing queries, expiration scans, and analytics have different access patterns
+and should not make that lookup heavier.
+
+{% code-block file="/api/content/practice/url-shortener/code/urls-table.sql" language="sql" title="Relational mapping schema" /%}
+
+The unique index enforces code ownership. Partition by a stable hash of `short_code`
+when a single cluster no longer meets capacity. A routing layer maps hash ranges to
+partitions so resharding can move ranges gradually instead of changing every client.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Relational mapping store" icon="database" tone="blue" %}
+Fits custom-alias transactions, tenant queries, and familiar operational tooling.
+Shard explicitly when write volume, index size, or failure isolation requires it.
+{% /concept-card %}
+{% concept-card title="Distributed key-value store" icon="key" tone="violet" %}
+Fits predictable lookups and built-in partitioning. Require conditional writes for
+alias reservation and understand its consistency and hot-partition behavior.
+{% /concept-card %}
+{% concept-card title="Analytical event store" icon="activity" tone="green" %}
+Use append-oriented, columnar storage for redirect events. Do not increment a counter
+on the mapping row for every click; that creates a hot write bottleneck.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/practice/url-shortener/code/clicks-table.sql" language="sql" title="Columnar redirect-event schema" /%}
+
+### Lifecycle rules
+
+- A disabled or expired mapping remains a tombstone long enough to prevent stale
+  caches or delayed replicas from reviving it.
+- Personally identifying network fields should be minimized, truncated or hashed, and
+  retained for a defined period.
+- Backups protect mappings; the event stream and analytical store can use a different
+  recovery objective because analytics is not on the correctness path.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep-dive the critical components" %}
+
+{% tabs %}
+{% tab title="Code generation" %}
+### Prefer allocation over collision repair
+
+Seven Base62 characters provide `62^7`, about **3.5 trillion** codes. At 100 million
+new mappings per day, that theoretical space lasts roughly 96 years before reservations
+and policy reduce it.
+
+A practical design allocates non-overlapping integer ranges to creation workers and
+encodes IDs with a reversible permutation plus Base62. Range allocation avoids a
+central request on every creation; permutation prevents obvious sequential codes.
+Custom aliases use a conditional insert against the unique code index.
+
+Random codes are also viable, but collision probability rises with occupancy. Retry
+with a conditional write and monitor retries rather than assuming randomness proves
+uniqueness.
+{% /tab %}
+
+{% tab title="Caching" %}
+### Cache mappings, including safe misses
+
+Use cache-aside reads with TTL jitter to prevent many hot keys expiring together.
+Coalesce concurrent misses for the same code and briefly negative-cache true `404`
+responses so scans do not repeatedly hit storage.
+
+Warm exceptionally hot links and replicate them across cache partitions if one key can
+saturate a node. On cache failure, shed suspicious traffic and rate-limit storage
+fallbacks so the database does not become the next failure.
+{% /tab %}
+
+{% tab title="Redirect semantics" %}
+### Make caching and mutability intentional
+
+`301 Moved Permanently` encourages aggressive browser and intermediary caching but is
+hard to revoke. `302 Found` preserves control and is a safer initial product default.
+Set explicit `Cache-Control` policies: longer for immutable links, shorter for new or
+editable links, and no-store for blocked or private mappings.
+
+Return `404` for unknown codes and `410` for links known to be expired or removed. Do
+not wait for analytics delivery before sending the redirect.
+{% /tab %}
+
+{% tab title="Abuse controls" %}
+### Spend expensive checks selectively
+
+Apply cheap validation, quotas, and known-blocklist checks synchronously. Crawl and
+classify uncertain destinations asynchronously, then disable confirmed harmful links
+and purge caches. Feed reports and false-positive appeals into the moderation workflow.
+
+Codes should be difficult to enumerate, but unpredictability does not replace access
+control. Private links need authentication or signed access, not merely long codes.
+{% /tab %}
+{% /tabs %}
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Plan scalability and reliability" %}
+
+### Give each path its own service level
+
+{% metric-strip %}
+{% metric value="99.99%" label="Redirect availability" detail="About 4.4 minutes unavailable per month" tone="green" /%}
+{% metric value="99.9%" label="Creation availability" detail="About 43.8 minutes unavailable per month" tone="blue" /%}
+{% metric value="99.5%" label="Analytics availability" detail="Can degrade without blocking links" tone="violet" /%}
+{% metric value="<0.1%" label="Redirect errors" detail="Exclude valid unknown or expired codes" tone="amber" /%}
+{% /metric-strip %}
+
+### Scale independently
+
+- Keep redirect and creation services stateless so they can scale separately.
+- Partition mappings by short-code hash and move ranges gradually during resharding.
+- Serve redirects from regional caches and replicas; keep one write authority per
+  partition to avoid cross-region conflicts.
+- Allocate generated-code ranges ahead of time so a transient allocator outage does
+  not immediately stop creation.
+- Apply backpressure to analytics consumers without backpressuring redirects.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Cache outage" icon="cache" tone="amber" %}
+Limit database fallback, coalesce misses, shed scanners, and restore cache capacity
+gradually. Test cold-cache recovery as a planned failure mode.
+{% /concept-card %}
+{% concept-card title="Partition failure" icon="database" tone="rose" %}
+Fence the failed writer before promoting a replica. Verify replication position,
+redirect clients, and rebuild redundancy after promotion.
+{% /concept-card %}
+{% concept-card title="Regional outage" icon="globe" tone="blue" %}
+Route reads to another healthy region. Generated codes can use preallocated ranges;
+custom aliases may temporarily become read-only if their authority is unavailable.
+{% /concept-card %}
+{% concept-card title="Event pipeline outage" icon="activity" tone="violet" %}
+Buffer within a fixed budget, sample or drop low-value events, and keep redirects
+successful. Surface the analytics gap to users and operators.
+{% /concept-card %}
+{% concept-card title="Bad deployment" icon="code" tone="neutral" %}
+Use canaries, compatibility-tested schemas, fast rollback, and per-version error and
+latency comparisons. Avoid coupling all regions to one deployment action.
+{% /concept-card %}
+{% concept-card title="Data loss or corruption" icon="shield" tone="green" %}
+Take encrypted backups, stream database logs for point-in-time recovery, and run
+regular restore drills against explicit recovery objectives.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Observe the critical path
+
+Track redirect latency by region and cache outcome, cache hit rate, mapping-store QPS
+and tail latency, hot-key concentration, replication lag, code-collision retries,
+creation rejection reasons, and analytics consumer lag. Alert on error-budget burn,
+not every isolated spike.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="7. Compare trade-offs and alternatives" %}
+
+{% concept-grid columns="2" %}
+{% concept-card title="302 control vs 301 cacheability" icon="route" tone="blue" %}
+Choose 302 when destinations can change or be disabled. Offer an immutable-link mode
+with longer edge caching only when the product contract makes revocation explicit.
+{% /concept-card %}
+{% concept-card title="SQL vs distributed key-value" icon="database" tone="violet" %}
+SQL simplifies aliases, tenancy, and operational familiarity. A distributed key-value
+store simplifies large-scale partitioned lookups. Both still require capacity tests,
+backups, and a conflict model.
+{% /concept-card %}
+{% concept-card title="Allocated vs random codes" icon="key" tone="green" %}
+Allocated ranges make uniqueness cheap but need an allocator and obfuscation. Random
+codes remove range coordination but require collision-safe conditional writes.
+{% /concept-card %}
+{% concept-card title="Freshness vs availability" icon="scale" tone="amber" %}
+Allow short replication and cache staleness for redirects, but strongly reserve a code
+before acknowledging creation. A delayed new link is preferable to two owners.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Alternatives rejected for this target
+
+- **One global primary for every request:** simple ownership, but adds avoidable
+  cross-region latency and creates a broad failure dependency.
+- **Write analytics synchronously:** complete event capture, but it makes redirect
+  availability depend on a much heavier pipeline.
+- **Store all mappings only in cache:** fast, but the cache becomes the system of
+  record and complicates durable recovery.
+- **Reuse expired codes immediately:** conserves namespace, but stale caches and old
+  messages can redirect users to the wrong destination.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Wrap up, risks, and extensions" %}
+
+### Recommended design in one minute
+
+{% process-flow %}
+{% process-step number="1" title="Reserve code ownership" label="Create" %}
+Validate and rate-limit the request, allocate or conditionally reserve a code, then
+commit the mapping before returning success.
+{% /process-step %}
+{% process-step number="2" title="Keep redirects short" label="Read" %}
+Route to a nearby stateless service, check a distributed cache, and fall back to the
+mapping store only on a miss.
+{% /process-step %}
+{% process-step number="3" title="Move events off-path" label="Analyze" %}
+Publish compact click events asynchronously to a durable stream and aggregate them in
+an analytical store.
+{% /process-step %}
+{% process-step number="4" title="Partition by stable keys" label="Scale" %}
+Hash short codes to ownership ranges, move ranges gradually, and scale creation,
+redirect, cache, storage, and analytics tiers independently.
+{% /process-step %}
+{% process-step number="5" title="Degrade deliberately" label="Fail" %}
+Preserve redirects ahead of creation and analytics. Fence failed writers, bound cache
+fallback, and keep tested backups for corruption recovery.
+{% /process-step %}
+{% process-step number="6" title="Measure the promises" label="Operate" %}
+Use regional latency, availability, cache behavior, storage health, and abuse signals
+to manage error budgets and capacity.
+{% /process-step %}
+{% /process-flow %}
+
+### Highest risks
+
+1. A cache outage transfers enough traffic to overload the mapping store.
+2. A split-brain promotion allows two writers to claim code ownership.
+3. A viral code creates a hot key or edge concentration.
+4. Abuse checks either miss harmful links or block legitimate destinations.
+5. Analytics retention grows faster than mapping storage and dominates cost.
+
+### Extensions worth rehearsing
+
+Pick one extension and explain how it changes ownership, the request path, and
+operations. A strong answer names the new invariant before adding components.
+
+- **Global active-active creation**
+  - Give generated codes explicit regional or range ownership so writers do not
+    coordinate on every request.
+  - Reserve custom aliases through a single authority or consensus boundary to prevent
+    two regions from accepting the same name.
+- **Enterprise domains**
+  - Verify domain ownership and route branded hosts without weakening tenant isolation.
+  - Add tenant-scoped quotas, audit logs, retention policies, and administrative roles.
+- **Real-time analytics**
+  - Deduplicate events, filter bots, and compute bounded stream windows independently
+    of redirect handling.
+  - Serve dashboards from an analytical store so expensive queries never reach the
+    mapping database.
+- **Privacy-preserving analytics**
+  - Minimize or coarsen network identifiers before events enter long-term storage.
+  - Enforce bounded retention, deletion workflows, and regional data residency.
+- **Dynamic links and experiments**
+  - Version destination rules so a bad experiment can be rolled back and audited.
+  - Cache evaluated rules carefully and keep targeting logic off the redirect critical
+    path whenever possible.
+
+{% callout variant="tip" %}
+In an interview, end by restating the requirements, tracing one redirect and one
+creation, naming the main failure mode, and identifying the metric that would force
+the next architecture change.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/url-shortener/quiz/url-shortener-design-review.json"
+   lessonSlug="practice-url-shortener"
+   title="URL Shortener Design Review" /%}

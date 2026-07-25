@@ -1,0 +1,79 @@
+{
+  "title": "Trace a write until search can prove it is visible",
+  "description": "Inject retries and indexing pressure, then compare mutation identity and read-after-write policies. Watch accepted writes diverge from searchable state when the indexing checkpoint falls behind.",
+  "defaults": {
+    "mutationId": "update",
+    "contractId": "versioned",
+    "readPolicyId": "checkpoint",
+    "writeRps": 700,
+    "indexRps": 850,
+    "retryPercent": 4
+  },
+  "windowSeconds": 30,
+  "overlayLimit": 12000,
+  "freshnessTargetSeconds": 5,
+  "mutations": [
+    {
+      "id": "insert",
+      "label": "Insert a new chunk",
+      "detail": "The client expects a stable ID and must know when the new evidence becomes searchable.",
+      "risk": "Duplicate delivery can create multiple records for one source chunk."
+    },
+    {
+      "id": "update",
+      "label": "Replace an embedding",
+      "detail": "A newer source version must supersede old text, metadata, and vector together.",
+      "risk": "An older retry can overwrite a newer embedding when versions are not compared."
+    },
+    {
+      "id": "delete",
+      "label": "Delete revoked evidence",
+      "detail": "A tombstone must stop retrieval before background compaction removes physical data.",
+      "risk": "A delayed upsert can resurrect content after an unversioned delete."
+    }
+  ],
+  "contracts": [
+    {
+      "id": "naive",
+      "label": "Request-shaped writes",
+      "detail": "Generate identity at delivery time and apply every retry as a new mutation.",
+      "idempotent": false,
+      "versioned": false,
+      "tombstones": false
+    },
+    {
+      "id": "versioned",
+      "label": "Versioned idempotent writes",
+      "detail": "Derive a stable point ID, compare source versions, and preserve delete tombstones.",
+      "idempotent": true,
+      "versioned": true,
+      "tombstones": true
+    }
+  ],
+  "readPolicies": [
+    {
+      "id": "eventual",
+      "label": "Read immediately",
+      "detail": "Query the serving index without waiting for the write checkpoint.",
+      "readCostMs": 0,
+      "usesCheckpoint": false,
+      "usesOverlay": false
+    },
+    {
+      "id": "checkpoint",
+      "label": "Wait for checkpoint",
+      "detail": "Carry the acknowledged write sequence and wait until the serving index reaches it.",
+      "readCostMs": 3,
+      "usesCheckpoint": true,
+      "usesOverlay": false
+    },
+    {
+      "id": "overlay",
+      "label": "Read through an overlay",
+      "detail": "Merge a bounded transactional change set with search results while indexing catches up.",
+      "readCostMs": 7,
+      "usesCheckpoint": false,
+      "usesOverlay": true
+    }
+  ]
+}

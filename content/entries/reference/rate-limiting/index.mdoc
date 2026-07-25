@@ -1,0 +1,314 @@
+---
+registryId: rate-limiting
+---
+
+{% section-card tone="intro" %}
+## What is rate limiting?
+
+**Rate limiting is an admission policy that decides how much work one identity may send to a protected operation over time.** The identity might be a user, tenant, API key, IP address, device, or internal service. The protected operation might be an API route, login attempt, expensive search, message publish, or model invocation.
+
+In plain language, a rate limiter is a budget at the door. It preserves shared capacity, limits abuse, and makes overload behavior predictable before a downstream database or service is saturated. It does not create capacity, authenticate callers, or repair an unsafe operation.
+
+The core invariant is: **for one normalized key and policy, every admitted request atomically spends available allowance; saved burst credit never exceeds its configured capacity.** When coordination fails, any exception to that invariant must be an explicit, bounded failure policy.
+
+{% callout variant="info" %}
+A complete policy names five things: the identity key, protected operation, request cost, time model, and overflow outcome. Choosing “token bucket” without those decisions does not define a usable limit.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Define the policy before choosing an algorithm
+
+Two limiters can run the same algorithm and protect completely different boundaries. Start with the promise the system must preserve.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Identity" eyebrow="Who shares a budget?" icon="key" tone="blue" %}
+Normalize a stable user, tenant, credential, device, IP, or service key. Decide how unauthenticated callers are grouped and cap distinct-key growth.
+{% /concept-card %}
+{% concept-card title="Operation" eyebrow="What is protected?" icon="shield" tone="violet" %}
+Separate cheap reads from expensive searches, writes, login attempts, exports, and administrative actions. One universal counter hides their different costs.
+{% /concept-card %}
+{% concept-card title="Cost" eyebrow="What spends allowance?" icon="scale" tone="amber" %}
+Most requests cost one unit, but a batch, large query, or model call can spend more. The cost must be known before admission and resistant to caller manipulation.
+{% /concept-card %}
+{% concept-card title="Outcome" eyebrow="What happens next?" icon="route" tone="green" %}
+Allow, reject, or place work in a bounded queue. Return enough metadata for the caller to stop retrying blindly and for operators to explain the decision.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Scope keys in layers
+
+A public API commonly combines several policies rather than trusting one counter:
+
+- A coarse **IP or network limit** slows unauthenticated floods, but shared networks and address rotation make it a poor fairness identity by itself.
+- An **account or API-key limit** represents customer entitlement after authentication.
+- A **tenant limit** prevents one organization from consuming an entire shared service through many accounts or keys.
+- An **operation limit** protects scarce work such as password guesses, report generation, or expensive fan-out queries.
+- A **global emergency limit** preserves the service when downstream capacity drops, even if every caller is individually below quota.
+
+Never put raw secrets or unbounded user input in the storage key. Hash sensitive identifiers, use a versioned policy namespace, and expire inactive keys.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Trace one atomic admission decision
+
+The fast path must make one decision from one policy snapshot. Logging and response metadata can follow, but two gateways must not both spend the same final token.
+
+{% system-flow title="Rate-limit decision path" caption="The outcome is a policy decision with evidence, not just a counter increment." %}
+{% system-node title="Normalize identity" eyebrow="Key" icon="key" tone="blue" %}
+Resolve a bounded key such as `tenant:42:search:v3`. Reject malformed or ambiguous identity before touching the counter store.
+{% /system-node %}
+{% system-node title="Resolve policy" eyebrow="Rule" icon="braces" tone="cyan" %}
+Load the operation cost, sustained rate, burst capacity, queue rule, and policy version.
+{% /system-node %}
+{% system-node title="Spend atomically" eyebrow="State" icon="database" tone="violet" %}
+Refill or expire state, compare available allowance with cost, and update the owner in one atomic operation.
+{% /system-node %}
+{% system-node title="Return evidence" eyebrow="Outcome" icon="activity" tone="green" %}
+Return allow or reject, remaining allowance, retry timing, policy identity, and the fallback mode if coordination was degraded.
+{% /system-node %}
+{% /system-flow %}
+
+For every modeled interval, keep this accounting identity visible:
+
+`offered requests = allowed requests + rejected requests + requests still queued`
+
+Retries are new offered work unless the protocol deduplicates them. A retry storm can therefore consume allowance and downstream capacity faster than the original incident.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab: match saved burst credit to request pressure
+
+A token bucket refills at a sustained rate and stores unused tokens up to a capacity. The refill rate protects long-run capacity; bucket capacity controls how much idle credit can be spent at once. Queueing is a separate overflow decision that trades rejection for delay.
+
+Change all five controls below. Compare a launch spike with a retry wave, then switch between immediate rejection and a bounded two-second queue. Watch the accounting line as work moves between outcomes.
+
+{% interactive-block id="reference/rate-limiting-request-pressure-lab" dataFile="/api/content/reference/rate-limiting/data/request-pressure-model.json" /%}
+
+{% callout variant="warn" %}
+An unbounded queue is not a generous rate limiter. It converts visible rejection into growing latency, memory pressure, expired work, and synchronized retries. Bound both queue depth and queue wait.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose an algorithm by the behavior it guarantees
+
+The useful question is not which algorithm is “best.” Ask whether the product needs saved burst credit, smooth output, precise rolling history, or cheap approximation.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Token bucket" eyebrow="Saved credit" icon="gauge" tone="blue" %}
+Refill tokens continuously up to capacity and spend tokens per request. It supports controlled bursts while bounding the sustained average. Store token balance and last-refill time per key.
+
+Use it for interactive APIs, tenant quotas, or operations where occasional bursts are expected.
+{% /concept-card %}
+{% concept-card title="Leaky bucket" eyebrow="Smoothed output" icon="workflow" tone="cyan" %}
+Place admitted work in a bounded queue and drain it at a fixed rate. It smooths downstream arrivals but adds wait time and needs an overflow rule.
+
+Use it when the downstream worker benefits from a predictable dispatch rate and queued work remains valuable.
+{% /concept-card %}
+{% concept-card title="Fixed window" eyebrow="Cheap boundary counter" icon="timer" tone="amber" %}
+Count requests in a named interval such as a minute. It is simple and memory efficient, but a caller can spend one window just before reset and the next just after reset.
+
+Use it when that boundary burst is acceptable or another limit absorbs it.
+{% /concept-card %}
+{% concept-card title="Sliding window" eyebrow="Rolling history" icon="repeat" tone="violet" %}
+A timestamp log counts exact events in the trailing interval; a weighted counter estimates the same view from adjacent windows. The exact log costs memory proportional to request history.
+
+Use the log for lower-volume precise controls and the counter approximation for high-volume quotas that tolerate bounded error.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Read the boundary behavior, not just the average
+
+Suppose a fixed window allows `100` requests per minute. A client can send `100` requests at `12:00:59` and another `100` at `12:01:00`. The counter is functioning correctly, yet nearly `200` requests cross a two-second span.
+
+A token bucket with refill `100 / 60 = 1.67 tokens/second` and capacity `100` still allows an idle client to burst `100` requests, but it cannot immediately repeat the full burst because the saved credit is gone. Reducing capacity tightens the immediate burst without changing the long-run refill rate.
+
+Use these selection tests:
+
+1. Choose **token bucket** when callers need bounded bursts and the sustained rate matters.
+2. Choose **leaky bucket or a work queue** when smoothing is intentional and delayed work is still useful.
+3. Choose **fixed window** when simplicity matters more than boundary precision.
+4. Choose **sliding window counter** when rolling accuracy matters but exact timestamp storage is too expensive.
+5. Choose **sliding window log** only when exact recent history justifies per-event state and cleanup cost.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: make distributed enforcement failure explicit
+
+A single process can update one counter safely. Multiple gateways and regions must also agree on who owns the allowance. Stronger coordination improves global accuracy but places a shared dependency on the request path; local decisions preserve availability while duplicating or leasing budget.
+
+The lab models one `600 requests/minute` identity budget. Compare centralized, local, and hybrid counters, concentrate abuse in one region, and partition that region. Then switch between fail open and fail closed to see whether the cost appears as global overshoot or blocked legitimate traffic.
+
+{% interactive-block id="reference/rate-limiting-distributed-consistency-lab" dataFile="/api/content/reference/rate-limiting/data/distributed-limiter-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Select a distributed topology from the allowed error
+
+“Distributed rate limiting” does not imply one mandatory design. State how much overshoot, latency, and outage impact the protected operation can tolerate.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Centralized owner" eyebrow="Strong global spend" icon="database" tone="blue" %}
+All gateways update one logical counter owner through atomic operations. This gives the clearest global budget while reachable, but counter latency and availability join every protected request path.
+
+Shard by normalized key, keep one key on one atomic owner, and define what happens when that owner or network path fails.
+{% /concept-card %}
+{% concept-card title="Independent locals" eyebrow="Fast but multiplied" icon="server" tone="amber" %}
+Each process or region enforces its own copy. Admission is fast and survives shared-store loss, but a roaming or distributed caller can spend the nominal limit at every owner.
+
+Use it for coarse protection where bounded over-admission is acceptable, or combine it with sticky routing and a separate global emergency control.
+{% /concept-card %}
+{% concept-card title="Leased budgets" eyebrow="Bounded regional autonomy" icon="network" tone="violet" %}
+A coordinator grants finite allowance to regions. Regional checks stay local; a partitioned region can spend its remaining lease without creating unlimited global credit.
+
+Smaller leases reduce overshoot but require more coordination. Uneven regional demand can strand unused allowance until leases are rebalanced.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Choose failure behavior per operation
+
+- **Fail open** can be appropriate for low-cost reads when limiter failure would otherwise become a broad outage. Do not equate it with unlimited traffic: keep a coarse local emergency cap and downstream load shedding.
+- **Fail closed** is safer for login attempts, costly exports, irreversible writes, scarce inventory, and abuse-sensitive operations. Return a bounded unavailable or limited response rather than silently admitting uncertain work.
+- **Hybrid fallback** spends a local lease or emergency allowance first, then follows the documented fail-open or fail-closed rule. Record every fallback decision so operators can reconcile overshoot.
+- **Partial failure** needs its own policy. A slow store can consume connection pools and request deadlines before it is fully unavailable; set a short limiter deadline and trip a deliberate fallback path.
+
+The limiter cannot identify intent. When abuse and legitimate traffic share one key, whichever arrives first can consume the budget. Improve identity and operation scope before simply increasing the number.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make the state transition atomic at its owner
+
+An implementation is atomic when no concurrent request can observe and spend the same old allowance. A common bug performs `GET`, compares in application code, then issues `INCR` or `SET`; two gateways can both pass the comparison before either update becomes visible.
+
+Redis Lua scripts execute the related reads and writes atomically on one Redis owner. They do not make a multi-region system perfectly consistent, keep the service available during partitions, or choose the right fallback policy.
+
+### Token bucket: refill and spend together
+
+{% code-block file="/api/content/reference/rate-limiting/code/redis-token-bucket.lua" language="lua" title="Atomic Redis token bucket" /%}
+
+The script stores the remaining token balance and last-refill time in one hash. Use server time, cap the refill at bucket capacity, reject a request whose cost exceeds current tokens, and set a TTL so inactive identities disappear.
+
+### Sliding window log: trim, count, and add together
+
+{% code-block file="/api/content/reference/rate-limiting/code/redis-sliding-window.lua" language="lua" title="Atomic Redis sliding window log" /%}
+
+Every sorted-set member must be unique per admitted request. Otherwise two requests with the same timestamp or identifier overwrite one member and undercount the window. Memory grows with admitted events, so monitor cardinality and cleanup cost.
+
+### Fixed-window counter: compare and increment together
+
+{% code-block file="/api/content/reference/rate-limiting/code/redis-distributed-counter.lua" language="lua" title="Atomic Redis fixed-window counter" /%}
+
+The counter is cheap, but atomicity does not remove its reset boundary. In Redis Cluster, every key touched by one script must route to the same hash slot; design key tags around the ownership model rather than adding a cross-slot lock.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Design the caller contract and retry behavior
+
+A rejection should tell a well-behaved caller what happened without exposing another tenant's state.
+
+- Return `429 Too Many Requests` when the request is valid but the caller has exhausted this policy.
+- Provide a retry delay or reset time that matches the algorithm. Add jitter on the client so many callers do not retry at one instant.
+- Return limit, remaining allowance, and policy metadata consistently when the API contract supports them.
+- Do not retry non-idempotent writes automatically. A rejected request did not enter, but a timeout after admission can have an uncertain outcome.
+- Cap retries by attempt count and deadline. Count retries against the same identity unless there is a deliberate reason not to.
+- Separate product quota from overload shedding. A customer may have quota remaining while a global emergency limiter rejects work because the service is degraded.
+
+{% callout variant="info" %}
+Rate limiting protects admission; backpressure controls work already inside the system. Use concurrency limits, bounded queues, deadlines, and load shedding after admission so accepted work cannot grow without bound.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Rehearse the failure modes before production
+
+{% accordion defaultOpen="counter-store" %}
+{% accordion-item id="counter-store" title="Counter storage is slow or unavailable" %}
+
+A slow decision can hold request workers, sockets, and connection pools until the protected service fails behind its protector.
+
+- Give the limiter a deadline shorter than the protected operation's remaining budget.
+- Choose fail open, fail closed, or a leased local fallback per operation.
+- Emit the selected fallback mode and duration, not only a generic storage error.
+- Test recovery for stale local state and reconcile any bounded overshoot after coordination returns.
+
+{% /accordion-item %}
+{% accordion-item id="key-cardinality" title="Keys explode or one key becomes hot" %}
+
+Unbounded identity input creates memory pressure, while a celebrity tenant or global key can saturate one Redis shard.
+
+- Normalize and hash keys from trusted identity fields; reject malformed dimensions.
+- Expire inactive state and alert on distinct-key growth by policy version.
+- Shard independent keys, but do not split one identity across owners unless the design accepts duplicated allowance or uses leases.
+- Give exceptional tenants explicit policy tiers rather than silently salting a hot key and breaking its invariant.
+
+{% /accordion-item %}
+{% accordion-item id="policy-rollout" title="Policy or clock changes create inconsistent decisions" %}
+
+Gateways can briefly use different rates, costs, or key formats during deployment. Client clocks can also disagree about a window boundary.
+
+- Version policy and key namespaces so old and new semantics are observable.
+- Use the counter owner's time for shared refill or window calculations.
+- Roll out a shadow policy first and compare predicted rejection before enforcement.
+- Define how old state expires or migrates; never reinterpret an old counter under a new unit cost silently.
+
+{% /accordion-item %}
+{% accordion-item id="retry-amplification" title="Rejections trigger synchronized retries" %}
+
+A limiter can protect the backend while callers turn one spike into repeated waves.
+
+- Return accurate retry guidance and require exponential backoff with jitter.
+- Track offered traffic separately from allowed traffic so rejected attempts remain visible.
+- Bound SDK retries and preserve the original end-to-end deadline.
+- Watch for callers that ignore `429`, rotate identities, or distribute work across regions.
+
+{% /accordion-item %}
+{% /accordion %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate the limiter as a protection system
+
+Dashboards need both product outcomes and enforcement health. A low rejection rate is not automatically healthy if the limiter is bypassed, and a high rejection rate can be correct during an attack.
+
+### Measure bounded dimensions
+
+- Offered, allowed, rejected, and queued requests by policy name, operation, tier, region, and outcome. Keep raw identity out of metric labels.
+- Queue depth and wait time, not only request count. A stable dequeue rate with rising age means admitted work is already stale.
+- Counter-store latency, timeout, error, connection saturation, and fallback-mode duration.
+- Estimated overshoot, local lease exhaustion, allocation rebalance, and reconciliation after partitions.
+- Distinct active keys, memory per policy, TTL behavior, hot-key share, and script execution time.
+- Caller retry volume, ignored-limit behavior, identity rotation, and downstream saturation while the limiter is rejecting.
+
+{% process-flow %}
+{% process-step number="1" title="Observe before enforcing" label="Shadow" %}
+Compute decisions without rejecting. Compare predicted impact by tenant tier, operation, region, and legitimate workload peak.
+{% /process-step %}
+{% process-step number="2" title="Ramp the policy" label="Control" %}
+Enable a conservative limit for a small traffic slice. Version the rule and keep a fast rollback path that does not delete evidence.
+{% /process-step %}
+{% process-step number="3" title="Challenge failure" label="Game day" %}
+Inject store latency, a regional partition, a hot key, clock skew, and synchronized retries. Verify the documented fallback and downstream safety.
+{% /process-step %}
+{% process-step number="4" title="Tune from evidence" label="Review" %}
+Adjust identity, cost, refill, burst, leases, and queue bounds separately. Record which user promise or capacity measurement justified each change.
+{% /process-step %}
+{% /process-flow %}
+
+Keep an emergency bypass narrow, authenticated, time-limited, and audited. A permanent hidden bypass makes the policy impossible to reason about during the incident when it matters most.
+{% /section-card %}
+
+{% section-card %}
+## Continue learning
+
+- [API Design Patterns](/reference/api-patterns): place limit outcomes, idempotency, and retry metadata in a coherent API contract.
+- [Redis](/technology/redis): understand atomic scripts, clustering, hot keys, persistence, and failover at the counter owner.
+- [Circuit Breakers](/technology/circuit-breakers): keep a slow limiter dependency from exhausting the protected request path.
+- [Rate Limiting Technology Deep Dive](/technology/rate-limiting): extend these decisions with broader implementation patterns.
+{% /section-card %}
+
+{% section-card %}
+## Check your rate-limiting decisions
+
+{% quiz questionsFile="/api/content/reference/rate-limiting/quiz/rate-limiting-decisions.json" lessonSlug="rate-limiting" title="Rate Limiting Decision Review" /%}
+{% /section-card %}

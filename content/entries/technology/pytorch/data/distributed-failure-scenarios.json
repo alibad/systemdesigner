@@ -1,0 +1,93 @@
+{
+  "title": "Can the training group recover coherently?",
+  "description": "Inject a distributed failure, choose DDP or FSDP, and enable recovery controls. The lab distinguishes a job that merely restarts from one that preserves model, optimizer, and sample-stream correctness.",
+  "defaults": {
+    "scenarioId": "rank-loss",
+    "topologyId": "ddp",
+    "enabledControls": ["telemetry", "watchdog"]
+  },
+  "topologies": [
+    {
+      "id": "ddp",
+      "label": "DDP replicas",
+      "detail": "Every rank holds a full model replica; gradients synchronize at each step.",
+      "restartPenaltyMinutes": 3,
+      "checkpointPenaltyMinutes": 2
+    },
+    {
+      "id": "fsdp",
+      "label": "FSDP shards",
+      "detail": "Model state is distributed; save and restore must preserve the chosen sharded checkpoint contract.",
+      "restartPenaltyMinutes": 5,
+      "checkpointPenaltyMinutes": 5
+    }
+  ],
+  "controls": [
+    {
+      "id": "sampler",
+      "label": "Synchronized sampler state",
+      "detail": "Shard examples by rank, persist the epoch or cursor, and call set_epoch consistently."
+    },
+    {
+      "id": "checkpoint",
+      "label": "Complete durable checkpoint",
+      "detail": "Persist model, optimizer, scaler, scheduler, global step, RNG, and data position together."
+    },
+    {
+      "id": "watchdog",
+      "label": "Fail-fast group restart",
+      "detail": "Bound collective waits and restart the coordinated process group instead of one rank."
+    },
+    {
+      "id": "telemetry",
+      "label": "Per-rank telemetry",
+      "detail": "Compare step time, data wait, memory, collective time, and progress for every rank."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "rank-loss",
+      "label": "One rank exits",
+      "detail": "A device error kills one process during backward synchronization.",
+      "symptom": "Seven ranks wait in a collective after rank 3 disappears.",
+      "rootCause": "The process group cannot complete the gradient reduction with missing membership.",
+      "requiredControls": ["checkpoint", "watchdog", "telemetry"],
+      "baseRecoveryMinutes": 4,
+      "lostStepsWithoutCheckpoint": 12000,
+      "affectedRanks": 8
+    },
+    {
+      "id": "sample-repeat",
+      "label": "Epochs repeat samples",
+      "detail": "Loss improves, but some records repeat while others never train.",
+      "symptom": "Ranks report healthy steps while sample IDs reveal duplicate ownership.",
+      "rootCause": "The distributed sampler, epoch seed, or resume cursor diverges across ranks.",
+      "requiredControls": ["sampler", "checkpoint", "watchdog", "telemetry"],
+      "baseRecoveryMinutes": 6,
+      "lostStepsWithoutCheckpoint": 18000,
+      "affectedRanks": 4
+    },
+    {
+      "id": "straggler",
+      "label": "One rank becomes a straggler",
+      "detail": "The entire synchronous group slows to the pace of one data-starved worker.",
+      "symptom": "Collective time rises on seven ranks while rank 5 spends most of the step waiting for data.",
+      "rootCause": "A slow input shard, worker failure, or device contention delays one synchronous participant.",
+      "requiredControls": ["checkpoint", "watchdog", "telemetry"],
+      "baseRecoveryMinutes": 3,
+      "lostStepsWithoutCheckpoint": 4000,
+      "affectedRanks": 8
+    },
+    {
+      "id": "checkpoint-mismatch",
+      "label": "Checkpoint cannot restore",
+      "detail": "A replacement cluster starts, but optimizer or shard metadata is incomplete.",
+      "symptom": "Model weights load while optimizer state or FSDP shard metadata fails validation.",
+      "rootCause": "The save path published a partial checkpoint without an atomic manifest and restore test.",
+      "requiredControls": ["checkpoint", "watchdog", "telemetry"],
+      "baseRecoveryMinutes": 12,
+      "lostStepsWithoutCheckpoint": 24000,
+      "affectedRanks": 8
+    }
+  ]
+}

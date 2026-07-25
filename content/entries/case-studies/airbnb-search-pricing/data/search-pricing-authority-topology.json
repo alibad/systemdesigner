@@ -1,0 +1,280 @@
+{
+  "title": "Trace ranking hints and marketplace authority",
+  "description": "Select a consistency or dependency failure. The active path shows which data may be stale, which service owns the final decision, and what the guest should see instead of a false result or price.",
+  "nodes": [
+    {
+      "id": "guest",
+      "label": "Guest app",
+      "eyebrow": "Intent and visible result",
+      "detail": "Sends destination, map bounds, dates, party size, filters, and session context. It must receive an honest state when inventory or price changes.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 50
+    },
+    {
+      "id": "search-edge",
+      "label": "Search API",
+      "eyebrow": "Deadline and policy",
+      "detail": "Normalizes the request, chooses a regional deadline, requests candidates, and assembles only results that pass current marketplace policy.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 22,
+      "y": 50
+    },
+    {
+      "id": "geo-index",
+      "label": "Geographic index",
+      "eyebrow": "Broad recall",
+      "detail": "Maps a point, radius, or viewport to spatial cells and returns nearby listing IDs without deeply scoring the entire catalog.",
+      "kind": "database",
+      "tone": "green",
+      "x": 39,
+      "y": 18
+    },
+    {
+      "id": "inventory-projection",
+      "label": "Inventory projection",
+      "eyebrow": "Fast but bounded-stale",
+      "detail": "Maintains date-level availability bitmaps for retrieval. Events and TTLs bound staleness, but this projection never owns a booking decision.",
+      "kind": "stream",
+      "tone": "amber",
+      "x": 39,
+      "y": 80
+    },
+    {
+      "id": "feature-store",
+      "label": "Ranking features",
+      "eyebrow": "Personalization hints",
+      "detail": "Provides guest preferences, listing quality, predicted booking probability, and market features with event-time and freshness metadata.",
+      "kind": "analytics",
+      "tone": "violet",
+      "x": 57,
+      "y": 18
+    },
+    {
+      "id": "ranker",
+      "label": "Personalized ranker",
+      "eyebrow": "Order, not authority",
+      "detail": "Scores eligible candidates, applies diversity and policy constraints, and returns an ordered slate. It may use price estimates but cannot invent a checkout total.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 57,
+      "y": 53
+    },
+    {
+      "id": "pricing-authority",
+      "label": "Pricing authority",
+      "eyebrow": "Versioned quote",
+      "detail": "Combines host rules, nightly rates, fees, taxes, discounts, currency, and a quote version into the current guest-visible total.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 75,
+      "y": 18
+    },
+    {
+      "id": "inventory-authority",
+      "label": "Inventory authority",
+      "eyebrow": "Sellable-night owner",
+      "detail": "Revalidates dates and party constraints against the booking record. Search projections and caches cannot overrule it.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 75,
+      "y": 82
+    },
+    {
+      "id": "results",
+      "label": "Result assembler",
+      "eyebrow": "Honest user state",
+      "detail": "Joins rank order with current availability and versioned price quotes, omits invalid candidates, and marks degraded or retryable states explicitly.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 92,
+      "y": 50
+    }
+  ],
+  "edges": [
+    {
+      "id": "guest-search",
+      "from": "guest",
+      "to": "search-edge",
+      "label": "query and context"
+    },
+    {
+      "id": "search-geo",
+      "from": "search-edge",
+      "to": "geo-index",
+      "label": "viewport and filters"
+    },
+    {
+      "id": "geo-inventory-projection",
+      "from": "geo-index",
+      "to": "inventory-projection",
+      "label": "candidate IDs",
+      "mode": "sync"
+    },
+    {
+      "id": "geo-features",
+      "from": "geo-index",
+      "to": "feature-store",
+      "label": "candidate batch"
+    },
+    {
+      "id": "projection-ranker",
+      "from": "inventory-projection",
+      "to": "ranker",
+      "label": "eligible dates",
+      "via": {
+        "x": 48,
+        "y": 69
+      }
+    },
+    {
+      "id": "features-ranker",
+      "from": "feature-store",
+      "to": "ranker",
+      "label": "freshness-tagged features"
+    },
+    {
+      "id": "ranker-pricing",
+      "from": "ranker",
+      "to": "pricing-authority",
+      "label": "quote selected slate"
+    },
+    {
+      "id": "ranker-inventory",
+      "from": "ranker",
+      "to": "inventory-authority",
+      "label": "revalidate dates"
+    },
+    {
+      "id": "ranker-results",
+      "from": "ranker",
+      "to": "results",
+      "label": "ordered slate"
+    },
+    {
+      "id": "pricing-results",
+      "from": "pricing-authority",
+      "to": "results",
+      "label": "versioned total"
+    },
+    {
+      "id": "inventory-results",
+      "from": "inventory-authority",
+      "to": "results",
+      "label": "sellable now"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy request",
+      "summary": "Geographic retrieval finds a broad local set, the availability projection removes obvious conflicts, personalization orders the survivors, and both authorities validate the selected slate.",
+      "activeEdges": [
+        "guest-search",
+        "search-geo",
+        "geo-inventory-projection",
+        "geo-features",
+        "projection-ranker",
+        "features-ranker",
+        "ranker-pricing",
+        "ranker-inventory",
+        "ranker-results",
+        "pricing-results",
+        "inventory-results"
+      ],
+      "focusNode": "ranker",
+      "result": "The guest sees a personalized order, currently sellable dates, and a versioned price total. A booking still rechecks the quote and inventory in one authoritative workflow."
+    },
+    {
+      "id": "inventory-lag",
+      "label": "Inventory projection lags",
+      "summary": "A booking event has not reached the search projection, so a recently sold night survives broad retrieval and reaches the ranker.",
+      "activeEdges": [
+        "guest-search",
+        "search-geo",
+        "geo-inventory-projection",
+        "geo-features",
+        "projection-ranker",
+        "features-ranker",
+        "ranker-pricing",
+        "ranker-inventory",
+        "ranker-results",
+        "pricing-results",
+        "inventory-results"
+      ],
+      "degradedNodes": [
+        "inventory-projection"
+      ],
+      "focusNode": "inventory-projection",
+      "result": "The inventory authority removes the sold candidate before a bookable result is assembled. The page may return fewer homes or a changed-result notice, but it must not confirm unavailable dates."
+    },
+    {
+      "id": "price-feature-lag",
+      "label": "Price feature is stale",
+      "summary": "The ranker sees an older estimated nightly price after the host changed a rule. Ranking quality may shift, but the estimate is not the checkout authority.",
+      "activeEdges": [
+        "guest-search",
+        "search-geo",
+        "geo-inventory-projection",
+        "geo-features",
+        "projection-ranker",
+        "features-ranker",
+        "ranker-pricing",
+        "ranker-inventory",
+        "ranker-results",
+        "pricing-results",
+        "inventory-results"
+      ],
+      "degradedNodes": [
+        "feature-store"
+      ],
+      "focusNode": "pricing-authority",
+      "result": "The listing can be ordered less optimally, but the result assembler displays the pricing authority's current versioned total. Log the feature age and retrain or repair freshness without serving the stale estimate as truth."
+    },
+    {
+      "id": "pricing-outage",
+      "label": "Pricing authority times out",
+      "summary": "Retrieval, availability, and ranking succeed, but the service that owns fees, taxes, discounts, currency, and quote version cannot answer before the deadline.",
+      "activeEdges": [
+        "guest-search",
+        "search-geo",
+        "geo-inventory-projection",
+        "geo-features",
+        "projection-ranker",
+        "features-ranker",
+        "ranker-pricing",
+        "ranker-inventory",
+        "ranker-results",
+        "inventory-results"
+      ],
+      "failedNodes": [
+        "pricing-authority"
+      ],
+      "focusNode": "pricing-authority",
+      "result": "Do not fabricate a checkout total from stale ranking features. Return a retryable price-unavailable state, omit affected results, or show a clearly labeled non-bookable estimate according to product policy."
+    },
+    {
+      "id": "personalization-outage",
+      "label": "Personalization unavailable",
+      "summary": "Guest and real-time feature reads fail, but geographic retrieval, inventory checks, and current price quotes remain healthy.",
+      "activeEdges": [
+        "guest-search",
+        "search-geo",
+        "geo-inventory-projection",
+        "projection-ranker",
+        "ranker-pricing",
+        "ranker-inventory",
+        "ranker-results",
+        "pricing-results",
+        "inventory-results"
+      ],
+      "failedNodes": [
+        "feature-store"
+      ],
+      "focusNode": "feature-store",
+      "result": "Fall back to geographic relevance, listing quality, availability, and market priors. Guests get valid but less personalized results; track the fallback rate instead of failing the whole search."
+    }
+  ]
+}

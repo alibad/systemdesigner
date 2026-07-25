@@ -1,0 +1,116 @@
+{
+  "title": "Route traffic through a Google Cloud failure",
+  "description": "Select a healthy path, a zonal loss, or a regional loss. The active route, failed boundary, component responsibility, and user-visible result change together.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "User request",
+      "eyebrow": "Public client",
+      "detail": "The user needs the complete business journey, not merely a successful edge connection.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "global-edge",
+      "label": "Global load balancer",
+      "eyebrow": "Routing boundary",
+      "detail": "The global edge applies policy and chooses a healthy backend. Its health signal must test the dependency path required for service.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 25,
+      "y": 50
+    },
+    {
+      "id": "zone-a",
+      "label": "Primary zone A",
+      "eyebrow": "Regional compute",
+      "detail": "Cloud Run capacity, GKE workloads, or a managed instance group serves one placement slice. It must be disposable without losing authority.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 44,
+      "y": 20
+    },
+    {
+      "id": "zone-b",
+      "label": "Primary zone B",
+      "eyebrow": "Regional compute",
+      "detail": "Independent zonal capacity carries the full admitted peak after one zone is removed, including retry and rollout pressure.",
+      "kind": "service",
+      "tone": "green",
+      "x": 44,
+      "y": 55
+    },
+    {
+      "id": "regional-data",
+      "label": "Regional data authority",
+      "eyebrow": "Primary state",
+      "detail": "A zonally resilient database can preserve regional availability. Its transaction, connection, backup, and failover behavior still needs workload validation.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 66,
+      "y": 37
+    },
+    {
+      "id": "secondary-compute",
+      "label": "Secondary region",
+      "eyebrow": "Recovery compute",
+      "detail": "A regional target is useful only when it is deployed, authorized, reachable, within quota, and scaled for the recovery objective.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 49,
+      "y": 87
+    },
+    {
+      "id": "secondary-data",
+      "label": "Secondary data copy",
+      "eyebrow": "Recovery state",
+      "detail": "Cross-region state needs a known replication position, promotion authority, conflict policy, restore evidence, and safe failback procedure.",
+      "kind": "database",
+      "tone": "rose",
+      "x": 79,
+      "y": 84
+    }
+  ],
+  "edges": [
+    { "id": "client-edge", "from": "client", "to": "global-edge", "label": "HTTPS", "mode": "sync" },
+    { "id": "edge-zone-a", "from": "global-edge", "to": "zone-a", "label": "healthy", "mode": "sync" },
+    { "id": "edge-zone-b", "from": "global-edge", "to": "zone-b", "label": "healthy", "mode": "sync" },
+    { "id": "zone-a-data", "from": "zone-a", "to": "regional-data", "label": "transaction", "mode": "sync" },
+    { "id": "zone-b-data", "from": "zone-b", "to": "regional-data", "label": "transaction", "mode": "sync" },
+    { "id": "data-secondary", "from": "regional-data", "to": "secondary-data", "label": "replicate", "mode": "async", "via": { "x": 72, "y": 60 } },
+    { "id": "edge-secondary", "from": "global-edge", "to": "secondary-compute", "label": "fail over", "mode": "sync", "via": { "x": 31, "y": 80 } },
+    { "id": "secondary-data-path", "from": "secondary-compute", "to": "secondary-data", "label": "promoted", "mode": "sync" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy region",
+      "summary": "Both primary zones serve traffic and share a regional data authority while recovery state replicates asynchronously.",
+      "activeEdges": ["client-edge", "edge-zone-a", "edge-zone-b", "zone-a-data", "zone-b-data", "data-secondary"],
+      "focusNode": "global-edge",
+      "result": "The regional path is available. The secondary data copy improves recoverability, but it is not a second serving region without compute, routing, quota, and promotion controls."
+    },
+    {
+      "id": "zone-loss",
+      "label": "Zone A fails",
+      "summary": "The edge removes zone A. Zone B and the regional data service must absorb peak traffic without waiting for new capacity.",
+      "activeEdges": ["client-edge", "edge-zone-b", "zone-b-data", "data-secondary"],
+      "failedNodes": ["zone-a"],
+      "degradedNodes": ["zone-b", "regional-data"],
+      "focusNode": "zone-b",
+      "result": "Requests continue only if the surviving zone, database, connections, and quotas were sized for failover. Extra replicas in the failed zone would not help."
+    },
+    {
+      "id": "region-loss",
+      "label": "Primary region fails",
+      "summary": "Primary compute and data authority are unavailable. Global routing can use the secondary only after its complete serving contract is ready.",
+      "activeEdges": ["client-edge", "edge-secondary", "secondary-data-path"],
+      "failedNodes": ["zone-a", "zone-b", "regional-data"],
+      "degradedNodes": ["secondary-compute", "secondary-data"],
+      "focusNode": "secondary-data",
+      "result": "Regional recovery succeeds only after the secondary proves health, capacity, IAM, dependency reachability, and an accepted data position. Operators must fence the old writer before promotion."
+    }
+  ]
+}

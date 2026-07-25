@@ -1,0 +1,281 @@
+{
+  "title": "Protect the aggregate when two commands race",
+  "description": "Both handlers read the same stream revision. Change the append contract to see which events enter history, whether the aggregate invariant survives, and why conflict handling belongs in the domain.",
+  "defaultScenarioId": "last-seat",
+  "defaultStrategyId": "expected-revision",
+  "strategies": [
+    {
+      "id": "append-any",
+      "label": "Append without an expected revision",
+      "detail": "Accept both event batches even though each decision used stale state.",
+      "rule": "The store appends whenever the stream exists. It does not prove that the command was evaluated against the latest aggregate state."
+    },
+    {
+      "id": "expected-revision",
+      "label": "Require the loaded revision",
+      "detail": "Append only while the stream still matches the revision the handler read.",
+      "rule": "The first append moves the stream forward. A second append that still expects the old revision fails atomically and must not be treated as success."
+    },
+    {
+      "id": "reload-recheck",
+      "label": "Reload and re-evaluate",
+      "detail": "After a conflict, rebuild current state and run the business rule again.",
+      "rule": "A conflict triggers a fresh decision, not a blind append retry. The domain can now accept, reject, or ask a person to resolve intent."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "last-seat",
+      "label": "Two customers reserve the last seat",
+      "detail": "The aggregate has one seat left. Two command handlers independently observe the same remaining capacity.",
+      "streamId": "show-4817",
+      "initialRevision": 12,
+      "initialState": "1 seat remains",
+      "commands": [
+        {
+          "id": "reserve-a",
+          "actor": "Customer A",
+          "label": "Reserve one seat",
+          "expectedRevision": 12,
+          "proposedEvent": "SeatReserved { reservationId: \"r-901\" }"
+        },
+        {
+          "id": "reserve-b",
+          "actor": "Customer B",
+          "label": "Reserve one seat",
+          "expectedRevision": 12,
+          "proposedEvent": "SeatReserved { reservationId: \"r-902\" }"
+        }
+      ],
+      "outcomes": {
+        "append-any": {
+          "appends": [
+            {
+              "commandId": "reserve-a",
+              "status": "appended",
+              "assignedRevision": 13,
+              "detail": "The first reservation enters the stream."
+            },
+            {
+              "commandId": "reserve-b",
+              "status": "appended",
+              "assignedRevision": 14,
+              "detail": "The stale decision also enters the stream because no revision was checked."
+            }
+          ],
+          "finalState": "-1 seats remain",
+          "invariant": "broken",
+          "summary": "Replaying both validly stored facts oversells the show. An append-only log faithfully preserves a bad decision; immutability does not create correctness.",
+          "nextStep": "Compensate one reservation, notify the affected customer, and require expected-revision appends for this aggregate boundary."
+        },
+        "expected-revision": {
+          "appends": [
+            {
+              "commandId": "reserve-a",
+              "status": "appended",
+              "assignedRevision": 13,
+              "detail": "The stream still matches v12, so the event is appended atomically."
+            },
+            {
+              "commandId": "reserve-b",
+              "status": "conflict",
+              "detail": "The stream is now v13, so an append that expects v12 is rejected."
+            }
+          ],
+          "finalState": "0 seats remain",
+          "invariant": "preserved",
+          "summary": "The event store protects the per-stream compare-and-append boundary. The rejected command has not yet been evaluated against the new state.",
+          "nextStep": "Reload v13 and run the reservation rule again. Return a domain result such as sold out instead of exposing a storage conflict as the final user message."
+        },
+        "reload-recheck": {
+          "appends": [
+            {
+              "commandId": "reserve-a",
+              "status": "appended",
+              "assignedRevision": 13,
+              "detail": "Customer A reserves the final seat."
+            },
+            {
+              "commandId": "reserve-b",
+              "status": "domain-rejected",
+              "detail": "After replaying v13, the aggregate sees zero capacity and emits no event."
+            }
+          ],
+          "finalState": "0 seats remain",
+          "invariant": "preserved",
+          "summary": "Re-evaluation converts a low-level conflict into the correct business outcome. No blind retry can oversell the aggregate.",
+          "nextStep": "Return a sold-out response with the current aggregate version. Retry only if the domain rule still permits the command after reload."
+        }
+      }
+    },
+    {
+      "id": "independent-cart-items",
+      "label": "Two devices add different cart items",
+      "detail": "Two commands touch the same cart stream but represent compatible intent after the aggregate is reloaded.",
+      "streamId": "cart-c-204",
+      "initialRevision": 3,
+      "initialState": "Cart is empty",
+      "commands": [
+        {
+          "id": "add-keyboard",
+          "actor": "Laptop",
+          "label": "Add one keyboard",
+          "expectedRevision": 3,
+          "proposedEvent": "CartItemAdded { sku: \"kbd-7\", quantity: 1 }"
+        },
+        {
+          "id": "add-mouse",
+          "actor": "Phone",
+          "label": "Add one mouse",
+          "expectedRevision": 3,
+          "proposedEvent": "CartItemAdded { sku: \"mouse-4\", quantity: 1 }"
+        }
+      ],
+      "outcomes": {
+        "append-any": {
+          "appends": [
+            {
+              "commandId": "add-keyboard",
+              "status": "appended",
+              "assignedRevision": 4,
+              "detail": "The keyboard is recorded."
+            },
+            {
+              "commandId": "add-mouse",
+              "status": "appended",
+              "assignedRevision": 5,
+              "detail": "The mouse is also recorded without checking the state used for its decision."
+            }
+          ],
+          "finalState": "Keyboard and mouse in cart",
+          "invariant": "review",
+          "summary": "This final state happens to be acceptable, but the write path skipped the aggregate's concurrency boundary. A different pair of commands could violate a quantity or inventory rule.",
+          "nextStep": "Do not infer that append-any is safe from one friendly race. Use expected revisions consistently, then make retry behavior explicit per command."
+        },
+        "expected-revision": {
+          "appends": [
+            {
+              "commandId": "add-keyboard",
+              "status": "appended",
+              "assignedRevision": 4,
+              "detail": "The first compatible intent is recorded."
+            },
+            {
+              "commandId": "add-mouse",
+              "status": "conflict",
+              "detail": "The second command still expects v3 and must be evaluated again."
+            }
+          ],
+          "finalState": "Keyboard in cart; mouse pending",
+          "invariant": "preserved",
+          "summary": "The concurrency check preserves the aggregate boundary, but conflict rejection alone does not complete a compatible user action.",
+          "nextStep": "Reload v4, verify that adding the mouse remains allowed, then append it using expected revision v4."
+        },
+        "reload-recheck": {
+          "appends": [
+            {
+              "commandId": "add-keyboard",
+              "status": "appended",
+              "assignedRevision": 4,
+              "detail": "The keyboard enters the stream first."
+            },
+            {
+              "commandId": "add-mouse",
+              "status": "appended",
+              "assignedRevision": 5,
+              "detail": "After reload, the mouse still satisfies quantity and inventory rules."
+            }
+          ],
+          "finalState": "Keyboard and mouse in cart",
+          "invariant": "preserved",
+          "summary": "A bounded re-evaluation safely keeps both compatible intents. The second append uses the newly observed stream revision.",
+          "nextStep": "Cap retries, preserve the command ID for idempotency, and return the final revision so the client can request read-your-write behavior."
+        }
+      }
+    },
+    {
+      "id": "address-conflict",
+      "label": "Two devices replace the shipping address",
+      "detail": "Both updates are individually valid, but software cannot infer which conflicting user intent should win.",
+      "streamId": "order-o-771",
+      "initialRevision": 8,
+      "initialState": "Shipping address is Doha",
+      "commands": [
+        {
+          "id": "set-paris",
+          "actor": "Laptop",
+          "label": "Ship to Paris",
+          "expectedRevision": 8,
+          "proposedEvent": "ShippingAddressChanged { city: \"Paris\" }"
+        },
+        {
+          "id": "set-berlin",
+          "actor": "Phone",
+          "label": "Ship to Berlin",
+          "expectedRevision": 8,
+          "proposedEvent": "ShippingAddressChanged { city: \"Berlin\" }"
+        }
+      ],
+      "outcomes": {
+        "append-any": {
+          "appends": [
+            {
+              "commandId": "set-paris",
+              "status": "appended",
+              "assignedRevision": 9,
+              "detail": "Paris enters the stream."
+            },
+            {
+              "commandId": "set-berlin",
+              "status": "appended",
+              "assignedRevision": 10,
+              "detail": "Berlin silently replaces the first intent during replay."
+            }
+          ],
+          "finalState": "Shipping address is Berlin",
+          "invariant": "review",
+          "summary": "The state is structurally valid, but arrival order silently decides between contradictory intentions. The business meaning is unresolved.",
+          "nextStep": "Surface a conflict to the user or define an explicit domain policy. Do not let storage arrival order masquerade as business intent."
+        },
+        "expected-revision": {
+          "appends": [
+            {
+              "commandId": "set-paris",
+              "status": "appended",
+              "assignedRevision": 9,
+              "detail": "Paris is recorded against the state the handler loaded."
+            },
+            {
+              "commandId": "set-berlin",
+              "status": "conflict",
+              "detail": "The Berlin command cannot append against stale revision v8."
+            }
+          ],
+          "finalState": "Shipping address is Paris",
+          "invariant": "preserved",
+          "summary": "The store prevents a silent lost update. The second user's intent still needs an explicit resolution.",
+          "nextStep": "Return the new address and revision to the second client, then let the user confirm whether Berlin should replace Paris."
+        },
+        "reload-recheck": {
+          "appends": [
+            {
+              "commandId": "set-paris",
+              "status": "appended",
+              "assignedRevision": 9,
+              "detail": "Paris is recorded first."
+            },
+            {
+              "commandId": "set-berlin",
+              "status": "domain-rejected",
+              "detail": "Reload reveals a competing change, so the handler refuses to guess which intent wins."
+            }
+          ],
+          "finalState": "Shipping address is Paris; review requested",
+          "invariant": "preserved",
+          "summary": "Re-evaluation does not mean automatic retry. For contradictory intent, the safe domain decision is to stop and ask.",
+          "nextStep": "Expose both values with the current revision. Append a new address-change event only after the user confirms the intended destination."
+        }
+      }
+    }
+  ]
+}

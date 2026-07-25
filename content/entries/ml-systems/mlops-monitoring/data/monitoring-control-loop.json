@@ -1,0 +1,220 @@
+{
+  "title": "Trace the monitoring control loop",
+  "description": "Switch scenarios to see when serving health, telemetry completeness, delayed outcomes, and mitigation disagree.",
+  "nodes": [
+    {
+      "id": "traffic",
+      "label": "Product traffic",
+      "eyebrow": "Exposure",
+      "detail": "Represents the requests and people exposed to a model-backed decision. Exposure must be measured by release and approved cohort.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 24
+    },
+    {
+      "id": "serving",
+      "label": "Serving path",
+      "eyebrow": "Decision",
+      "detail": "Loads compatible features and a pinned model, applies the decision policy, and returns a result within the serving objective.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 27,
+      "y": 24
+    },
+    {
+      "id": "decision-log",
+      "label": "Decision log",
+      "eyebrow": "Lineage",
+      "detail": "Stores the prediction ID, event time, model and feature versions, bounded summaries, cohort, action, and outcome join key.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 48,
+      "y": 24
+    },
+    {
+      "id": "outcomes",
+      "label": "Outcome source",
+      "eyebrow": "Delayed truth",
+      "detail": "Produces observed outcomes after the product-specific delay. Some outcomes may never arrive, so absence and lateness need explicit measurement.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 27,
+      "y": 78
+    },
+    {
+      "id": "outcome-join",
+      "label": "Outcome join",
+      "eyebrow": "Mature cohort",
+      "detail": "Joins predictions to outcomes by stable key and computes label coverage before evaluating quality on cohorts old enough to be complete.",
+      "kind": "analytics",
+      "tone": "green",
+      "x": 48,
+      "y": 78
+    },
+    {
+      "id": "monitor",
+      "label": "Monitoring rules",
+      "eyebrow": "Evidence",
+      "detail": "Combines service, contract, drift, labeled quality, and product guardrails with sample-size and persistence requirements.",
+      "kind": "analytics",
+      "tone": "cyan",
+      "x": 70,
+      "y": 50
+    },
+    {
+      "id": "response",
+      "label": "Response owner",
+      "eyebrow": "Action",
+      "detail": "Uses a runbook to investigate, reduce exposure, roll back, choose a safe fallback, and restore traffic gradually with evidence.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 91,
+      "y": 50
+    }
+  ],
+  "edges": [
+    {
+      "id": "traffic-serving",
+      "from": "traffic",
+      "to": "serving",
+      "label": "request",
+      "mode": "sync"
+    },
+    {
+      "id": "serving-log",
+      "from": "serving",
+      "to": "decision-log",
+      "label": "prediction event",
+      "mode": "async"
+    },
+    {
+      "id": "log-monitor",
+      "from": "decision-log",
+      "to": "monitor",
+      "label": "live signals",
+      "mode": "async",
+      "via": {
+        "x": 61,
+        "y": 24
+      }
+    },
+    {
+      "id": "outcomes-join",
+      "from": "outcomes",
+      "to": "outcome-join",
+      "label": "observed result",
+      "mode": "async"
+    },
+    {
+      "id": "log-join",
+      "from": "decision-log",
+      "to": "outcome-join",
+      "label": "join key",
+      "mode": "async"
+    },
+    {
+      "id": "join-monitor",
+      "from": "outcome-join",
+      "to": "monitor",
+      "label": "quality + coverage",
+      "mode": "async",
+      "via": {
+        "x": 61,
+        "y": 78
+      }
+    },
+    {
+      "id": "monitor-response",
+      "from": "monitor",
+      "to": "response",
+      "label": "owned alert",
+      "mode": "async"
+    },
+    {
+      "id": "response-serving",
+      "from": "response",
+      "to": "serving",
+      "label": "rollback or fallback",
+      "mode": "sync",
+      "via": {
+        "x": 70,
+        "y": 7
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-loop",
+      "label": "Healthy loop",
+      "summary": "Serving meets its objective, prediction events arrive, and the mature outcome cohort has enough coverage to evaluate quality.",
+      "activeEdges": [
+        "traffic-serving",
+        "serving-log",
+        "log-monitor",
+        "outcomes-join",
+        "log-join",
+        "join-monitor"
+      ],
+      "focusNode": "monitor",
+      "result": "All four planes have current evidence. The system remains healthy only while service, data, model, and product guardrails agree; no response action is required."
+    },
+    {
+      "id": "blind-telemetry",
+      "label": "Blind telemetry",
+      "summary": "Predictions still return, but the decision log stops accepting events after a schema change.",
+      "activeEdges": [
+        "traffic-serving",
+        "serving-log"
+      ],
+      "failedNodes": [
+        "decision-log"
+      ],
+      "degradedNodes": [
+        "monitor",
+        "outcome-join"
+      ],
+      "focusNode": "decision-log",
+      "result": "The endpoint is available but the ML product is unobservable. Alert on telemetry loss or freshness, stop risky rollout growth, and restore compatible event delivery before claiming health."
+    },
+    {
+      "id": "labels-pending",
+      "label": "Labels pending",
+      "summary": "Live serving signals are current, but recent predictions have not had enough time to receive their product outcomes.",
+      "activeEdges": [
+        "traffic-serving",
+        "serving-log",
+        "log-monitor",
+        "outcomes-join",
+        "log-join",
+        "join-monitor"
+      ],
+      "degradedNodes": [
+        "outcomes",
+        "outcome-join"
+      ],
+      "focusNode": "outcome-join",
+      "result": "Report the cohort as immature and publish label coverage. Continue watching service and output signals, but do not convert missing labels into false errors or compare this window with a mature baseline."
+    },
+    {
+      "id": "harmful-slice",
+      "label": "Harmful slice",
+      "summary": "Aggregate service health is normal, while a mature high-risk cohort breaches its false-negative guardrail after a model release.",
+      "activeEdges": [
+        "traffic-serving",
+        "serving-log",
+        "log-monitor",
+        "outcomes-join",
+        "log-join",
+        "join-monitor",
+        "monitor-response",
+        "response-serving"
+      ],
+      "degradedNodes": [
+        "serving"
+      ],
+      "focusNode": "response",
+      "result": "The guardrail and release correlation justify action. Reduce exposure with the tested rollback, fallback, threshold, or review path before retraining or completing root-cause analysis."
+    }
+  ]
+}

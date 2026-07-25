@@ -1,0 +1,286 @@
+---
+registryId: docker
+---
+
+{% section-card tone="intro" %}
+## What is Docker?
+
+**Docker is a platform for building, distributing, and running applications as
+containers.** An image is an immutable package of application files, dependencies, and
+runtime metadata. A container is a runnable instance of that image plus process,
+network, storage, resource, and security configuration.
+
+Docker matters because one identified image can move through development, CI, and
+production without rebuilding the application differently in each environment. That
+does not make every run identical: hosts, secrets, mounted data, ports, limits, and
+kernel behavior remain deployment inputs.
+
+### Core invariant
+
+Treat the **image as a versioned delivery artifact** and the **container as a
+replaceable process**. Anything that must survive replacement belongs outside the
+container writable layer, and every runtime capability should be declared deliberately.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Describe the build" eyebrow="Dockerfile" icon="file-code" tone="blue" %}
+Order instructions so stable inputs can stay cached, and use stages to keep build-only
+tools out of the runtime artifact.
+{% /concept-card %}
+{% concept-card title="Package immutable files" eyebrow="Image" icon="layers" tone="violet" %}
+An image is content-addressed, read-only, and composed of filesystem layers plus
+configuration such as its default command and user.
+{% /concept-card %}
+{% concept-card title="Run one isolated process" eyebrow="Container" icon="box" tone="cyan" %}
+Docker creates a writable layer and configures namespaces, control groups, mounts, and
+networking around the image's process.
+{% /concept-card %}
+{% concept-card title="Store and distribute" eyebrow="Registry" icon="database" tone="green" %}
+A registry stores image manifests and layers. Deploy by immutable digest when the exact
+artifact matters; a mutable tag is only a reference.
+{% /concept-card %}
+{% /concept-grid %}
+
+Docker's official [platform overview](https://docs.docker.com/get-started/docker-overview/)
+defines the client, daemon, registry, images, and containers that make up this lifecycle.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one artifact from source to a running process
+
+The same image should cross environments. Build-time inputs determine its content;
+run-time inputs determine how one instance behaves.
+
+{% system-flow title="Docker delivery path" caption="Build once, identify the result, then create replaceable containers from that exact artifact." %}
+{% system-node title="Source and Dockerfile" eyebrow="Inputs" icon="file-code" tone="blue" %}
+The build context, `.dockerignore`, Dockerfile, base-image references, dependency locks,
+and build-time secrets define what the builder can observe.
+{% /system-node %}
+{% system-node title="BuildKit" eyebrow="Build" icon="layers" tone="violet" %}
+Execute instructions, reuse valid cache records, and produce an image manifest plus
+content-addressed layers. A changed step invalidates dependent work.
+{% /system-node %}
+{% system-node title="Registry" eyebrow="Distribute" icon="database" tone="cyan" %}
+Push the manifest and missing blobs. Sign, scan, promote, or attest the immutable digest
+that CI actually tested.
+{% /system-node %}
+{% system-node title="Docker Engine" eyebrow="Run" icon="box" tone="green" %}
+Pull the image if needed, create a writable layer, attach declared mounts and networks,
+apply resource and security controls, then start the configured process.
+{% /system-node %}
+{% /system-flow %}
+
+### Containers are not small virtual machines
+
+{% concept-grid columns="2" %}
+{% concept-card title="Container boundary" eyebrow="Shared host kernel" icon="box" tone="cyan" %}
+Containers isolate processes and selected kernel resources. Multiple Linux containers
+on one host use that host's Linux kernel, so kernel compatibility and host hardening
+remain part of the security model.
+{% /concept-card %}
+{% concept-card title="Virtual-machine boundary" eyebrow="Guest kernel" icon="server" tone="violet" %}
+A virtual machine presents virtual hardware to a guest operating system with its own
+kernel. Teams commonly run containers inside VMs to combine deployment density with a
+stronger infrastructure boundary.
+{% /concept-card %}
+{% /concept-grid %}
+
+Choose the boundary from the threat model and operating model. Image size or startup
+speed alone does not establish isolation strength.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make rebuild work proportional to the change
+
+Docker evaluates a build as ordered instructions. When an input changes, Docker must
+rerun that instruction and dependent instructions after it. Put expensive, stable work
+before frequently changing source, and keep the build context narrow.
+
+{% metric-strip %}
+{% metric label="Cold build" value="all required steps" detail="Establishes the complete artifact without reusable cache records" tone="blue" /%}
+{% metric label="Warm rebuild" value="invalidated path" detail="A source edit should not reinstall unchanged dependencies" tone="green" /%}
+{% metric label="Final image" value="runtime files only" detail="Builder tools and caches do not belong in the serving artifact" tone="violet" /%}
+{% metric label="Promotion key" value="image digest" detail="Tags can move; a digest identifies immutable manifest content" tone="amber" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/docker-efficiency" dataFile="/api/content/technology/docker/data/image-build-model.json" /%}
+
+The lab uses illustrative timings and sizes to make invalidation visible. Measure your
+own build with BuildKit output and image inspection before setting a CI or rollout
+budget. Docker's official [build-cache guide](https://docs.docker.com/build/cache/)
+explains why a changed layer affects downstream layers, while the
+[cache optimization guide](https://docs.docker.com/build/cache/optimize/) covers layer
+ordering, smaller contexts, cache mounts, and external caches.
+
+{% code-block file="/api/content/technology/docker/code/cache-aware.Dockerfile" language="dockerfile" title="Cache-aware multi-stage Node.js image" /%}
+
+{% code-block file="/api/content/technology/docker/code/compare-build-plans.mjs" language="javascript" title="Execute the lesson's illustrative build model" /%}
+
+### Read the Dockerfile as two dependency graphs
+
+- The **cache graph** asks which instructions and files can change a build result.
+  - Copy dependency manifests before source when dependencies change less often.
+  - Keep generated output, local dependencies, credentials, and irrelevant files out
+    of the context with `.dockerignore`.
+  - Use cache mounts for package downloads that remain useful across rebuilds.
+- The **artifact graph** asks which files reach the final stage.
+  - Copy only runtime dependencies and selected build output.
+  - Start the final stage from a base that contains the libraries the process needs.
+  - Verify runtime behavior before choosing an extremely minimal or `scratch` base.
+
+Docker's [multi-stage build documentation](https://docs.docker.com/build/building/multi-stage/)
+defines how each `FROM` starts a stage and how selected artifacts cross stage boundaries.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Keep credentials out of image history
+
+A build may need a package-registry token, SSH agent, or cloud credential. Passing that
+value through `ARG`, `ENV`, `COPY`, or a generated configuration file can persist it in
+image metadata, a layer, the cache, or build logs.
+
+Use BuildKit secret or SSH mounts instead. They expose the credential to the specific
+build instruction that needs it without making the value part of the resulting layer.
+
+{% code-block file="/api/content/technology/docker/code/build-with-secret.Dockerfile" language="dockerfile" title="Consume a temporary BuildKit secret" /%}
+
+### The boundary still needs controls
+
+- Give the builder only the credential scope and lifetime required for that build.
+- Keep secret values out of command output and error traces.
+- Pin and verify downloaded artifacts; a successful authenticated download is not proof
+  of content integrity.
+- Assume remote caches and CI logs are shared infrastructure unless their access and
+  retention are explicitly constrained.
+
+See Docker's official [build secrets documentation](https://docs.docker.com/build/building/secrets/)
+for the current CLI, Bake, secret-mount, SSH-mount, and remote-context contracts.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Declare state, reachability, resources, and privilege
+
+The image does not decide whether data persists, who can connect, or how much of the
+host one process may consume. Those are run-time policies. Test them by replacing the
+container, not only by restarting the process inside it.
+
+{% interactive-block id="technology/docker-runtime-lab" dataFile="/api/content/technology/docker/data/runtime-boundaries.json" /%}
+
+### Place each write by lifecycle
+
+- **Container writable layer:** temporary process-local changes that may disappear with
+  the container. Do not put authoritative database files here.
+- **Named volume:** Docker-managed persistent data whose lifecycle is independent of a
+  container.
+  - Define ownership, backup, restore, migration, encryption, and deletion policy.
+  - A volume survives replacement; it does not automatically provide a backup.
+- **Bind mount:** a daemon-host path exposed directly to the container.
+  - Useful when host and container tools must share source or generated files.
+  - Couples the workload to host paths, permissions, and platform behavior.
+- **tmpfs mount:** memory-backed temporary data that should not reach persistent disk.
+  - Size it explicitly and plan for loss on stop, restart, or host reboot.
+
+Docker's [storage overview](https://docs.docker.com/engine/storage) distinguishes the
+container writable layer, volumes, bind mounts, and tmpfs lifecycle.
+
+### Expose only the required callers
+
+- A user-defined bridge gives containers on one Docker host name-based project
+  connectivity without publishing every service to the host.
+- Port publishing maps an explicit host address and port to a container port.
+  - Bind development services to `127.0.0.1` when only the host should reach them.
+  - Treat a port published on all interfaces as external exposure subject to host and
+    network policy.
+- Host networking removes the separate network namespace. Use it only when its reduced
+  isolation and shared port space are part of the design.
+- The `none` driver provides no external network interface for work that should be
+  network-isolated.
+
+The official [network-driver summary](https://docs.docker.com/engine/network/drivers/)
+documents bridge, host, overlay, macvlan, ipvlan, and none semantics.
+
+### Bound host impact
+
+Containers have no CPU or memory constraints by default. Measure representative peaks,
+then set limits and observe throttling, OOM kills, restart behavior, and host headroom.
+Docker's [resource-constraint guide](https://docs.docker.com/engine/containers/resource_constraints/)
+details memory, swap, CPU quota, shares, and host OOM behavior.
+
+{% code-block file="/api/content/technology/docker/code/run-with-boundaries.sh" language="bash" title="Run a database and API with explicit boundaries" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the process as disposable, not invisible
+
+A container is a deployment unit, not an observability or recovery strategy. The
+application still needs a startup contract, a termination contract, bounded retries,
+and evidence that connects an incident to the exact image and runtime policy.
+
+{% process-flow %}
+{% process-step number="1" title="Build and prove" label="CI" %}
+Create the image from reviewed inputs. Run tests, inspect dependencies, scan the final
+artifact, and retain provenance for the immutable digest.
+{% /process-step %}
+{% process-step number="2" title="Configure and start" label="Deploy" %}
+Inject environment-specific configuration and secrets at runtime. Declare user, mounts,
+network, limits, health behavior, and restart policy before the process starts.
+{% /process-step %}
+{% process-step number="3" title="Observe and drain" label="Operate" %}
+Collect standard output and error, application metrics, container resource signals, and
+events. On shutdown, stop admission, finish bounded work, and exit before the grace
+period expires.
+{% /process-step %}
+{% process-step number="4" title="Replace and recover" label="Failure" %}
+Recreate from the same image and policy, attach declared persistent state, and verify
+service plus data recovery. Roll back by digest when the artifact is the fault.
+{% /process-step %}
+{% /process-flow %}
+
+### Evidence to retain
+
+- **Artifact identity:** image digest, source revision, base-image digests, build
+  provenance, dependency inventory, and scan results.
+- **Runtime identity:** container ID, image digest, host, effective user, mounts,
+  published ports, limits, capabilities, health, and restart count.
+- **Service behavior:** request latency, errors, saturation, queue depth, dependency
+  failures, termination duration, and application-defined readiness.
+- **Recovery behavior:** replacement time, volume attachment, restore result, data
+  validation, traffic re-entry, and rollback decision.
+
+### Failure drills worth automating
+
+1. Kill the main process and verify restart behavior does not duplicate external side
+   effects.
+2. Replace the complete container and prove all required data returns from declared
+   storage or an authoritative service.
+3. Exceed a representative memory limit and verify the OOM signal, alert, and recovery
+   path are visible.
+4. Remove network access to a dependency and verify timeouts, retries, and admission are
+   bounded.
+5. Revoke a runtime secret and verify rotation does not require baking a new credential
+   into the image.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Review the production contract
+
+Before promoting an image, answer these questions with evidence:
+
+- Which digest was tested, and can deployment select that exact digest?
+- Which files are build-only, and how was their absence from the final image verified?
+- What changes invalidate the slowest build steps?
+- Which writes survive container replacement, and how are they backed up or rebuilt?
+- Which callers can reach each port from the project network, host, and external network?
+- What CPU, memory, process, filesystem, user, and capability boundaries are effective?
+- What happens after `SIGTERM`, an OOM kill, host loss, dependency timeout, or partial
+  rollout?
+- Can operators connect logs, metrics, events, and recovery results to one immutable
+  image and one runtime configuration?
+
+{% callout variant="warn" %}
+A green container status proves only that the container is running according to its
+configured health behavior. It does not prove the application is correct, durable,
+authorized, recoverable, or safe under replacement.
+{% /callout %}
+{% /section-card %}
+
+{% quiz quizId="docker" lessonSlug="docker" title="Docker Production Design Review" questionsFile="/api/content/technology/docker/quiz/docker-production-design.json" /%}

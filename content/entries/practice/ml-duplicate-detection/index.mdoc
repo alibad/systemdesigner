@@ -1,0 +1,307 @@
+---
+registryId: practice-ml-duplicate-detection
+---
+
+{% section-card tone="intro" %}
+## What is near-duplicate detection?
+
+Near-duplicate detection finds items that communicate the same information even when their bytes differ. A text pair may be paraphrased, an image may be cropped, or a prompt may contain a changed name while keeping the same intent. Exact hashes catch identical files; an ML system is needed when meaning or visual content must be compared.
+
+For this interview, design a service that checks text and images as they enter customer datasets. Assume **50 million indexed items**, **1 million new items per day**, and a **500 ms p95** online target. The central invariant is: **a similarity score may nominate a pair, but only a versioned decision may merge their duplicate clusters**.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retrieve, then verify" eyebrow="Critical path" icon="search" tone="blue" %}
+Use approximate search to find a small candidate set, then apply a calibrated pairwise decision.
+{% /concept-card %}
+{% concept-card title="Isolate each dataset" eyebrow="Trust boundary" icon="shield" tone="violet" %}
+Never compare or merge customer items across dataset and tenant boundaries without explicit permission.
+{% /concept-card %}
+{% concept-card title="Make merges reversible" eyebrow="Recovery" icon="history" tone="green" %}
+Record model, index, threshold, and edge versions so one bad link can be removed without rebuilding everything.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Business Boundary" %}
+
+
+### Define what the product decides
+
+The service accepts one new item and returns zero or more candidate duplicates with scores and evidence. It does not delete data automatically. A customer policy decides whether a high-confidence pair is blocked, queued for review, or linked into a duplicate cluster.
+
+**Functional requirements**
+
+- Detect semantic duplicates among text prompts and responses.
+- Detect visually similar images despite resizing, crops, compression, and small edits.
+- Return candidate IDs, calibrated confidence, match evidence, and model lineage.
+- Accept human labels for duplicate, distinct, and uncertain pairs.
+- Support cluster repair when a prior decision is reversed.
+
+**Non-functional requirements**
+
+- Keep online p95 below 500 ms for an item already inside the supported size limit.
+- Isolate vector indices and decision policies by tenant and dataset.
+- Continue ingesting when ML dependencies fail by marking the item `pending_detection`.
+- Make every cluster edge attributable to a model, threshold, index, and policy version.
+
+### Ask questions that change the architecture
+
+1. **What counts as a duplicate?** A translation, template reuse, and two photographs of the same object may need different labels by dataset purpose.
+2. **Which error costs more?** A false merge can hide unique training data; a missed duplicate can contaminate evaluation and inflate dataset size.
+3. **Is blocking required?** A synchronous upload gate needs a strict deadline, while an asynchronous quality scan can use deeper models.
+4. **Can content cross boundaries?** Default to searching only the current dataset; cross-dataset discovery needs explicit access and privacy policy.
+
+### State the initial scope
+
+- Include text and still images; defer video and audio.
+- Support one item against an existing dataset, not all-pairs recomputation inline.
+- Use human review for uncertain pairs and irreversible customer actions.
+- Treat multi-modal relationships as a future extension rather than forcing text and image scores onto one scale.
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate Data, Search Load, and Latency" %}
+
+
+### Turn the scenario into explicit assumptions
+
+- **Indexed items:** 50 million, split across roughly 500 active datasets.
+- **New items:** 1 million per day, or about 12 items/s on average.
+- **Peak factor:** 5x, giving 60 online checks/s.
+- **Modality mix:** 80% text and 20% images.
+- **Candidate depth:** retrieve top 50 approximate neighbors, then rerank the best 10.
+
+{% metric-strip %}
+{% metric value="150 GB" label="Text vectors" detail="40M items x 768 float32 dimensions x 4 bytes." tone="blue" /%}
+{% metric value="20 GB" label="Image vectors" detail="10M items x 512 float32 dimensions x 4 bytes." tone="cyan" /%}
+{% metric value="3,000/s" label="Peak ANN candidates" detail="60 checks/s x 50 retrieved neighbors." tone="violet" /%}
+{% metric value="600/s" label="Peak reranked pairs" detail="60 checks/s x 10 expensive pair checks." tone="green" /%}
+{% /metric-strip %}
+
+The vector estimate is about **170 GB before index overhead, replicas, metadata, and version overlap**. Provision closer to 500 GB when an HNSW index, two serving replicas, and a previous model version must coexist during migration.
+
+### Budget the online path
+
+1. Validate and normalize the item: **20 ms**.
+2. Generate its embedding: **120 ms for text**, up to **220 ms for an image**.
+3. Retrieve top candidates from the dataset index: **50 ms**.
+4. Rerank, calibrate, and apply policy: **100 ms**.
+5. Reserve the remaining budget for network variance and queueing.
+
+The average 12 requests/s is not a sizing target. Benchmark embedding and search replicas at the 60 requests/s peak while one replica or shard is unavailable.
+
+{% /accordion-item %}
+
+{% accordion-item id="ml-framing" title="3. Frame the Model and Choose a Decision Threshold" %}
+
+
+### Separate retrieval from classification
+
+The system solves two related problems:
+
+- **Candidate retrieval:** maximize recall by finding a small set of plausible neighbors quickly.
+- **Pairwise verification:** estimate whether each candidate pair satisfies the dataset's duplicate policy.
+
+Start with exact hashes and normalized lexical or perceptual hashes as cheap baselines. Add modality-specific embeddings only where those rules miss valid duplicates. For retrieved pairs, combine embedding similarity with interpretable signals such as token overlap, image perceptual distance, language, content length, and template markers.
+
+### Define labels and objective
+
+- **Positive:** reviewers agree the items are interchangeable for this dataset's purpose.
+- **Negative:** both items should remain independently represented.
+- **Uncertain:** policy or evidence is insufficient; do not force it into training as a negative.
+- **Hard negative:** superficially similar items with a meaningful difference, such as two legal clauses with opposite obligations.
+
+Train with contrastive or triplet objectives, then calibrate the pair score on held-out dataset slices. Optimize the operating threshold against the real costs of false merges, missed duplicates, and human review capacity.
+
+### Tune the operating point
+
+{% interactive-block id="practice/ml-duplicate-detection-threshold-lab" /%}
+
+The lesson is not "pick 0.90 everywhere." The correct policy is versioned per modality and dataset class, measured against a labeled calibration set, and constrained by the available review queue.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="4. Design the End-to-End ML Architecture" %}
+
+
+### Keep the synchronous path bounded
+
+{% system-flow title="Online near-duplicate decision path" caption="Approximate retrieval narrows the search; the decision service owns calibration, policy, and reversible cluster links." %}
+{% system-node title="Ingest gateway" eyebrow="Validate" icon="upload" tone="blue" %}
+Authenticate the dataset, enforce size limits, normalize content, and assign an immutable item ID.
+{% /system-node %}
+{% system-node title="Embedding service" eyebrow="Represent" icon="braces" tone="cyan" %}
+Route by modality and attach preprocessing and model versions to the new vector.
+{% /system-node %}
+{% system-node title="Dataset ANN index" eyebrow="Retrieve" icon="search" tone="violet" %}
+Search only the authorized dataset shard and return top candidates with index lineage.
+{% /system-node %}
+{% system-node title="Pair verifier" eyebrow="Decide" icon="scale" tone="amber" %}
+Rerank candidates, calibrate scores, and apply the dataset's threshold and review policy.
+{% /system-node %}
+{% system-node title="Cluster ledger" eyebrow="Record" icon="git-merge" tone="green" %}
+Append versioned duplicate edges and preserve enough evidence to reverse a bad merge.
+{% /system-node %}
+{% /system-flow %}
+
+### Split online and asynchronous responsibilities
+
+**Online serving**
+
+- Read model and threshold versions from a cached policy snapshot.
+- Generate one embedding and search one dataset-scoped index.
+- Return candidates before the deadline or mark detection pending.
+- Write decisions idempotently using item and policy versions.
+
+**Asynchronous pipelines**
+
+- Backfill vectors when a model or preprocessing version changes.
+- Compact and rebuild ANN shards without blocking ingestion.
+- Mine uncertain pairs and hard negatives for human labeling.
+- Recompute affected cluster components after feedback reverses an edge.
+
+### Define the service contracts
+
+{% code-block file="/api/content/practice/ml-duplicate-detection/code/detect-duplicates-request-response.txt" language="text" title="Detection request and response" /%}
+
+{% code-block file="/api/content/practice/ml-duplicate-detection/code/duplicate-feedback-request.json" language="json" title="Reviewer feedback request" /%}
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep Dive on Embeddings, Search, and Clusters" %}
+
+
+### Use a modality-specific cascade
+
+**Text path**
+
+1. Normalize Unicode and known templates without erasing meaningful numbers or negation.
+2. Check exact and lexical fingerprints for cheap high-confidence matches.
+3. Generate a sentence or document embedding appropriate to content length.
+4. Retrieve top 50 neighbors and rerank the top 10 with pair features.
+
+**Image path**
+
+1. Decode safely, normalize orientation, and preserve the original asset hash.
+2. Use perceptual hashes for resize, compression, and minor color changes.
+3. Use a vision embedding for crop, viewpoint, and semantic similarity.
+4. Rerank with local features when global similarity is ambiguous.
+
+### Choose index boundaries before index vendors
+
+- Partition first by tenant and dataset to preserve isolation and local policy.
+- Use HNSW for low-latency, high-recall search when memory overhead is acceptable.
+- Keep an immutable vector version beside every index entry.
+- Build a replacement index in parallel, validate recall, then switch a versioned alias.
+- Route newly written vectors to a small fresh-data index until the main shard compacts them.
+
+### Treat clusters as evidence, not mutable labels
+
+A duplicate cluster is a connected component of pair decisions. Store each edge with its evidence and version instead of writing only a final `cluster_id`. That design supports review, audit, and local repair when one bridge edge is wrong.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Build Evaluation and QA Release Gates" %}
+
+
+### Evaluate each stage separately
+
+- **Retrieval recall@50:** Does the candidate set contain the known duplicate?
+- **Pair precision and recall:** Does the verifier classify retrieved pairs correctly at the operating threshold?
+- **Calibration error:** Does a score of 0.9 correspond to roughly 90% positives in that slice?
+- **Cluster over-merge rate:** How often does one incorrect bridge join distinct groups?
+- **Cluster fragmentation:** How often are true duplicates split across multiple groups?
+
+### Build leakage-resistant test sets
+
+- Split by source, time, and duplicate cluster so paraphrases of one item cannot land in both training and test.
+- Report text and image results separately, then slice by language, length, domain, and transformation type.
+- Maintain hard-negative sets for changed numbers, negation, watermarks, crops, and template-heavy content.
+- Re-label a stable audit sample with multiple reviewers to measure policy ambiguity and label agreement.
+
+### Require release evidence
+
+1. Beat exact-hash and current-model baselines on retrieval and pair metrics.
+2. Pass hard floors for high-cost false merges on every critical slice.
+3. Stay within p95 latency and index memory budgets under peak load and one-shard failure.
+4. Shadow the new model against production-shaped traffic before creating cluster edges.
+5. Canary by dataset with automatic rollback and preserved old model/index artifacts.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate, Retrain, and Repair Safely" %}
+
+
+### Design degraded modes before incidents
+
+{% process-flow %}
+{% process-step number="1" title="Use cheap exact checks" label="Model unavailable" %}
+Run hashes and mark the semantic decision pending instead of accepting an unversioned guess.
+{% /process-step %}
+{% process-step number="2" title="Queue bounded work" label="Index unavailable" %}
+Persist the item and retry asynchronously with a deadline, attempt limit, and dead-letter path.
+{% /process-step %}
+{% process-step number="3" title="Freeze cluster writes" label="Version skew" %}
+Continue returning advisory candidates but stop automatic merges until model, index, and policy align.
+{% /process-step %}
+{% process-step number="4" title="Repair the component" label="False merge" %}
+Remove the bad edge, recompute only the affected connected component, and retain the audit trail.
+{% /process-step %}
+{% /process-flow %}
+
+### Practice incident containment
+
+{% interactive-block id="practice/ml-duplicate-detection-cluster-repair-lab" /%}
+
+### Close the feedback loop deliberately
+
+- Sample high-impact false positives, false negatives, uncertainty-band pairs, and drifted slices.
+- Measure reviewer agreement before using labels for calibration or training.
+- Keep raw content access separate from pair labels and enforce retention by tenant policy.
+- Retrain on a schedule or a measured drift trigger, not on every individual label.
+- Register the dataset snapshot, code, features, model, calibrator, threshold, and index as one release manifest.
+
+Monitor queue age, embedding errors, ANN recall probes, score distributions, review volume, edge reversals, cluster sizes, and version-skew events. Alert on user-visible invariants, not GPU utilization alone.
+
+{% /accordion-item %}
+
+{% accordion-item id="tradeoffs" title="8. Compare Trade-offs and Plan Extensions" %}
+
+
+### Defend the main choices
+
+- **Exact search vs ANN:** exhaustive search offers stronger retrieval recall but does not meet interactive latency at 50 million items; ANN plus reranking is the practical default.
+- **Global vs per-dataset index:** a global index may improve reuse, but dataset-scoped shards make access control, policy, deletion, and threshold calibration safer.
+- **One model vs modality-specific models:** one interface simplifies serving, but separate text and image representations preserve meaningful similarity and independent releases.
+- **Automatic merge vs human review:** auto-merge only above a separately validated high-confidence threshold; route the uncertainty band to reviewers.
+- **Immediate retraining vs batched releases:** batching feedback delays adaptation but creates reproducible artifacts, QA gates, and rollback points.
+
+### Name the residual risks
+
+- Sparse new datasets have too few labels for local calibration.
+- Template-heavy data can create large, misleading clusters.
+- Cross-language and cross-modal duplicates remain under-covered.
+- Review feedback can be noisy, delayed, or strategically manipulated.
+- Data deletion must remove vectors, evidence, and derived cluster edges.
+
+### Summarize the interview answer
+
+Start with dataset-scoped exact baselines, then add modality-specific embeddings, ANN retrieval, and a calibrated pair verifier. Keep the online path bounded, send uncertainty to review, and record duplicate relationships as reversible versioned edges. Evaluate retrieval, pair decisions, and clusters independently; deploy model, threshold, and index versions as one manifest.
+
+**Extensions after the core system is healthy**
+
+- Add multilingual calibration with language-specific hard negatives.
+- Explore video fingerprints and sampled-frame embeddings.
+- Support explicit cross-dataset discovery through a permissioned federated index.
+- Use active learning to prioritize pairs with high uncertainty and high cluster impact.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/ml-duplicate-detection/quiz/ml-duplicate-detection-design-review.json"
+   lessonSlug="practice-ml-duplicate-detection"
+   title="ML Duplicate Detection Design Review" /%}

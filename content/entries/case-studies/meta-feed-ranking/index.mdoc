@@ -1,0 +1,233 @@
+---
+registryId: case-study-meta-feed-ranking
+---
+
+{% section-card tone="intro" %}
+## What is feed ranking?
+
+Feed ranking is the system that decides which eligible posts to show a person, and in what order, when they open a social app. It does not search every post on the internet. It gathers a manageable set of possible posts, predicts several outcomes for each one, then applies rules to form a safe and varied feed.
+
+In plain language: a good feed is not the set of posts most likely to get a click. It is a time-bounded decision that balances relevance with safety, freshness, diversity, and the product's long-term health.
+
+{% callout variant="info" %}
+### Core invariant
+
+A post may enter a feed only when it is eligible for this viewer **and** it passes the final slate policy. A high predicted engagement score never overrides a hard safety, privacy, availability, or repetition rule.
+{% /callout %}
+{% /section-card %}
+
+This case study uses an illustrative planning envelope of **900K peak feed opens per second**, **1,000 retrieval candidates per request**, and a **150 ms P99 decision budget**. The figures make the architecture concrete; they are not claims about a specific production deployment. Review [recommendation systems](/ml-systems/recommender-systems-advanced) and [caching](/fundamentals/caching) first if candidate retrieval or cache freshness is new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the feed promise and its boundaries" %}
+
+## The product returns a policy-governed slate, not just a sorted list
+
+A feed request returns a small ordered slate of posts. Each position should be relevant enough to earn attention, but the sequence must also avoid prohibited, duplicated, stale, or overly concentrated content. The system learns from what people view, skip, hide, share, report, and follow after the response is already delivered.
+
+### Functional requirements
+
+- Retrieve candidates from followed accounts, social graph activity, topic or creator recommendations, and bounded exploration pools.
+- Filter candidates for audience, geography, age, privacy, integrity, availability, and viewer-level blocks before ranking.
+- Predict several outcomes, such as meaningful interaction, negative feedback, likely satisfaction, and policy or quality risk.
+- Return an ordered slate, explainable reason codes, and stable pagination or cursor semantics.
+- Record exposures and downstream actions asynchronously for experiments, model training, abuse review, and creator analytics.
+
+### Non-functional requirements
+
+- Keep the online decision within a **150 ms P99** budget, including retrieval, feature reads, scoring, constraints, and response assembly.
+- Keep policy changes effective quickly enough that a cached candidate cannot outlive an urgent restriction.
+- Preserve a safe, bounded-age fallback during ranker, feature, or fanout trouble.
+- Make experiments reversible and diagnosable by recording candidate, model, feature, and policy versions for each exposure.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+This lesson designs organic-feed candidate selection and ranking. Ad auctions, content creation, human-review operations, notifications, and a complete social graph store are separate systems, even though they provide inputs or constraints here.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Turn feed behavior into a capacity and freshness budget" %}
+
+## Cheap recall must protect expensive personalization
+
+At 900K peak feed opens per second, evaluating 1,000 candidates all the way through a heavy model would create 900M candidate scores per second before any retries or headroom. The system therefore uses cheap retrieval to recall broadly, then spends more model and feature work only on a much smaller set.
+
+{% metric-strip %}
+{% metric value="900K/s" label="Peak feed opens" detail="Requests that need a decision or a policy-valid cached slate" tone="blue" /%}
+{% metric value="1,000" label="Retrieved candidates" detail="A broad, cheap recall set before stronger ranking" tone="violet" /%}
+{% metric value="150 ms" label="P99 decision budget" detail="Includes retrieval, features, scoring, policy, and response assembly" tone="amber" /%}
+{% metric value="100" label="Heavy-ranked candidates" detail="An illustrative reranking set after inexpensive pruning" tone="green" /%}
+{% /metric-strip %}
+
+### Candidate freshness policy lab
+
+Choose how often a request may reuse a bounded-age, eligible candidate batch rather than execute fresh retrieval and ranking. The control changes exact origin decision traffic; it does not remove final policy checks. Drive it low enough to see the provisioned ranking envelope enter warning state.
+
+{% traffic-split dataFile="/api/content/case-studies/meta-feed-ranking/data/candidate-freshness-policy.json" /%}
+
+### What the calculation means
+
+- **A reused batch is not a blind cache hit:** its key must include the viewer context that affects eligibility, and each item still needs a final rule and repetition check.
+- **A fresh path needs headroom:** provision retrieval, online features, model serving, and policy evaluation for cache warm-up, hot-key loss, and regional failover.
+- **Freshness is a product policy:** use a shorter allowable age for breaking content or newly restricted posts than for durable interest candidates.
+
+{% callout variant="tip" %}
+Treat the warning state as a load-test requirement. Test a cold cache, one unavailable zone, a surge around a major event, and an emergency policy change before accepting a candidate-cache design.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate eligibility, recall, ranking, and slate policy" %}
+
+## A staged pipeline makes the deadline and the rules visible
+
+The feed pipeline has four distinct decisions. Eligibility asks whether an item may be shown. Recall asks which eligible items are worth considering. Ranking predicts likely outcomes. Slate policy examines the ordered set, where duplicate creators and topic concentration become visible.
+
+{% system-flow title="One bounded feed decision" caption="Each stage narrows uncertainty. The final policy gate owns hard constraints even when earlier stages use cached or approximate data." %}
+{% system-node title="Eligibility and sources" eyebrow="Admission" icon="shield" tone="amber" %}
+Apply audience, privacy, integrity, availability, and block rules while collecting candidates from follows, recommendations, and exploration pools.
+{% /system-node %}
+{% system-node title="Retrieve and prune" eyebrow="Recall" icon="search" tone="blue" %}
+Use lightweight features and embeddings to reduce a large eligible universe to a few hundred plausible candidates under a small latency budget.
+{% /system-node %}
+{% system-node title="Predict outcomes" eyebrow="Rank" icon="scale" tone="violet" %}
+Score the small set using viewer, content, relationship, session, and recency features; keep score and feature versions with the decision.
+{% /system-node %}
+{% system-node title="Compose and record" eyebrow="Policy and learning" icon="layers" tone="green" %}
+Enforce hard rules, diversity, creator caps, and pagination stability; return the slate and emit exposure events outside the request path.
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership boundaries
+
+- **Trust and safety** owns policy definitions, restrictions, review state, policy versioning, and urgent removal propagation.
+- **Recommendation serving** owns candidate-source contracts, features, model versions, ranking deadlines, and experiment assignment.
+- **Graph and content systems** own durable relationship and post state; they publish changes rather than letting rankers write primary social data.
+- **Data and experimentation** own privacy-bounded event schemas, attribution windows, metric definitions, and rollback analysis.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model a decision so it can be replayed and audited" %}
+
+## A score alone cannot explain a feed exposure
+
+The system needs enough versioned state to reconstruct why a viewer was shown a post. That record is useful for debugging, experiment analysis, safety investigations, and creator support. It is not a reason to retain raw personal data indefinitely; use privacy-bounded identifiers and retention controls.
+
+### Minimum decision records
+
+- **Content eligibility record:** post ID, author, publish time, audience, policy disposition, region and age constraints, availability, and policy version.
+- **Candidate record:** request ID, post ID, source, source timestamp, retrieval score, candidate-set version, and deduplication state.
+- **Rank prediction record:** request ID, post ID, model version, feature snapshot reference, outcome estimates, calibration version, and deadline result.
+- **Slate and exposure record:** request ID, rank position, applied policy reasons, cursor or session state, response version, and later positive or negative feedback.
+
+### Choose storage by access pattern
+
+- Keep authoritative privacy, restriction, and content state in stores with clear ownership and ordered updates where the policy requires them.
+- Serve high-rate candidate and feature reads from partitioned online stores or caches, with explicit freshness and invalidation contracts.
+- Send immutable exposure and action events through a durable stream; training and analytics consume them asynchronously rather than blocking the feed response.
+- Store model, feature, source, and policy versions beside an exposure so an operator can reproduce a decision without silently re-running today's model.
+
+{% callout variant="info" %}
+### Why log source and policy separately?
+
+Candidate source says how a post entered consideration. Final policy says why it was kept, moved, or removed from the slate. Mixing them hides whether a problem began in recall, prediction, or a necessary safety constraint.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="5. Deep-dive the candidate-to-slate policy" %}
+
+## Ranking is prediction; policy is a decision about the whole slate
+
+Individual scores are useful but incomplete. A list of the top individual scores can repeat one creator, over-concentrate one topic, or expose an item whose status changed after it was scored. Treat the final stage as an explicit, inspectable policy.
+
+{% process-flow %}
+{% process-step number="1" title="Gather eligible pools" label="Recall" %}
+Pull bounded candidates from follows, social activity, interest retrieval, local trends, and controlled exploration. Remove hard ineligible items before expensive work.
+{% /process-step %}
+{% process-step number="2" title="Score several outcomes" label="Prediction" %}
+Estimate not just engagement but meaningful interaction, dissatisfaction, integrity risk, freshness value, and long-term satisfaction proxies.
+{% /process-step %}
+{% process-step number="3" title="Build the slate" label="Constrained ordering" %}
+Apply creator and topic caps, repetition limits, diversity or exploration targets, and session continuity while preserving the strongest valid choices.
+{% /process-step %}
+{% process-step number="4" title="Revalidate before release" label="Final gate" %}
+Check the latest restrictions, blocks, deletion state, and policy version. Record reason codes and return only the valid ordered slate.
+{% /process-step %}
+{% /process-flow %}
+
+### Objective design needs guardrails
+
+- **Optimize multiple outcomes:** a click may be useful evidence, but raw engagement alone can reward misleading, sensational, or repetitive content.
+- **Calibrate before blending:** a probability estimate from one model head should be comparable to another only after calibration is measured and maintained.
+- **Constrain before declaring success:** caps and safety rules are product commitments, not after-the-fact dashboard annotations.
+- **Explore deliberately:** reserve a small, monitored discovery budget so the system can learn about new creators without silently turning all users into experiments.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Design fanout and degraded behavior before an incident" %}
+
+## Degrade personalization before safety or policy
+
+New posts and relationship changes may reach a feed through fanout-on-write, fanout-on-read, or a hybrid. The right choice depends on author fanout, freshness, storage cost, and read pressure. Whatever the path, a serving fallback must still run the final policy gate.
+
+### Fanout and degraded-mode lab
+
+Select a normal publication path or a failure scenario. The lab changes the active route, component condition, and result together. Inspect the fallback paths: they reduce freshness or personalization, but none may bypass eligibility or slate policy.
+
+{% topology-lab dataFile="/api/content/case-studies/meta-feed-ranking/data/fanout-degraded-topology.json" /%}
+
+### Fallback rules worth writing down
+
+- **Ranker deadline exceeded:** return a bounded-age personalized candidate batch or a broader eligible source, then re-run final policy and session deduplication.
+- **Feature stream delayed:** stop claiming session-level precision; use a declared stale-feature mode with its own metrics and age limit.
+- **Hot-author fanout backlog:** do not synchronously write every follower inbox. Combine read-time retrieval with a bounded freshness indicator and protect the write path from runaway amplification.
+- **Policy uncertainty:** fail closed for the affected item. A stale score, cache entry, or pending fanout job cannot substitute for a decision that an item is allowed.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make relevance, fairness, and safety trade-offs explicit" %}
+
+## A faster or more engaging feed can still be a worse feed
+
+The central design question is not whether the model is accurate. It is which outcome the product permits the model to optimize, which groups or creators bear the error, and which constraints are non-negotiable. Record these choices before an experiment, not only after a bad outcome.
+
+### Decision guide
+
+- **Fanout-on-write:** gives fast reads for ordinary authors, but celebrity or viral posts can create write amplification and stale inbox cleanup work.
+- **Fanout-on-read:** avoids mass writes and can use the newest context, but shifts more graph and ranking work into the feed latency budget.
+- **Hybrid fanout:** precomputes ordinary social updates while retrieving high-fanout authors and recommendations on read; it adds operational complexity but controls both extremes.
+- **Diversity and creator caps:** may reduce the top individual score at one position, while improving the quality and resilience of the full slate.
+- **Stricter safety thresholds:** reduce harmful exposure but can increase false positives; measure appeals, review samples, affected populations, and creator outcomes rather than treating one global rate as sufficient.
+
+{% callout variant="warn" %}
+Do not use a single engagement lift to approve a ranking change. Require guardrails for negative feedback, exposure concentration, integrity incidents, satisfaction, and the experience of groups likely to be affected differently by the change.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Operate an accountable learning loop" %}
+
+## Run experiments with a rollback path and a social outcome view
+
+The system must be observable as a product and a policy mechanism. A healthy latency graph cannot prove that the feed is diverse, fair, or safe; an engagement graph cannot prove the system will survive a cache cold start. Operate both planes together.
+
+### Metrics that should trigger action
+
+- **Serving health:** stage latency, candidate counts, cache miss rate, model deadline failures, fallback age, policy-evaluation errors, and response completeness.
+- **Decision quality:** source mix, repeated-author and repeated-topic rate, score calibration, slate churn, unexplained empty feeds, and stale-feature usage.
+- **Safety and fairness:** reports and hides per exposure, appeal outcomes, policy false-positive and false-negative samples, exposure concentration, and creator distribution slices.
+- **Experiment health:** cohort assignment, treatment/control divergence, novelty effects, longer-horizon retention or satisfaction, and guardrail breaches by region and audience.
+
+### Release and incident sequence
+
+1. Shadow-score a new model or policy and compare it with the active decision without changing what people see.
+2. Roll out to a bounded cohort with a retained model, source, and policy rollback path.
+3. Freeze expansion when latency, safety, concentration, or satisfaction guardrails breach; do not wait for a broad engagement average.
+4. Capture the decision record, contain the smallest affected source or rule, restore a compatible version, and review the policy or capacity assumption before retrying.
+
+The durable lesson is simple: feed ranking is a controlled decision system. Its candidate sources, model predictions, final constraints, and degraded paths must all agree on the same promise to the viewer.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/meta-feed-ranking/quiz/meta-feed-ranking.json" lessonSlug="meta-feed-ranking" title="Review the feed ranking design" /%}

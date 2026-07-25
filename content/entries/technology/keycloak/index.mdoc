@@ -1,0 +1,321 @@
+---
+registryId: keycloak
+---
+
+{% section-card tone="intro" %}
+## What is Keycloak?
+
+**Keycloak is an identity and access management server.** Applications redirect people
+to Keycloak to sign in, and APIs trust tokens that Keycloak issues. This keeps
+password handling, single sign-on, multi-factor authentication, identity federation,
+sessions, and protocol configuration in one deliberate security boundary.
+
+Keycloak can store users itself or connect to LDAP, Active Directory, and external
+OpenID Connect or SAML identity providers. It exposes OpenID Connect, OAuth 2.0, and
+SAML endpoints so applications do not need to invent their own login protocol.
+
+{% callout variant="warn" %}
+### Keycloak does not replace application authorization
+
+Keycloak can issue roles, groups, scopes, and other claims, but each API must still
+validate the token and enforce resource ownership, tenant boundaries, and business
+rules. A valid token is not permission to access every object.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Realm" eyebrow="Identity boundary" icon="globe" tone="violet" %}
+A realm owns its users, clients, roles, sessions, authentication flows, and signing
+keys. The `master` realm administers the server; application identities belong in
+purpose-built realms.
+{% /concept-card %}
+{% concept-card title="Client" eyebrow="Application contract" icon="code" tone="blue" %}
+A client represents an application or service. Its settings define redirect URIs,
+allowed protocol capabilities, credentials, scopes, and claim mappings.
+{% /concept-card %}
+{% concept-card title="Identity source" eyebrow="Who verifies the user?" icon="users" tone="cyan" %}
+Keycloak can verify a local credential, federate a directory, or broker login to an
+external identity provider while presenting one protocol contract to applications.
+{% /concept-card %}
+{% concept-card title="Session and token" eyebrow="Continuity and evidence" icon="key" tone="green" %}
+The Keycloak session enables SSO. ID, access, and refresh tokens carry different
+evidence and lifetimes; applications must use each only for its intended audience.
+{% /concept-card %}
+{% /concept-grid %}
+
+Review [OAuth 2.0](/technology/oauth2) first if authorization codes, PKCE, audiences,
+or scopes are unfamiliar. Keycloak implements those protocols; it does not change
+their trust model.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Configure each client from where its secrets can live
+
+In Keycloak, **Client authentication On** creates a confidential client that must
+authenticate at the token endpoint. **Off** creates a public client that cannot safely
+protect a shared secret. That distinction follows the application's execution
+environment, not the administrator's preference.
+
+### Lab 1: harden the client contract
+
+Choose an application shape, then deliberately enable the wrong capability, remove
+PKCE, expose a wildcard redirect, or pretend a browser can hold a client secret. The
+lab maps those choices to the names used in Keycloak's client settings.
+
+{% interactive-block id="technology/keycloak-client-hardening-lab" dataFile="/api/content/technology/keycloak/data/client-boundary-model.json" /%}
+
+The safe starting points are:
+
+- **Server-rendered web application**
+  - Enable Client authentication and Standard flow.
+  - Require PKCE S256 and exchange the code on the backend.
+  - Store client credentials and tokens outside the browser.
+- **Single-page or native application**
+  - Disable Client authentication because distributed code cannot protect a shared secret.
+  - Enable Standard flow, require PKCE S256, and register specific redirect URIs.
+  - Keep Implicit flow and Direct access grants disabled.
+- **Machine service**
+  - Enable Client authentication and Service account roles.
+  - Grant only the service-account roles the workload needs.
+  - Disable browser and password-based capabilities that the workload never uses.
+
+The current [Keycloak client guide](https://www.keycloak.org/docs/latest/server_admin/#_oidc_clients)
+defines these capability switches. The
+[OAuth 2.0 Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700)
+explains why the implicit and password grants are unsuitable for new designs.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace one browser login before adding features
+
+An OpenID Connect login is a sequence of boundaries. The browser carries redirects;
+the backend or public client completes the code exchange; the API evaluates the access
+token. Keep the responsibilities separate.
+
+{% process-flow %}
+{% process-step number="1" title="Start authorization" label="Application" %}
+Create transaction state and a PKCE verifier, then redirect the browser to the realm's
+authorization endpoint with an exact registered callback.
+{% /process-step %}
+{% process-step number="2" title="Establish identity" label="Keycloak" %}
+Keycloak reuses an eligible SSO session or runs the realm's authentication flow. It may
+verify a local credential or broker the user to an external identity provider.
+{% /process-step %}
+{% process-step number="3" title="Redeem the code" label="Token endpoint" %}
+The client sends the one-time code and PKCE verifier to the token endpoint. A
+confidential client also authenticates using its configured credential.
+{% /process-step %}
+{% process-step number="4" title="Enforce the token" label="Application and API" %}
+The client validates the ID token for its login transaction. The API independently
+validates the access token's signature, issuer, audience, expiry, and required scope
+before applying application authorization.
+{% /process-step %}
+{% /process-flow %}
+
+### Do not merge the token roles
+
+- **ID token:** an OpenID Connect identity assertion for the client. It is not the API's
+  authorization credential.
+- **Access token:** a credential for a resource server. The API must reject a token
+  minted for another audience.
+- **Refresh token:** a credential used at the token endpoint to obtain replacement
+  tokens. Do not send it to APIs or place it in URLs and logs.
+- **Keycloak session:** server-side login continuity that can connect several client
+  sessions. Token expiry, session expiry, and logout propagation are related but not
+  identical controls.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Treat realms, groups, roles, and scopes as different controls
+
+A realm is the broadest administrative and cryptographic boundary in this model.
+Clients, groups, roles, and client scopes organize policy inside it; they are not
+interchangeable tenant-isolation mechanisms.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Realm boundary" eyebrow="Keys and administration" icon="shield" tone="violet" %}
+Use a separate realm when identities, signing keys, login policy, administrators, or
+protocol endpoints require strong separation. Realm count also creates operational
+work for upgrades, configuration, monitoring, and incident response.
+{% /concept-card %}
+{% concept-card title="Groups" eyebrow="Membership structure" icon="users" tone="cyan" %}
+Groups organize users and can carry inherited role mappings or attributes. A group
+describes membership; it does not by itself prove permission to a particular object.
+{% /concept-card %}
+{% concept-card title="Roles" eyebrow="Coarse entitlement" icon="key" tone="blue" %}
+Realm and client roles can express broad capabilities. Keep composites understandable,
+and avoid placing every entitlement into every access token.
+{% /concept-card %}
+{% concept-card title="Client scopes" eyebrow="Claim contract" icon="braces" tone="green" %}
+Client scopes package protocol mappers and role-scope mappings. Use them to control
+which claims and scopes a client can request or receives by default.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before creating one realm per customer, name the isolation requirement: separate
+administrators, keys, identity policy, branding, data residency, or only application
+membership. Choose the boundary from that requirement and test onboarding, export,
+backup, recovery, and offboarding at the expected realm count.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Compose authentication flows without creating bypasses
+
+An authentication flow is an ordered decision graph that determines how Keycloak
+establishes identity. Executions can be required, alternative, conditional, or
+disabled. A polished login page does not compensate for a branch that silently skips
+the intended assurance.
+
+Build flows in this order:
+
+1. **Name the assurance outcome.** Decide when password, OTP, WebAuthn, identity
+   brokering, or another approved authenticator is sufficient.
+2. **Define recovery separately.** Enrollment, lost-device recovery, email actions,
+   and administrator resets can become weaker alternate login paths.
+3. **Bind step-up to risk and action.** Require stronger authentication for sensitive
+   operations instead of forcing one static flow onto every request.
+4. **Test every branch.** Exercise new users, existing SSO sessions, federated users,
+   missing attributes, failed authenticators, locked accounts, and unavailable
+   dependencies.
+
+For external identity stores, decide whether Keycloak imports data, reads it on demand,
+or delegates credential validation. Then rehearse directory latency, duplicate
+identifiers, mapper changes, disabled users, and provider outages. Federation moves an
+identity dependency; it does not remove it.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Rotate signing keys with an intentional overlap
+
+Keycloak has one selected active signing key and may retain passive keys for
+verification. During a planned rotation, the new active key signs new tokens while the
+old passive key remains available long enough for previously issued tokens to expire.
+
+### Lab 2: decide when the old key may stop verifying
+
+Set the longest old-token lifetime and elapsed overlap, then compare a planned rotation
+with a compromised-key response. Advance through the key states and inspect which
+tokens continue to validate.
+
+{% interactive-block id="technology/keycloak-signing-key-rotation-lab" dataFile="/api/content/technology/keycloak/data/signing-key-rotation-model.json" /%}
+
+The arithmetic is deliberately small and visible:
+
+`remaining old-token window = max(0, longest accepted old-token lifetime - elapsed overlap)`
+
+This is a **planning bound**, not a claim about a Keycloak default. Inventory the actual
+access, ID, offline, action-token, and client-cache behavior in your realm before
+retiring a key.
+
+For a suspected compromise, waiting preserves the attacker's validation path. The
+[Keycloak realm-key guide](https://www.keycloak.org/docs/latest/server_admin/#configuring-realm-keys)
+directs operators to create a new pair and remove the compromised pair immediately. It
+also describes a Keycloak not-before push for configured clients; verify which of your
+clients honor that mechanism and plan forced reauthentication separately.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Deploy Keycloak as a stateful security service
+
+A production request crosses more than a Keycloak process. The public hostname,
+reverse proxy, realm configuration, database, distributed caches, identity providers,
+email delivery, and protected applications all participate in login and recovery.
+
+{% system-flow title="Production authentication path" caption="Keep public, management, persistence, and downstream trust boundaries explicit." %}
+{% system-node title="Browser or workload" eyebrow="Protocol client" icon="users" tone="cyan" %}
+Starts OIDC or SAML, carries redirects, and presents the resulting credential only to
+its intended recipient.
+{% /system-node %}
+{% system-node title="Trusted reverse proxy" eyebrow="Public edge" icon="route" tone="blue" %}
+Terminates or passes TLS according to one documented model, overwrites forwarded
+headers, and restricts administration paths.
+{% /system-node %}
+{% system-node title="Keycloak nodes" eyebrow="Identity control plane" icon="key" tone="violet" %}
+Run the same build and realm policy, participate in cache discovery, and expose health
+and metrics on a protected management interface.
+{% /system-node %}
+{% system-node title="Database and identity stores" eyebrow="Durable dependencies" icon="database" tone="amber" %}
+Persist Keycloak state and resolve federated identities. Their latency, backup,
+consistency, and failure behavior are part of authentication availability.
+{% /system-node %}
+{% system-node title="Application and API" eyebrow="Enforcement boundary" icon="shield" tone="green" %}
+Validate discovery metadata and tokens, apply local authorization, and handle key
+refresh, issuer outages, logout, and expired credentials predictably.
+{% /system-node %}
+{% /system-flow %}
+
+Use supported deployment guidance and benchmark your own realm, extensions, login
+flows, token shape, identity providers, and traffic mix. User count alone cannot
+predict memory, login latency, database storage, or availability.
+
+The [Keycloak high-availability guide](https://www.keycloak.org/high-availability/introduction)
+documents supported topologies and explicitly marks experimental options. Do not copy
+a topology without checking the documentation for the Keycloak version you deploy.
+{% /section-card %}
+
+{% section-card %}
+## Start production with explicit network boundaries
+
+This configuration assumes an edge proxy terminates TLS, reaches Keycloak over a
+private HTTP network, overwrites `X-Forwarded-*` headers, and is restricted to the
+listed CIDR. Secrets stay in environment variables or the platform's secret mechanism,
+not in this file.
+
+{% code-block file="/api/content/technology/keycloak/code/production-keycloak.conf" language="properties" title="Keycloak configuration behind an edge TLS proxy" /%}
+
+Keycloak's current reverse-proxy guidance separates the application listener from the
+management interface. Do not publish management port `9000` through the public proxy.
+Restrict the Admin Console and Admin REST API at the network and reverse-proxy layer;
+an alternate admin hostname alone does not remove the API from the frontend hostname.
+
+See the official
+[hostname](https://www.keycloak.org/server/hostname),
+[reverse proxy](https://www.keycloak.org/server/reverseproxy), and
+[management interface](https://www.keycloak.org/server/management-interface) guides
+for the exact options and threat model.
+{% /section-card %}
+
+{% section-card %}
+## Validate access tokens at the API boundary
+
+This TypeScript example uses OpenID Connect discovery and a remote JWKS through the
+maintained `jose` library. It pins issuer, audience, algorithm, expiry, and required
+scopes before application code receives the claims.
+
+{% code-block file="/api/content/technology/keycloak/code/verify-keycloak-access-token.ts" language="typescript" title="Verify a Keycloak access token before authorization" /%}
+
+Production verification also needs bounded network timeouts, cached-key refresh
+behavior, telemetry that never logs credentials, and a policy for issuer or JWKS
+unavailability. After cryptographic validation, enforce tenant ownership and
+object-level authorization from trusted application data.
+{% /section-card %}
+
+{% section-card %}
+## Review the production boundary
+
+### Identity and client policy
+
+- Keep application users and administrators out of the `master` realm.
+- Register exact redirect URIs and narrow web origins; never use a full wildcard in production.
+- Disable unused flows and capabilities on every client.
+- Require MFA or stronger authenticators for privileged administration.
+- Review role composites, protocol mappers, default client scopes, and token size.
+
+### Runtime and dependencies
+
+- Run production mode with a supported external database and tested backups.
+- Pin and test the public hostname, TLS model, proxy headers, and trusted proxy addresses.
+- Protect health, metrics, administration, and database endpoints from public access.
+- Benchmark login, refresh, logout, federation, and key-refresh traffic with production-like flows.
+- Rehearse node, zone, database, directory, email, and external identity-provider failures.
+
+### Operations and incident response
+
+- Export configuration through a reviewed, repeatable process and detect policy drift.
+- Patch Keycloak, providers, themes, and extensions on a tested release cadence.
+- Alert on login failures, lockouts, token errors, dependency latency, database saturation,
+  cache health, and administrator actions without recording secrets or tokens.
+- Rotate realm keys and client credentials, and test the overlap or revocation behavior.
+- Verify restore, forced logout, compromised administrator, and compromised signing-key runbooks.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/keycloak/quiz/keycloak-production.json" lessonSlug="keycloak" title="Keycloak Production Review" /%}

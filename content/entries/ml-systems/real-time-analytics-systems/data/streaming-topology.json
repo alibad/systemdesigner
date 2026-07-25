@@ -1,0 +1,145 @@
+{
+  "title": "Follow an event through delay, replay, and dependency failure",
+  "description": "Switch scenarios to see which paths remain authoritative, where state is protected, and what the product observes.",
+  "nodes": [
+    {
+      "id": "producer",
+      "label": "Event producer",
+      "eyebrow": "Source time",
+      "detail": "Creates a stable event ID, event timestamp, schema version, and source metadata before publishing.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 9,
+      "y": 22
+    },
+    {
+      "id": "broker",
+      "label": "Durable event log",
+      "eyebrow": "Partitioned",
+      "detail": "Orders events within a partition, retains them for replay, and applies bounded producer and consumer backpressure.",
+      "kind": "stream",
+      "tone": "blue",
+      "x": 29,
+      "y": 22
+    },
+    {
+      "id": "processor",
+      "label": "Stream processor",
+      "eyebrow": "Event time",
+      "detail": "Validates schemas, assigns watermarks, updates windows, joins state, and emits idempotent results.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 50,
+      "y": 22
+    },
+    {
+      "id": "state",
+      "label": "Checkpointed state",
+      "eyebrow": "Recoverable",
+      "detail": "Stores window, join, and deduplication state together with the input positions required for consistent recovery.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 50,
+      "y": 56
+    },
+    {
+      "id": "features",
+      "label": "Online feature store",
+      "eyebrow": "Fresh values",
+      "detail": "Publishes versioned, timestamped features for low-latency readers without becoming the source of raw event truth.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 72,
+      "y": 14
+    },
+    {
+      "id": "model",
+      "label": "Model service",
+      "eyebrow": "Versioned",
+      "detail": "Scores fresh features under a bounded deadline and returns an explicit degraded or unavailable state on failure.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 91,
+      "y": 14
+    },
+    {
+      "id": "analytics",
+      "label": "Analytical sink",
+      "eyebrow": "History",
+      "detail": "Stores append-only events and corrected aggregates for reporting, backfills, evaluation, and investigation.",
+      "kind": "analytics",
+      "tone": "green",
+      "x": 72,
+      "y": 58
+    },
+    {
+      "id": "action",
+      "label": "Decision consumer",
+      "eyebrow": "Product effect",
+      "detail": "Applies idempotent actions and records the prediction, exposure, fallback, and eventual outcome join key.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 91,
+      "y": 58
+    }
+  ],
+  "edges": [
+    { "id": "producer-broker", "from": "producer", "to": "broker", "label": "publish" },
+    { "id": "broker-processor", "from": "broker", "to": "processor", "label": "consume" },
+    { "id": "processor-state", "from": "processor", "to": "state", "label": "checkpoint" },
+    { "id": "state-processor", "from": "state", "to": "processor", "label": "restore", "via": { "x": 40, "y": 40 } },
+    { "id": "processor-features", "from": "processor", "to": "features", "label": "upsert" },
+    { "id": "features-model", "from": "features", "to": "model", "label": "fresh features" },
+    { "id": "model-action", "from": "model", "to": "action", "label": "prediction" },
+    { "id": "processor-analytics", "from": "processor", "to": "analytics", "label": "aggregate", "mode": "async" },
+    { "id": "analytics-action", "from": "analytics", "to": "action", "label": "dashboard or rule", "mode": "async" },
+    { "id": "features-action", "from": "features", "to": "action", "label": "fallback", "via": { "x": 84, "y": 36 } }
+  ],
+  "scenarios": [
+    {
+      "id": "normal",
+      "label": "Fresh event",
+      "summary": "An on-time event updates checkpointed state, online features, the analytical history, and a model-backed decision.",
+      "activeEdges": ["producer-broker", "broker-processor", "processor-state", "processor-features", "features-model", "model-action", "processor-analytics"],
+      "focusNode": "processor",
+      "result": "The decision uses a fresh feature version, while the durable log and checkpoint preserve replayability."
+    },
+    {
+      "id": "late",
+      "label": "Late event",
+      "summary": "The processor accepts an event behind the watermark only when the allowed-lateness policy permits a correction.",
+      "activeEdges": ["producer-broker", "broker-processor", "processor-state", "processor-features", "processor-analytics"],
+      "degradedNodes": ["processor", "features", "analytics"],
+      "focusNode": "processor",
+      "result": "Historical aggregates and future features are corrected; already-issued decisions remain traceable to their earlier feature version."
+    },
+    {
+      "id": "processor-restart",
+      "label": "Processor restart",
+      "summary": "The event log retains input while a replacement processor restores state and resumes from the matching checkpoint position.",
+      "activeEdges": ["producer-broker", "state-processor", "broker-processor", "processor-state", "processor-features", "processor-analytics"],
+      "degradedNodes": ["broker", "processor"],
+      "focusNode": "state",
+      "result": "Freshness is temporarily degraded, but replay plus idempotent sinks prevents lost or duplicated business effects."
+    },
+    {
+      "id": "model-outage",
+      "label": "Model outage",
+      "summary": "Streaming features and historical analytics remain healthy while synchronous model scoring is unavailable.",
+      "activeEdges": ["producer-broker", "broker-processor", "processor-state", "processor-features", "processor-analytics", "features-action"],
+      "failedNodes": ["model"],
+      "degradedNodes": ["action"],
+      "focusNode": "model",
+      "result": "The consumer uses a documented feature-based fallback or abstains; events continue so recovery does not require a data backfill."
+    },
+    {
+      "id": "analytics-outage",
+      "label": "Analytics outage",
+      "summary": "The historical sink is unavailable, but the online feature and model path remains isolated from reporting.",
+      "activeEdges": ["producer-broker", "broker-processor", "processor-state", "processor-features", "features-model", "model-action"],
+      "failedNodes": ["analytics"],
+      "focusNode": "analytics",
+      "result": "Online decisions continue; retained log data is replayed into the analytical sink after it recovers."
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "title": "Trace delivery, redelivery, and broker pressure",
+  "description": "Select a scenario to see what ActiveMQ Classic can observe, what the application must decide, and where a message waits when delivery cannot complete.",
+  "nodes": [
+    {
+      "id": "producer",
+      "label": "JMS producer",
+      "eyebrow": "Create and send",
+      "detail": "Creates a message with a stable business event ID, destination, expiration policy, and persistence mode.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 38
+    },
+    {
+      "id": "broker",
+      "label": "ActiveMQ broker",
+      "eyebrow": "Route and dispatch",
+      "detail": "Accepts messages, applies destination policy, dispatches to consumers, and enforces memory, store, and temporary-store limits.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 34,
+      "y": 38
+    },
+    {
+      "id": "kahadb",
+      "label": "KahaDB store",
+      "eyebrow": "Persistent journal",
+      "detail": "Stores persistent messages for the local ActiveMQ Classic broker. Storage durability and broker high availability are separate design decisions.",
+      "kind": "database",
+      "tone": "violet",
+      "x": 34,
+      "y": 82
+    },
+    {
+      "id": "consumer",
+      "label": "JMS consumer",
+      "eyebrow": "Process then settle",
+      "detail": "Runs business logic and acknowledges or commits according to the session mode. A rollback, recovery, close-before-commit, or connection timeout can trigger redelivery.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 64,
+      "y": 38
+    },
+    {
+      "id": "business-store",
+      "label": "Business store",
+      "eyebrow": "Durable side effect",
+      "detail": "Commits the domain mutation and an event receipt together so repeated delivery produces one visible result.",
+      "kind": "database",
+      "tone": "green",
+      "x": 91,
+      "y": 20
+    },
+    {
+      "id": "dlq",
+      "label": "Dead-letter queue",
+      "eyebrow": "Quarantine",
+      "detail": "Receives a poison message after the configured redelivery limit. Operators still need diagnosis, repair, bounded replay, and reconciliation.",
+      "kind": "database",
+      "tone": "rose",
+      "x": 91,
+      "y": 74
+    }
+  ],
+  "edges": [
+    { "id": "send", "from": "producer", "to": "broker", "label": "send", "mode": "sync" },
+    { "id": "persist", "from": "broker", "to": "kahadb", "label": "journal", "mode": "sync" },
+    { "id": "dispatch", "from": "broker", "to": "consumer", "label": "dispatch", "mode": "async" },
+    { "id": "commit-effect", "from": "consumer", "to": "business-store", "label": "commit effect", "mode": "sync" },
+    { "id": "settle", "from": "consumer", "to": "broker", "label": "ack or commit", "mode": "sync", "via": { "x": 50, "y": 8 } },
+    { "id": "redeliver", "from": "broker", "to": "consumer", "label": "redeliver", "mode": "async", "via": { "x": 50, "y": 67 } },
+    { "id": "dead-letter", "from": "broker", "to": "dlq", "label": "poison ACK", "mode": "async" },
+    { "id": "flow-control", "from": "broker", "to": "producer", "label": "block or fail send", "mode": "sync", "via": { "x": 20, "y": 10 } }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-persistent",
+      "label": "Healthy persistent delivery",
+      "summary": "The broker accepts and journals a persistent message, the consumer commits one business effect, then settles the JMS delivery.",
+      "activeEdges": ["send", "persist", "dispatch", "commit-effect", "settle"],
+      "focusNode": "consumer",
+      "result": "Settlement follows the durable business effect. This ordering narrows ambiguity, while a stable event receipt makes a later replay harmless."
+    },
+    {
+      "id": "timeout-after-commit",
+      "label": "Timeout after business commit",
+      "summary": "The consumer commits the business mutation, but its connection times out before the broker observes successful settlement.",
+      "activeEdges": ["send", "persist", "dispatch", "commit-effect", "redeliver"],
+      "degradedNodes": ["consumer"],
+      "focusNode": "business-store",
+      "result": "Redelivery is correct because the broker cannot inspect the external database. The consumer must recognize the stable event ID and return the first result without applying a second mutation."
+    },
+    {
+      "id": "poison-message",
+      "label": "Poison message",
+      "summary": "A permanent schema or business-rule failure repeats until the configured redelivery limit is exceeded.",
+      "activeEdges": ["send", "persist", "dispatch", "redeliver", "dead-letter"],
+      "degradedNodes": ["consumer"],
+      "focusNode": "dlq",
+      "result": "The dead-letter queue isolates repeatedly failing work; it does not fix it. Preserve identity, repair the cause, and replay at a bounded rate."
+    },
+    {
+      "id": "store-pressure",
+      "label": "Broker store pressure",
+      "summary": "Consumers fall behind until configured broker storage usage reaches its limit and producer flow control activates.",
+      "activeEdges": ["send", "persist", "flow-control"],
+      "degradedNodes": ["broker", "kahadb"],
+      "focusNode": "broker",
+      "result": "A synchronous producer can block or fail according to policy. Raising the limit only delays the incident if sustained arrivals still exceed consumer service capacity."
+    }
+  ]
+}

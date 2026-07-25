@@ -1,0 +1,292 @@
+---
+registryId: clip-architecture
+---
+
+{% section-card tone="intro" %}
+## What is CLIP?
+
+**CLIP (Contrastive Language-Image Pre-training)** is a dual-encoder model that learns which images and text descriptions belong together. One encoder turns an image into a vector, another turns text into a vector, and learned projections place both vectors in the same coordinate system.
+
+That shared space matters because a text query can be compared directly with millions of precomputed image vectors. The same model can support image retrieval and zero-shot classification without training a new classifier head for every label set.
+
+### The invariant
+
+**A matching image and text should point in similar directions after projection and normalization; mismatched pairs should point in different directions.** CLIP estimates compatibility in its training distribution. It does not prove that a statement is true, generate a caption, or understand every object relationship in a scene.
+
+This lesson builds on [Transformers](/genai/transformers) and [Tokenization Fundamentals](/genai/tokenization-fundamentals), but introduces each CLIP-specific contract before using it.
+
+{% metric-strip %}
+{% metric value="2" label="Independent encoders" detail="Images and text can be encoded, scaled, and cached on separate paths." tone="blue" /%}
+{% metric value="1" label="Projection space" detail="Normalized vectors make cross-modal cosine similarity meaningful." tone="violet" /%}
+{% metric value="N x N" label="Batch comparisons" detail="A batch of N pairs supplies N positives and N - 1 candidate negatives per direction." tone="amber" /%}
+{% metric value="Versioned" label="Inference contract" detail="Checkpoint, processor, tokenizer, prompt bank, and index belong to one release." tone="green" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card %}
+## Follow the two paths into one projection space
+
+A **dual encoder** processes each modality independently. This is the architectural choice that makes large-scale retrieval practical: catalog images can be encoded once, while a new text query uses only the text tower.
+
+{% system-flow title="CLIP encoding and comparison path" caption="The towers may have different internal widths. Their projection heads must produce the same final embedding dimension." %}
+{% system-node title="Image processor" eyebrow="Pixels" icon="layers" tone="blue" %}
+Convert to RGB, resize and crop with the approved interpolation policy, then apply the checkpoint's expected channel normalization.
+{% /system-node %}
+{% system-node title="Image encoder" eyebrow="Vision tower" icon="boxes" tone="cyan" %}
+A Vision Transformer or modified ResNet converts the prepared image into one global representation.
+{% /system-node %}
+{% system-node title="Projection + L2 norm" eyebrow="Shared dimension" icon="route" tone="violet" %}
+A learned linear map produces the joint embedding; normalization puts the vector on the unit hypersphere.
+{% /system-node %}
+{% system-node title="Cosine similarity" eyebrow="Compatibility" icon="search" tone="green" %}
+The dot product of normalized image and text vectors becomes a similarity score, then a scaled logit when probabilities or loss are needed.
+{% /system-node %}
+{% /system-flow %}
+
+The text path runs in parallel:
+
+1. The exact checkpoint tokenizer converts text into IDs and special tokens.
+2. A Transformer produces a sequence representation. Original CLIP variants use a masked text Transformer and select the end-of-text representation.
+3. A learned text projection maps that representation to the same dimension as the image projection.
+4. L2 normalization makes the final dot product equal to cosine similarity.
+
+### Why the projection heads are necessary
+
+The vision tower and text tower solve different representation problems and can use different hidden widths. Their projections learn the cross-modal interface. Removing, swapping, or partially updating one projection changes the geometry even if both encoders still run successfully.
+
+{% callout variant="info" %}
+Original OpenAI CLIP model families used either modified ResNets or Vision Transformers for images. The architecture pattern is broader than one backbone, resolution, tokenizer, or embedding dimension; always read those values from the selected checkpoint's artifact contract.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Learn alignment from the whole batch
+
+For a batch of `N` paired examples, let `I` be normalized image embeddings and `T` normalized text embeddings. CLIP forms one square matrix:
+
+- `S = scale x I @ T^T`
+- diagonal cell `S[i,i]` is the declared positive pair;
+- each other cell in row `i` is an image-to-text candidate negative;
+- each other cell in column `i` is a text-to-image candidate negative.
+
+The objective is symmetric:
+
+1. apply cross-entropy across every image row, targeting its diagonal text;
+2. apply cross-entropy across every text row of `S^T`, targeting its diagonal image;
+3. average the image-to-text and text-to-image losses.
+
+This symmetry prevents one tower from being evaluated only as a query or only as a catalog item.
+
+### Batch negatives are useful but not automatically correct
+
+A global batch of `N` pairs gives each anchor `N - 1` negatives without a separate negative-mining service. Larger distributed batches expose more confusable examples, but they also:
+
+- create `N^2` logits and more communication across workers;
+- increase the chance that a valid alternative caption or near-duplicate image is mislabeled as negative;
+- make duplicate detection, pair identity, and gradient-preserving all-gather part of the training contract;
+- require metrics beyond diagonal batch accuracy because easy batches can look healthy.
+{% /section-card %}
+
+{% interactive-block id="genai/clip-architecture-contrastive-batch-lab" dataFile="/api/content/genai/clip-architecture/data/contrastive-batch-model.json" /%}
+
+{% section-card %}
+## Treat temperature as a confidence control
+
+CLIP commonly stores a learned `logit_scale = log(1 / temperature)` and uses `exp(logit_scale)` to multiply cosine similarities.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Low scale" eyebrow="High temperature" icon="gauge" tone="blue" %}
+Softmax probabilities stay flatter. Hard negatives receive less concentrated gradient pressure, but genuinely strong matches may not separate enough.
+{% /concept-card %}
+{% concept-card title="Useful scale" eyebrow="Learned separation" icon="activity" tone="green" %}
+The model can emphasize meaningful similarity gaps while retaining enough probability mass to learn from several candidates.
+{% /concept-card %}
+{% concept-card title="Extreme scale" eyebrow="Low temperature" icon="warning" tone="rose" %}
+Tiny cosine differences become overconfident logits. Label noise and false negatives then receive large penalties and can destabilize training or calibration.
+{% /concept-card %}
+{% /concept-grid %}
+
+The scale does not improve the underlying geometry by itself. It changes how strongly the loss and softmax react to existing similarity gaps. Track the learned value, keep the log parameter finite, and cap it according to the implementation contract when numerical stability requires a bound.
+
+{% code-block file="/api/content/genai/clip-architecture/code/clip-contrastive-step.py" language="python" title="Distributed symmetric CLIP training step" /%}
+{% /section-card %}
+
+{% section-card %}
+## Freeze preprocessing and tokenization into the model contract
+
+An embedding is only comparable with vectors produced by the same semantic contract. Matching dimensions are necessary, but not sufficient.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Image contract" eyebrow="Before the vision tower" icon="layers" tone="blue" %}
+
+- color mode and channel order;
+- decode behavior and pixel range;
+- resize, crop, aspect-ratio, and interpolation policy;
+- input resolution plus normalization mean and standard deviation.
+
+{% /concept-card %}
+{% concept-card title="Text contract" eyebrow="Before the text tower" icon="braces" tone="violet" %}
+
+- tokenizer vocabulary, merges, and normalization;
+- start, end, padding, and unknown-token IDs;
+- context length, truncation side, and end-of-text selection;
+- prompt templates, class wording, and prompt-ensemble reduction.
+
+{% /concept-card %}
+{% /concept-grid %}
+
+### Contract drift can stay numerically plausible
+
+A changed crop may still produce the expected tensor shape. A different tokenizer may still return 77 IDs. A replaced projection may still emit 512 numbers. These are dangerous failures because the service remains available while retrieval ranking or zero-shot decisions silently change.
+
+Pin and fingerprint the checkpoint, both processors, projection dimension, normalization behavior, prompt bank, precision policy, and embedding-index revision. Golden fixtures should compare prepared inputs and output vectors within declared tolerances.
+{% /section-card %}
+
+{% section-card %}
+## Build retrieval and zero-shot paths differently
+
+The two applications reuse CLIP geometry but have different system boundaries.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Cross-modal retrieval" eyebrow="Query against a catalog" icon="search" tone="cyan" %}
+
+1. Encode and normalize every catalog image offline.
+2. store vectors with artifact revision, source identity, and policy metadata;
+3. encode each text query online with the paired text contract;
+4. retrieve approximate nearest neighbors, then apply product and safety filters;
+5. rerank or review when fine-grained evidence matters.
+
+Index freshness and vector compatibility are correctness concerns. A new image tower normally requires a new image index.
+{% /concept-card %}
+{% concept-card title="Zero-shot classification" eyebrow="Compare with label prompts" icon="workflow" tone="green" %}
+
+1. Write one or more prompts for each candidate class.
+2. encode and normalize every prompt;
+3. average normalized prompt embeddings per class, then normalize again;
+4. compare the image with all class vectors;
+5. calibrate abstention and decision thresholds on representative labeled data.
+
+The resulting softmax is relative to the supplied classes. It is not an open-world probability that the image truly belongs to one of them.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Know when CLIP is the wrong final model
+
+Use a cross-encoder, detector, OCR model, captioner, or task-specific verifier when the decision depends on exact counting, spatial relations, tiny text, detailed attributes, or grounded explanations. CLIP can retrieve candidates for those systems without owning the final decision.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Expect confident and systematic failures
+
+CLIP inherits both dataset bias and the limitations of global embedding similarity.
+
+- **Prompt sensitivity:** wording, language, and prompt context can reorder classes even when the image is unchanged.
+- **Shortcut learning:** watermarks, backgrounds, photographic style, and co-occurrence can dominate the intended concept.
+- **Compositional weakness:** "a dog left of a bicycle" can score similarly to the reversed relationship.
+- **Fine-grained confusion:** nearby species, product variants, quantities, and subtle attributes may collapse together.
+- **Domain shift:** medical scans, satellite imagery, diagrams, local cultural concepts, and unusual image pipelines may sit outside training support.
+- **Social bias:** occupations, identities, geography, and harmful concepts can inherit uneven and stereotyped associations.
+- **Adversarial input:** text overlays, crops, perturbations, and crafted prompts can move similarities without changing the human interpretation.
+
+Do not convert raw cosine similarity with an arbitrary sigmoid and call it a probability. Calibrate scores for the exact candidate set, domain, policy, and operating point. For safety or moderation, combine specialized models, rules, human escalation, and explicit false-negative analysis.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the decision the product will make
+
+One aggregate benchmark cannot validate every CLIP use.
+
+### Retrieval evidence
+
+- report image-to-text and text-to-image `Recall@K`, median rank, and mean reciprocal rank;
+- measure exact search and approximate-index search separately;
+- slice by query language, image source, freshness, popularity, long-tail concept, and policy class;
+- include duplicate and near-duplicate groups so leakage does not inflate recall.
+
+### Zero-shot evidence
+
+- report top-1 and top-k accuracy, macro metrics for imbalanced classes, and per-class confusion;
+- evaluate multiple approved prompt templates and compare against a simple supervised baseline;
+- measure calibration with negative log-likelihood or expected calibration error when a threshold drives action;
+- include an unknown or abstain test when production inputs are not guaranteed to belong to the candidate set.
+
+### System and risk evidence
+
+- record encoder latency, throughput, memory, cost, index build time, index age, and cache hit rate;
+- test corrupt files, extreme aspect ratios, long or multilingual text, text-heavy images, and adversarial overlays;
+- measure worst-slice regression and disparity, not only average quality;
+- inspect real errors with qualified reviewers before assigning causes to the model.
+{% /section-card %}
+
+{% interactive-block id="genai/clip-architecture-release-assessment-lab" dataFile="/api/content/genai/clip-architecture/data/release-assessment-model.json" /%}
+
+{% section-card %}
+## Operate embeddings as versioned derived data
+
+Embedding services are stateful even when the encoders are stateless. The durable state lives in vector indexes, cached prompt vectors, fingerprints, and downstream thresholds.
+
+{% process-flow %}
+{% process-step number="1" title="Package one manifest" label="Immutable contract" %}
+Record checkpoint hashes, image processor, tokenizer, projections, prompt bank, precision, library versions, and expected embedding dimension.
+{% /process-step %}
+{% process-step number="2" title="Run offline gates" label="Exact + statistical" %}
+Verify golden tensors and embeddings, bidirectional retrieval, zero-shot tasks, protected slices, robustness, latency, and calibration.
+{% /process-step %}
+{% process-step number="3" title="Build derived artifacts" label="No mixed geometry" %}
+Re-encode the catalog when the image path changes, rebuild the ANN index, warm prompt embeddings, and tag every artifact with the manifest ID.
+{% /process-step %}
+{% process-step number="4" title="Shadow and canary" label="Bounded exposure" %}
+Compare score distributions, neighbor overlap, decision rates, latency, and user outcomes against the baseline before expansion.
+{% /process-step %}
+{% process-step number="5" title="Promote or restore" label="Complete rollback" %}
+Route by manifest and index revision together. Restore checkpoint, processors, prompt bank, index, thresholds, and caches as one unit.
+{% /process-step %}
+{% /process-flow %}
+
+### Monitor signals with an owner and response
+
+- embedding norm before and after normalization, non-finite values, and dimension mismatches;
+- cosine-score and top-k margin distributions by model, query type, and traffic slice;
+- retrieval overlap with the baseline, empty-result rate, filter rejection, and index freshness;
+- zero-shot class distribution, abstention, calibration drift, and prompt-bank revision;
+- decode, preprocessing, tokenization, queue, encoder, and ANN latency separately;
+- rollback readiness and the fraction of traffic attributable to one complete manifest.
+
+{% code-block file="/api/content/genai/clip-architecture/code/clip-release-gate.py" language="python" title="CLIP artifact and evaluation release gate" /%}
+{% /section-card %}
+
+{% section-card %}
+## Make the trade-offs explicit
+
+{% concept-grid columns="3" %}
+{% concept-card title="Dual encoder vs cross-encoder" eyebrow="Scale versus interaction" icon="scale" tone="blue" %}
+Independent vectors make catalog retrieval fast and cacheable. They lose token-to-region interaction that a cross-encoder can use for detailed reranking.
+{% /concept-card %}
+{% concept-card title="Large batch vs clean labels" eyebrow="More negatives versus collisions" icon="users" tone="amber" %}
+More negatives can improve representation learning, but memory, communication, duplicate pairs, and semantic false negatives grow with the global batch.
+{% /concept-card %}
+{% concept-card title="Higher resolution vs serving cost" eyebrow="Detail versus capacity" icon="gauge" tone="violet" %}
+More visual tokens can preserve small details while increasing image-encoder latency, memory, index rebuild time, and operational cost.
+{% /concept-card %}
+{% concept-card title="Prompt ensemble vs simplicity" eyebrow="Robustness versus governance" icon="repeat" tone="green" %}
+Several prompts can reduce wording sensitivity, but the full template bank becomes a tested, versioned part of every zero-shot release.
+{% /concept-card %}
+{% concept-card title="ANN search vs exact search" eyebrow="Latency versus recall" icon="search" tone="cyan" %}
+Approximate indexes reduce query cost at scale. Their own recall, filters, quantization, and freshness must be evaluated against exact neighbors.
+{% /concept-card %}
+{% concept-card title="One score vs layered decision" eyebrow="Convenience versus safety" icon="shield" tone="rose" %}
+A raw similarity threshold is easy to deploy. High-impact decisions need calibration, specialized evidence, policy rules, review, and an abstain path.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Release checklist
+
+1. Every online vector and derived artifact identifies one complete manifest.
+2. Golden preprocessing and tokenization fixtures pass without unexplained drift.
+3. Retrieval or zero-shot quality passes in both directions and on protected slices.
+4. ANN recall, calibration, latency, and cost meet use-specific thresholds.
+5. Bias, domain-shift, corrupt-input, and adversarial tests have named owners.
+6. The previous complete manifest and index are loaded, routable, and rehearsed.
+{% /section-card %}
+
+{% quiz title="CLIP Architecture and Release Review" questionsFile="/api/content/genai/clip-architecture/quiz/clip-architecture-review.json" lessonSlug="clip-architecture" /%}

@@ -1,0 +1,118 @@
+{
+  "blockId": "technology/dynamodb-consistency-index-recovery-lab",
+  "title": "Choose the consistency, index, and recovery boundary",
+  "description": "Pick a workload, then assemble its read surface, write correctness control, and recovery mechanism. A fast API is not a complete contract unless all three decisions agree.",
+  "defaults": {
+    "scenarioId": "checkout-receipt",
+    "readPathId": "base-eventual",
+    "writeBoundaryId": "unconditional",
+    "recoveryId": "replica-or-stream"
+  },
+  "readPaths": [
+    {
+      "id": "base-eventual",
+      "label": "Base table, eventual read",
+      "detail": "Lowest read-unit cost; a successful write might not be visible immediately."
+    },
+    {
+      "id": "base-strong",
+      "label": "Base table, strong read",
+      "detail": "Reads the latest committed item by table key; not available on a GSI."
+    },
+    {
+      "id": "gsi-eventual",
+      "label": "GSI query, eventual read",
+      "detail": "Supports a different partition and sort key, with asynchronous index updates."
+    }
+  ],
+  "writeBoundaries": [
+    {
+      "id": "unconditional",
+      "label": "Unconditional write",
+      "detail": "Overwrites the targeted item without checking its current business state."
+    },
+    {
+      "id": "conditional",
+      "label": "Conditional write",
+      "detail": "Atomically applies one item mutation only when its version or invariant still matches."
+    },
+    {
+      "id": "transaction",
+      "label": "DynamoDB transaction",
+      "detail": "Commits coordinated item actions as one ACID unit or cancels the whole request."
+    }
+  ],
+  "recoveries": [
+    {
+      "id": "replica-or-stream",
+      "label": "Replica or stream only",
+      "detail": "Improves availability or change propagation, but can copy an accidental mutation."
+    },
+    {
+      "id": "on-demand-snapshot",
+      "label": "Occasional on-demand backup",
+      "detail": "Preserves named milestones but leaves gaps between backup times."
+    },
+    {
+      "id": "pitr",
+      "label": "Point-in-time recovery",
+      "detail": "Continuously captures recovery points and restores the selected time to a new table."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "checkout-receipt",
+      "label": "Show a receipt immediately after checkout",
+      "detail": "An order and its payment ledger entry must commit together, then the receipt must show the committed order.",
+      "requirement": "Commit the order and ledger entry all-or-nothing, read the latest committed order by primary key, and retain a recovery point before an accidental application write.",
+      "expected": {
+        "readPathId": "base-strong",
+        "writeBoundaryId": "transaction",
+        "recoveryId": "pitr"
+      },
+      "rationale": {
+        "readPath": "The receipt is a read-your-write path. A strongly consistent base-table read can return the latest committed item; a GSI cannot provide that option.",
+        "writeBoundary": "The order and ledger entry form one business operation. A transaction prevents one item from committing while the other fails.",
+        "recovery": "PITR can restore the table to a selected second in a new table. A replica or stream can propagate the same accidental mutation instead of undoing it."
+      },
+      "safeOutcome": "The checkout commits as one unit, the receipt reads the committed order from the authoritative key, and operators can restore a clean point into a new table.",
+      "unsafeOutcome": "A customer can observe a stale receipt, a split order/payment state, or no trustworthy rollback point after a destructive write."
+    },
+    {
+      "id": "open-orders-dashboard",
+      "label": "List open orders by status and time",
+      "detail": "Operators need a query that the base primary key does not support, and a few seconds of index lag is acceptable.",
+      "requirement": "Query open orders by status and creation time without scanning, protect each status transition from a stale worker, and recover from accidental bulk updates.",
+      "expected": {
+        "readPathId": "gsi-eventual",
+        "writeBoundaryId": "conditional",
+        "recoveryId": "pitr"
+      },
+      "rationale": {
+        "readPath": "A GSI can use status as its partition key and creation time as its sort key. GSI reads are eventually consistent, which this dashboard explicitly tolerates.",
+        "writeBoundary": "Each order transition is one-item state-machine work. A condition on the current status or version rejects a stale worker without paying for a multi-item transaction.",
+        "recovery": "PITR covers an accidental bulk update. An index is another copy of selected attributes, not an independent backup."
+      },
+      "safeOutcome": "The dashboard queries an index shaped for the access pattern, stale transition attempts fail atomically, and the source table has a restorable history.",
+      "unsafeOutcome": "The application may scan, demand unsupported strong reads from a GSI, overwrite a newer state, or discover that its secondary copy contains the same corruption."
+    },
+    {
+      "id": "inventory-reservation",
+      "label": "Reserve inventory without overselling",
+      "detail": "The displayed count may be slightly stale, but the authoritative mutation must never reduce stock below zero.",
+      "requirement": "Read the product by primary key, atomically decrement only when stock remains, and preserve recoverability from a bad deployment or operator command.",
+      "expected": {
+        "readPathId": "base-eventual",
+        "writeBoundaryId": "conditional",
+        "recoveryId": "pitr"
+      },
+      "rationale": {
+        "readPath": "The UI may use the cheaper eventual base-table read because the displayed count is advisory. Read freshness alone cannot prevent a race.",
+        "writeBoundary": "A conditional UpdateItem such as stock >= requested units is the authoritative no-oversell boundary. It evaluates atomically with the mutation.",
+        "recovery": "PITR provides continuous recovery points and restores to a new table. It complements, rather than replaces, the conditional business invariant."
+      },
+      "safeOutcome": "The UI remains inexpensive, concurrent reservations cannot cross the stock invariant, and an unrelated destructive write remains recoverable.",
+      "unsafeOutcome": "Treating a pre-read as a lock can oversell under concurrency, while a replica or stream can faithfully reproduce the bad state."
+    }
+  ]
+}

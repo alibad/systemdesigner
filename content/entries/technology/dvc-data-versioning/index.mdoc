@@ -1,0 +1,312 @@
+---
+registryId: dvc-data-versioning
+---
+
+{% section-card tone="intro" %}
+## What is DVC data versioning?
+
+**DVC (Data Version Control) connects large data and model files to the Git revision
+that uses them without putting those large files in Git.** Git stores small DVC
+metadata, pipeline definitions, parameters, and code. DVC stores file contents in a
+content-addressed cache and can copy those contents to a shared remote.
+
+This separation matters because an ML result is not reproducible from source code
+alone. You also need the exact input data, parameters, pipeline graph, environment,
+and produced artifacts.
+
+{% callout variant="info" %}
+The core invariant is **a Git revision identifies the desired project state, but that
+state is recoverable only while every referenced content hash remains available in a
+local cache or DVC remote**.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Git metadata" eyebrow="Identity" icon="braces" tone="blue" %}
+Git versions `.dvc` files, `dvc.yaml`, `dvc.lock`, parameters, metrics, plots, and
+source code. These files describe which content and computation belong together.
+{% /concept-card %}
+{% concept-card title="DVC cache" eyebrow="Local content" icon="database" tone="violet" %}
+The local cache stores artifacts by content hash. DVC links cached content into the
+workspace and can reuse unchanged files or stage results.
+{% /concept-card %}
+{% concept-card title="DVC remote" eyebrow="Shared durability" icon="cloud" tone="green" %}
+A remote holds cached objects outside one laptop or runner. `dvc push` publishes
+referenced content; `dvc pull` retrieves it and updates the workspace.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one dataset from bytes to a reproducible revision
+
+`dvc add data/raw` does not upload data or commit anything to Git. It hashes the
+target, places its content in the cache, writes a small metadata file, and adds the
+workspace path to `.gitignore`.
+
+{% system-flow title="One versioned dataset path" caption="Git preserves the pointer and project definition; DVC storage preserves the referenced bytes." %}
+{% system-node title="Workspace" eyebrow="Readable path" icon="storage" tone="cyan" %}
+`data/raw` looks like an ordinary directory used by scripts and notebooks.
+{% /system-node %}
+{% system-node title="Local cache" eyebrow="Content hash" icon="database" tone="violet" %}
+DVC stores the content once and links or copies it into the workspace.
+{% /system-node %}
+{% system-node title="Git repository" eyebrow="Small metadata" icon="braces" tone="blue" %}
+`data/raw.dvc` maps the readable path to its hash, size, and object count.
+{% /system-node %}
+{% system-node title="DVC remote" eyebrow="Shared objects" icon="cloud" tone="green" %}
+`dvc push` transfers missing cache objects so another checkout can recover the data.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the commands in the right transaction
+
+1. Change or acquire the data and validate its schema, license, privacy class, and
+   source.
+2. Run `dvc add` for standalone data or let a DVC pipeline stage produce the output.
+3. Run `dvc push` so the referenced objects exist outside the current machine.
+4. Commit DVC metadata, code, parameters, and the lockfile to Git.
+5. In CI or on another machine, check out the Git revision and run `dvc pull` or
+   `dvc checkout` against an already populated cache.
+
+{% code-block file="/api/content/technology/dvc-data-versioning/code/version-and-publish-data.sh" language="bash" title="Version a dataset and publish its objects before the Git pointer" /%}
+
+`dvc push` and `git push` are separate operations. A Git commit can therefore point to
+objects that were never uploaded. Make publication order and post-push verification
+part of the delivery workflow instead of treating remote storage as an automatic side
+effect of `git commit`.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Plan cache and remote placement from change rate
+
+Content addressing avoids storing one complete copy per version when most files are
+unchanged. It does not make storage free: a rewritten archive or monolithic checkpoint
+has a new hash even if its logical records mostly match the previous version.
+
+{% interactive-block id="technology/dvc-data-versioning-artifact-placement-lab" dataFile="/api/content/technology/dvc-data-versioning/data/artifact-placement-model.json" /%}
+
+### Read the estimate correctly
+
+- The lab models retained unique content as the first version plus the changed share
+  of each later version. Real usage depends on file boundaries and actual hashes.
+- A directory with many independently hashed files can reuse unchanged members. One
+  repeatedly rewritten archive usually invalidates the whole object.
+- Copy cache mode can require another workspace-sized copy. Reflink, hardlink, and
+  symlink modes have different filesystem support and mutation semantics.
+- A shared remote protects collaboration only when the exact referenced objects were
+  pushed and retained. It is not a substitute for bucket durability, access control,
+  retention policy, or recovery testing.
+
+{% callout variant="warn" %}
+Do not market a rough compression or deduplication ratio as a DVC guarantee. Measure
+unique cache bytes, object counts, transfer time, and restored checksums on the real
+file layout.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Define a pipeline as a hashable dependency graph
+
+A DVC pipeline stage declares a command, dependencies, parameter keys, outputs, and
+optional metrics or plots. `dvc.yaml` is the human-authored graph. `dvc.lock` records
+resolved dependency and output hashes after execution.
+
+{% process-flow %}
+{% process-step number="1" title="Ingest immutable input" label="Source" %}
+Validate the source contract and publish a versioned raw-data output. Preserve a
+source identifier or acquisition timestamp alongside the bytes.
+{% /process-step %}
+{% process-step number="2" title="Prepare features" label="Transform" %}
+Declare raw data, transformation code, and preprocessing parameters as dependencies.
+Write a deterministic, replaceable feature artifact.
+{% /process-step %}
+{% process-step number="3" title="Train the model" label="Compute" %}
+Declare features, training code, and selected parameter keys. Emit the model plus
+machine-readable metrics.
+{% /process-step %}
+{% process-step number="4" title="Evaluate the candidate" label="Evidence" %}
+Compare the candidate against explicit thresholds and data slices. Keep evaluation
+outputs tied to the same lockfile.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/dvc-data-versioning/code/dvc.yaml" language="yaml" title="A concise prepare, train, and evaluate pipeline" /%}
+
+{% code-block file="/api/content/technology/dvc-data-versioning/code/params.yaml" language="yaml" title="Versioned parameters referenced by exact keys" /%}
+
+### Understand what `dvc repro` decides
+
+For each target stage, DVC compares the current command, dependencies, parameters, and
+declared outputs with the recorded stage state. Changed upstream output propagates to
+downstream stages. Unchanged stages can be skipped or restored from run cache when the
+required cached outputs exist.
+
+{% interactive-block id="technology/dvc-data-versioning-invalidation-recovery-lab" dataFile="/api/content/technology/dvc-data-versioning/data/invalidation-recovery-model.json" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate version restoration from computation
+
+Several DVC commands sound similar but change different state:
+
+{% concept-grid columns="4" %}
+{% concept-card title="dvc checkout" eyebrow="Workspace" icon="storage" tone="cyan" %}
+Replace DVC-tracked workspace paths with the versions referenced by the current Git
+revision. It normally expects required objects to exist in the local cache.
+{% /concept-card %}
+{% concept-card title="dvc pull" eyebrow="Transfer + workspace" icon="cloud" tone="blue" %}
+Download missing referenced objects from a remote and update tracked workspace paths.
+Use it after checking out the intended Git revision.
+{% /concept-card %}
+{% concept-card title="dvc repro" eyebrow="Computation" icon="workflow" tone="violet" %}
+Evaluate the pipeline graph and run invalidated stages needed for the requested target.
+It does not publish results to the shared remote.
+{% /concept-card %}
+{% concept-card title="dvc push" eyebrow="Publication" icon="cloud" tone="green" %}
+Upload cache objects referenced by the current project state. It does not create a Git
+commit or validate a model for release.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Use the smallest correct recovery action
+
+- **Missing workspace file, object cached locally:** run `dvc checkout`.
+- **Missing local object, object present remotely:** run `dvc pull`.
+- **Dependency or parameter changed:** inspect `dvc status`, then run `dvc repro` for
+  the intended target.
+- **Output is missing everywhere but reproducible:** rerun the producing stage and its
+  invalidated descendants, then publish the new cache state.
+- **Output is missing and not reproducible:** restore the source from an independent
+  backup or upstream system. Git metadata cannot reconstruct absent bytes.
+
+Do not start incident response with `dvc repro --force`. A full recomputation can be
+expensive, can overwrite useful workspace evidence, and cannot recover an unavailable
+external source.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Build a team workflow that closes the publication gap
+
+{% process-flow %}
+{% process-step number="1" title="Review metadata" label="Pull request" %}
+Review pipeline edges, parameter changes, output declarations, source policy, and
+lockfile changes. A changed hash is evidence of different bytes, not evidence of
+better data.
+{% /process-step %}
+{% process-step number="2" title="Verify remote objects" label="CI" %}
+Use scoped credentials to fetch required data, reproduce or restore the target, and
+verify checksums, metrics, and policy gates.
+{% /process-step %}
+{% process-step number="3" title="Publish atomically by convention" label="Release" %}
+Push DVC objects before merging or tagging the Git pointer. Record the Git revision,
+data hash, model hash, and environment identifier in the release manifest.
+{% /process-step %}
+{% process-step number="4" title="Restore from a clean runner" label="Proof" %}
+Regularly test a cache-empty checkout. A green run using one developer's warm cache
+does not prove the remote contains everything.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep credentials out of Git
+
+- Commit shareable remote definitions in `.dvc/config`.
+- Put user-specific endpoints or sensitive settings in `.dvc/config.local`, which DVC
+  normally excludes from Git.
+- Prefer workload identity or short-lived environment credentials over long-lived
+  access keys.
+- Give CI read access by default and grant write or deletion rights only to explicit
+  publication and retention jobs.
+- Protect the Git branch and DVC remote together; changing either side can break the
+  revision-to-content mapping.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Test failure behavior before trusting reproducibility
+
+### Missing or unpublished objects
+
+`dvc pull` fails when the current metadata references an object absent from every
+configured remote. Alert on the missing hash, preserve the Git revision, and determine
+whether another cache or upstream source still has the bytes. Do not rewrite metadata
+to a convenient nearby dataset.
+
+### Interrupted publication
+
+Object uploads can be retried because content-addressed destinations are stable, but a
+workflow still needs to verify that every object referenced by the intended revision
+exists before publishing the Git pointer.
+
+### Unsafe garbage collection
+
+`dvc gc` removes unreferenced cache objects according to the revisions and repositories
+included in the command. Remote garbage collection can affect teammates and historical
+revisions. Inventory protected branches, tags, experiment refs, and dependent projects;
+dry-run the retention decision externally; back up critical remote data; and test an
+old restore before deletion.
+
+### Nondeterministic stages
+
+DVC can detect declared changes, but it cannot make training deterministic. Seeds,
+library versions, hardware kernels, external services, wall-clock inputs, and undeclared
+files can change an output. Capture them or explicitly label the result as
+non-bit-reproducible.
+{% /section-card %}
+
+{% section-card %}
+## Operate DVC as a provenance system
+
+### Monitor the recovery path
+
+- Cache size, object count, inode usage, and workspace link mode
+- Remote object count, retained bytes, upload failures, and missing-object errors
+- `dvc pull` bytes, duration, retry count, and clean-runner restore success
+- Stage invalidation reason, run duration, cache hit or restoration result, and output
+  checksum
+- Git revision, `dvc.lock` diff, parameter diff, data source identifier, and model
+  release decision
+
+### Choose DVC for the right boundary
+
+DVC is a strong fit for Git-centered projects where a team versions bounded datasets,
+models, and pipelines together. It is less suitable as the transaction layer for a
+high-concurrency data lake, row-level collaborative editing, streaming state, or a
+petabyte-scale namespace with tens of thousands of frequently synchronized files.
+Keep the authoritative operational dataset in the system designed for that workload
+and use DVC for project-scoped snapshots or derived artifacts when appropriate.
+
+### Production review checklist
+
+- [ ] Every release can be restored from a clean machine using documented identities.
+- [ ] DVC objects are pushed before the Git revision becomes a shared dependency.
+- [ ] Pipeline commands declare every meaningful code, data, parameter, and environment
+  dependency.
+- [ ] Outputs are immutable or replaceable and are validated before publication.
+- [ ] Credentials are scoped, short-lived, and absent from committed configuration.
+- [ ] Remote retention protects supported branches, tags, experiments, and downstream
+  consumers.
+- [ ] Recovery drills cover missing cache, missing remote objects, partial uploads, and
+  unavailable external sources.
+{% /section-card %}
+
+{% section-card %}
+## Verify behavior against primary documentation
+
+- [DVC get started](https://doc.dvc.org/start) explains `.dvc` metadata, the local
+  content-addressed cache, remotes, push, pull, and version switching.
+- [DVC data pipelines](https://doc.dvc.org/start/data-pipelines/data-pipelines)
+  introduces the dependency graph, `dvc.yaml`, `dvc.lock`, and `dvc repro`.
+- [Remote storage](https://doc.dvc.org/user-guide/data-management/remote-storage)
+  documents supported remotes and the relationship between cache and shared storage.
+- [Running pipelines](https://doc.dvc.org/user-guide/pipelines/running-pipelines)
+  describes stage invalidation, reproduction, and run-cache behavior.
+- [`dvc repro`](https://doc.dvc.org/command-reference/repro),
+  [`dvc pull`](https://doc.dvc.org/command-reference/pull), and
+  [`dvc gc`](https://doc.dvc.org/command-reference/gc) define the operational command
+  boundaries and destructive retention behavior.
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/dvc-data-versioning/quiz/dvc-production-workflow.json"
+   lessonSlug="dvc-data-versioning"
+   title="DVC Reproducibility and Operations Review"
+/%}

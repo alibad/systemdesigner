@@ -1,0 +1,185 @@
+---
+registryId: zero-trust-mesh-architecture
+---
+
+{% section-card tone="intro" %}
+## What is zero-trust mesh architecture?
+
+**Zero-trust mesh architecture applies explicit workload identity, request-level authorization, encrypted transport, and continuous evidence to service-to-service communication.** It removes the shortcut that a caller is trustworthy because it runs inside a cluster, virtual network, namespace, or service mesh.
+
+In plain language, every request has to answer two different questions:
+
+1. **Who is calling?** Validate a cryptographic workload identity from a trusted issuer.
+2. **May that caller perform this action now?** Evaluate the principal, destination, method, resource, and relevant context against an explicit policy.
+
+A [service mesh](/technology/service-mesh) can distribute certificates, encrypt traffic, expose identity attributes, and enforce policy near each workload. It is an enforcement substrate, not a complete zero-trust program. Identity issuance, least-privilege policy, application authorization, telemetry, recovery, and governance still need owners and evidence.
+
+{% callout variant="warn" %}
+### Core invariant
+
+Network location and successful mTLS grant no business privilege. Authenticate both workloads, authorize the exact request, keep credentials and policies short-lived or bounded, and deny when required evidence is missing or invalid.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Keep identity, transport, and authorization separate
+
+The controls cooperate, but each answers a different question. Combining them into one “trust score” hides which boundary failed.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Workload identity" eyebrow="Who is this process?" icon="key" tone="blue" %}
+Bind a stable principal to attested runtime properties. A SPIFFE ID is one portable identity format; the issuing trust domain and registration process determine whether it is credible.
+{% /concept-card %}
+{% concept-card title="Authenticated transport" eyebrow="Who is on each end?" icon="lock" tone="cyan" %}
+mTLS validates presented identities and protects traffic in transit. It does not decide whether checkout may create a charge or analytics may read a customer record.
+{% /concept-card %}
+{% concept-card title="Request authorization" eyebrow="May this action run?" icon="shield" tone="violet" %}
+Match the authenticated principal with destination, operation, resource, tenant, data class, and risk context. Use default deny so missing rules do not create access.
+{% /concept-card %}
+{% concept-card title="Decision evidence" eyebrow="Can we prove what happened?" icon="search" tone="green" %}
+Record policy version, principal, normalized action, decision, and reason without logging secrets or sensitive payloads. Monitor both denies and unexpectedly broad allows.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A protected request crosses four boundaries
+
+{% system-flow title="Identity-aware service request" caption="The mesh can enforce transport and policy near workloads, while the identity and policy control planes distribute signed material out of band." %}
+{% system-node title="Attested caller" eyebrow="1. Establish identity" icon="key" tone="blue" %}
+The identity system maps runtime evidence to a workload principal and delivers a short-lived credential through a local workload API.
+{% /system-node %}
+{% system-node title="Authenticated channel" eyebrow="2. Verify peers" icon="lock" tone="cyan" %}
+Client and server proxies validate credentials against the intended trust domain before application bytes cross the boundary.
+{% /system-node %}
+{% system-node title="Local policy gate" eyebrow="3. Authorize request" icon="shield" tone="violet" %}
+The enforcement point evaluates a signed policy bundle using the caller, destination, method, resource, and context.
+{% /system-node %}
+{% system-node title="Application handler" eyebrow="4. Enforce business rules" icon="server" tone="green" %}
+The service still validates tenant ownership, object state, and domain invariants that a network proxy cannot infer.
+{% /system-node %}
+{% /system-flow %}
+
+The [SPIFFE identity specification](https://spiffe.io/docs/latest/spiffe-specs/spiffe-id/) defines a workload identity as a URI containing a trust domain and path. The path is operator-defined metadata, not proof by itself. Trust comes from attestation, issuance, credential validation, and an explicitly configured federation relationship.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Lab 1: build the authorization decision
+
+Change the requested action, the presented workload credential, and the enforcement profile. Watch identity authentication and request authorization succeed or fail independently.
+
+{% interactive-block id="fundamentals/zero-trust-mesh-architecture-calculator" dataFile="/api/content/fundamentals/zero-trust-mesh-architecture/data/authorization-decision-model.json" /%}
+
+Use the lab to test these cases:
+
+- A valid checkout credential can authenticate but must still be denied access to unrelated customer data.
+- An expired credential fails before policy evaluation, even when its principal name appears in an allow rule.
+- Namespace-wide access is narrower than mesh-wide access but still grants every matching workload more methods and resources than most need.
+- An exact allow needs every required attribute to match. Omitted or mismatched evidence produces a default deny.
+
+The important distinction is **authenticated is not authorized**. Enabling strict mTLS without an authorization policy creates a strongly authenticated flat network.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Distribute policy without making every request depend on the control plane
+
+A data-plane enforcement point should usually evaluate requests locally from a validated policy bundle. The policy control plane compiles, signs, distributes, and observes policy; it should not need to answer every request synchronously.
+
+{% process-flow %}
+{% process-step number="1" title="Author and test policy" label="Control plane" %}
+Review source identity, destination, action, resource, context, and exceptions. Test allow and deny cases before promotion.
+{% /process-step %}
+{% process-step number="2" title="Compile and sign a bundle" label="Artifact" %}
+Produce deterministic policy data with a version, expiry, target scope, and signature that enforcement points can validate.
+{% /process-step %}
+{% process-step number="3" title="Distribute to local gates" label="Data plane" %}
+Push the bundle out of band. Each proxy validates and activates it atomically while retaining a bounded last-known-good version if policy permits.
+{% /process-step %}
+{% process-step number="4" title="Evaluate and record" label="Request path" %}
+Authorize locally, attach a stable reason code, emit decision telemetry, and keep application-specific object checks in the service.
+{% /process-step %}
+{% /process-flow %}
+
+### Do not collapse every failure into “access denied”
+
+- **Identity failure:** the peer credential is invalid, expired, untrusted, or bound to the wrong workload. Stop before authorization.
+- **Authorization denial:** identity is valid, but no rule permits the action. Return a stable denial and do not invoke the handler.
+- **Policy-distribution failure:** the local gate has no usable bundle. Apply a documented fail-closed or bounded last-known-good rule.
+- **Destination failure:** identity and policy passed, but the service is unavailable. Report availability separately from access control.
+
+{% callout variant="info" %}
+### Availability is part of the security design
+
+Fail-closed protects authorization but can create an outage. A signed, versioned, short-lived last-known-good bundle can reduce control-plane coupling without silently disabling policy. Fail-open is a security exception that needs explicit risk ownership, a narrow scope, telemetry, and a short automatic expiry.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: inject a request-path failure
+
+Select a failure, then choose what the local gate does when its current policy bundle is unavailable. The trace shows where execution stops, the client-visible response, and whether authorization was preserved or bypassed.
+
+{% interactive-block id="fundamentals/zero-trust-mesh-architecture-request-path-lab" dataFile="/api/content/fundamentals/zero-trust-mesh-architecture/data/request-path-failure-model.json" /%}
+
+Notice what the fallback cannot change:
+
+- Fail-open cannot make an expired workload credential valid.
+- A cached policy cannot override an explicit deny from that same policy.
+- A healthy authorization decision cannot make a failed destination available.
+- Only the policy-distribution scenario should consult the policy-unavailable fallback.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Implement explicit policy and failure contracts
+
+The first example models a default-deny decision. It verifies trusted, unexpired identity evidence before matching every required request attribute. Production systems should use maintained policy engines and identity libraries; this small example exists to make the decision contract visible.
+
+{% code-block file="/api/content/fundamentals/zero-trust-mesh-architecture/code/zero-trust-policy-engine-py.py" language="python" title="Evaluate an explicit workload authorization rule" /%}
+
+The second example keeps request-path outcomes distinct and permits a signed cached bundle only inside a fixed age limit. It never treats policy unavailability as permission.
+
+{% code-block file="/api/content/fundamentals/zero-trust-mesh-architecture/code/service-mesh-security-ts.ts" language="typescript" title="Apply bounded policy fallback behavior" /%}
+
+For a concrete service-mesh implementation, [Istio recommends a default-deny authorization pattern](https://istio.io/latest/docs/ops/best-practices/security/) and exposes source identity, operation, and conditions in `AuthorizationPolicy`. Product authorization still belongs at the layer that understands tenants, ownership, transaction state, and business invariants.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Roll out zero trust as a controlled migration
+
+### Build the identity foundation
+
+- Define trust domains around real administrative and security boundaries; do not copy production trust roots into staging.
+- Attest nodes and workloads before issuing identities. Protect the local workload API because it bootstraps credentials without an application secret.
+- Automate credential and trust-bundle rotation. Exercise overlapping roots, revoked roots, clock skew, and expired credentials.
+- Require both client and server identity so callers do not send sensitive requests to an unverified destination.
+
+### Move from reachability to least privilege
+
+- Inventory observed service calls, then confirm them with owning teams. Traffic history is evidence, not automatic permission.
+- Begin with audit or dry-run where supported, but define an end date for observation-only policy.
+- Install a default-deny boundary, then add narrow allows for principal, destination, action, and context.
+- Keep emergency access separate, time-bounded, strongly authenticated, and independently reviewed.
+
+### Preserve user and operator safety
+
+- Separate policy denials, identity failures, control-plane faults, and destination errors in metrics and alerts.
+- Version every policy and record who approved it, where it was enforced, and when it expires.
+- Test stale policy, bad policy, partial rollout, identity issuer outage, root rotation, proxy bypass, and overloaded decision telemetry.
+- Give responders a safe rollback to a previously signed policy, not a switch that disables authorization globally.
+{% /section-card %}
+
+{% section-card %}
+## Review the architecture against its actual promise
+
+Before calling a deployment zero trust, verify:
+
+1. Every protected request has a cryptographically validated principal from an intended trust domain.
+2. mTLS is enforced in both directions, including paths that bypass normal service discovery.
+3. At least one explicit authorization layer checks the action; “inside the mesh” is not an allow condition.
+4. Application services retain tenant, object, and business-state authorization that proxies cannot evaluate.
+5. Missing, expired, or invalid evidence produces a bounded, documented outcome.
+6. Decision logs identify policy version and reason without exposing credentials or sensitive payloads.
+7. Operators can rotate roots, revoke workloads, roll back policy, and recover from control-plane loss without disabling every boundary.
+
+NIST [SP 800-207A](https://csrc.nist.gov/pubs/sp/800/207/a/final) describes a cloud-native zero-trust model built from identity-tier and network-tier policies, enforcement components, and monitoring. It treats a service mesh as enabling infrastructure inside a comprehensive policy framework, not as the zero-trust architecture by itself.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/zero-trust-mesh-architecture/quiz/zero-trust-mesh-architecture.json" lessonSlug="zero-trust-mesh-architecture" title="Zero-Trust Mesh Decisions" /%}

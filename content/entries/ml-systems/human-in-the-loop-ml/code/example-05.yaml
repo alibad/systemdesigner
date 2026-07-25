@@ -1,0 +1,215 @@
+# Human-in-the-Loop ML Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hitl-ml-service
+  labels:
+    app: hitl-ml
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hitl-ml
+  template:
+    metadata:
+      labels:
+        app: hitl-ml
+    spec:
+      containers:
+      - name: hitl-service
+        image: ml-platform/hitl-ml:v1.5.0
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+            nvidia.com/gpu: "1"
+        env:
+        - name: ML_MODEL_PATH
+          value: "/models/production_model.pt"
+        - name: REDIS_HOST
+          value: "redis-cluster"
+        - name: REVIEW_TIMEOUT_HOURS
+          value: "24"
+        - name: AUTO_APPROVE_THRESHOLD
+          value: "0.95"
+        - name: EXPERT_ESCALATION_THRESHOLD
+          value: "0.5"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+        - name: workflow-configs
+          mountPath: /configs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 15
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: ml-models-pvc
+      - name: workflow-configs
+        configMap:
+          name: hitl-workflow-configs
+
+---
+# Human Review Interface
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: review-interface
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: review-interface
+  template:
+    metadata:
+      labels:
+        app: review-interface
+    spec:
+      containers:
+      - name: review-ui
+        image: ml-platform/review-interface:v1.2.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: API_ENDPOINT
+          value: "http://hitl-ml-service:8000"
+        - name: AUTH_PROVIDER
+          value: "oauth2"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "0.5"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+
+---
+# Redis Cluster for Queue Management
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-hitl-cluster
+spec:
+  serviceName: "redis-hitl"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-hitl
+  template:
+    metadata:
+      labels:
+        app: redis-hitl
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - --cluster-enabled
+        - "yes"
+        - --cluster-config-file
+        - nodes.conf
+        - --cluster-node-timeout
+        - "5000"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "0.5"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        volumeMounts:
+        - name: redis-storage
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+# Workflow Orchestrator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-orchestrator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: workflow-orchestrator
+  template:
+    metadata:
+      labels:
+        app: workflow-orchestrator
+    spec:
+      containers:
+      - name: orchestrator
+        image: ml-platform/workflow-orchestrator:v1.0.0
+        env:
+        - name: REDIS_HOST
+          value: "redis-hitl-cluster"
+        - name: HITL_SERVICE_ENDPOINT
+          value: "http://hitl-ml-service:8000"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+
+---
+# Monitoring and Analytics
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hitl-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hitl-analytics
+  template:
+    metadata:
+      labels:
+        app: hitl-analytics
+    spec:
+      containers:
+      - name: analytics
+        image: ml-platform/hitl-analytics:v1.0.0
+        ports:
+        - containerPort: 8080
+        env:
+        - name: REDIS_HOST
+          value: "redis-hitl-cluster"
+        - name: PROMETHEUS_ENDPOINT
+          value: "http://prometheus:9090"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"

@@ -1,0 +1,104 @@
+{
+  "defaults": { "pattern": "cache-aside", "scenario": "stale-write" },
+  "patterns": [
+    {
+      "id": "cache-aside",
+      "label": "Cache-aside",
+      "detail": "The application reads the source on a miss and owns population and invalidation.",
+      "authority": "The source database is authoritative; the cache is a disposable read copy.",
+      "path": "Read: app -> cache -> source on miss -> cache. Write: app -> source -> delete or version cache key."
+    },
+    {
+      "id": "read-through",
+      "label": "Read-through",
+      "detail": "The cache provider loads a miss from a configured source adapter.",
+      "authority": "The source database remains authoritative; the cache owns miss loading policy.",
+      "path": "Read: app -> cache -> source adapter on miss. Write: application still commits source and refreshes or invalidates cache."
+    },
+    {
+      "id": "write-through",
+      "label": "Write-through",
+      "detail": "A write updates the cache and durable source in one synchronous flow.",
+      "authority": "The durable source is authoritative after the write completes; the cache mirrors the acknowledged value.",
+      "path": "Read: app -> cache. Write: app -> cache write path -> durable source -> acknowledgement."
+    },
+    {
+      "id": "write-behind",
+      "label": "Write-behind",
+      "detail": "A cache accepts a write and flushes it to the source asynchronously.",
+      "authority": "Before flush, the cache holds accepted but not yet durable state; after flush, the source is durable authority.",
+      "path": "Read: app -> cache. Write: app -> cache -> asynchronous flush queue -> source."
+    },
+    {
+      "id": "event-invalidation",
+      "label": "Event invalidation",
+      "detail": "A committed source write emits an event that removes or versions derived cache entries.",
+      "authority": "The source database is authoritative; an outbox event distributes cache coherence work.",
+      "path": "Write: app -> source transaction + outbox -> event consumer -> invalidate or version cache entries."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "stale-write",
+      "label": "Stale write or lost invalidation",
+      "detail": "A source record changes while a previous cache value can still be served."
+    },
+    {
+      "id": "source-outage",
+      "label": "Source outage",
+      "detail": "The database is unavailable while reads or writes continue to arrive."
+    },
+    {
+      "id": "synchronized-expiry",
+      "label": "Synchronized expiry",
+      "detail": "Many popular keys expire at the same time and miss together."
+    },
+    {
+      "id": "hot-key",
+      "label": "Hot key",
+      "detail": "One key receives a disproportionate share of traffic."
+    },
+    {
+      "id": "regional-partition",
+      "label": "Regional partition",
+      "detail": "Regions cannot exchange invalidations or reach a shared source reliably."
+    }
+  ],
+  "effects": {
+    "cache-aside": {
+      "stale-write": { "staleRisk": "High when deletion is lost or ordered before the source commit.", "duplicateRisk": "Low for reads; retries of the application write still need idempotency.", "blastRadius": "Usually one key or tag, but a bad namespace can invalidate a whole feature.", "recovery": "Commit source first, then delete or version the key. Re-read from source and repair the affected cache namespace." },
+      "source-outage": { "staleRisk": "Controlled only if stale-if-error is explicitly allowed and bounded.", "duplicateRisk": "Low for reads; reject or queue writes rather than pretending they committed.", "blastRadius": "Every cold key becomes an unavailable read; hot cached keys may remain available.", "recovery": "Serve bounded stale data only for safe reads, use circuit breaking, and warm priority keys after source recovery." },
+      "synchronized-expiry": { "staleRisk": "Low, but source pressure can turn misses into user-visible failures.", "duplicateRisk": "Many identical source reads can run concurrently without request coalescing.", "blastRadius": "All keys sharing a TTL boundary can overload the source pool.", "recovery": "Add TTL jitter, singleflight or leases, and negative caching for known absent keys." },
+      "hot-key": { "staleRisk": "Depends on invalidation delivery; a hot stale value is highly visible.", "duplicateRisk": "Low, unless each miss triggers an independent refresh.", "blastRadius": "One key can saturate a cache shard or reconnecting clients.", "recovery": "Coalesce refreshes, replicate or shard the hot value deliberately, and rate-limit abusive clients." },
+      "regional-partition": { "staleRisk": "Regions can serve divergent copies until TTL or reconciliation closes the gap.", "duplicateRisk": "Write retries across regions can repeat work without an idempotency key.", "blastRadius": "One region can drift; a global cache key makes the failure wider.", "recovery": "Choose a write region, fence conflicting writers, expire or version on reconnection, and reconcile durable records." }
+    },
+    "read-through": {
+      "stale-write": { "staleRisk": "Medium: read loading is centralized, but writes still need a source-first invalidation rule.", "duplicateRisk": "Low for reads; adapter retries must not repeat mutations.", "blastRadius": "A faulty adapter policy can affect every key using that cache cluster.", "recovery": "Make the source commit and cache version explicit; invalidate affected keys and verify adapter observability." },
+      "source-outage": { "staleRisk": "Bounded only by explicit stale serving; misses fail at the adapter boundary.", "duplicateRisk": "Low for reads; writes must report uncertainty rather than rely on a read adapter.", "blastRadius": "Cold reads across the adapter fail together when its source dependency is down.", "recovery": "Use a short circuit breaker and a documented stale-if-error window for safe resources." },
+      "synchronized-expiry": { "staleRisk": "Low, but the adapter can create a coordinated miss storm.", "duplicateRisk": "Duplicate loads are possible unless the cache coalesces them.", "blastRadius": "Cluster-wide TTL alignment can overload the source adapter and database.", "recovery": "Use per-key jitter and provider-supported request collapsing or refresh-ahead for proven hot keys." },
+      "hot-key": { "staleRisk": "Medium if refresh is delayed; a hot key magnifies one cache policy error.", "duplicateRisk": "Concurrent loads may duplicate source reads.", "blastRadius": "A single cache node or source connection pool can become the bottleneck.", "recovery": "Pin or replicate carefully, collapse loads, and verify the adapter has per-key metrics." },
+      "regional-partition": { "staleRisk": "Regional adapters may read different source replicas or retain isolated values.", "duplicateRisk": "Cross-region write retries remain an application concern.", "blastRadius": "The partition is scoped to the affected region unless cache routing is global.", "recovery": "Use regional authority and reconciliation rules; do not assume read-through creates cross-region coherence." }
+    },
+    "write-through": {
+      "stale-write": { "staleRisk": "Low only when the cache and durable source acknowledge the same version; split failures remain possible.", "duplicateRisk": "A retry after an uncertain acknowledgement can repeat a write without an idempotency key.", "blastRadius": "A broken synchronous write path blocks all writes using it.", "recovery": "Use version checks and idempotency keys, then reconcile any cache/source disagreement before reopening writes." },
+      "source-outage": { "staleRisk": "Reads may remain fresh enough, but synchronous writes should fail or queue explicitly.", "duplicateRisk": "Retrying a timed-out write can duplicate an effect.", "blastRadius": "Write availability is coupled to source availability.", "recovery": "Reject or durably queue writes with a visible status; do not acknowledge a durable write that the source did not confirm." },
+      "synchronized-expiry": { "staleRisk": "Low for recently written keys; cold-key read misses still fan into the source.", "duplicateRisk": "Low for writes, possible for uncoalesced read fills.", "blastRadius": "Read storms still pressure the source even though writes are synchronized.", "recovery": "Jitter expiration, coalesce fills, and separate write capacity from read-miss capacity." },
+      "hot-key": { "staleRisk": "Low when writes complete, but one hot mutable key serializes synchronous write latency.", "duplicateRisk": "Client retries need idempotency around the write request.", "blastRadius": "The hot key can consume cache and source write capacity.", "recovery": "Serialize with a version or conditional write, publish read replicas carefully, and measure write contention." },
+      "regional-partition": { "staleRisk": "Each region can acknowledge different versions if multi-writer replication is not fenced.", "duplicateRisk": "High for client retries that cross regions without a global key.", "blastRadius": "A synchronous cross-region dependency can make the partition global.", "recovery": "Prefer one write authority per key, fence stale leaders, and reconcile versions before re-enabling multi-region writes." }
+    },
+    "write-behind": {
+      "stale-write": { "staleRisk": "High: readers can observe cache state that is not yet durable, and flush order matters.", "duplicateRisk": "Flush retries can duplicate non-idempotent source mutations.", "blastRadius": "A flush bug can corrupt or lose every queued write in a cache partition.", "recovery": "Persist an ordered durable write log, make source writes idempotent, and replay with version checks." },
+      "source-outage": { "staleRisk": "The cache can keep accepting writes, but the gap between accepted and durable state grows.", "duplicateRisk": "Flush retries can repeat writes after recovery.", "blastRadius": "A prolonged outage fills cache or write-log capacity and risks data loss on failure.", "recovery": "Apply a durable queue limit, expose flush lag, stop accepting writes before capacity is exhausted, and replay idempotently." },
+      "synchronized-expiry": { "staleRisk": "Expiry can discard accepted-but-unflushed state if the design does not protect it.", "duplicateRisk": "Recovery replays can repeat source writes.", "blastRadius": "Shared expiry settings can destroy a broad set of pending writes.", "recovery": "Do not use ordinary eviction for pending writes; persist and drain a write-ahead log before eviction." },
+      "hot-key": { "staleRisk": "Rapid updates can coalesce or reorder, hiding intermediate states from the source.", "duplicateRisk": "A failed flush batch may replay more than one mutation.", "blastRadius": "One hot key can monopolize a flush worker and delay unrelated writes.", "recovery": "Partition ordered flushes by key, cap coalescing to allowed semantics, and alert on per-key flush lag." },
+      "regional-partition": { "staleRisk": "Independent regional buffers can accept conflicting values while disconnected.", "duplicateRisk": "Both regions can flush the same logical mutation after reconnection.", "blastRadius": "Conflict resolution becomes a data-model problem, not a cache setting.", "recovery": "Avoid multi-writer write-behind unless conflicts are designed; fence writers or use a single durable log authority." }
+    },
+    "event-invalidation": {
+      "stale-write": { "staleRisk": "Medium and bounded by event lag; a missing event leaves stale entries until TTL or repair.", "duplicateRisk": "Events are commonly at-least-once, so invalidation consumers must tolerate duplicate delivery.", "blastRadius": "A bad event schema or broad tag can invalidate a feature-wide cache namespace.", "recovery": "Use a transactional outbox, versioned event IDs, replayable consumers, and periodic cache/source reconciliation." },
+      "source-outage": { "staleRisk": "Existing entries can serve within a documented stale window; no new source commits should emit invalidations.", "duplicateRisk": "Event retries after recovery are normal and should be harmless.", "blastRadius": "Consumers may lag while the source or broker is down, widening freshness delay.", "recovery": "Monitor outbox and consumer lag, pause unsafe writers, then replay events and invalidate affected versions." },
+      "synchronized-expiry": { "staleRisk": "Low if events invalidate early, but expiry can still create a read-miss storm.", "duplicateRisk": "Repeated invalidation events should be no-ops.", "blastRadius": "A shared expiry boundary still overloads the read path if event freshness is not enough.", "recovery": "Add TTL jitter, coalesce fills, and use versioned keys so late events cannot delete newer data." },
+      "hot-key": { "staleRisk": "Fast event lag makes one hot key visibly stale; event fan-out may itself become hot.", "duplicateRisk": "Duplicate events are expected and must not trigger repeated destructive work.", "blastRadius": "A hot entity can flood invalidation consumers and evict a large fan-out of derived keys.", "recovery": "Debounce where semantics permit, version derived keys, and isolate hot-key event partitions and metrics." },
+      "regional-partition": { "staleRisk": "Regions miss invalidations and serve diverging versions until replay completes.", "duplicateRisk": "Replay after reconnection delivers duplicate events by design.", "blastRadius": "The isolated region drifts; global consumers can spread delayed invalidations on recovery.", "recovery": "Keep per-region event cursors, use monotonically increasing versions, replay from the durable log, and invalidate only older versions." }
+    }
+  }
+}

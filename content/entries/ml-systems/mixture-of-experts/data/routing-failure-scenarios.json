@@ -1,0 +1,183 @@
+{
+  "title": "Match the mitigation to the failed MoE stage",
+  "description": "Inject a production symptom, choose a response, and compare its effect on drops, tail latency, load, and availability.",
+  "defaults": {
+    "incidentId": "router-collapse",
+    "mitigationId": "router-regularization"
+  },
+  "incidents": [
+    {
+      "id": "router-collapse",
+      "label": "One expert receives most tokens",
+      "detail": "A domain shift concentrates router probability on one expert and capacity alarms rise.",
+      "failureStage": "route",
+      "signals": [
+        "Expert assignment histogram and coefficient of variation",
+        "Per-expert overflow and token-drop counters",
+        "Router entropy, logit magnitude, and auxiliary loss"
+      ],
+      "outcomes": {
+        "router-regularization": {
+          "score": 94,
+          "verdict": "Correct the routing objective, then retune capacity",
+          "detail": "Balancing pressure and router-logit stabilization address the skew itself. Revalidate quality because forcing uniform traffic too aggressively can erase useful specialization.",
+          "droppedTokensPct": 0.1,
+          "p99LatencyMs": 17,
+          "maxExpertLoadPct": 89,
+          "survivesFailure": true
+        },
+        "capacity-headroom": {
+          "score": 62,
+          "verdict": "Useful containment, incomplete correction",
+          "detail": "Extra capacity absorbs part of the hot load, but the router remains collapsed. Memory and communication grow while the same expert stays a tail-latency bottleneck.",
+          "droppedTokensPct": 1.4,
+          "p99LatencyMs": 27,
+          "maxExpertLoadPct": 121,
+          "survivesFailure": true
+        },
+        "topology-aware-placement": {
+          "score": 35,
+          "verdict": "Placement cannot repair a collapsed router",
+          "detail": "A shorter network path may reduce dispatch time, but it does not change which expert receives tokens or prevent capacity overflow.",
+          "droppedTokensPct": 8.2,
+          "p99LatencyMs": 19,
+          "maxExpertLoadPct": 165,
+          "survivesFailure": false
+        },
+        "redundant-experts": {
+          "score": 55,
+          "verdict": "Replication helps availability, not routing quality",
+          "detail": "A replica can serve hot work, but assignment skew, synchronization cost, and expert-quality drift remain. Fix the router before treating replication as the primary answer.",
+          "droppedTokensPct": 2.5,
+          "p99LatencyMs": 28,
+          "maxExpertLoadPct": 128,
+          "survivesFailure": true
+        }
+      }
+    },
+    {
+      "id": "network-saturation",
+      "label": "All-to-all latency dominates",
+      "detail": "Expert compute is fast, but cross-host dispatch saturates one fabric link and p99 jumps.",
+      "failureStage": "dispatch",
+      "signals": [
+        "Bytes and queue time by source-destination device pair",
+        "Dispatch, expert-compute, and combine latency spans",
+        "Topology locality and collective-operation utilization"
+      ],
+      "outcomes": {
+        "router-regularization": {
+          "score": 52,
+          "verdict": "Balanced experts can still overload the wrong links",
+          "detail": "Load balance improves device compute, but a topology-blind assignment can preserve the same oversubscribed network cut.",
+          "droppedTokensPct": 0.4,
+          "p99LatencyMs": 54,
+          "maxExpertLoadPct": 94,
+          "survivesFailure": true
+        },
+        "capacity-headroom": {
+          "score": 28,
+          "verdict": "More expert capacity increases pressure on the blocked path",
+          "detail": "Allowing more assignments per expert does not add link bandwidth. It can increase in-flight buffers and make the tail worse.",
+          "droppedTokensPct": 0.2,
+          "p99LatencyMs": 67,
+          "maxExpertLoadPct": 92,
+          "survivesFailure": true
+        },
+        "topology-aware-placement": {
+          "score": 95,
+          "verdict": "Keep common routes local and spread collective traffic",
+          "detail": "Topology-aware expert placement and routing reduce the congested cross-host cut. Confirm that locality constraints do not create a new expert imbalance.",
+          "droppedTokensPct": 0.1,
+          "p99LatencyMs": 16,
+          "maxExpertLoadPct": 96,
+          "survivesFailure": true
+        },
+        "redundant-experts": {
+          "score": 46,
+          "verdict": "A replica is useful only when routing uses its locality",
+          "detail": "Duplicating weights adds memory but does not reduce communication unless the router or dispatcher deliberately selects the local copy.",
+          "droppedTokensPct": 0.2,
+          "p99LatencyMs": 61,
+          "maxExpertLoadPct": 91,
+          "survivesFailure": true
+        }
+      }
+    },
+    {
+      "id": "expert-host-loss",
+      "label": "A device holding experts fails",
+      "detail": "The router still selects unavailable experts, so tokens cannot complete the sparse feed-forward layer.",
+      "failureStage": "execute",
+      "signals": [
+        "Expert heartbeat, device health, and assignment failures",
+        "Tokens rerouted, retried, or sent through a fallback path",
+        "Quality and latency of degraded-mode responses"
+      ],
+      "outcomes": {
+        "router-regularization": {
+          "score": 38,
+          "verdict": "A balanced router can still select a dead expert",
+          "detail": "Regularization shapes traffic during healthy operation. It does not provide another copy of unavailable weights or a tested degraded path.",
+          "droppedTokensPct": 6.5,
+          "p99LatencyMs": 41,
+          "maxExpertLoadPct": 115,
+          "survivesFailure": false
+        },
+        "capacity-headroom": {
+          "score": 30,
+          "verdict": "Unused capacity cannot execute missing weights",
+          "detail": "Healthy experts have spare slots, but the system still needs a compatible reroute, replica, or fallback policy for tokens assigned to the failed device.",
+          "droppedTokensPct": 7.0,
+          "p99LatencyMs": 46,
+          "maxExpertLoadPct": 112,
+          "survivesFailure": false
+        },
+        "topology-aware-placement": {
+          "score": 55,
+          "verdict": "Placement limits blast radius but needs redundancy",
+          "detail": "Spreading experts across fault domains prevents one host from removing an entire group, yet unique experts on the failed host remain unavailable.",
+          "droppedTokensPct": 4.2,
+          "p99LatencyMs": 32,
+          "maxExpertLoadPct": 108,
+          "survivesFailure": false
+        },
+        "redundant-experts": {
+          "score": 96,
+          "verdict": "Route to a tested replica or bounded fallback",
+          "detail": "A version-matched replica in another fault domain preserves the expert path. The rollout must also test rerouting latency, stale replicas, and fallback quality.",
+          "droppedTokensPct": 0.1,
+          "p99LatencyMs": 20,
+          "maxExpertLoadPct": 98,
+          "survivesFailure": true
+        }
+      }
+    }
+  ],
+  "mitigations": [
+    {
+      "id": "router-regularization",
+      "label": "Rebalance and stabilize the router",
+      "detail": "Tune balancing pressure, router z-loss, noise, and admission using measured token slices.",
+      "kind": "routing"
+    },
+    {
+      "id": "capacity-headroom",
+      "label": "Increase expert capacity",
+      "detail": "Reserve more slots per expert and accept the extra compute, memory, and communication cost.",
+      "kind": "capacity"
+    },
+    {
+      "id": "topology-aware-placement",
+      "label": "Change placement and locality",
+      "detail": "Place experts across links and fault domains, then route common traffic through local paths.",
+      "kind": "placement"
+    },
+    {
+      "id": "redundant-experts",
+      "label": "Add replicas and a fallback path",
+      "detail": "Keep compatible expert copies in another fault domain and test bounded degraded behavior.",
+      "kind": "recovery"
+    }
+  ]
+}

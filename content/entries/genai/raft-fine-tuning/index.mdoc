@@ -1,0 +1,200 @@
+---
+registryId: raft-fine-tuning
+---
+
+{% section-card tone="intro" %}
+## What is RAFT?
+
+**Retrieval-Augmented Fine-Tuning (RAFT)** is a supervised fine-tuning recipe for a language model that will answer questions with documents retrieved from a known domain. Each training record pairs a question with answer-bearing **oracle documents**, irrelevant or misleading **distractor documents**, and a target answer grounded in the oracle.
+
+In plain language: ordinary RAG gives a model an open book at inference time. RAFT also lets the model practice using that kind of open book before deployment. It does not replace retrieval or guarantee correctness.
+
+The core invariant is: **train and evaluate on the retrieval conditions the deployed generator must actually handle**.
+{% /section-card %}
+
+{% section-card %}
+## Four terms define the recipe
+
+{% concept-grid columns="4" %}
+{% concept-card title="Oracle document" eyebrow="Useful evidence" icon="file" tone="green" %}
+A passage from which the target answer can be supported. One question may require more than one oracle.
+{% /concept-card %}
+{% concept-card title="Distractor document" eyebrow="Retrieved but unhelpful" icon="search" tone="amber" %}
+A passage that does not support the answer. Hard distractors are plausible enough to test real evidence selection.
+{% /concept-card %}
+{% concept-card title="P fraction" eyebrow="Oracle presence" icon="sliders" tone="blue" %}
+The share of training questions whose retrieved context retains an oracle. The remaining share contains only distractors.
+{% /concept-card %}
+{% concept-card title="Evidence target" eyebrow="Supervised behavior" icon="check" tone="violet" %}
+The answer demonstrates which text supports the claim, often with a concise rationale and an extractive quotation.
+{% /concept-card %}
+{% /concept-grid %}
+
+RAFT is designed for an **in-domain open-book** setting: the corpus domain is known during training, while retrieval supplies passages for each inference request.
+{% /section-card %}
+
+{% section-card %}
+## Build records from the production retrieval path
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the retrieval profile" label="Mirror" %}
+Record the corpus snapshot, chunker, metadata filters, embedding model, reranker, and top-k used to retrieve passages.
+{% /process-step %}
+{% process-step number="2" title="Create answerable questions" label="Ask" %}
+Cover real user intents and difficult domain distinctions. Split by source or topic so near-duplicates do not leak across evaluation.
+{% /process-step %}
+{% process-step number="3" title="Label oracle evidence" label="Ground" %}
+Identify every passage required to support the answer and verify the target against the source.
+{% /process-step %}
+{% process-step number="4" title="Sample realistic distractors" label="Challenge" %}
+Use confusing passages returned by the retriever, not only random text that the model can dismiss trivially.
+{% /process-step %}
+{% process-step number="5" title="Version the complete record" label="Trace" %}
+Store question, passage IDs, oracle presence, target, retrieval profile, generator, prompt, and quality-review identity.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Compose the training distribution deliberately
+
+Changing `P`, context size, and distractor difficulty changes what the model practices. Use the lab to expose the actual record counts and passage slots before starting an expensive run.
+
+{% interactive-block id="genai/raft-fine-tuning-evidence-mixture-lab" dataFile="/api/content/genai/raft-fine-tuning/data/evidence-mixture-model.json" /%}
+
+The counts are exact for the selected recipe; the recommendations are planning heuristics. Only held-out experiments can establish quality for a specific model and domain.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Oracle absence is not the same as abstention
+
+In the original RAFT recipe, the `1-P` examples remove the oracle document **but keep the answer target**. This applies pressure to learn domain knowledge and should not be described as abstention training.
+
+If the product must refuse or defer when retrieval lacks support:
+
+- create explicit missing-evidence examples with an abstention target;
+- distinguish “no relevant document retrieved” from “relevant document contradicts the premise”;
+- test false refusals on answerable questions and unsupported answers on unanswerable questions;
+- keep this extension separate from canonical RAFT results when reporting experiments.
+{% /section-card %}
+
+{% section-card %}
+## Represent each record as auditable evidence
+
+The example keeps document identity, oracle presence, context size, and seed in metadata. It uses a concise evidence target rather than storing private model reasoning.
+
+{% code-block file="/api/content/genai/raft-fine-tuning/code/build-raft-record.py" language="python" title="Build one reproducible RAFT training record" /%}
+
+For a real pipeline, add source permission, document version, question provenance, reviewer identity, and train/evaluation split ownership. Reject records whose answer cannot be traced to the labeled oracle.
+{% /section-card %}
+
+{% section-card %}
+## Train the generator, but preserve the system boundary
+
+{% system-flow title="RAFT changes one part of the RAG request path" caption="The retriever remains independently versioned and evaluated after the generator is fine-tuned." %}
+{% system-node title="User question" eyebrow="Request" icon="user" tone="blue" %}
+Normalize the request without changing its information need.
+{% /system-node %}
+{% system-node title="Versioned retriever" eyebrow="Evidence" icon="search" tone="amber" %}
+Search the deployed corpus with the declared chunker, filters, reranker, and top-k.
+{% /system-node %}
+{% system-node title="RAFT generator" eyebrow="Selection" icon="cpu" tone="violet" %}
+Use relevant passages, resist distractors, and produce the trained answer format.
+{% /system-node %}
+{% system-node title="Evidence checks" eyebrow="Control" icon="shield" tone="green" %}
+Validate citations, unsupported claims, policy boundaries, latency, and fallback behavior.
+{% /system-node %}
+{% /system-flow %}
+
+Parameter-efficient methods such as LoRA can implement the supervised update, but they do not change the RAFT data contract. Base checkpoint, tokenizer, chat template, adapter configuration, and record format must remain reproducible.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the retriever and generator separately
+
+A single end-to-end answer score hides whether the retriever missed the oracle or the generator ignored good evidence. Grade the pair with at least:
+
+- **Oracle recall:** how often answer-bearing evidence appears in the retrieved set.
+- **Answer correctness:** whether the final answer satisfies the question.
+- **Citation correctness:** whether cited passages actually support the claims.
+- **Distractor resistance:** whether plausible unsupported passages change the answer.
+- **Missing-evidence behavior:** whether the model follows the product's explicit answer, defer, or abstain contract.
+- **Operational cost:** prompt tokens, latency, throughput, and review or fallback rate.
+
+{% code-block file="/api/content/genai/raft-fine-tuning/code/evaluate-raft-pair.py" language="python" title="Keep answer, citation, and unsupported-answer metrics separate" /%}
+{% /section-card %}
+
+{% section-card %}
+## Gate retriever changes as model changes
+
+A new chunker, filter, reranker, corpus, or top-k changes the distribution that reaches the fine-tuned generator. Compare candidate and retrieval profiles, then apply an explicit exposure policy.
+
+{% interactive-block id="genai/raft-fine-tuning-retrieval-release-lab" dataFile="/api/content/genai/raft-fine-tuning/data/retrieval-release-model.json" /%}
+
+The lab's percentages are illustrative held-out results. They demonstrate a release process: do not infer them from model size, dataset size, or training loss.
+{% /section-card %}
+
+{% section-card %}
+## Choose RAFT only when the system needs it
+
+{% tabs %}
+{% tab title="Standard RAG" %}
+Use standard RAG when the base model already follows evidence reliably, knowledge changes frequently, or training data and evaluation evidence are not ready.
+
+- Fastest content refresh because facts remain in the corpus.
+- Best first baseline for measuring retriever and prompt quality.
+- Can still fail when context contains many plausible distractors.
+{% /tab %}
+{% tab title="RAFT" %}
+Use RAFT when the domain is bounded, the production retrieval distribution can be reproduced, and evidence selection is a measured generator weakness.
+
+- Teaches a repeatable answer and evidence-use behavior.
+- Requires representative records, training infrastructure, and model-retriever release gates.
+- Still depends on retrieval recall and current source documents.
+{% /tab %}
+{% tab title="Domain SFT without retrieval" %}
+Use domain supervised fine-tuning without documents when the goal is stable task behavior or format rather than source-grounded, updateable knowledge.
+
+- Simpler inference path.
+- Facts can become stale or difficult to attribute.
+- Does not test the model against retrieved distractors.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Operate RAFT as a versioned learning system
+
+### Before training
+
+- Define the product answer and abstention contracts separately.
+- Build questions from real intents and preserve source-level evaluation isolation.
+- Measure retrieval output first; do not manufacture only clean, oracle-first contexts.
+- Review generated answers and evidence labels for support, privacy, permission, and leakage.
+
+### Before release
+
+- Compare against base-model RAG and domain SFT baselines on the same held-out cases.
+- Sweep oracle position, missing-oracle cases, distractor hardness, and context count.
+- Test corpus, chunker, filter, reranker, prompt, tokenizer, and model changes independently.
+- Require slice-level evidence for rare intents, multi-hop questions, and consequential domains.
+
+### In production
+
+- Log version IDs and bounded evidence diagnostics without retaining unnecessary sensitive text.
+- Monitor oracle recall proxies, citation failures, unsupported answers, abstentions, latency, and fallback.
+- Rebuild records when the retrieval distribution or domain language changes materially.
+- Preserve rollback targets for the model, corpus, index, prompt, and retrieval configuration.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and scope
+
+- The [RAFT paper](https://arxiv.org/abs/2403.10131) defines the in-domain open-book recipe, oracle and distractor documents, the `P` fraction, and evidence-grounded chain-of-thought-style targets.
+- The authors' [UC Berkeley Gorilla RAFT guide](https://gorilla.cs.berkeley.edu/blogs/9_raft.html) provides the training-data construction, example format, evaluated domains, and open-source implementation context.
+- The [official Gorilla RAFT repository](https://github.com/ShishirPatil/gorilla/tree/main/raft) contains the research code and data-generation workflow.
+
+RAFT is a 2024 research recipe, not a universal production guarantee. Reproduce its claims on the model, corpus, retrieval path, language, and risk profile that will actually ship.
+{% /section-card %}
+
+{% quiz title="RAFT Production Decisions" questionsFile="/api/content/genai/raft-fine-tuning/quiz/raft-production-decisions.json" lessonSlug="raft-fine-tuning" /%}

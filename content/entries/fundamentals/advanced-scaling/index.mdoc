@@ -1,0 +1,235 @@
+---
+registryId: advanced-scaling
+---
+
+{% section-card tone="intro" %}
+## What is advanced scaling?
+
+**Advanced scaling** is the work of distributing data and traffic across independent owners after one server, database, or region can no longer meet the required capacity or resilience. It adds routing, replication, and coordination so the system can grow without losing the facts users depend on.
+
+In plain language: adding machines creates more places where data can live and more ways those places can disagree. The central invariant is **every authoritative fact has a known owner, and every acknowledged change remains reachable through failure, retries, and ownership moves**.
+
+Start with [scalability basics](/fundamentals/scalability-basics) and [database fundamentals](/fundamentals/database-fundamentals) if load distribution, transactions, or replicas are unfamiliar.
+
+{% callout variant="info" %}
+Scale a measured constraint, not an architecture diagram. A new shard, replica, or region is useful only when its ownership rule, consistency contract, and recovery path are explicit.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Know what simple scaling cannot solve
+
+Vertical scaling gives one owner more CPU, memory, storage, or I/O. Horizontal scaling adds interchangeable workers behind a load balancer. Both are valuable, but neither automatically distributes durable state or coordinates concurrent writers.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Capacity" eyebrow="More useful work" icon="gauge" tone="blue" %}
+Identify the saturated resource and its sustainable rate. Fleet averages can look healthy while one partition, tenant, or dependency is overloaded.
+{% /concept-card %}
+{% concept-card title="Ownership" eyebrow="One routing answer" icon="route" tone="green" %}
+For each key and routing version, know which shard may accept the authoritative write and how stale routers are rejected.
+{% /concept-card %}
+{% concept-card title="Correctness" eyebrow="Allowed observations" icon="shield-check" tone="violet" %}
+State whether a read must see the latest write, a bounded-old value, this session's writes, or any value that eventually converges.
+{% /concept-card %}
+{% concept-card title="Recovery" eyebrow="Failure is a transition" icon="refresh-cw" tone="amber" %}
+Define how replicas catch up, how a new owner is fenced, and how accepted operations are reconciled after uncertainty.
+{% /concept-card %}
+{% /concept-grid %}
+
+Advanced scaling begins when at least one of these boundaries becomes real:
+
+- The authoritative dataset or write rate no longer fits one database owner.
+- Read traffic exceeds one copy's capacity and some reads can tolerate replica lag.
+- A region or availability zone must fail without losing acknowledged changes.
+- One hot key or tenant dominates load even though fleet-wide utilization is low.
+- A global path cannot meet its latency target without placing data nearer to users.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Turn demand into a capacity envelope
+
+Suppose an order service peaks at `120,000` writes per second. Four perfectly balanced shards receive `30,000` writes per second each. If one shard receives `48%` of demand, that owner receives `57,600` writes per second while the other machines retain idle capacity.
+
+{% metric-strip %}
+{% metric value="120k/s" label="Peak logical writes" detail="Include bursts and client retries" tone="blue" /%}
+{% metric value="30k/s" label="Balanced load per shard" detail="120,000 divided across four owners" tone="green" /%}
+{% metric value="57.6k/s" label="Hot-owner load" detail="48% of the same total demand" tone="rose" /%}
+{% metric value="3x" label="Replica write floor" detail="Three durable copies before logs or compaction" tone="violet" /%}
+{% /metric-strip %}
+
+An estimate should expose assumptions rather than create false precision:
+
+1. **Name the peak window:** daily averages hide launches, retries, and regional traffic shifts.
+2. **Measure the largest key and owner:** equal row counts do not imply equal CPU, locks, or write pressure.
+3. **Reserve failure headroom:** the survivors must absorb reassigned work while replicas rebuild.
+4. **Count physical work:** replication, write-ahead logs, indexes, and compaction consume I/O beyond the logical payload.
+
+{% code-block file="/api/content/fundamentals/advanced-scaling/code/estimate-scaling-envelope.py" language="python" title="Estimate hot-owner load and physical write pressure" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: choose a placement rule under skew
+
+A shard key decides which owner receives a record and which queries stay local. Choose a placement rule, change peak demand, and increase the largest tenant's share. The lab updates owner pressure, query fanout, and the scaling action that follows.
+
+{% interactive-block id="fundamentals/advanced-scaling-calculator" dataFile="/api/content/fundamentals/advanced-scaling/data/shard-placement-model.json" /%}
+
+### Read the result as two separate costs
+
+- **Hash by tenant** keeps tenant-scoped reads and writes together, but one oversized tenant can remain an indivisible hot key.
+- **Hash by order** spreads point writes well, but a tenant history query must fan out and merge results from every shard.
+- **Range by creation time** makes bounded time scans direct, but current writes concentrate in the newest range.
+- **Directory placement** can move one hot tenant independently, but the routing directory becomes a replicated, versioned control-plane dependency.
+
+The best key is not the one with the prettiest distribution graph. It is the stable key that balances load while keeping the important transaction and query paths on as few owners as possible.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make ownership a versioned protocol
+
+Sharding is safe only when routing and movement preserve a single authoritative owner. Use many movable logical shards on a smaller number of physical database groups so one hot range can move without splitting the whole dataset.
+
+{% process-flow %}
+{% process-step number="1" title="Route with an epoch" label="Locate" %}
+The client or router maps the key to a logical shard and includes the current ownership version with the request.
+{% /process-step %}
+{% process-step number="2" title="Validate the owner" label="Fence" %}
+The database group accepts the write only when it owns that shard at the supplied epoch. An old owner rejects stale routes.
+{% /process-step %}
+{% process-step number="3" title="Persist and replicate" label="Acknowledge" %}
+The owner commits the change under the operation's durability and consistency contract before replying.
+{% /process-step %}
+{% process-step number="4" title="Move with evidence" label="Rebalance" %}
+Copy a snapshot, replay ordered changes, verify, fence the old owner, then atomically advance the routing epoch.
+{% /process-step %}
+{% /process-flow %}
+
+During a move, preserve writes that arrive after the snapshot begins:
+
+- Make copy batches idempotent and resumable from durable checkpoints.
+- Replay updates and tombstones from an ordered change stream.
+- Compare counts, checksums, sampled records, and change-stream lag before cutover.
+- Keep the source read-only through a rollback window instead of deleting it immediately.
+- Reject a stale epoch at the old owner so delayed clients cannot create two writers.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Replicate for a declared read and write contract
+
+**Replication** stores copies of the same logical data on multiple failure domains. It can improve read capacity, durability, and failover, but it also creates lag and coordination work.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Primary and replicas" eyebrow="One write authority" icon="git-branch" tone="blue" %}
+One primary orders writes; replicas copy its log and may serve lag-tolerant reads. Failover must fence the old primary before promoting a new one.
+{% /concept-card %}
+{% concept-card title="Quorum replication" eyebrow="Collect acknowledgements" icon="network" tone="violet" %}
+An operation waits for `R` read or `W` write responses from `N` replicas. Larger quorums add evidence and latency while reducing failure tolerance.
+{% /concept-card %}
+{% concept-card title="Multi-writer" eyebrow="Accept concurrent intent" icon="git-merge" tone="amber" %}
+Multiple regions can accept writes only with a conflict model: single-key ownership, versions, mergeable operations, deterministic resolution, or compensation.
+{% /concept-card %}
+{% /concept-grid %}
+
+Choose a consistency model per operation:
+
+- **Strong or linearizable read:** return the latest completed write in one legal order, or fail when authority cannot be reached.
+- **Bounded staleness:** allow an older value only within a stated time or version limit.
+- **Session consistency:** preserve read-your-writes and monotonic reads for one user session even if other users temporarily see older state.
+- **Eventual consistency:** replicas converge when writes stop, with explicit conflict detection and repair for concurrent updates.
+
+{% callout variant="warn" %}
+A replica is not a backup. Replication can copy an accidental delete, corruption, or bad migration immediately. Recovery still needs independent, tested backups and point-in-time restore evidence.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: tune quorum safety through replica loss
+
+Use a five-replica data group. Change the read quorum, write quorum, and number of failed replicas. The acknowledgement frontier shows modeled latency, remaining failure budget, and whether read/write and write/write quorums are guaranteed to intersect.
+
+{% interactive-block id="fundamentals/advanced-scaling-quorum-lab" dataFile="/api/content/fundamentals/advanced-scaling/data/replication-quorum-model.json" /%}
+
+The useful quorum checks are:
+
+- `R + W > N` means every read quorum intersects every completed write quorum.
+- `2W > N` means any two write quorums intersect.
+- `N - R` is the maximum replica failures before that read quorum becomes impossible.
+- `N - W` is the maximum replica failures before that write quorum becomes impossible.
+
+Overlap is necessary evidence for common quorum protocols, not a full proof of strong consistency. The protocol still needs version comparison, authority or conflict rules, fencing, durable writes, and idempotent retries.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Budget write amplification and coordination
+
+**Write amplification** is physical data written divided by the application's logical write. A 1 MB logical update stored on three replicas already creates at least 3 MB of replica writes. A write-ahead log, secondary indexes, compaction, change-data capture, and backups add more work.
+
+Treat these costs separately:
+
+- **Replication factor:** raises durable copies and network transfer for every accepted write.
+- **Indexes:** trade additional write I/O and storage for faster reads.
+- **Log-structured compaction:** rewrites existing data while merging files and removing obsolete versions.
+- **Cross-region coordination:** adds network latency to the acknowledgement path and can reduce availability during a partition.
+- **Repair and rebalancing:** consume the same disk and network resources that serve foreground traffic.
+
+Reduce amplification only after preserving the required durability and query behavior. Batch compatible work, remove unused indexes, tune compaction, and rate-limit repair traffic, but do not silently lower replication or acknowledgement guarantees.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Contain the failures distribution introduces
+
+The distributed version of a system has failure states that do not exist on one machine:
+
+- **Hot owner:** one shard saturates while fleet-wide dashboards look healthy.
+  - Detect maximum-to-average load and largest-key pressure.
+  - Split a divisible range, isolate the tenant, or add a cache only when its freshness contract is safe.
+- **Stale route:** a client writes to a previous owner after cutover.
+  - Include the ownership epoch and reject old authority at the storage node.
+  - Retry with the same operation identity after refreshing the route.
+- **Replica lag:** a confirmation read misses a just-accepted write.
+  - Route read-after-write requests to authority or carry a session token/version.
+  - Expose stale or pending states instead of presenting absence as truth.
+- **Network partition:** replica groups cannot coordinate.
+  - Reject invariant-breaking operations or accept local intent with an explicit reconciliation rule.
+  - Never let an automatic retry create a second business effect.
+- **Cascading recovery:** failover, repair, and retries overload the survivors.
+  - Bound queues and retries, reserve recovery headroom, and rate-limit rebuild work.
+  - Shed optional traffic before the critical write path loses control.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the hottest owner and the weakest guarantee
+
+Fleet averages are not enough. Observe the distribution and the correctness contract together.
+
+### Measure the data plane
+
+- Per-shard throughput, bytes, p95/p99 latency, queue depth, CPU, IOPS, locks, storage, and largest-key share.
+- Replica acknowledgement latency, lag in time and versions, unavailable quorum rate, conflicts, and repair backlog.
+- Scatter-gather width, timeout rate, partial results, and cross-shard transaction or workflow failures.
+- Logical-to-physical write ratio, compaction debt, rebuild rate, and recovery traffic throttling.
+
+### Measure the control plane
+
+- Routing-directory availability, cache age, ownership epoch, and stale-route rejections.
+- Rebalance checkpoint age, copy progress, change-stream lag, verification mismatches, and cutover audit history.
+- Fencing-token changes, promotion evidence, backup age, restore point, and time to rebuild redundancy.
+
+Rehearse one hot-key incident, one physical-shard loss, a stale router after cutover, a split replica group, and a restore through the production routing path. A failover that has never been tested under traffic is only a hypothesis.
+{% /section-card %}
+
+{% section-card %}
+## Use the least distributed design that meets the requirement
+
+Advanced patterns are justified when measurement proves a limit and the system can state the new ownership and recovery rules. Before sharding or adding multi-region writes:
+
+1. Fix query plans, indexes, connection pools, oversized transactions, and unbounded queues.
+2. Scale the current owner vertically while that remains operationally simpler and economical.
+3. Cache reconstructable reads or add replicas only for reads that tolerate their freshness contract.
+4. Partition the smallest dataset and request path that need independent ownership.
+5. Add multi-region writers only when the latency or availability requirement is worth conflict handling and recovery complexity.
+
+The next lesson, [Reliability and Availability](/fundamentals/reliability-availability), turns these failure assumptions into service targets, budgets, and recovery plans.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/advanced-scaling/quiz/advanced-scaling-decisions.json" lessonSlug="advanced-scaling" title="Advanced Scaling Decision Review" /%}

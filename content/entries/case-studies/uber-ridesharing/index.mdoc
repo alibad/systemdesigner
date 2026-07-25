@@ -1,0 +1,333 @@
+---
+registryId: case-study-uber-ridesharing
+---
+
+{% section-card tone="intro" %}
+## What is Uber ridesharing architecture?
+
+Uber ridesharing architecture is the real-time marketplace system that connects a rider request to one eligible nearby driver, then keeps both people synchronized through pickup, travel, payment, and completion. It combines rapidly expiring location data, geospatial search, dispatch decisions, pricing signals, and a durable trip state machine.
+
+In plain language: the map may show many moving drivers, but only one driver can own a trip. Search can be approximate and retried; the assignment must be authoritative.
+
+This matters because the marketplace changes while the request is being processed. Drivers move or go offline, demand spikes around an event, a regional service can fail, and a timeout can hide whether an assignment already committed. The architecture must remain fast without turning uncertainty into two drivers, two trips, or a false pickup promise.
+
+{% callout variant="info" %}
+### Core invariant
+
+A trip has one authoritative state, one version, and at most one assigned driver at a time. Location indexes, matching scores, caches, and event consumers may be stale or replayed, but none may bypass the versioned trip transition that owns the assignment.
+{% /callout %}
+{% /section-card %}
+
+This case study keeps the useful shape of Uber's published architectural evolution: an early city-focused dispatch application grows into domain services, event streams, geospatial partitions, regional isolation, and machine-learning-assisted marketplace decisions.
+
+The capacity figures below are an **illustrative regional planning envelope**, not claims about Uber's current private deployment. Review [event-driven architecture](/fundamentals/event-driven-architecture) and [message queues](/fundamentals/message-queues) first if durable events and replay are new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the marketplace contract and scope" %}
+
+## Dispatch chooses a candidate; trip state grants ownership
+
+A ridesharing request crosses two different consistency domains. The location and dispatch path needs fresh-enough data and low latency. The trip authority needs an exact transition so one accepted offer cannot race with another. State that boundary before choosing databases or algorithms.
+
+### Functional requirements
+
+- Let a rider request an eligible product from a pickup point to a destination.
+- Ingest driver availability and location updates with an explicit freshness timestamp.
+- Find, filter, score, and offer the trip to nearby drivers under a bounded deadline.
+- Commit one accepted driver to the trip and synchronize rider and driver views.
+- Advance the trip through pickup, in-progress, completion, cancellation, and support workflows.
+- Feed pricing, safety, payments, notifications, analytics, and support from durable trip events.
+
+### Non-functional requirements
+
+- Return a match or an honest unavailable result within a few seconds.
+- Keep fresh location search and trip-state writes available inside the rider's home region.
+- Isolate hot cells, event surges, stale coordinates, and failed regions from healthy markets.
+- Make every retry, offer, acceptance, cancellation, and state transition idempotent.
+- Preserve enough history to explain which driver was selected, which evidence was used, and why a transition won.
+
+### Scope boundary
+
+- The lesson covers dispatch, location indexing, trip ownership, dynamic pricing signals, regional failure, and operations.
+- Turn-by-turn navigation, payment settlement, fraud models, identity verification, support tooling, and driver onboarding are adjacent systems.
+- Exact production fleet size, internal service count, model features, and current traffic are intentionally not assumed.
+
+{% callout variant="warn" %}
+Do not equate a nearby marker with an available driver. A marker can be stale, represent the wrong product, belong to a driver already reserved, or disappear before the offer is accepted.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Turn regional demand and geography into a dispatch budget" %}
+
+## Capacity starts with candidate work, not only ride requests
+
+One rider request can touch many spatial cells and score many drivers. A larger radius improves recall when supply is thin, but it also scans more candidates and can promise a longer pickup. A smaller cell reduces false candidates, but a radius may span so many cells that index lookup overhead dominates.
+
+{% metric-strip %}
+{% metric label="Rider demand" value="900/min" detail="Illustrative regional peak" tone="blue" /%}
+{% metric label="Ready drivers" value="5.2K" detail="Before location freshness filtering" tone="green" /%}
+{% metric label="Search radius" value="3 km" detail="Expanded only under bounded policy" tone="violet" /%}
+{% metric label="Wait objective" value="<6 min" detail="Modeled request-to-pickup estimate" tone="amber" /%}
+{% /metric-strip %}
+
+### Back-of-the-envelope model
+
+- **Demand window:** `900 requests/min x 5 minutes` creates 4,500 requests that need fresh supply during the planning window.
+- **Fresh supply:** if 82% of 5,200 ready drivers have coordinates inside the freshness bound, about 4,264 count as searchable supply.
+- **Spatial work:** candidate pressure is request rate multiplied by scanned drivers plus index-cell lookup work. It is not simply request count.
+- **Operating target:** plan below raw benchmark capacity so retries, hot-cell skew, worker loss, and radius expansion have reserve.
+- **Wait estimate:** combine dispatch time, expected pickup distance, low-candidate penalty, supply shortage, and queueing pressure.
+
+Change each control and watch which constraint moves first. Try a wide radius during high demand, then compare very small and very large spatial cells.
+
+{% interactive-block id="case-studies/uber-ridesharing-dispatch-capacity-lab" dataFile="/api/content/case-studies/uber-ridesharing/data/dispatch-capacity-model.json" /%}
+
+### What the model teaches
+
+1. Add driver supply and observe two effects:
+    - Wait and unmatched demand usually improve.
+    - Candidate scans can increase because more drivers occupy every searched area.
+2. Increase the radius and observe the trade-off:
+    - More fresh drivers become eligible.
+    - Candidate work and possible pickup distance grow.
+3. Move cell size to either extreme:
+    - Tiny cells create many index lookups.
+    - Coarse cells admit more false candidates that must be filtered.
+4. Raise demand until pressure exceeds the planning ceiling:
+    - Queue growth becomes a user-visible wait problem.
+    - Expanding the radius alone cannot repair a regional supply shortage.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate the moving marketplace from trip authority" %}
+
+## The synchronous path narrows uncertainty before one durable claim
+
+Location updates are high-volume, short-lived hints. Trip state is lower-volume, durable business truth. Combining them in one database or one distributed transaction would make every GPS update contend with assignment correctness.
+
+{% system-flow title="Regional ride request path" caption="Fast spatial state proposes candidates; the versioned trip authority decides whether an accepted offer becomes the assignment." %}
+{% system-node title="Rider gateway" eyebrow="Admit" icon="users" tone="blue" %}
+
+Authenticate the rider, validate the request, choose the home region, create an idempotency key, and capture product and pickup context.
+
+{% /system-node %}
+{% system-node title="Location and dispatch" eyebrow="Search" icon="search" tone="cyan" %}
+
+Read fresh driver coordinates, expand spatial cells under policy, filter eligibility, estimate pickup, score candidates, and issue bounded offers.
+
+{% /system-node %}
+{% system-node title="Trip authority" eyebrow="Commit" icon="storage" tone="violet" %}
+
+Accept one driver against the expected trip version, store the state change, and append a publication intent atomically.
+
+{% /system-node %}
+{% system-node title="Trip event consumers" eyebrow="Coordinate" icon="activity" tone="green" %}
+
+Update rider and driver sessions, pricing, safety, payment preparation, support, analytics, and peer-region replicas independently.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Service ownership
+
+- **Location service:** owns expiring coordinates, driver availability hints, spatial indexes, and freshness watermarks.
+- **Dispatch service:** owns candidate retrieval, eligibility filters, ETA scoring, offer leases, radius expansion, and overload admission.
+- **Trip service:** owns the trip state machine, assigned driver, state version, idempotent command result, and transactional outbox.
+- **Pricing service:** owns a versioned quote assembled from product, route, local demand and supply, policy, and expiry.
+- **Regional event platform:** owns ordered publication, retention, consumer offsets, replay, and isolation of slow subscribers.
+
+Dynamic pricing influences demand and driver positioning, but it does not grant trip ownership. The quote may expire and be recomputed; an accepted trip transition must retain the exact quote identity used by the rider.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model freshness, offers, commands, and trip versions explicitly" %}
+
+## Every record should reveal whether it is a hint or an authority
+
+The fastest way to create a consistency bug is to let two services believe they own the same field. Put freshness and expiry on transient records, and put version and idempotency on authoritative commands.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Driver location" eyebrow="Expiring hint" icon="route" tone="cyan" %}
+Store driver ID, coordinate or cell, observed time, availability epoch, product eligibility, heading, and expiry. A missing or expired coordinate means unknown, not nearby.
+{% /concept-card %}
+{% concept-card title="Driver offer" eyebrow="Bounded lease" icon="timer" tone="amber" %}
+Store offer ID, trip ID, driver ID, score snapshot, issue time, expiry, response, and reservation token. Expiry returns the candidate to search; it does not reassign the trip by itself.
+{% /concept-card %}
+{% concept-card title="Trip" eyebrow="Authoritative state" icon="database" tone="violet" %}
+Store trip ID, rider, region owner, state, assigned driver, quote ID, monotonically increasing version, timestamps, and cancellation reason.
+{% /concept-card %}
+{% concept-card title="Command and outbox" eyebrow="Replay contract" icon="repeat" tone="green" %}
+Store the idempotency key, expected trip version, result, event ID, schema version, and publication status so uncertain acknowledgements can be resolved safely.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Minimal trip lifecycle
+
+{% process-flow %}
+{% process-step number="1" title="Requested" label="No owner" %}
+The rider command creates one regional trip identity. Repeating the same command returns that identity.
+{% /process-step %}
+{% process-step number="2" title="Offered" label="Candidate lease" %}
+Dispatch can create several sequential or bounded parallel offers, but none is the assignment until trip authority commits it.
+{% /process-step %}
+{% process-step number="3" title="Assigned" label="One driver" %}
+The first valid acceptance advances the expected trip version and records one driver. Later acceptances fail cleanly.
+{% /process-step %}
+{% process-step number="4" title="Terminal" label="Complete or cancel" %}
+Completion and cancellation are versioned transitions with durable events. Consumers ignore stale or duplicate event versions.
+{% /process-step %}
+{% /process-flow %}
+
+### An idempotent assignment boundary
+
+The SQL sketch shows the two pieces the contract needs: a stable command identity and a conditional update against the expected trip version. In production, return the stored command result on duplicate input and write the trip event through the same transaction or an equivalent durable log boundary.
+
+{% code-block file="/api/content/case-studies/uber-ridesharing/code/idempotent-trip-assignment.sql" language="sql" title="Claim one driver with command identity and optimistic concurrency" /%}
+
+{% callout variant="info" %}
+An idempotency key answers “Have I processed this logical command?” The trip version answers “Is this transition still legal against current state?” A correct assignment path needs both.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="matching" title="5. Deep-dive on matching, ETA, and marketplace control" %}
+
+## Matching is a constrained funnel, not a nearest-driver lookup
+
+The nearest coordinate can be stale, ineligible, headed away from the pickup, reserved by another offer, or expensive to reach on the road network. A practical matcher reduces the candidate set in stages and keeps every expensive step bounded.
+
+{% process-flow %}
+{% process-step number="1" title="Retrieve" label="Spatial recall" %}
+Read the pickup cell and neighbors, reject expired coordinates, and expand the radius only when fresh recall is below policy.
+{% /process-step %}
+{% process-step number="2" title="Filter and estimate" label="Hard constraints" %}
+Apply product, capacity, accessibility, compliance, availability-epoch, and reservation checks. Estimate road ETA rather than straight-line distance alone.
+{% /process-step %}
+{% process-step number="3" title="Score and offer" label="Marketplace decision" %}
+Balance pickup ETA, acceptance likelihood, driver idle time, destination preferences, fairness, and cancellation risk. Offer to a bounded set with an expiry.
+{% /process-step %}
+{% process-step number="4" title="Commit or expand" label="Authoritative result" %}
+Commit the accepted driver against the trip version. On decline or expiry, continue with remaining candidates or expand under the wait and capacity budget.
+{% /process-step %}
+{% /process-flow %}
+
+### Design rules for the online matcher
+
+- Bound candidate count, scoring features, parallel offers, total attempts, radius, and end-to-end deadline.
+- Keep mandatory eligibility and freshness checks ahead of optional machine-learning features.
+- Cache road and traffic features with versions, but recompute or degrade when the cache exceeds its tolerated age.
+- Prefer regional and cell-level queues so one stadium exit cannot consume every dispatch worker.
+- Record the candidate set, feature version, policy version, score summary, offer result, and winning transition for investigation.
+
+### Dynamic pricing and supply positioning
+
+Pricing consumes request rate, available supply, wait, event, weather, historical, and elasticity signals at a geographic granularity. It can reduce demand or attract supply, but it has slower feedback than dispatch and can oscillate if every noisy cell reacts independently.
+
+- Smooth noisy signals and apply multiplier floors, ceilings, expiry, policy, and experiment version.
+- Separate the rider quote from the live marketplace multiplier so an accepted quote remains explainable.
+- Measure driver repositioning, acceptance, cancellation, rider conversion, and fairness together; revenue alone is not a sufficient objective.
+- Fall back to a valid base-price policy when the prediction path is unavailable rather than blocking trip assignment.
+
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Contain dispatch, location, regional, and retry failures" %}
+
+## Degrade search and freshness before creating a second trip authority
+
+Failures do not all permit the same response. Dispatch can return unavailable without changing trip ownership. A stale coordinate must be excluded. A peer-region partition should delay replication while the home region remains fenced as writer. An uncertain assignment acknowledgement should replay the same command identity.
+
+Select all four incidents, then compare a broad retry, boundary isolation, and identity-aware replay.
+
+{% interactive-block id="case-studies/uber-ridesharing-trip-failure-state-lab" dataFile="/api/content/case-studies/uber-ridesharing/data/trip-failure-scenarios.json" /%}
+
+### Failure rules worth making executable
+
+- **Dispatch unavailable:** keep the trip requested, stop issuing offers in the affected boundary, and return an honest retryable result.
+- **Stale driver location:** remove the candidate before scoring or offering; a retry does not refresh evidence.
+- **Region isolated:** keep one fenced home-region writer, continue local trips when dependencies are healthy, and queue replication for later reconciliation.
+- **Assignment acknowledgement lost:** read or replay with the same idempotency key and expected version; never invent a new command identity to discover whether the first committed.
+- **Event consumer lag:** preserve the trip commit, isolate the slow consumer, and replay from a stable offset with event ID and version deduplication.
+
+{% callout variant="warn" %}
+Failover is an ownership transfer, not merely a routing change. A peer region must prove the previous writer is fenced and restore the latest accepted trip version before it can commit new transitions.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make evolution and architecture trade-offs explicit" %}
+
+## Growth changes boundaries, not the invariant
+
+Uber's architecture evolved as cities, products, traffic, and engineering teams grew. The useful lesson is not a particular service count. It is the sequence of pressures that forced dispatch, location, pricing, trip state, and event delivery into clearer ownership boundaries.
+
+{% concept-grid columns="2" %}
+{% concept-card title="City-focused application" eyebrow="Early phase" icon="users" tone="blue" %}
+A compact application and relational store can validate the marketplace quickly. The main benefit is speed of change; the limit is coupling between location churn, trip writes, pricing, and city operations.
+{% /concept-card %}
+{% concept-card title="Domain services" eyebrow="Expansion" icon="network" tone="green" %}
+Location, dispatch, trip, pricing, and payments separate around distinct access patterns and ownership. The cost is explicit contracts, deployment coordination, and operational maturity.
+{% /concept-card %}
+{% concept-card title="Real-time event platform" eyebrow="Scale" icon="activity" tone="violet" %}
+Durable streams decouple trip commits from analytics, notifications, safety, and support. Replay improves recovery but requires idempotent, version-aware consumers.
+{% /concept-card %}
+{% concept-card title="Regional and ML-assisted marketplace" eyebrow="Global operations" icon="scale" tone="amber" %}
+Regional isolation limits latency and blast radius while models improve ETA, matching, positioning, and pricing. Governance, fallback behavior, and feature freshness become first-class design work.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Decision guide
+
+- **Fine cells versus coarse cells**
+    - Fine cells reduce false candidates but increase lookup fan-out for a wide radius.
+    - Coarse cells touch fewer index keys but scan more drivers outside the exact aperture.
+    - Measure total work and hot-key skew; do not choose precision from map appearance alone.
+- **Fresh locations versus device and network cost**
+    - Frequent updates improve ETA and reduce ghost candidates.
+    - They consume battery, radio bandwidth, ingestion capacity, and index writes.
+    - Adapt cadence by movement, trip phase, and uncertainty while enforcing a hard dispatch freshness bound.
+- **Strict local ownership versus instant cross-region failover**
+    - Local authority keeps latency and trip transitions predictable.
+    - Ownership transfer takes fencing and recovery time during a regional event.
+    - Active-active writes without a conflict-free trip-state design can create two accepted drivers.
+- **Better model versus simpler degraded path**
+    - Rich models can improve acceptance, ETA, and marketplace efficiency.
+    - They add feature dependencies, tail latency, distribution shift, and explanation work.
+    - Keep a bounded rules or lightweight scoring path that preserves eligibility and trip-state correctness.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Operate dispatch and trip state as separate planes" %}
+
+## Measure the rider result, the candidate queue, and the authority
+
+An average API latency chart can look healthy while a hot cell has no drivers, stale coordinates dominate offers, or event consumers lag minutes behind committed trips. Operations need separate signals for marketplace health, dispatch work, authoritative state, and derived freshness.
+
+### Operational scorecard
+
+- **Marketplace:** rider requests, fresh ready drivers, demand-to-supply coverage, match success, no-match reasons, acceptance, cancellation, and estimated versus actual pickup.
+- **Location plane:** updates per second, coordinate age distribution, expired-candidate rate, index write latency, hot cells, GPS uncertainty, and battery-aware update mode.
+- **Dispatch plane:** candidates scanned, cells read, scoring latency, offer attempts, queue age, queue growth, worker pressure, radius expansion, and optional-feature fallback rate.
+- **Trip authority:** transition latency, compare-and-swap conflicts, idempotency hits, illegal transitions, duplicate-assignment attempts, outbox lag, and reconciliation mismatches.
+- **Regional reliability:** ownership-fence age, replication lag, failover recovery point, isolated trips, peer backlog, and time spent in each degraded mode.
+
+### Incident sequence
+
+1. Identify whether the rider problem is supply, location freshness, dispatch capacity, trip authority, or a derived consumer.
+2. Limit the smallest affected region, cell, product, worker pool, or event partition before changing global policy.
+3. Preserve trip ownership and idempotency while shedding optional scoring, wider searches, analytics, and noncritical updates.
+4. Restore capacity or freshness, replay durable commands and events by stable identity, and verify monotonically increasing trip versions.
+5. Compare rider and driver views with trip authority, account for duplicate suppression and queued replication, then remove the degraded mode gradually.
+
+### Release guardrails
+
+- Roll out dispatch changes by region and cell cohort, not to the full marketplace at once.
+- Shadow-score new models before they can issue offers, then compare ETA error, acceptance, cancellation, fairness, and latency.
+- Load-test a stadium surge, a sparse suburb, stale GPS bursts, one failed dispatch zone, and a lost assignment acknowledgement.
+- Rehearse regional fencing and replay with real trip-state invariants, not only service-health checks.
+
+The durable lesson is simple: use fast approximate state to discover good candidates, but let one versioned trip authority decide ownership. Capacity models protect wait time; freshness bounds protect candidate truth; idempotency and regional fencing protect the trip when the network is uncertain.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/uber-ridesharing/quiz/uber-ridesharing.json" lessonSlug="uber-ridesharing" title="Review the ridesharing architecture" /%}

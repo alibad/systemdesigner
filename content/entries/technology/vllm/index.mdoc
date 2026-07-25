@@ -1,0 +1,270 @@
+---
+registryId: vllm-tech
+---
+
+{% section-card tone="intro" %}
+## What is vLLM?
+
+**vLLM is an open-source inference engine and API server for running trained language models.** It accepts prompts, schedules many requests onto accelerators, manages each request's attention memory, and streams generated tokens back to clients.
+
+In plain language: a model checkpoint contains learned weights; vLLM is the runtime that turns those weights into a shared service. It does not train the model or make the model's answers correct.
+
+The core invariant is **admit only the work that the serving pool can hold, then measure useful completions inside the latency and quality contract**. High raw token throughput is not success when requests wait too long, workers restart under memory pressure, or an upgrade changes API behavior.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="TTFT" label="Start the stream" detail="Queueing and prompt prefill dominate time to first token" tone="blue" /%}
+{% metric value="ITL" label="Keep it moving" detail="Decode scheduling determines the gap between streamed tokens" tone="violet" /%}
+{% metric value="KV" label="Hold request state" detail="Paged blocks grow with live sequence tokens and concurrency" tone="cyan" /%}
+{% metric value="Goodput" label="Meet the contract" detail="Count useful requests completed within the target, not abandoned work" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Start from the serving problem
+
+Read [LLM Serving and APIs](/genai/llm-serving) first if prefill, decode, time to first token, or model serving is new. vLLM supplies an engine for those concepts, but the application still owns admission policy, authentication, safety checks, request limits, and routing.
+
+Use vLLM when the model and supported hardware fit its current compatibility matrix and the workload benefits from shared scheduling. Do not choose it from a benchmark headline alone. Reproduce results with the exact model, precision, prompt lengths, output lengths, concurrency, accelerator, driver, and service-level objectives you will operate.
+
+### What the runtime controls
+
+- The **scheduler** chooses which waiting and running requests receive work in the next engine step.
+- The **model executor** runs prefill and decode work, potentially across several devices.
+- The **KV cache manager** allocates attention state as sequences grow, finish, share prefixes, or are preempted.
+- The **API server** validates supported request fields, streams responses, exposes metrics, and propagates cancellation.
+
+### What remains outside the runtime
+
+- A gateway must enforce tenant identity, endpoint allowlists, rate limits, request-size limits, and audit policy.
+- A deployment controller must provide replica health, load balancing, draining, rollback, and failure-domain isolation.
+- Evaluation must check model quality, safety, structured output, and tool behavior for the released configuration.
+{% /section-card %}
+
+{% section-card %}
+## Trace one request through vLLM
+
+{% system-flow title="The online generation path" caption="Continuous batching changes the active batch between engine steps. Paged KV blocks preserve each request's attention state while that membership changes." %}
+{% system-node title="Gateway and API server" eyebrow="Bound the request" icon="shield" tone="amber" %}
+Authenticate, cap prompt and output tokens, validate the supported API contract, assign a deadline, and reject overload before GPU work begins.
+{% /system-node %}
+{% system-node title="Tokenizer and queue" eyebrow="Prepare work" icon="list" tone="blue" %}
+Apply the model's chat template, turn text into token IDs, and place the request in the scheduler's waiting set.
+{% /system-node %}
+{% system-node title="Prefill" eyebrow="Read the prompt" icon="layers" tone="cyan" %}
+Process prompt tokens and create per-layer keys and values. Exact reusable prefix blocks can avoid some repeated prefill work.
+{% /system-node %}
+{% system-node title="Iterative decode" eyebrow="Generate tokens" icon="repeat" tone="violet" %}
+Run repeated next-token steps over the changing active batch. Finished and cancelled requests leave; eligible waiting work can enter.
+{% /system-node %}
+{% system-node title="Stream and observe" eyebrow="Close the loop" icon="activity" tone="green" %}
+Return token chunks, record finish reasons and latency, and release scheduler and KV capacity when the request ends.
+{% /system-node %}
+{% /system-flow %}
+
+Cancellation is a capacity feature. If a disconnected client continues decoding, the engine spends GPU time and KV memory on work no user can consume.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Understand continuous batching before tuning it
+
+A static batch waits for a fixed group of requests to finish. Language-model requests have different prompt and output lengths, so that policy leaves capacity idle behind the slowest sequence.
+
+**Continuous batching** revisits membership at engine-step granularity. A completed request can leave and eligible work can join a later step without waiting for every earlier request. The idea builds on iteration-level scheduling described by Orca; vLLM combines scheduling with its own memory manager and execution stack.
+
+### Three limits answer different questions
+
+- `max_num_seqs` caps how many sequences may be processed in one iteration. Raising it increases possible concurrency and KV demand.
+- `max_num_batched_tokens` caps tokens processed in one iteration. With chunked prefill, the scheduler can split a long prompt across steps.
+- `max_model_len` caps an individual sequence's prompt plus generated-token envelope. It is not a concurrency target.
+
+Current vLLM V1 documentation says chunked prefill is enabled when supported. Decode work is prioritized, then remaining token budget is used for prefill. A smaller token budget can protect inter-token latency; a larger one can process prefill faster. Treat both directions as hypotheses until a representative load test measures TTFT, ITL, and goodput together.
+{% /section-card %}
+
+{% interactive-block id="technology/vllm-scheduling-envelope-lab" dataFile="/api/content/technology/vllm/data/scheduling-envelope.json" /%}
+
+{% section-card %}
+## Treat KV cache and PagedAttention precisely
+
+During autoregressive generation, every layer reuses keys and values from prior tokens. This **KV cache** avoids recomputing the full prefix at every decode step, but it grows with live sequence length and concurrency.
+
+A first-order estimate for standard attention layouts is:
+
+`KV bytes per token = 2 x layers x KV heads x head dimension x bytes per element`
+
+The factor of two represents keys and values. Grouped-query and multi-query attention reduce KV heads. Hybrid architectures, quantized KV, alignment, allocator metadata, and runtime workspace require model-specific measurement.
+
+### What PagedAttention changes
+
+- It stores a sequence's KV state in fixed-size physical blocks rather than requiring one contiguous maximum-length reservation.
+- A logical block table maps each sequence position to its physical KV block, so physical placement need not be contiguous.
+- Allocation can follow actual sequence growth. Waste is concentrated in partially filled blocks instead of a large worst-case reservation per request.
+- Block sharing and copy-on-write can support shared prefixes and branching sequences without copying every common block.
+
+### What it does not change
+
+- The model still needs KV bytes for live tokens; paging does not make per-token state free.
+- The final partially filled block can still waste space, and runtime workspace still consumes accelerator memory.
+- More efficient allocation enables larger useful batches, but does not guarantee a fixed throughput multiplier on a new workload.
+
+The original vLLM paper reported 2-4x higher throughput than its evaluated baselines at comparable latency. That is a result for the paper's models, hardware, workloads, and competing systems, not a production promise.
+{% /section-card %}
+
+{% section-card %}
+## Size the memory envelope with an executable model
+
+This standalone Python program estimates model-weight bytes, KV bytes per token, block rounding, and a conservative sequence capacity. It uses only the standard library and exposes every assumption as a command-line argument.
+
+Use it to reject impossible configurations before loading a checkpoint. Replace the estimate with vLLM's startup profile and observed cache metrics before release.
+
+{% code-block file="/api/content/technology/vllm/code/serving-envelope.py" language="python" title="Estimate a vLLM serving envelope" /%}
+{% /section-card %}
+
+{% section-card %}
+## Choose parallelism by the constraint
+
+Parallelism changes both capacity and failure domains. Multiplying settings without mapping the process topology can produce expensive collectives, uneven memory, or a replica that spans too many hosts.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Tensor parallelism" eyebrow="Split each layer" icon="split" tone="blue" %}
+Shard tensor operations across devices. It helps a model fit and can accelerate a replica, but each decode step needs device communication. Prefer fast links and measure collective tails.
+{% /concept-card %}
+{% concept-card title="Pipeline parallelism" eyebrow="Split layer ranges" icon="workflow" tone="violet" %}
+Place groups of layers on different stages. It can span nodes or accommodate uneven partitions, while bubbles and stage imbalance can reduce utilization.
+{% /concept-card %}
+{% concept-card title="Data parallelism" eyebrow="Replicate the model" icon="copy" tone="green" %}
+Run independent engine replicas against different request batches. It increases aggregate capacity and isolates failures when the load balancer is aware of queue and KV state.
+{% /concept-card %}
+{% /concept-grid %}
+
+### A practical selection order
+
+1. Use one device when the full measured footprint fits with safe headroom.
+2. Add tensor parallelism within a fast-connected host when one replica needs more memory or compute.
+3. Add pipeline parallelism when a replica must span stages or hosts and the latency trade-off is acceptable.
+4. Add data-parallel replicas for aggregate throughput, independent canaries, and smaller failure domains.
+
+For current defaults, vLLM documents native multiprocessing for typical single-node distributed execution and Ray as the default multi-node runtime. Verify the behavior in the version you pin; distributed backends and supported combinations evolve.
+{% /section-card %}
+
+{% section-card %}
+## Serve an explicit API contract
+
+The vLLM server implements several OpenAI-compatible endpoints, but compatibility is not identity. Supported parameters vary by endpoint and model, chat requests require a usable chat template, and model-specific tool or reasoning parsers may change output shape.
+
+### Bound the public surface
+
+- Pin the vLLM image or package, model revision, tokenizer revision, and served model name.
+- Put the server behind a gateway that allowlists required inference and metrics paths.
+- Enforce authentication, request and token limits, deadlines, concurrency quotas, and body-size limits at that gateway.
+- Keep distributed-runtime, profiling, cache-control, and development endpoints on trusted networks only.
+
+Official security guidance warns that `--api-key` does not protect every endpoint on the HTTP server. It is one control, not a complete production boundary.
+
+{% code-block file="/api/content/technology/vllm/code/serve-openai-api.sh" language="bash" title="Start a pinned OpenAI-compatible server" /%}
+
+The smoke test checks the advertised model, a non-streaming response, a streaming response, expected error behavior, and the metrics contract. It uses only Python's standard library so it can run in a release job without an SDK.
+
+{% code-block file="/api/content/technology/vllm/code/release-smoke-test.py" language="python" title="Exercise API and metrics release gates" /%}
+{% /section-card %}
+
+{% section-card %}
+## Observe queues, latency, and cache pressure together
+
+The OpenAI-compatible server exposes Prometheus metrics at `/metrics`. Metric names are versioned runtime contracts: check the documentation and the actual endpoint for the pinned release rather than copying an old dashboard unchanged.
+
+### Minimum operational views
+
+- **Demand:** request arrival rate plus prompt and generation token histograms by workload class.
+- **Queue:** waiting and running requests, queue time, rejected work, and cancellation lag.
+- **Latency:** TTFT, inter-token latency, end-to-end latency, and finish reason at p50, p95, and p99.
+- **Capacity:** prompt and generation token rates, KV cache usage, prefix-cache queries and hits, preemptions, and worker restarts.
+- **Correctness:** HTTP errors, malformed structured outputs, tool-call validity, task evaluation slices, and safety outcomes.
+
+### Diagnose combinations, not isolated charts
+
+- Rising queue time with low KV usage points toward compute, scheduling, a blocked worker, or an upstream bottleneck rather than cache exhaustion alone.
+- High KV usage plus preemption and tail-latency growth indicates that live sequence state exceeds the stable envelope.
+- A high prefix hit percentage is useful only when it saves meaningful prompt tokens and does not cross tenant trust boundaries.
+- High GPU utilization can coexist with poor goodput when clients time out or requests miss latency targets.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Contain predictable failures
+
+- **KV exhaustion:** reject or route oversized work before allocation; bound context and generated tokens; keep a lower-context or lower-concurrency fallback pool.
+- **Worker or collective failure:** remove the whole replica from routing, stop sending partial traffic to a broken tensor or pipeline group, and restart outside the request path.
+- **Queue overload:** shed work by explicit priority and deadline before timeout storms create retries and more queueing.
+- **API regression:** keep contract tests for non-streaming, streaming, errors, tool calls, and structured outputs; route back to the pinned replica when any required shape changes.
+- **Bad prefix reuse:** include the model, adapter, token sequence, and trust boundary in cache identity. Use supported cache salting where tenants must not share reuse signals.
+- **Poisoned rollout:** run the new runtime in a separate canary pool so a crash, memory leak, or metric change cannot replace the rollback path.
+
+Retries require an owner. A gateway retry after generation has started can duplicate expensive work and may duplicate side effects in tool-using applications.
+{% /section-card %}
+
+{% interactive-block id="technology/vllm-release-failure-lab" dataFile="/api/content/technology/vllm/data/release-failure-scenarios.json" /%}
+
+{% section-card %}
+## Upgrade as a measured serving-policy change
+
+vLLM evolves quickly across engine internals, model support, CLI flags, metrics, kernels, and dependencies. The project's deprecation policy covers public CLI flags, environment variables, server APIs, and Python APIs, but a version change can still alter performance or model behavior without violating an API signature.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the candidate" label="Build" %}
+Pin runtime and dependency versions, container digest, model and tokenizer revisions, chat template, parsers, precision, and parallelism.
+{% /process-step %}
+{% process-step number="2" title="Reproduce the workload" label="Offline" %}
+Replay representative prompts, outputs, arrival bursts, cancellations, long contexts, and malformed requests against old and new pools.
+{% /process-step %}
+{% process-step number="3" title="Canary in isolation" label="Online" %}
+Send a bounded traffic slice to a separate pool with its own queue and KV state. Compare latency, goodput, errors, memory, and quality.
+{% /process-step %}
+{% process-step number="4" title="Promote or roll back" label="Decision" %}
+Advance only when every required gate passes. Keep the prior image warm until rollback timing and state cleanup are proven.
+{% /process-step %}
+{% /process-flow %}
+
+### Required production release gates
+
+- API contract tests pass for every endpoint and request mode the product exposes.
+- Task, safety, structured-output, and tool-use evaluations meet the reference floor.
+- Representative load meets TTFT, ITL, end-to-end latency, error, and goodput targets at the planned concurrency.
+- KV occupancy, preemption, prefix reuse, process memory, and restart behavior remain bounded during long-context and cancellation tests.
+- Worker, gateway, model-store, and distributed-communication failures stay inside the intended replica or canary boundary.
+- Dashboards and alerts use metrics present in the candidate release; deprecated names have an explicit migration.
+- Rollback restores capacity before the error budget is exhausted and does not depend on the failing pool.
+{% /section-card %}
+
+{% section-card %}
+## Benchmark the deployment you will ship
+
+Use `vllm bench serve` or an equivalent workload generator with production-shaped data. A useful test matrix varies prompt length, output length, arrival process, prefix repetition, priority, streaming, cancellation, and concurrency.
+
+### Compare at a fair operating point
+
+- Hold the model, task-quality floor, sampling policy, and latency targets constant.
+- Report throughput only while TTFT, ITL, and error objectives still pass.
+- Separate cold start, cold prefix cache, warm prefix cache, steady state, and overload results.
+- Include p95 and p99 behavior; averages hide queue and collective stalls.
+- Preserve exact commands, environment details, traces, and result files with the release artifact.
+
+Do not tune `gpu_memory_utilization`, sequence limits, or token budgets from a generic recommendation. Profile startup, leave headroom for non-KV allocations, drive the workload to steady state, and increase one limit at a time.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and current contracts
+
+- [vLLM overview and feature index](https://docs.vllm.ai/en/latest/) describes the current project surface and links to supported models and hardware.
+- [Optimization and tuning](https://docs.vllm.ai/en/stable/configuration/optimization/) documents chunked prefill, scheduler token-budget trade-offs, and parallelism strategies.
+- [OpenAI-compatible serving](https://docs.vllm.ai/en/stable/serving/openai_compatible_server/) lists supported endpoints and compatibility limits.
+- [Production metrics](https://docs.vllm.ai/en/stable/usage/metrics/) documents the `/metrics` endpoint and current metric names.
+- [Security guidance](https://docs.vllm.ai/en/stable/usage/security/) explains endpoint exposure and the limits of API-key authentication.
+- [Parallelism and scaling](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/) and [data-parallel deployment](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/) describe current distributed execution patterns.
+- [Automatic prefix caching](https://docs.vllm.ai/en/latest/design/prefix_caching/) documents block hashes, full-block reuse, and cache salting.
+- [vLLM deprecation policy](https://docs.vllm.ai/en/stable/contributing/deprecation_policy.html) defines the lifecycle for public flags, APIs, environment variables, and metrics.
+- [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180) presents vLLM's original block-based KV memory design and scoped evaluation.
+- [Orca](https://www.usenix.org/conference/osdi22/presentation/yu) introduces iteration-level scheduling and selective batching for generative-model serving.
+
+Documentation pages describe a moving runtime. Recheck them against the exact release you pin.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/vllm/quiz/vllm-production-serving.json" lessonSlug="vllm" title="vLLM Production Design Review" /%}

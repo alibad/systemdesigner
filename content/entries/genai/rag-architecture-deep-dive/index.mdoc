@@ -1,0 +1,212 @@
+---
+registryId: rag-architecture-deep-dive
+---
+
+{% section-card tone="intro" %}
+## What is a RAG architecture?
+
+A **retrieval-augmented generation (RAG) architecture** is the complete system that finds evidence for a question, places a bounded set of that evidence in a model prompt, and decides whether the resulting answer is safe to release.
+
+In plain language: the model does not search the whole knowledge base itself. A retrieval system selects a small, authorized evidence packet first. The model must answer from that packet or admit that the evidence is insufficient.
+
+The core invariant is **no evidence, no grounded claim**. A fluent answer is not proof that retrieval found the right source, that the user may see it, or that the source is current.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Recall" label="Find the evidence" detail="Retrieve answer-bearing chunks before generation begins" tone="blue" /%}
+{% metric value="Precision" label="Spend context well" detail="Rerank and deduplicate so weak candidates do not consume the prompt" tone="violet" /%}
+{% metric value="Policy" label="Enforce access" detail="Apply tenant, identity, and freshness filters before evidence reaches the model" tone="rose" /%}
+{% metric value="Grounding" label="Release with proof" detail="Cite supported claims and refuse when evidence is incomplete" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Separate the offline and online systems
+
+RAG has two connected paths. The **offline path** turns source documents into searchable units. The **online path** turns a user question into an evidence-backed answer. Mixing their responsibilities makes failures difficult to diagnose.
+
+{% system-flow title="A question earns its context" caption="Every handoff has a different contract: ingestion preserves meaning and policy; retrieval finds candidates; generation uses only the final evidence packet." %}
+{% system-node title="Prepare the corpus" eyebrow="Offline" icon="database" tone="blue" %}
+Parse structure, create stable chunks, attach source identity and access metadata, then build lexical and vector indexes.
+{% /system-node %}
+{% system-node title="Plan the query" eyebrow="Online" icon="braces" tone="cyan" %}
+Resolve conversation references, decompose only when needed, and construct mandatory authorization and freshness filters.
+{% /system-node %}
+{% system-node title="Retrieve broadly" eyebrow="Recall" icon="search" tone="violet" %}
+Run lexical, vector, or hybrid retrieval to gather a candidate set larger than the final context.
+{% /system-node %}
+{% system-node title="Select evidence" eyebrow="Precision" icon="scale" tone="amber" %}
+Rerank, deduplicate, enforce the token budget, and preserve source provenance for each selected passage.
+{% /system-node %}
+{% system-node title="Generate or refuse" eyebrow="Grounding" icon="shield" tone="green" %}
+Answer from selected evidence, attach citations, and stop when required facts are missing or conflicting.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep ownership explicit
+
+- **Source owners** define authoritative records, retention, and access policy.
+- **The ingestion pipeline** preserves structure, lineage, policy metadata, and index freshness.
+- **The retrieval service** owns query planning, filtering, candidate recall, and ranking.
+- **The answer service** owns context assembly, citation mapping, refusal, and response policy.
+- **The evaluation system** measures retrieval and generation separately so one cannot hide the other's failure.
+{% /section-card %}
+
+{% section-card %}
+## Add complexity only for a measured retrieval failure
+
+{% concept-grid columns="2" %}
+{% concept-card title="Single-query RAG" eyebrow="Simple default" icon="route" tone="blue" %}
+Run one bounded query, select evidence, and generate once. Prefer this when questions are direct and the corpus uses consistent terminology.
+{% /concept-card %}
+{% concept-card title="Hybrid retrieval" eyebrow="Vocabulary mismatch" icon="search" tone="cyan" %}
+Combine exact-term and semantic signals. This helps when identifiers need lexical precision while paraphrases need vector recall.
+{% /concept-card %}
+{% concept-card title="Hierarchical retrieval" eyebrow="Long structure" icon="network" tone="violet" %}
+Route through document or section summaries, then retrieve detailed passages from the selected parents. Use it when document structure carries meaning.
+{% /concept-card %}
+{% concept-card title="Multi-query retrieval" eyebrow="Multi-part questions" icon="workflow" tone="amber" %}
+Decompose a question into bounded subqueries and merge evidence. Use it only when one query repeatedly misses required facts.
+{% /concept-card %}
+{% /concept-grid %}
+
+Agentic retrieval is not a quality switch. Planning calls add latency, cost, and new failure modes. Start with the smallest pipeline that passes a representative evaluation set, then add a stage for a named failure such as low exact-term recall, missing multi-hop facts, or poor ranking.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Pack the index and prompt into explicit budgets
+
+Chunk size, overlap, embedding width, candidate count, and final evidence count affect different resources. Use the lab to change the corpus and query envelope. Watch raw vector storage, prompt usage, and reranking pressure move independently.
+{% /section-card %}
+
+{% interactive-block id="genai/rag-architecture-deep-dive" dataFile="/api/content/genai/rag-architecture-deep-dive/data/rag-capacity-envelope.json" /%}
+
+{% section-card %}
+## Design chunks as retrievable evidence units
+
+A chunk should be large enough to preserve one useful idea and small enough to rank independently. There is no universal token count or overlap percentage. Tune the strategy against labeled questions from the actual corpus.
+
+### Preserve meaning before optimizing size
+
+- Split on document structure such as headings, paragraphs, list boundaries, tables, and code blocks before falling back to token limits.
+- Store stable source and chunk IDs, document version, section path, effective time, tenant, and access-control attributes with every chunk.
+- Keep the original text available for display and citation even if cleaned text is used for embedding.
+- Avoid copying headers or overlap into every chunk when it causes near-duplicate candidates to crowd out distinct evidence.
+- Re-index deterministically so a source update can replace its previous chunks rather than creating silent duplicates.
+
+### Use parent context without flooding the prompt
+
+Retrieve the smallest answer-bearing passage, then attach a bounded parent heading or neighboring passage only when it resolves an ambiguous reference. Parent-child retrieval can recover structure without ranking an entire long document as one unit.
+
+{% code-block file="/api/content/genai/rag-architecture-deep-dive/code/bounded-rag-pipeline.py" language="python" title="A policy-aware retrieval pipeline" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Diagnose retrieval before blaming the model
+
+The candidate set determines what the generator can know. Select a query, change the retrieval mode, and remove policy controls in the lab. The release verdict changes when the top evidence is irrelevant, stale, unauthorized, or incomplete.
+{% /section-card %}
+
+{% interactive-block id="genai/rag-architecture-deep-dive-retrieval-failure-lab" dataFile="/api/content/genai/rag-architecture-deep-dive/data/retrieval-failure-scenarios.json" /%}
+
+{% section-card %}
+## Treat retrieval as a funnel, not one score
+
+Lexical and vector retrieval produce candidate sets; reranking only reorders the candidates it receives. A reranker cannot recover a relevant passage that initial retrieval missed.
+
+{% process-flow %}
+{% process-step number="1" title="Apply hard filters" label="Policy" %}
+Constrain tenant, identity, document state, language, and effective time before candidates can enter the evidence path.
+{% /process-step %}
+{% process-step number="2" title="Retrieve for recall" label="Candidate set" %}
+Use lexical search for exact identifiers, vectors for semantic similarity, or both when the workload contains both query shapes.
+{% /process-step %}
+{% process-step number="3" title="Rerank for precision" label="Evidence set" %}
+Spend the expensive relevance model on a bounded candidate pool, then remove duplicates and passages that do not add a required fact.
+{% /process-step %}
+{% process-step number="4" title="Assemble the prompt" label="Token budget" %}
+Reserve answer and instruction tokens, order evidence deliberately, and retain source-to-passage mappings for citations.
+{% /process-step %}
+{% /process-flow %}
+
+### Do not confuse these signals
+
+- **Similarity** estimates how closely a chunk matches a query representation; it does not prove factual correctness.
+- **Reranker score** orders the supplied candidates; score scales are model-specific and should not be treated as universal confidence.
+- **Citation presence** shows that a source was attached; claim-level support still needs evaluation.
+- **Model confidence** cannot repair missing, unauthorized, or stale evidence.
+{% /section-card %}
+
+{% section-card %}
+## Build the context as an evidence contract
+
+The final prompt should contain only what the answer service is allowed to use. Retrieved text is external data, not trusted instructions.
+
+### Before generation
+
+- Preserve the system and application instructions outside the retrieved-data boundary.
+- Label every passage with a stable source ID and delimit retrieved content from instructions.
+- Drop unauthorized, deleted, expired, malformed, or untraceable passages.
+- Detect conflicts across authoritative sources and route them to a refusal or resolution policy.
+- Reserve enough tokens for the answer, citations, and safety instructions instead of filling the window with retrieval output.
+
+### After generation
+
+- Map each material claim to supporting passage IDs.
+- Reject citations that do not entail the attached claim.
+- Return an explicit insufficient-evidence state when required facts are absent.
+- Log source IDs, index version, query plan, filters, candidate ranks, selected passages, and policy version for replay.
+
+{% callout variant="warn" %}
+Authorization must happen in retrieval, not only in the final prompt. Once forbidden text enters model context, response filtering cannot reliably undo the disclosure.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate the two systems separately
+
+An end-to-end answer score is useful, but it cannot tell whether retrieval failed or generation ignored good evidence. Maintain a versioned evaluation set with questions, required facts, acceptable source IDs, access context, and time context.
+
+### Retrieval evaluation
+
+- **Recall at k:** did the candidate set contain an acceptable answer-bearing source?
+- **Precision at k:** how much of the selected evidence was actually useful?
+- **Fact coverage:** did the final evidence packet contain every fact required by the question?
+- **Policy leakage rate:** did any unauthorized or expired passage enter candidates, selected evidence, or logs?
+- **Freshness lag:** how long after a source change until retrieval reflects the approved version?
+
+### Generation evaluation
+
+- **Groundedness:** are material claims supported by the supplied passages?
+- **Answer completeness:** does the response cover the required facts without inventing missing ones?
+- **Citation correctness:** does each citation point to the passage that supports its claim?
+- **Refusal correctness:** does the system stop when evidence is absent, conflicting, or forbidden?
+
+{% code-block file="/api/content/genai/rag-architecture-deep-dive/code/evaluate-retrieval.py" language="python" title="Retrieval and policy metrics from replay traces" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Operate for stale indexes, partial dependencies, and unsafe content
+
+- **Index lag:** expose source and index versions, alert on ingestion delay, and keep deletion updates on a short, measured path.
+- **Search degradation:** define whether lexical-only or vector-only fallback is acceptable for each query class; do not silently change semantics.
+- **Reranker timeout:** use a bounded fallback ranking and record that the precision stage was skipped.
+- **Embedding migration:** dual-write or rebuild into a versioned index, evaluate at matched traffic, and switch with rollback available.
+- **Duplicate evidence:** deduplicate by source lineage and semantic similarity before context assembly.
+- **Indirect prompt injection:** treat instructions inside retrieved documents as untrusted content and restrict any downstream tools independently.
+- **Cross-tenant leakage:** enforce policy filters in the retrieval request and include adversarial identity cases in every release evaluation.
+- **Missing evidence:** return a typed refusal with the missing fact or unavailable source class instead of asking the model to guess.
+{% /section-card %}
+
+{% section-card %}
+## Primary documentation behind the design
+
+- [Microsoft's RAG overview](https://learn.microsoft.com/en-us/azure/search/retrieval-augmented-generation-overview) separates classic and agentic retrieval, explains token and security constraints, and recommends measuring retrieval choices against the workload.
+- [Azure AI Search chunking guidance](https://learn.microsoft.com/en-us/azure/search/vector-search-how-to-chunk-documents) explains why large documents must be partitioned for embedding and generation input limits.
+- [Azure hybrid ranking documentation](https://learn.microsoft.com/en-us/azure/search/hybrid-search-ranking) describes rank fusion and keeps hybrid and semantic reranker scores conceptually separate.
+- [Amazon Bedrock reranking documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/rerank.html) defines reranking as reordering an existing candidate list rather than searching the corpus again.
+- [NIST's adversarial machine-learning taxonomy](https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-2e2025.pdf) includes indirect prompt injection through external sources used by RAG applications.
+
+Product defaults and APIs change. Treat these sources as implementation references and verify the current limits of the service and models you deploy.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/genai/rag-architecture-deep-dive/quiz/rag-architecture-deep-dive.json" lessonSlug="rag-architecture-deep-dive" /%}

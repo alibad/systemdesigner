@@ -1,0 +1,275 @@
+---
+registryId: beautiful-soup
+---
+
+{% section-card tone="intro" %}
+## What is Beautiful Soup?
+
+**Beautiful Soup is a Python library for turning HTML or XML markup into a tree that
+you can navigate, search, and modify.** Instead of splitting strings or writing regular
+expressions for nested tags, you ask the tree for elements such as product cards,
+links, headings, or attributes.
+
+It matters because real HTML is nested, repetitive, and often malformed. Beautiful
+Soup gives several underlying parsers one consistent Python interface, then provides
+methods such as `find()`, `find_all()`, `select_one()`, and `select()` over the tree
+they produce.
+
+The core invariant is **your query runs against the tree created by the parser, not
+directly against the original markup**. If two parsers repair invalid HTML differently,
+the same selector can see different ancestors, siblings, or missing nodes. Pin the
+parser and treat the expected tree shape as part of the extraction contract.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Put Beautiful Soup in the right part of the workflow
+
+Beautiful Soup parses markup that your program already has. It does not send HTTP
+requests, execute page JavaScript, bypass access controls, or decide whether collecting
+the page is permitted. Those responsibilities belong to the acquisition layer around
+it.
+
+{% process-flow %}
+{% process-step number="1" title="Acquire markup" label="File, HTTP client, or browser" %}
+Read a local fixture or fetch an allowed resource with explicit timeouts, identity,
+rate limits, and response-size bounds. Use browser rendering only when the authorized
+workflow genuinely requires JavaScript.
+{% /process-step %}
+{% process-step number="2" title="Build one tree" label="Explicit parser" %}
+Pass the bytes, string, or file handle to `BeautifulSoup(markup, parser)`. The parser
+decides how malformed input becomes nodes.
+{% /process-step %}
+{% process-step number="3" title="Select by contract" label="Scope + cardinality" %}
+Choose singular or plural search methods deliberately and scope selectors to stable,
+semantic containers rather than incidental document order.
+{% /process-step %}
+{% process-step number="4" title="Validate records" label="Required + optional fields" %}
+Normalize text, resolve permitted URLs, validate types, and surface missing required
+fields before writing data downstream.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Learn the four objects you will handle most
+
+{% concept-grid columns="4" %}
+{% concept-card title="BeautifulSoup" eyebrow="Document root" icon="network" tone="blue" %}
+Represents the parsed document and exposes the same navigation and search operations
+as a tag.
+{% /concept-card %}
+{% concept-card title="Tag" eyebrow="Element node" icon="code" tone="cyan" %}
+Represents an element such as `article` or `a`. Its attributes behave like a mapping,
+and its children form the next level of the tree.
+{% /concept-card %}
+{% concept-card title="NavigableString" eyebrow="Text node" icon="braces" tone="violet" %}
+Represents text inside the tree. `get_text()` combines descendant strings when an
+extractor needs normalized visible text.
+{% /concept-card %}
+{% concept-card title="Comment" eyebrow="Special string" icon="search" tone="amber" %}
+Represents an HTML or XML comment. It is a specialized string node, not a visible tag
+or attribute.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Search methods encode cardinality
+
+- `find()` and `select_one()` return the first matching `Tag`, or `None` when no match
+  exists. Use them for zero-or-one contracts and check the missing case.
+- `find_all()` and `select()` return collections. Use them when every match belongs in
+  the result, then apply an explicit limit when unbounded output is unnecessary.
+- Tree navigation such as `.parent`, `.children`, and sibling properties is useful
+  when relationships are stable. Prefer a scoped query when positional navigation
+  would couple the extractor to irrelevant whitespace or wrapper changes.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Match the selector to the extraction contract
+
+A selector is reliable only when its scope and return shape match what downstream code
+expects. Change the extraction goal and candidate query below. Watch which nodes enter
+the result and whether the Python return shape is singular or plural.
+
+{% interactive-block id="technology/beautiful-soup-selector-lab" dataFile="/api/content/technology/beautiful-soup/data/selector-contracts.json" /%}
+
+The shortest query is not automatically the clearest. A good query records the
+semantic boundary, expected relationship, and cardinality that make a result valid.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build a small extractor that fails clearly
+
+This complete example uses local HTML and Python's built-in `html.parser`, so it makes
+no network call and needs no parser package beyond Beautiful Soup itself. It scopes
+product cards, validates required fields, handles an optional rating, and includes
+assertions that make the example executable.
+
+{% code-block file="/api/content/technology/beautiful-soup/code/extract-catalog.py" language="python" title="Extract validated product records from local HTML" /%}
+
+### Treat fields according to their contract
+
+- Required fields should fail with enough context to locate the broken record. A
+  silent empty string makes upstream markup drift look like valid data.
+- Optional fields should use an explicit fallback such as `None`; do not access
+  `.text` on a missing result.
+- Attribute access with `tag["name"]` is appropriate when the attribute is required.
+  Use `tag.get("name")` or `tag.get("name", default)` when absence is expected.
+- `get_text(" ", strip=True)` joins descendant text with a separator and trims edge
+  whitespace. Keep raw markup only when the downstream contract truly needs it.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose a parser for repeatable trees
+
+Beautiful Soup supplies the search interface; an underlying parser builds the tree.
+The official documentation recommends specifying that parser because invalid markup
+can produce materially different structures.
+
+{% concept-grid columns="3" %}
+{% concept-card title="html.parser" eyebrow="Built into Python" icon="code" tone="blue" %}
+Start here for portable HTML parsing with no extra parser dependency. It has decent
+speed, but its repair behavior may differ from a browser on malformed input.
+{% /concept-card %}
+{% concept-card title="lxml" eyebrow="Fast external parser" icon="speed" tone="green" %}
+Use when measured workloads need speed or when XML support is required. It is an
+external C-backed dependency, and `xml` or `lxml-xml` is the supported XML path.
+{% /concept-card %}
+{% concept-card title="html5lib" eyebrow="HTML5 recovery" icon="globe" tone="violet" %}
+Use when browser-style HTML5 repair is part of the contract. It creates valid HTML5
+trees, is very lenient, and is slower than the other documented options.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not select a parser from generic benchmark claims alone. Test representative pages,
+pin the parser package in the deployment environment, and store malformed fixtures that
+assert the exact nodes your extractor depends on.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## See malformed markup become three valid interpretations
+
+The documented fragment `<a></p>` is invalid HTML. Choose what downstream code assumes,
+then switch parsers. Each result is legitimate for that parser, but only some satisfy
+contracts that require a document shell or browser-style recovery.
+
+{% interactive-block id="technology/beautiful-soup-parser-lab" dataFile="/api/content/technology/beautiful-soup/data/parser-recovery.json" /%}
+
+Parser choice is therefore observable behavior, not a hidden implementation detail.
+Changing it should receive the same fixture review as changing selectors or field
+validation.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Parse only the subtrees the job needs
+
+`SoupStrainer` can pass a filter into the constructor through `parse_only`. With a
+compatible parser, Beautiful Soup builds matching subtrees without retaining the full
+document tree. This is useful when a large page contains a small, predictable target
+such as links or selected records.
+
+{% code-block file="/api/content/technology/beautiful-soup/code/parse-links-only.py" language="python" title="Build only link subtrees with SoupStrainer" /%}
+
+### Know the boundary of this optimization
+
+- `parse_only` changes which nodes are built; it does not reduce download size because
+  acquisition already happened.
+- The official documentation notes that `html5lib` parses the whole document even when
+  `parse_only` is supplied, because its recovery algorithm rearranges the full tree.
+- A `SoupStrainer` match includes the matching tag's children. Test retained structure,
+  not only top-level match counts.
+- For documents too large for an in-memory tree, use a streaming or event-based parser
+  rather than assuming selective tree construction will solve every memory limit.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design the extraction pipeline for change
+
+Selectors eventually break because publishers redesign pages, experiments create
+alternate markup, localization changes text, or an acquisition layer returns an error
+page that still has status 200. Reliability comes from detecting those changes before
+bad records spread.
+
+{% system-flow title="A production extraction boundary" caption="Every stage narrows trust: acquisition bounds the response, parsing fixes the tree contract, and validation decides whether data may proceed." %}
+{% system-node title="Acquisition" eyebrow="Permission + limits" icon="globe" tone="blue" %}
+Check applicable terms and robots policy, identify the client where required, set
+timeouts and byte limits, throttle requests, cache stable responses, and back off on
+pressure or errors.
+{% /system-node %}
+{% system-node title="Parsing" eyebrow="Pinned tree builder" icon="network" tone="cyan" %}
+Record parser name and version, reject unexpected content types, and keep representative
+HTML fixtures for valid, malformed, localized, and blocked responses.
+{% /system-node %}
+{% system-node title="Extraction" eyebrow="Scoped selectors" icon="search" tone="violet" %}
+Separate required from optional fields, bound plural matches, normalize text once, and
+resolve only permitted links against the known source origin.
+{% /system-node %}
+{% system-node title="Validation" eyebrow="Evidence + quarantine" icon="shield" tone="green" %}
+Check schema, ranges, uniqueness, and record counts. Quarantine suspicious batches and
+retain enough source evidence to diagnose selector drift without storing unnecessary
+sensitive data.
+{% /system-node %}
+{% /system-flow %}
+
+### Observe the contract, not only exceptions
+
+- Track fetch status, content type, response bytes, parse duration, and parser version.
+- Track matches per selector, missing required-field rate, optional-field coverage, and
+  records emitted per page.
+- Alert on distribution changes, not only zero results. A broad selector can fail by
+  returning too much data while the process remains green.
+- Save sanitized failing fixtures and test them before releasing a selector change.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Avoid the failures Beautiful Soup cannot solve for you
+
+### Dynamic pages
+
+If a value appears in a browser but not in the acquired response, changing selectors
+cannot reveal it. Prefer an authorized structured endpoint when one exists. Otherwise,
+use browser automation only when permitted and operationally justified, then pass the
+rendered markup into the parser.
+
+### Untrusted input and output
+
+- Do not treat Beautiful Soup as an HTML sanitizer. If extracted markup will be shown
+  to users, sanitize and escape it for the output context.
+- Do not fetch every extracted URL blindly. Validate schemes and destinations to avoid
+  turning a crawler into a server-side request forgery path.
+- Cap response bytes, redirect depth, parse time, match counts, and retained evidence.
+  Adversarial or accidental input can otherwise exhaust memory and worker time.
+- Keep credentials, session cookies, and private-source data out of fixtures, logs, and
+  error payloads.
+
+### Tool mismatch
+
+- Prefer a documented JSON, XML, RSS, or other structured interface over scraping HTML
+  when it provides the required data.
+- Use `lxml` directly when XPath, XSLT, streaming XML, or measured high-throughput
+  parsing is the main requirement and Beautiful Soup's convenience layer adds little.
+- Use browser automation for required client-side execution, not as the default parser.
+{% /section-card %}
+
+{% section-card %}
+## Review the extraction contract
+
+Before shipping a Beautiful Soup job, make these answers explicit:
+
+- Where does the markup come from, and is acquiring it permitted and rate-limited?
+- Which parser and version define the tree in every environment?
+- Which selectors encode semantic scope instead of accidental document order?
+- Which fields are required, optional, repeated, or bounded?
+- Which fixtures cover malformed markup, missing fields, localization, and blocked or
+  error responses?
+- Which metrics detect underfetching, overfetching, and sudden distribution changes?
+- What quarantines a suspicious batch and rolls back a bad selector release?
+
+The [official Beautiful Soup documentation](https://www.crummy.com/software/BeautifulSoup/bs4/doc/)
+is the primary reference for parser differences, search methods, CSS selector support,
+tree modification, encodings, and `SoupStrainer`. For site access policy, Python's
+[`urllib.robotparser` documentation](https://docs.python.org/3/library/urllib.robotparser.html)
+describes how to evaluate published `robots.txt` rules; legal permission and site terms
+still require separate review.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/beautiful-soup/quiz/beautiful-soup-extraction.json" lessonSlug="beautiful-soup" title="Beautiful Soup Extraction Review" /%}

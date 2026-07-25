@@ -1,0 +1,163 @@
+---
+registryId: llm-as-judge-evaluation
+---
+
+{% section-card tone="intro" %}
+## What is LLM-as-judge evaluation?
+
+**LLM-as-judge evaluation uses a language model to apply a written rubric to another system's output.** The judge might assign a score, compare two responses, explain a defect, or abstain when the evidence is insufficient.
+
+In plain language, it is an automated reviewer. It matters because product teams often need to inspect thousands of open-ended answers that do not have one exact reference string. A judge can make that review faster and more repeatable, but it cannot turn a subjective decision into objective truth.
+
+The core invariant is **a judge result is evidence about a declared rubric, not ground truth**. Every reported score must remain traceable to the judge version, prompt, rubric, input order, output pair, calibration set, human reference process, and release policy that produced it.
+
+Review [evaluation benchmarks](/genai/evaluation-benchmarks-comprehensive) first if terms such as holdout, slice, or calibration set are unfamiliar.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="3 roles" label="Minimum separation" detail="Candidate, judge, and release owner must not collapse into one claim" tone="blue" /%}
+{% metric value="2 orders" label="Pairwise probe" detail="Evaluate A/B and B/A before declaring a stable preference" tone="violet" /%}
+{% metric value="1+ panel" label="Human reference" detail="Calibrate against independently reviewed examples, with disagreement retained" tone="amber" /%}
+{% metric value="0 overrides" label="Gate invariant" detail="A healthy aggregate cannot cancel a failed critical slice or bias probe" tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Decide what the judge is allowed to claim
+
+An LLM judge is useful when the criterion is observable in the supplied evidence and the consequence of an occasional disagreement is bounded. Start with the decision, then choose an evaluation pattern.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Direct scoring" eyebrow="One response" icon="gauge" tone="blue" %}
+Score named dimensions such as instruction coverage, citation support, or clarity. Use behavior-anchored labels and report each dimension separately before any weighted total.
+{% /concept-card %}
+{% concept-card title="Pairwise preference" eyebrow="Two responses" icon="scale" tone="violet" %}
+Ask which output better satisfies the same rubric. Pairwise choices can be easier than absolute scores, but order, style, and model identity can still move the preference.
+{% /concept-card %}
+{% concept-card title="Reference-grounded check" eyebrow="Response plus evidence" icon="search" tone="green" %}
+Compare a response with supplied documents, facts, or test results. The reference narrows the claim, but incomplete or incorrect references create their own failure mode.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not delegate a decision merely because a judge can produce a number:
+
+- **Good candidates:** response-format compliance, evidence coverage, bounded style requirements, and low-risk preference triage.
+- **Conditional candidates:** factuality, safety, and domain quality when the judge receives authoritative evidence and uncertain cases escalate.
+- **Poor candidates:** novel expert conclusions, legal or medical approval, appeals, and irreversible high-impact decisions without qualified human ownership.
+
+The judge should be able to return `abstain` or `needs_review`. Forcing a score when the rubric is ambiguous hides uncertainty as false precision.
+{% /section-card %}
+
+{% section-card %}
+## Build a rubric that another reviewer can reproduce
+
+A rubric is an evaluation contract, not a list of adjectives. Replace labels such as "excellent" or "helpful" with observable behavior and boundary examples.
+
+{% process-flow %}
+{% process-step number="1" title="Name the decision" label="Scope" %}
+State whether the result ranks candidates, detects regressions, routes review, or blocks a release. One judge prompt should not silently serve all four purposes.
+{% /process-step %}
+{% process-step number="2" title="Anchor each label" label="Rubric" %}
+Define what evidence earns each label, include near-boundary positive and negative examples, and separate dimensions that can fail independently.
+{% /process-step %}
+{% process-step number="3" title="Calibrate by slice" label="Evidence" %}
+Compare judge outputs with an independently reviewed set across languages, domains, response lengths, model families, and risk levels. Preserve panel disagreement.
+{% /process-step %}
+{% process-step number="4" title="Predeclare escalation" label="Policy" %}
+Set agreement, bias, coverage, and critical-miss limits before evaluating release candidates. Route abstentions and failed slices to the named human owner.
+{% /process-step %}
+{% /process-flow %}
+
+### A defensible calibration record contains
+
+1. The item ID, task slice, candidate output, and any reference evidence.
+2. Independent human labels, reviewer qualifications, adjudication notes, and unresolved disagreement.
+3. Judge model and prompt versions, rubric version, output order, raw judgment, parsed label, and abstention.
+4. Agreement and disagreement counts with denominators, not only a percentage.
+5. Results for order swaps, repeated runs, style-controlled pairs, critical slices, and appeals.
+
+{% callout variant="warn" %}
+Human labels are reference evidence, not perfect truth. Report panel disagreement and adjudication policy instead of training the judge to mimic one reviewer's undocumented preferences.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Calibrate rubric specificity and abstention together
+
+The lab below uses a **synthetic teaching dataset**, not a benchmark claim. Choose a task slice and compare a vague rubric, a behavior-anchored rubric, and an anchored rubric that permits abstention. Every outcome comes from visible counts in a 120-case calibration set.
+
+Watch the trade-off between decision coverage and agreement with the independent panel. Abstention can remove unsupported decisions, but excessive abstention can make the judge operationally useless. A rubric is calibrated only when all declared checks pass for the slice that matters.
+{% /section-card %}
+
+{% interactive-block id="genai/llm-as-judge-evaluation" dataFile="/api/content/genai/llm-as-judge-evaluation/data/rubric-calibration.json" /%}
+
+{% section-card %}
+## Implement the judge as a versioned evidence producer
+
+The judge runner should return structured evidence, not a bare score. For pairwise evaluation, run both candidate orders and translate the second result back to the original candidate identities. If the two orders disagree, abstain or escalate instead of manufacturing a winner.
+
+{% code-block file="/api/content/genai/llm-as-judge-evaluation/code/calibrated-pairwise-judge.py" language="python" title="Order-swapped pairwise aggregation with abstention" /%}
+
+Keep these boundaries explicit:
+
+- The **runner** owns model calls, deterministic settings where supported, retries, raw responses, parsing, and immutable item records.
+- The **calibration report** owns slice counts, agreement, disagreement, abstention, confidence intervals, and bias probes.
+- The **release policy** owns thresholds, required human coverage, waivers, rollout limits, and approvers.
+- A changed judge, rubric, prompt, parser, candidate population, or policy creates a new result version.
+{% /section-card %}
+
+{% section-card %}
+## Probe disagreement instead of averaging it away
+
+One overall agreement number can conceal several different failures:
+
+- **Position bias:** the preferred candidate changes when A/B becomes B/A.
+- **Verbosity or style bias:** a longer or more polished answer wins even when controlled evidence favors the concise answer.
+- **Self-inconsistency:** repeated judgments of the same item change beyond the allowed rate.
+- **Slice failure:** aggregate agreement looks healthy while one language, domain, risk tier, or candidate family falls below its floor.
+- **Panel mismatch:** the judge confidently disagrees with qualified reviewers on cases that matter to the product.
+- **Judge leakage:** the evaluator recognizes or favors its own model family, prompt style, or memorized benchmark artifacts.
+
+Research has documented [position, verbosity, and self-enhancement risks in MT-Bench-style judging](https://arxiv.org/abs/2306.05685), while [G-Eval](https://arxiv.org/abs/2303.16634) shows how structured criteria can improve correspondence on specific NLG tasks. Neither result is a universal reliability guarantee. Measure the judge, task, and population you actually use.
+
+Run controlled probes separately. A low order-flip rate does not prove the absence of verbosity bias, and repeated agreement does not prove correctness.
+{% /section-card %}
+
+{% section-card %}
+## Turn bias and disagreement into release gates
+
+The next lab models four evaluation batches: a controlled baseline, position bias, verbosity bias, and a hidden slice failure. Select a batch and policy, then change human-audit coverage.
+
+Every gate shows its numerator, denominator, measured rate, and threshold. The aggregate panel-agreement rate is never allowed to override a failed controlled probe or critical slice.
+{% /section-card %}
+
+{% interactive-block id="genai/llm-as-judge-evaluation-release-gate-lab" dataFile="/api/content/genai/llm-as-judge-evaluation/data/release-gate.json" /%}
+
+{% section-card %}
+## Encode the gate without treating the judge as truth
+
+The release example below accepts already-collected evidence counts and applies a declared policy. It does not call a model, estimate hidden correctness, or reinterpret disagreement after seeing the candidate result.
+
+{% code-block file="/api/content/genai/llm-as-judge-evaluation/code/judge-release-gate.py" language="python" title="Transparent bias, slice, and human-audit release gate" /%}
+
+### Operate the evaluator like a production dependency
+
+- Store raw candidate outputs, references, judge prompts, raw judgments, parsed labels, order variants, timestamps, latency, cost, and version identifiers.
+- Monitor parse failures, abstentions, score distributions, pairwise ties, order flips, repeat disagreement, slice agreement, panel disagreement, and appeal reversals.
+- Recalibrate after a judge-model change, rubric change, candidate-model change, major traffic shift, new language or domain, or unexpected distribution movement.
+- Shadow a new judge beside the current system before it can block releases. Compare decisions on the same frozen evidence.
+- Keep an appeal path. High-impact, low-confidence, novel, and policy-sensitive cases belong with qualified human reviewers.
+
+{% callout variant="info" %}
+Cost and speed determine how much evidence you can collect; they do not determine whether the evidence supports a decision. Budget human review first for calibration, critical slices, disagreements, appeals, and drift detection.
+{% /callout %}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Know when to stop using the judge
+
+Hold or narrow the evaluation when the judge lacks required evidence, the human panel itself cannot define a stable rubric, critical-slice denominators are too small, controlled bias probes fail, or candidate behavior moves outside the calibration population.
+
+For medicine, law, finance, safety incidents, culturally specific content, and advanced technical claims, route approval to qualified experts. An LLM judge can organize evidence and surface disagreements; it should not become the unnamed owner of a consequential decision.
+{% /section-card %}
+
+{% quiz title="LLM Judge Calibration and Release Decisions" questionsFile="/api/content/genai/llm-as-judge-evaluation/quiz/llm-as-judge-evaluation.json" lessonSlug="llm-as-judge-evaluation" /%}

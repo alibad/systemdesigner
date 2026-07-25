@@ -1,0 +1,344 @@
+---
+registryId: nginx
+---
+
+{% section-card tone="intro" %}
+## What is NGINX?
+
+NGINX is an event-driven web server and traffic proxy. It can accept a client
+connection, terminate TLS, select a virtual server and location, enforce request
+limits, serve a local or cached response, or proxy the request to an upstream
+application.
+
+A **reverse proxy** gives a system one controlled boundary in front of its services.
+That boundary matters because routing, client identity, timeouts, retries, buffering,
+caching, and overload policy all change what the application receives and what the
+caller observes.
+
+NGINX does not make an unhealthy application reliable by itself. A timeout can leave an
+upstream result unknown, a retry can repeat a mutation, a cache can serve the wrong
+tenant, and a broad location rule can route traffic somewhere unintended. The safe
+design starts with the end-to-end request contract, then configures NGINX to preserve
+it.
+{% /section-card %}
+
+{% callout variant="info" %}
+New to request routing? Review [communication patterns](/fundamentals/communication-patterns)
+and [load balancing](/fundamentals/load-balancing) before tuning proxy failure behavior.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Web server" eyebrow="Respond locally" icon="server" tone="blue" %}
+Serve static files, redirects, errors, health endpoints, or generated module responses
+without opening an upstream connection.
+{% /concept-card %}
+{% concept-card title="Reverse proxy" eyebrow="Forward intentionally" icon="route" tone="cyan" %}
+Normalize the request boundary, select an upstream, apply deadlines and buffering, and
+return a controlled response.
+{% /concept-card %}
+{% concept-card title="Load balancer" eyebrow="Distribute work" icon="network" tone="violet" %}
+Choose among upstream servers with round robin, least connections, hashing, weights,
+and passive or configured health behavior.
+{% /concept-card %}
+{% concept-card title="HTTP cache" eyebrow="Avoid source work" icon="database" tone="green" %}
+Store reusable responses under an explicit identity and freshness policy, then serve a
+hit or permitted stale response without contacting the origin.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card accent="blue" %}
+## Trace one proxied request through the edge
+
+NGINX first chooses a listening socket and virtual server, then evaluates the request
+against location rules. A selected location may reject, redirect, serve, cache, or
+proxy. The upstream response then crosses buffering, header, cache, and error policy
+before reaching the client.
+
+{% system-flow title="One reverse-proxy request" caption="Every arrow is a contract boundary: client identity, routing, cache identity, upstream attempt, and returned result must remain observable." %}
+{% system-node title="Client connection" eyebrow="Protocol boundary" icon="globe" tone="blue" %}
+Negotiate TLS and HTTP, bound headers and body size, and preserve a request ID and
+deadline that can be correlated across the system.
+{% /system-node %}
+{% system-node title="Server and location" eyebrow="Routing boundary" icon="route" tone="violet" %}
+Match host, port, path, method, and explicit policy. Confirm exact and prefix locations
+do not shadow sensitive handlers.
+{% /system-node %}
+{% system-node title="Cache or upstream" eyebrow="Work boundary" icon="database" tone="cyan" %}
+Serve an eligible cache entry or choose an upstream and apply connect, send, read,
+retry, buffering, and request-body behavior.
+{% /system-node %}
+{% system-node title="Client response" eyebrow="Outcome boundary" icon="check" tone="green" %}
+Return the status, headers, and body while recording edge time, upstream time, cache
+status, selected upstream, and final attempt result.
+{% /system-node %}
+{% /system-flow %}
+
+### Make routing behavior explicit
+
+- Define one owner for each host and path; test normal, trailing-slash, encoded,
+  traversal-like, and unexpected-method requests.
+- Keep internal administration and status locations inaccessible from untrusted
+  networks.
+- Pass a deliberate `Host` value. The default proxy behavior is not necessarily the
+  original client host.
+- Use generated configuration tests for every route and policy boundary before reload.
+- Avoid variable-heavy `proxy_pass` rules until DNS resolution, URI rewriting, cache
+  keys, and observability have been tested together.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Understand the master, workers, and connection slots
+
+The master process reads configuration, binds sockets, responds to control signals,
+and manages worker generations. Workers run event loops and handle network activity.
+During a graceful reload, new workers use the new configuration while old workers
+finish existing connections.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Master process" eyebrow="Lifecycle" icon="settings" tone="blue" %}
+Validate and load configuration, own privileged startup work, and coordinate reload,
+reopen, quit, and worker replacement signals.
+{% /concept-card %}
+{% concept-card title="Worker event loop" eyebrow="Concurrency" icon="activity" tone="cyan" %}
+One worker can manage many sockets with non-blocking I/O. Slow network clients do not
+require one operating-system thread each.
+{% /concept-card %}
+{% concept-card title="Shared zones" eyebrow="Cross-worker state" icon="layers" tone="violet" %}
+Rate-limit state, cache metadata, upstream state, and other module data may live in
+explicitly sized shared-memory zones.
+{% /concept-card %}
+{% /concept-grid %}
+
+`worker_connections` is not a requests-per-second setting. It limits connections a
+worker can own, including upstream connections. A proxied request may occupy a client
+socket and an upstream socket at the same time, while HTTP/2, WebSockets, keep-alive,
+buffering, and slow responses produce different concurrency shapes.
+
+{% metric-strip %}
+{% metric label="Request concurrency" value="rate x duration" detail="Use latency distributions, not only an average" tone="blue" /%}
+{% metric label="Proxy slots" value="downstream + upstream" detail="A proxied miss commonly occupies both sides" tone="cyan" /%}
+{% metric label="Configured ceiling" value="workers x worker_connections" detail="Also bound by file descriptors and operating system limits" tone="violet" /%}
+{% metric label="Origin pressure" value="misses x retries" detail="Cache and failure policy decide downstream work" tone="rose" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/nginx-performance" dataFile="/api/content/technology/nginx/data/proxy-capacity.json" /%}
+
+{% code-block file="/api/content/technology/nginx/code/production-reverse-proxy.conf" language="nginx" title="Bound a production reverse-proxy path" /%}
+
+### Benchmark the real resource envelope
+
+- Raise file-descriptor limits only after measuring worker connections, log files,
+  cache files, upstream sockets, and reload overlap.
+- Measure CPU cost for the deployed TLS versions, ciphers, compression, logging,
+  request transformations, and modules.
+- Test small and large responses with buffering both enabled and intentionally disabled.
+- Include slow clients, long-lived streams, upstream keep-alive, DNS changes, and
+  graceful reload in concurrency tests.
+- Record p50, p95, and p99 edge and upstream time separately; a healthy average can hide
+  an exhausted connection or upstream queue.
+
+See the official [core directive reference](https://nginx.org/en/docs/ngx_core_module.html)
+for the exact worker and connection settings supported by the deployed release.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Select a load-balancing method from request behavior
+
+No method knows application capacity automatically. The algorithm observes only the
+signals in its contract, while weights, health behavior, connection reuse, session
+state, and long requests determine the real distribution.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Round robin" eyebrow="Default" icon="repeat" tone="blue" %}
+Rotate requests across available servers. It is a clear baseline when instances and
+request costs are similar.
+{% /concept-card %}
+{% concept-card title="Least connections" eyebrow="Uneven duration" icon="activity" tone="cyan" %}
+Send new work to the server with fewer active connections. Connection count is useful
+for long or uneven requests but is still only a proxy for load.
+{% /concept-card %}
+{% concept-card title="Hash routing" eyebrow="Stable affinity" icon="key" tone="violet" %}
+Hash a declared key when repeat placement is necessary. Choose a key that reflects the
+real affinity boundary and plan behavior when a server disappears.
+{% /concept-card %}
+{% concept-card title="Weighted capacity" eyebrow="Mixed servers" icon="scale" tone="amber" %}
+Give capable servers proportionally more traffic. Maintain weights as instance shape,
+limits, and workload change.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep health and state outside wishful routing
+
+- Open-source NGINX performs passive checks from live request failures. Know which
+  failures count, how `max_fails` and `fail_timeout` interact, and when a server is
+  tried again.
+- Do not use IP hash as a substitute for external session storage. Carrier NAT,
+  proxies, IPv6 behavior, and failover weaken client-to-server affinity.
+- Bound upstream keep-alive pools but remember that the `keepalive` directive does not
+  cap all connections a worker can open to an upstream group.
+- Drain application instances before shutdown and test long requests and upgraded
+  connections during rollout.
+- Compare per-upstream request count, active work, latency, failures, saturation, and
+  business cost rather than declaring a method balanced from totals.
+
+The official [load-balancing guide](https://nginx.org/en/docs/http/load_balancing.html)
+documents round robin, least connections, hash routing, weights, and passive health
+behavior.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make retries, cache expiry, and client identity fail visibly
+
+A proxy timeout does not prove the application did nothing. An expired hot cache entry
+can send every waiting request to the origin. A forwarding header is not trustworthy
+merely because its name begins with `X-Forwarded-`.
+
+Use the lab to inject each incident and change the control that protects its actual
+boundary. Retry identity, cache-fill ownership, stale policy, and trusted proxy ranges
+are independent decisions.
+
+{% interactive-block id="technology/nginx-failure-lab" dataFile="/api/content/technology/nginx/data/failure-incidents.json" /%}
+
+### Interpret upstream failure precisely
+
+- Set connect, send, and read timeouts from the end-to-end deadline and the upstream's
+  measured behavior. A long timeout is not a health strategy.
+- Limit retry tries and total retry time. Preserve enough response and log context to
+  distinguish connection failure, timeout, invalid response, and explicit status.
+- Do not enable retries for non-idempotent requests unless the application uses a
+  stable operation ID and returns or converges on the first durable outcome.
+- Account for request buffering. The proxy may have sent some or all of a request body
+  before an error made the final upstream result unknown.
+- Shed load before every worker and upstream queue saturates; overload needs a bounded,
+  observable response.
+
+The current [`proxy_next_upstream` reference](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream)
+defines the failure classes, retry limits, and special treatment of non-idempotent
+requests.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Cache only responses with a complete identity and freshness policy
+
+An HTTP cache stores a representation under a cache key. Safety depends on whether the
+key includes every request property that changes the response and whether authenticated,
+personalized, cookie-setting, or otherwise private responses are excluded.
+
+{% process-flow %}
+{% process-step number="1" title="Classify eligibility" label="Privacy" %}
+Permit only methods, statuses, routes, and response metadata with a documented shared-
+cache contract. Bypass authorization and session-dependent requests by default.
+{% /process-step %}
+{% process-step number="2" title="Build the cache key" label="Identity" %}
+Include scheme, host, normalized path/query, and every trusted variation dimension that
+changes the representation.
+{% /process-step %}
+{% process-step number="3" title="Define freshness" label="Time" %}
+Respect application cache headers or an explicit edge policy. Separate freshness from
+disk inactivity and eviction.
+{% /process-step %}
+{% process-step number="4" title="Control refresh" label="Stampede" %}
+Use cache locking, background update, conditional revalidation, and permitted stale
+serving to contain origin work.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/nginx/code/cache-with-stale.conf" language="nginx" title="Protect a shared cache from unsafe identity and refresh pressure" /%}
+
+### Test cache correctness before hit rate
+
+- Send two users, authorization states, languages, encodings, devices, and query orders
+  through the same route and confirm only equivalent representations share a key.
+- Expire one hot object under peak concurrency and count origin requests with and
+  without cache locking.
+- Fail the origin and verify exactly which statuses may serve stale, for how long, and
+  with what user-visible warning or age evidence.
+- Purge or version content and confirm every relevant key is removed or made
+  unreachable without a global cache flush.
+- Monitor hit, miss, bypass, expired, updating, stale, revalidated, origin latency,
+  cache-zone capacity, disk capacity, and loader/manager behavior.
+
+The official [proxy-cache directive reference](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cache)
+documents cache keys, shared zones, locking, background update, revalidation, and stale
+serving.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat forwarding headers and TLS as security boundaries
+
+The direct peer address is trustworthy only to the extent that the network path is
+controlled. If NGINX accepts arbitrary client-supplied forwarding headers as identity,
+an attacker can influence rate limits, audit logs, geolocation, and access decisions.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Trusted client identity" eyebrow="Known proxy ranges" icon="fingerprint" tone="blue" %}
+Strip or replace inbound forwarding fields at the first trusted edge. Configure real-IP
+processing only for explicit load-balancer or proxy networks.
+{% /concept-card %}
+{% concept-card title="Upstream TLS identity" eyebrow="Verify the service" icon="lock" tone="violet" %}
+When proxying over HTTPS, enable certificate verification, provide trusted CAs, set the
+expected server name, and test rotation and failure.
+{% /concept-card %}
+{% concept-card title="Bound untrusted input" eyebrow="Admission" icon="shield" tone="amber" %}
+Limit header and body size, request rate, connection rate, methods, parse time, and
+temporary-file use before expensive upstream work begins.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep edge policy auditable
+
+- Prefer allowlists for administrative hosts, paths, methods, and source networks.
+- Normalize one request ID at the trusted boundary and reject invalid external values
+  before forwarding.
+- Avoid logging credentials, authorization values, session cookies, signed URLs, and
+  sensitive query parameters.
+- Add HSTS and cookie attributes only with an application-aware rollout and rollback
+  plan.
+- Patch the deployed NGINX distribution and modules, remove unused modules, and verify
+  the exact compiled configuration with `nginx -V`.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Reload, observe, and recover as one operational workflow
+
+Graceful reload is powerful because established connections can finish on old workers
+while new workers accept traffic with the new configuration. It also means two worker
+generations can temporarily consume resources and long-lived connections can keep an
+old policy alive.
+
+{% process-flow %}
+{% process-step number="1" title="Render and validate" label="Before change" %}
+Generate configuration from reviewed inputs, run syntax validation, and execute route,
+header, cache, and retry tests against the candidate.
+{% /process-step %}
+{% process-step number="2" title="Reload a small edge set" label="Canary" %}
+Apply the candidate to bounded traffic and watch worker startup, upstream selection,
+status codes, latency, resource use, and security policy.
+{% /process-step %}
+{% process-step number="3" title="Observe generation overlap" label="Drain" %}
+Track old workers and long-lived connections. Confirm memory, file descriptors, and
+logs remain healthy until the old generation exits.
+{% /process-step %}
+{% process-step number="4" title="Promote or roll back" label="Evidence" %}
+Expand only when user and upstream outcomes remain inside the release envelope. Restore
+the prior artifact when a route or policy regresses.
+{% /process-step %}
+{% /process-flow %}
+
+### Monitor consequences, not just process liveness
+
+- Edge request rate, active connections, accepted/handled connections, and worker exits.
+- Status codes by route, host, upstream, cache status, retry count, and final attempt.
+- Request time, upstream connect time, header time, response time, and bytes buffered.
+- Upstream active work, failures, queueing, saturation, and application business errors.
+- Cache hit/miss/bypass/stale/update behavior, shared-zone pressure, disk pressure, and
+  origin amplification.
+- Rejected requests, rate-limit actions, invalid headers, oversized bodies, TLS errors,
+  certificate expiry, and forwarding-boundary violations.
+
+The production question is not “How many requests can NGINX handle?” It is “Which
+request contract must the edge preserve, and what evidence proves it still does so
+during overload, upstream ambiguity, cache expiry, and configuration change?”
+{% /section-card %}
+
+{% quiz quizId="nginx" lessonSlug="nginx" title="NGINX Production Design Review" questionsFile="/api/content/technology/nginx/quiz/nginx-production-design.json" /%}

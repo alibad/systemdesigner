@@ -1,0 +1,314 @@
+---
+registryId: ludwig
+---
+
+{% section-card tone="intro" %}
+## What is Ludwig?
+
+Ludwig is an open-source **declarative machine learning framework**. You
+describe input features, prediction targets, preprocessing, model choices, and
+training behavior in a configuration. Ludwig turns that contract into an
+executable training and inference pipeline.
+
+The framework reduces the amount of custom model code needed for tabular,
+text, image, audio, time-series, and multimodal problems. It does not remove
+the hard parts of machine learning: choosing a valid target, preventing data
+leakage, building a representative evaluation set, and operating the released
+artifact.
+
+Its core invariant is:
+
+> The configuration, training data contract, preprocessing metadata, model
+> weights, and evaluation evidence must describe the same prediction decision.
+
+Use Ludwig when a team benefits from a repeatable configuration-driven
+workflow and its feature abstractions fit the problem. Use lower-level
+frameworks such as [PyTorch](/technology/pytorch) when custom model internals
+are the main source of value.
+{% /section-card %}
+
+{% section-card %}
+## Read the configuration as an executable contract
+
+A minimal Ludwig configuration requires named input and output features. Most
+other settings have defaults, but production teams should make consequential
+choices explicit and review them like code.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Input features" eyebrow="What is known now" icon="database" tone="blue" %}
+Each input declares a dataset column and feature type. Optional preprocessing
+and encoder settings define how raw values become tensors.
+{% /concept-card %}
+{% concept-card title="Output features" eyebrow="What must be predicted" icon="target" tone="violet" %}
+Each output names a target and its type. Ludwig selects or configures a decoder,
+loss, and evaluation metrics appropriate to that prediction.
+{% /concept-card %}
+{% concept-card title="Combiner" eyebrow="Where representations meet" icon="workflow" tone="green" %}
+Encoded feature representations are combined before the output decoders. This
+is the central junction in Ludwig's encoder-combiner-decoder architecture.
+{% /concept-card %}
+{% concept-card title="Trainer and preprocessing" eyebrow="How evidence is produced" icon="settings" tone="amber" %}
+Trainer settings control optimization. Preprocessing owns dataset partitioning
+and data preparation, which directly affect whether evaluation is trustworthy.
+{% /concept-card %}
+{% /concept-grid %}
+
+The configuration is not a data-quality shield. A valid YAML file can still
+include a post-outcome field, mix one customer across train and test, or depend
+on a feature that does not exist in the live request.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one example through the generated model
+
+Ludwig's feature abstractions let different modalities enter one model without
+forcing the author to hand-write every tensor transformation.
+
+{% system-flow title="From dataset row to prediction" caption="Training and serving must reproduce the same feature meaning and preprocessing metadata." %}
+{% system-node title="Raw example" eyebrow="Named columns" icon="database" tone="neutral" %}
+A row supplies the fields declared by `input_features` and the ground-truth
+fields declared by `output_features` during training and evaluation.
+{% /system-node %}
+{% system-node title="Feature encoders" eyebrow="Typed preprocessing" icon="braces" tone="blue" %}
+Text, category, number, image, and other feature types validate and encode raw
+values into learned representations.
+{% /system-node %}
+{% system-node title="Combiner" eyebrow="Shared representation" icon="workflow" tone="violet" %}
+The model joins encoded inputs so the prediction can use evidence across
+features and modalities.
+{% /system-node %}
+{% system-node title="Output decoders" eyebrow="Predictions and metrics" icon="target" tone="green" %}
+Each output produces a prediction. When ground truth is present, evaluation
+also computes metrics for that output type.
+{% /system-node %}
+{% /system-flow %}
+
+The saved model depends on more than weights:
+
+- Feature names, types, and encoder settings define accepted inputs.
+- Learned vocabularies, category mappings, and normalization statistics define
+  how values become tensors.
+- Output metadata defines prediction names, classes, and probabilities.
+- The rendered configuration records the defaults Ludwig actually applied.
+- Environment and dependency versions determine whether the artifact can be
+  loaded and reproduced.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design the data boundary before tuning the model
+
+Start from the decision the model must make, then work backward to the data
+available at that exact moment.
+
+### Reject fields that know the future
+
+Common leakage sources include:
+
+- Resolution codes written after a support case closes.
+- Payment status created after a renewal prediction cutoff.
+- Human review notes added only to difficult training examples.
+- Aggregates whose time window extends beyond the prediction timestamp.
+- Duplicate entity history split across training and test rows.
+
+### Make the split represent production
+
+- Use a random split only when examples are independently sampled from the same
+  operating window.
+- Keep every account, patient, device, or other entity in one partition when
+  repeated history could leak.
+- Put future periods in validation and test when temporal drift is a real
+  deployment risk.
+- Generate explicit split assignments upstream and load them with Ludwig's
+  fixed split when the boundary requires group or time logic.
+
+### Lab 1: align features, availability, and evaluation
+
+Choose a prediction job, change its input profile, and set the split. The result
+shows how a syntactically valid configuration can still fail the decision
+contract.
+
+{% interactive-block id="technology/ludwig-feature-contract-lab" dataFile="/api/content/technology/ludwig/data/feature-contract-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build and run one reviewable baseline
+
+This example routes a new support ticket. It excludes fields written after
+resolution and uses an upstream group-aware split column so one customer cannot
+appear in multiple partitions.
+
+{% code-block file="/api/content/technology/ludwig/code/ticket-routing-config.yaml" language="yaml" title="ticket-routing-config.yaml" /%}
+
+Review the rendered configuration and training output rather than assuming
+every default is appropriate. Keep the config, dataset revision, environment,
+and command arguments attached to the experiment record.
+
+{% code-block file="/api/content/technology/ludwig/code/run-ludwig-lifecycle.sh" language="bash" title="run-ludwig-lifecycle.sh" /%}
+
+The `evaluate` step needs ground-truth output columns. Predictions without
+ground truth are useful for inference and inspection, but they cannot establish
+held-out model quality.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Evaluate the decision, not one attractive score
+
+The right metric depends on the output type and the cost of each error. A single
+overall accuracy value can hide class imbalance, poor minority performance, or
+unsafe threshold behavior.
+
+{% metric-strip %}
+{% metric value="Held out" label="Evaluation boundary" detail="No training or tuning decisions may consume the final test evidence." tone="blue" /%}
+{% metric value="Per slice" label="Failure visibility" detail="Measure important products, regions, cohorts, and low-volume classes separately." tone="violet" /%}
+{% metric value="Cost aware" label="Decision metric" detail="Choose precision, recall, ranking, calibration, or error measures from business harm." tone="green" /%}
+{% metric value="Versioned" label="Release evidence" detail="Tie every metric report to the exact data, config, preprocessing, and model artifact." tone="amber" /%}
+{% /metric-strip %}
+
+For a category output such as ticket routing:
+
+- Inspect the confusion matrix, not only aggregate accuracy.
+- Measure precision and recall for queues where a wrong route is expensive.
+- Compare performance for new and established customers.
+- Review low-confidence examples and unknown-category rates.
+- Establish an abstain or human-review path when uncertainty is operationally
+  meaningful.
+
+Hyperparameter search can optimize a validation metric, but it cannot choose
+the business objective or repair a contaminated split. Reserve untouched test
+evidence for the final candidate comparison.
+{% /section-card %}
+
+{% section-card %}
+## Promote one coherent release artifact
+
+Treat model delivery as a controlled lifecycle rather than copying a model
+directory into a container.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the contract" label="Config and data" %}
+Version the reviewed configuration, dataset identity, split assignments, and
+environment. Record the feature availability assumptions.
+{% /process-step %}
+{% process-step number="2" title="Train and evaluate" label="Artifact evidence" %}
+Train from the frozen inputs, evaluate the saved artifact on held-out data, and
+apply metric and slice gates.
+{% /process-step %}
+{% process-step number="3" title="Package together" label="Serving parity" %}
+Keep weights, preprocessing metadata, output metadata, and the rendered config
+in one immutable release unit.
+{% /process-step %}
+{% process-step number="4" title="Canary and observe" label="Bounded exposure" %}
+Check request validity, unknown values, latency, errors, prediction
+distribution, and decision outcomes before broad promotion.
+{% /process-step %}
+{% /process-flow %}
+
+The built-in Ludwig REST server is useful for development and simple services.
+A production system still needs authentication, authorization, request limits,
+timeouts, rollout control, autoscaling, observability, and a rollback owner.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Respond to evidence before increasing traffic
+
+An offline score approves only the evaluated artifact under the evaluated data
+boundary. Live requests can expose schema drift, unknown values, packaging
+mistakes, and latency behavior that the test set did not exercise.
+
+### Lab 2: operate the release gate
+
+Inject a release condition and choose the operator response. The lab traces
+which evidence remains valid and where promotion should stop.
+
+{% interactive-block id="technology/ludwig-release-readiness-lab" dataFile="/api/content/technology/ludwig/data/release-readiness-model.json" /%}
+
+{% callout variant="warn" %}
+Weights and preprocessing metadata are not interchangeable across runs. Loading
+a new model with an old vocabulary, category map, or normalizer can change the
+meaning of valid-looking input values and invalidate offline results.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Make the serving contract explicit
+
+Validate request fields before invoking the model. Do not forward arbitrary
+payload keys, and avoid logging raw text, images, or other sensitive feature
+values just to make the service observable.
+
+{% code-block file="/api/content/technology/ludwig/code/validate-serving-contract.py" language="python" title="validate-serving-contract.py" /%}
+
+Track service and model signals together:
+
+- Request count, error rate, timeout rate, and latency distributions.
+- Missing fields, rejected types, unknown categories, and sequence-length
+  truncation.
+- Prediction distribution, confidence distribution, and abstain rate.
+- Slice metrics once delayed ground truth becomes available.
+- Model, config, preprocessing, and data versions on every release.
+- Training-serving feature skew and changes in upstream producers.
+
+Never treat confidence as correctness. Calibration must be measured on
+representative held-out data and monitored when the production population
+changes.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate Ludwig as part of an ML system
+
+### Reproducibility
+
+- Pin Ludwig and its runtime dependencies instead of deploying an unbounded
+  `latest` image.
+- Save the rendered config so implicit defaults become reviewable evidence.
+- Record seeds, hardware, backend, dataset revision, and code revision.
+- Keep preprocessing metadata with the model artifact it created.
+- Test that a clean environment can load the artifact and reproduce a sample
+  prediction contract.
+
+### Reliability and security
+
+- Bound request size, batch size, concurrency, and prediction timeout.
+- Authenticate callers and authorize access to sensitive models.
+- Scan model containers and dependencies, then patch through a controlled
+  rebuild.
+- Encrypt model artifacts and restrict who can read or replace them.
+- Keep a last known-good artifact and practice rollback.
+
+### Model quality
+
+- Define release thresholds before inspecting the candidate.
+- Compare against a simple baseline and the current production model.
+- Review important slices and costly error types.
+- Monitor delayed outcomes and retraining triggers.
+- Require human review where model errors can create high-impact decisions.
+{% /section-card %}
+
+{% section-card %}
+## Know where Ludwig fits
+
+Ludwig is a strong fit when:
+
+- The problem maps cleanly to supported feature and output types.
+- A declarative baseline will accelerate comparison and collaboration.
+- Several modalities must be combined without hand-building every encoder.
+- The team wants one repeatable interface for training, evaluation, prediction,
+  export, and serving.
+- Engineers will still own data contracts, evaluation, deployment, and
+  monitoring.
+
+Choose a lower-level or specialized system when:
+
+- Novel architecture internals are the core research contribution.
+- The serving runtime requires custom kernels or a protocol Ludwig does not
+  support.
+- Streaming feature computation dominates the system design.
+- Regulatory controls require an already-approved platform integration.
+- The team cannot operate the framework's runtime and artifact dependencies.
+
+The decision is not “configuration versus engineering.” Ludwig moves model
+construction into a configuration; sound ML systems engineering still surrounds
+that configuration.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/ludwig/quiz/ludwig-production-decisions.json" lessonSlug="ludwig" title="Ludwig Configuration and Production Decisions" /%}

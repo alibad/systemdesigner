@@ -1,0 +1,229 @@
+---
+registryId: snowflake-warehouse
+---
+
+{% section-card tone="intro" %}
+## What is Snowflake?
+
+Snowflake is a managed data platform for storing, transforming, and querying analytical
+data. A team loads data into tables, grants access through roles and policies, and sends
+SQL work to compute resources called **virtual warehouses**.
+
+Snowflake matters because storage and query compute have separate scaling boundaries.
+Several warehouses can read the same durable table data without sharing one compute
+pool. That makes it possible to isolate ingestion, dashboards, data science, and
+administration instead of forcing every workload through one queue.
+
+### Core invariant
+
+A Snowflake design is healthy only when **data remains governed in storage while each
+workload receives an explicit compute, latency, concurrency, and cost boundary**.
+Separating storage and compute creates those controls; it does not size warehouses,
+prevent queues, choose clustering keys, or govern shared data automatically.
+
+{% callout variant="info" %}
+Snowflake is available on Amazon Web Services, Microsoft Azure, and Google Cloud, but
+regions, editions, warehouse generations, services, and cross-region behavior differ.
+Validate every architecture against the target account rather than treating “Snowflake”
+as one identical global deployment.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Trace a query through the platform
+
+Snowflake documents three broad architectural layers. The boundaries explain why one
+team can resize compute without rewriting table storage and why a warehouse outage does
+not mean the durable data disappeared.
+
+{% system-flow title="A Snowflake analytical query" caption="The services layer plans and governs the request; a selected virtual warehouse performs the compute; durable table data remains in Snowflake-managed storage." %}
+{% system-node title="Client and role" eyebrow="Request boundary" icon="users" tone="blue" %}
+Submit SQL with a current role, database, schema, and warehouse.
+{% /system-node %}
+{% system-node title="Cloud services" eyebrow="Control plane" icon="workflow" tone="violet" %}
+Authenticate, authorize, parse, optimize, coordinate metadata, and track the query.
+{% /system-node %}
+{% system-node title="Virtual warehouse" eyebrow="Compute plane" icon="cpu" tone="cyan" %}
+Provision one or more compute clusters to scan, join, sort, aggregate, load, or mutate
+data.
+{% /system-node %}
+{% system-node title="Table storage" eyebrow="Durable data" icon="database" tone="green" %}
+Persist compressed columnar data in automatically created micro-partitions.
+{% /system-node %}
+{% /system-flow %}
+
+This separation has practical limits:
+
+- suspending a warehouse stops its compute charges but drops its warehouse cache;
+- resizing mainly changes resources available to a query or cluster;
+- adding clusters is the scale-out path for concurrency, not a promise that one query
+  becomes faster;
+- multi-cluster warehouses require Enterprise Edition or higher;
+- serverless features can consume credits outside user-managed warehouse runtime.
+{% /section-card %}
+
+{% section-card %}
+## Size compute from observed work, not a user count
+
+Snowflake does not publish one universal “queries per minute” number. Query composition,
+data shape, pruning, cache state, warehouse type and size, and concurrent work all
+change the result. Benchmark a representative query set, then feed the measured runtime
+and safe concurrency into this queueing envelope.
+
+{% interactive-block id="technology/snowflake-calculator" /%}
+
+Use the lab to separate two decisions:
+
+1. **Scale up** when representative queries need more per-query compute or spill less
+   with a larger warehouse.
+2. **Scale out** with another warehouse or an Enterprise-or-higher multi-cluster
+   warehouse when acceptable queries are waiting behind concurrency.
+
+The lab uses documented Gen1 credit rates as a compute-unit reference, not a currency
+price. Contract price, region, cloud, edition, warehouse generation, discounts, and
+serverless usage are deliberately outside the model.
+{% /section-card %}
+
+{% section-card %}
+## Let micro-partition metadata eliminate work
+
+Snowflake automatically divides standard table data into compressed, columnar
+**micro-partitions**. It records metadata such as value ranges and distinct-value
+counts. At query time, a usable predicate can let Snowflake prune partitions whose
+metadata cannot match.
+
+Clustering describes how values overlap across those partitions. Natural load order is
+often sufficient. An explicit clustering key can help a very large table whose
+important selective queries scan too many partitions, but Automatic Clustering is a
+serverless service with its own credit and storage effects.
+
+Choose a metadata layout and predicate below. The result is exact for this small
+teaching dataset; it does not predict production bytes, latency, or credits.
+
+{% interactive-block id="technology/snowflake-pruning-lab" /%}
+
+The production decision loop is:
+
+1. inspect Query Profile for partitions scanned, bytes scanned, spill, and queue time;
+2. confirm that the predicate shape matches real user queries;
+3. check clustering information and overlap on the candidate column expression;
+4. compare query benefit with Automatic Clustering credit and storage usage;
+5. retain the key only while measured workload value exceeds its maintenance cost.
+
+{% callout variant="warn" %}
+A clustering key is not a general index. Snowflake recommends it selectively for very
+large tables when query performance has degraded or does not meet requirements. Good
+pruning on the important workload is stronger evidence than clustering depth alone.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Treat sharing and recovery as separate contracts
+
+### Secure Data Sharing is governed read-only access
+
+Direct Secure Data Sharing exposes selected objects to another Snowflake account
+without copying the underlying data into the consumer account. The consumer creates a
+read-only database from the share and pays for the warehouse compute used to query it.
+Roles, secure objects, masking and row-access policies, and consumer grants still need
+deliberate review.
+
+Cross-region or cross-cloud sharing is not the same zero-transfer path: listings and
+replication or Cross-Cloud Auto-Fulfillment can move data to another region. Residency,
+replication, refresh, and provider charges must be evaluated for the actual route.
+
+### Time Travel is not a backup system
+
+Time Travel preserves historical table state for querying, cloning, and `UNDROP` during
+the configured retention window:
+
+- Standard Edition supports a standard retention window of 0 or 1 day;
+- Enterprise Edition and higher can configure up to 90 days for permanent objects;
+- transient and temporary objects are limited to 0 or 1 day and have no Fail-safe;
+- permanent objects have a separate 7-day Fail-safe period managed by Snowflake after
+  Time Travel expires.
+
+Historical data consumes storage. Time Travel and Fail-safe help recover from logical
+mistakes, but account, region, credential, policy, and broad corruption scenarios still
+need independent continuity and recovery plans.
+{% /section-card %}
+
+{% section-card %}
+## Put workload and cost boundaries in SQL
+
+### Create an isolated analytics warehouse
+
+This example makes auto-suspend, queue timeout, scaling mode, and credit controls
+visible. The multi-cluster settings require Enterprise Edition or higher.
+
+{% code-block file="/api/content/technology/snowflake/code/warehouse-configuration-sql.sql" language="sql" title="warehouse-configuration.sql" /%}
+
+### Inspect pruning before adding a clustering key
+
+Run a representative filtered query with a query tag, inspect Query Profile, and use
+Snowflake's clustering functions to examine overlap. The SQL does not claim that a key
+is necessary; measured scan behavior decides.
+
+{% code-block file="/api/content/technology/snowflake/code/inspect-pruning-and-clustering.sql" language="sql" title="inspect-pruning-and-clustering.sql" /%}
+
+### Clone historical data into an isolated repair table
+
+Clones initially share existing micro-partitions and add storage as either side changes.
+They are fast metadata operations, not free long-lived copies and not cross-account
+backups.
+
+{% code-block file="/api/content/technology/snowflake/code/time-travel-cloning-sql.sql" language="sql" title="time-travel-cloning.sql" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate the boundaries together
+
+Review these signals as one system:
+
+- **admission:** submitted, running, queued, blocked, canceled, and timed-out queries by
+  workload and warehouse;
+- **execution:** latency percentiles, bytes and partitions scanned, cache percentage,
+  local and remote spill, and errors;
+- **compute:** cluster count, provisioning time, warehouse runtime, credits, suspend and
+  resume frequency, and resource-monitor actions;
+- **storage:** active, Time Travel, Fail-safe, clone, and replication bytes;
+- **governance:** role grants, policy coverage, share consumers, provider-controlled
+  object changes, and access history;
+- **recovery:** retention settings, clone or `UNDROP` drills, replication state, restore
+  evidence, owners, and recovery objectives.
+
+### Release checklist
+
+- Benchmark representative queries cold and warm on candidate warehouse sizes.
+- Route dissimilar workloads to separate warehouses before masking contention with size.
+- Set queue and statement timeouts so overload becomes bounded and observable.
+- Enable auto-suspend according to measured gaps, accounting for the 60-second minimum
+  each time compute is provisioned.
+- Use resource monitors for user-managed warehouses and budgets for broader serverless
+  coverage where supported.
+- Add a clustering key only with Query Profile evidence and a measured maintenance
+  budget.
+- Grant shared objects through least-privilege roles and test policy behavior as the
+  consumer.
+- Test logical recovery and regional continuity as different failure exercises.
+{% /section-card %}
+
+{% section-card %}
+## Documentation baseline
+
+Semantics in this lesson were checked against Snowflake documentation in July 2026:
+
+- [Overview and considerations for virtual warehouses](https://docs.snowflake.com/en/user-guide/warehouses-overview)
+- [Warehouse sizing, concurrency, billing, and cache guidance](https://docs.snowflake.com/en/user-guide/warehouses-considerations)
+- [Micro-partitions, pruning, and clustering metadata](https://docs.snowflake.com/en/user-guide/tables-clustering-micropartitions)
+- [Clustering keys and clustered tables](https://docs.snowflake.com/en/user-guide/tables-clustering-keys)
+- [Secure Data Sharing](https://docs.snowflake.com/en/user-guide/data-sharing-intro)
+- [Time Travel and Fail-safe](https://docs.snowflake.com/en/user-guide/data-availability)
+- [Resource monitors](https://docs.snowflake.com/en/user-guide/resource-monitors)
+{% /section-card %}
+
+{% quiz
+  lessonSlug="snowflake"
+  title="Snowflake Production Decisions"
+  questionsFile="/api/content/technology/snowflake/quiz/snowflake.json"
+/%}

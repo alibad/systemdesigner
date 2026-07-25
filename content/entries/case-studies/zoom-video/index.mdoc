@@ -1,0 +1,292 @@
+---
+registryId: case-study-zoom-video
+---
+
+{% section-card tone="intro" %}
+## What is Zoom video infrastructure?
+
+Zoom video infrastructure is the distributed system that admits people to a meeting, sends their audio and video to a nearby media server, and forwards the right streams back with conversational delay. The central media component is usually a **selective forwarding unit (SFU)**: it receives encoded streams and forwards selected quality layers without combining every participant into one new video.
+
+In plain language: each participant publishes once, while the SFU chooses what every receiver should get. The system must adapt those choices as bandwidth, packet loss, device load, meeting size, and regional health change.
+
+{% callout variant="info" %}
+### Core invariant
+
+Protect intelligible audio and meeting continuity before video resolution, frame rate, or gallery size. A participant should be able to keep talking through congestion or recovery even when the picture becomes less detailed.
+{% /callout %}
+{% /section-card %}
+
+This case study designs a Zoom-like conferencing system from public protocol concepts and explicit planning assumptions. The numbers are illustrative capacity inputs, not claims about Zoom's private deployment. Review [stream processing](/technology/streaming) and [WebRTC](/technology/webrtc) first if media tracks, congestion feedback, or real-time transport are new.
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the meeting promise and scope" %}
+
+## A meeting is a bidirectional latency contract
+
+One-way streaming can buffer future media. A live meeting cannot: people notice late replies, overlapping speech, freezes, and repeated reconnects. The product promise is therefore not "always HD." It is "join reliably, hear people promptly, and degrade predictably when conditions worsen."
+
+### Functional requirements
+
+- Create a meeting, authorize participants, and issue short-lived credentials for its assigned media region.
+- Publish microphone, camera, and screen-share tracks with one or more quality layers.
+- Subscribe each participant to the active speaker, selected gallery tiles, screen share, and a bounded set of audio tracks.
+- Support mute, layout changes, device changes, participant roles, and host controls without rebuilding the meeting.
+- Move a participant or meeting to healthy media capacity after an SFU, region, or network-path failure.
+- Emit quality and routing telemetry without putting analytics acknowledgement on the media path.
+
+### Non-functional requirements
+
+- Keep mouth-to-ear latency low enough for natural turn-taking and measure the tail, not only the average.
+- Preserve audio under constrained bandwidth by reducing video layers before dropping the call.
+- Reserve enough SFU network and compute headroom for bursty joins, layout changes, and failover.
+- Isolate one meeting, tenant, SFU, availability zone, or region so its failure does not drain the global fleet.
+- Encrypt media in transit, authorize every subscription, minimize retained meeting metadata, and audit sensitive control actions.
+
+{% callout variant="warn" %}
+### Scope boundary
+
+This lesson covers meeting admission, SFU forwarding, quality adaptation, regional placement, recovery, and operations. Codec internals, recording pipelines, transcription, chat, billing, and a complete end-to-end encryption key protocol are separate designs.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="capacity" title="2. Turn receivers into an SFU bandwidth budget" %}
+
+## SFU outbound traffic grows faster than publisher traffic
+
+An SFU receives one encoded stream from each active camera, but it forwards a tailored set to every participant. For an illustrative 600-person meeting in the balanced profile, each receiver gets one 0.9 Mbps speaker stream, six 0.12 Mbps thumbnails, and three 0.04 Mbps audio streams:
+
+`0.9 + (6 x 0.12) + (3 x 0.04) = 1.74 Mbps per receiver`
+
+The meeting therefore produces about `600 x 1.74 = 1,044 Mbps`, or **1.04 Gbps**, of SFU outbound traffic before transport overhead. This fan-out, not the meeting row in a database, sets the media capacity envelope.
+
+{% metric-strip %}
+{% metric value="600" label="Participants" detail="Illustrative large meeting with 70% of cameras active" tone="blue" /%}
+{% metric value="1.74 Mbps" label="Per receiver" detail="Balanced speaker, gallery, and protected audio mix" tone="violet" /%}
+{% metric value="1.04 Gbps" label="SFU outbound" detail="Participant count multiplied by the receiver mix" tone="amber" /%}
+{% metric value="65%" label="Operating target" detail="Reserve network headroom for skew, bursts, and recovery" tone="green" /%}
+{% /metric-strip %}
+
+### Media bandwidth and SFU capacity lab
+
+Change the participant count, allocated SFUs, and adaptation profile. The model updates ingress, per-participant downlink, total outbound media, target pressure, minimum SFU count, and the consequence of losing one allocated SFU.
+
+{% interactive-block id="case-studies/zoom-video-media-capacity-lab" dataFile="/api/content/case-studies/zoom-video/data/sfu-capacity-model.json" /%}
+
+### What the estimate changes
+
+- **Placement:** keep one meeting within the smallest healthy SFU group that can preserve its forwarding state and failure headroom.
+- **Admission:** stop assigning new meetings before existing calls consume the recovery reserve.
+- **Adaptation:** reduce video layers when outbound pressure or receiver feedback rises; adding capacity is slower than dropping a layer.
+- **Load tests:** vary active-camera share, join bursts, speaker changes, packet overhead, uneven subscriptions, and one-SFU loss rather than trusting a smooth average.
+- **Limits:** treat a 1,000-person event differently from a 10-person call; webinar roles and server-side composition create different fan-out shapes.
+
+{% callout variant="tip" %}
+The model counts encoded media payloads. Production planning must add transport, encryption, retransmission, telemetry, and protocol overhead, then validate the result with representative devices and network loss.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Separate meeting control from real-time media" %}
+
+## The control plane chooses a route; the media plane carries the call
+
+Meeting APIs authenticate a participant, enforce policy, choose a region and SFU group, and return connection credentials. Once connected, media should continue through a bounded control-plane disturbance. Do not make every packet wait for a database or global coordinator.
+
+{% system-flow title="Join once, adapt continuously" caption="The control path assigns a healthy media route. The SFU forwarding path then reacts to receiver feedback without a database lookup per packet." %}
+{% system-node title="Participant client" eyebrow="Capture and decode" icon="user" tone="blue" %}
+
+Encode microphone, camera, and screen-share tracks in useful layers. Report loss, jitter, delay, available bandwidth, and which streams are actually visible.
+
+{% /system-node %}
+{% system-node title="Meeting control plane" eyebrow="Authorize and place" icon="shield" tone="violet" %}
+
+Validate the join, enforce roles, select a region and SFU group, issue short-lived credentials, and retain enough session identity to support reassignment.
+
+{% /system-node %}
+{% system-node title="Regional SFU group" eyebrow="Forward media" icon="activity" tone="green" %}
+
+Receive encoded layers, select subscriptions for each participant, prioritize audio, pace outbound packets, and expose capacity plus health signals.
+
+{% /system-node %}
+{% system-node title="Quality and routing loop" eyebrow="Observe and correct" icon="network" tone="amber" %}
+
+Aggregate client and SFU telemetry, detect regional or path pressure, adjust admission, and trigger bounded rerouting without joining analytics to the packet deadline.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership boundaries
+
+- **Meeting service:** meeting identity, schedule, roles, policy, waiting-room state, and participant authorization.
+- **Global allocator:** regional health, jurisdiction, proximity, available SFU headroom, placement leases, and recovery assignments.
+- **SFU group:** transport termination, stream and layer inventory, subscription state, packet pacing, and local overload protection.
+- **Client adaptation:** capture settings, encoder layers, receive layout, decoder budget, congestion feedback, and user-visible recovery state.
+- **Telemetry pipeline:** sampled quality events, aggregation, alerts, experiment dimensions, and incident evidence; it does not authorize or forward media.
+
+{% /accordion-item %}
+
+{% accordion-item id="data-model" title="4. Model leases, tracks, and subscriptions explicitly" %}
+
+## Durable meeting metadata is not the live packet stream
+
+The control plane needs reconstructable identities and assignments. The SFU needs fast, ephemeral forwarding state. Persisting every packet or per-frame decision would add latency and cost without improving meeting recovery.
+
+### Authoritative control records
+
+- **Meeting:** meeting ID, owner, policy version, allowed roles, region constraints, lifecycle state, and creation or scheduled time.
+- **Participant session:** participant ID, device session ID, role, authorization result, join attempt, selected region, assignment version, and credential expiry.
+- **Media assignment:** meeting ID, SFU group, lease version, placement reason, issue time, expiry, and recovery predecessor.
+- **Recovery event:** failed scope, detection source, old assignment, replacement assignment, participant acknowledgement, and recovery duration.
+
+### Ephemeral media records
+
+- **Published track:** publisher, media kind, codec, source layers, sequence and timing state, encryption context reference, and last-packet time.
+- **Subscription:** receiver, published track, selected layer, priority, layout reason, target bitrate, and last adaptation decision.
+- **Quality window:** packet loss, jitter, round-trip time, estimated bandwidth, freeze duration, audio concealment, decoder load, and sample interval.
+
+### Consistency and expiry rules
+
+- Give each assignment a monotonically increasing version so a late recovery response cannot move a client back to a failed SFU.
+- Make join and reassignment requests idempotent by device session and attempt ID; retries should return the same valid assignment or a newer one.
+- Keep authorization stronger than quality telemetry. Missing telemetry may reduce optimization, but it must not grant a subscription.
+- Expire abandoned tracks, leases, and subscriptions quickly enough to release capacity, while retaining only the bounded control history required for audit and debugging.
+- Rebuild SFU forwarding state from client republish and current control identity after a crash; do not depend on replaying every old media packet.
+
+{% /accordion-item %}
+
+{% accordion-item id="quality" title="5. Adapt quality inside a conversational latency budget" %}
+
+## Measure short windows, then change one quality step at a time
+
+Transient loss should not make the picture oscillate between HD and low quality. The receiver and SFU need a controller with hysteresis: degrade after a small number of bad windows, recover only after several good windows, and protect audio immediately when severe congestion appears.
+
+{% process-flow %}
+{% process-step number="1" title="Measure the path" label="Observe" %}
+
+Collect bandwidth estimates, loss, jitter, round-trip time, freeze duration, decoder load, and SFU queue pressure over short windows.
+
+{% /process-step %}
+{% process-step number="2" title="Choose the bottleneck" label="Diagnose" %}
+
+Separate sender limitation, receiver limitation, SFU egress pressure, and network-path impairment so one user's poor Wi-Fi does not lower every participant.
+
+{% /process-step %}
+{% process-step number="3" title="Adapt deliberately" label="Respond" %}
+
+Drop gallery layers, frame rate, or dominant-speaker resolution before protected audio. Pace changes and require evidence before upgrading again.
+
+{% /process-step %}
+{% process-step number="4" title="Verify recovery" label="Confirm" %}
+
+Check that loss, freezes, and audio concealment actually fall. If not, continue degrading, reroute the path, or enter an audio-priority state.
+
+{% /process-step %}
+{% /process-flow %}
+
+### Illustrative one-way latency budget
+
+{% metric-strip %}
+{% metric value="20 ms" label="Capture and encode" detail="Device scheduling, frame capture, and encoder work" tone="blue" /%}
+{% metric value="35 ms" label="Uplink to SFU" detail="Access network and regional path" tone="violet" /%}
+{% metric value="10 ms" label="SFU forwarding" detail="Selection, pacing, encryption handling, and queueing" tone="amber" /%}
+{% metric value="65 ms" label="Downlink and render" detail="Network, jitter buffer, decode, and display" tone="green" /%}
+{% /metric-strip %}
+
+The illustrative total is **130 ms one way**. A nearby edge cannot compensate for a long jitter buffer, overloaded decoder, or saturated SFU queue, so the latency budget must be measured stage by stage and by percentile.
+
+### Adaptation controller with hysteresis
+
+{% code-block file="/api/content/case-studies/zoom-video/code/adaptation-controller.ts" language="typescript" title="Degrade quickly, recover cautiously, and protect audio" /%}
+
+{% callout variant="info" %}
+Quality is receiver-specific. A phone showing one speaker should not receive eight desktop gallery layers, and a congested participant should not force unrelated receivers onto the same low layer.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="reliability" title="6. Recover from SFU, region, and network-path failure" %}
+
+## Recovery changes both route and user-visible quality
+
+Select the healthy route, an SFU crash, a regional outage, or a degraded network path. The topology updates the active media path, failed or degraded components, recovery owner, and participant-visible result.
+
+{% topology-lab dataFile="/api/content/case-studies/zoom-video/data/media-failure-topology.json" /%}
+
+### Failure contracts
+
+- **SFU process or host loss:** stop new assignments immediately, issue a higher-version standby assignment, and have clients reconnect and republish current tracks. Expect a brief freeze; never pretend ephemeral forwarding state survived.
+- **Regional outage:** route new joins away, reassign existing participants to a recovery region, and lower video while the longer path and reconnect settle. Preserve meeting identity and roles across the move.
+- **Network-path degradation:** keep the healthy SFU, switch transit when evidence is sustained, and adapt video before rerouting repeatedly. A route change can briefly reorder packets and increase jitter.
+- **Allocator outage:** let already authorized media sessions continue within their lease where safe, while blocking risky new placement and surfacing the control-plane impairment.
+- **Telemetry lag:** continue local congestion control with bounded defaults. Loss of analytics must not stop media, but it should reduce rollout confidence and trigger a freshness alert.
+
+### Recovery sequence
+
+1. Detect the smallest failed scope from independent client, SFU, and network signals.
+2. Quarantine it from admission before moving healthy meetings unnecessarily.
+3. Issue a monotonic recovery assignment and preserve the participant's meeting authorization.
+4. Reconnect transport, republish tracks, rebuild subscriptions, and begin in a conservative quality profile.
+5. Verify audio continuity, recovered participant count, latency, and quality before returning capacity to the allocator.
+
+{% /accordion-item %}
+
+{% accordion-item id="trade-offs" title="7. Make media and recovery trade-offs explicit" %}
+
+## Optimize for the meeting contract, not one infrastructure metric
+
+### SFU versus other media topologies
+
+- **SFU forwarding**
+    - Preserves separate streams and avoids server-side decode and re-encode for every participant.
+    - Produces substantial outbound fan-out and moves layer selection plus decode work toward clients.
+    - Fits interactive meetings when clients can publish layered media and the server can personalize subscriptions.
+- **MCU composition**
+    - Mixes participants into one or a few server-generated outputs, reducing receiver decode work and bandwidth.
+    - Adds server compute, encoding delay, layout coupling, and another quality-loss step.
+    - Fits constrained devices, recordings, broadcasts, or interoperability boundaries better than every interactive meeting.
+- **Peer-to-peer mesh**
+    - Removes the central media forwarder for very small calls.
+    - Makes each sender upload one stream per peer, which grows poorly with participant count and complicates policy plus recovery.
+    - Fits tiny trusted meetings only when network and device limits are explicit.
+
+### Operational choices
+
+- **Regional affinity versus recovery distance:** nearby SFUs reduce steady latency, while a farther warm region costs more but shortens outage recovery.
+- **High utilization versus failure headroom:** packing SFUs lowers idle cost, while reserved egress and connection capacity let a surviving pool absorb reconnects.
+- **Simulcast versus scalable coding:** multiple independent encodes simplify layer selection but increase sender bitrate; layered coding can be more efficient but depends on codec and client support.
+- **Fast degradation versus stable visuals:** rapid drops protect audio, while cautious upgrades and hysteresis prevent oscillation after one good sample.
+- **Per-meeting locality versus fleet balance:** keeping a meeting together simplifies state and latency, while splitting very large meetings can avoid one-node limits at the cost of cascading complexity.
+
+{% callout variant="warn" %}
+A nominally healthy SFU fleet can still produce a bad meeting if one transit path, device class, software version, or large-meeting cohort is failing. Capacity, latency, and participant experience need the same diagnostic dimensions.
+{% /callout %}
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="8. Operate from participant experience back to capacity" %}
+
+## A green server graph is not proof of a healthy call
+
+Operations should connect user-visible symptoms to the exact client, route, SFU, adaptation profile, and recovery action that produced them. Global averages hide a region or device cohort with repeated freezes.
+
+### Operational scorecard
+
+- **Join and continuity:** join success, time to first audio, time to first video, reconnect rate, unexpected leave rate, and recovered-participant percentage.
+- **Audio quality:** loss, jitter, concealment time, audio gaps, echo events, and mouth-to-ear latency by percentile.
+- **Video quality:** freeze duration, rendered frame rate, selected layer, resolution changes, screen-share readability, and time spent in audio-priority mode.
+- **SFU capacity:** ingress and egress by group, target utilization, queue delay, active transports, subscriptions, packet retransmission, and N-1 recovery headroom.
+- **Routing:** participant-to-SFU round-trip time, path changes, regional spillover, allocator rejection reason, lease version conflicts, and transit-provider health.
+- **Recovery:** detection time, quarantine time, reassignment time, republish completion, subscription rebuild, and quality stabilization after each failure scope.
+
+### Incident and release sequence
+
+1. Confirm whether the symptom is authorization, device, access network, transit, SFU, or regional capacity before moving the meeting.
+2. Protect audio and stop new admission to the affected scope while preserving evidence from both clients and servers.
+3. Apply the smallest recovery action: adapt one receiver, switch one path, replace one SFU, or evacuate one region.
+4. Compare participant outcomes before and after the action, then reconcile leaked leases, tracks, and reservations.
+5. Roll out codec, congestion-control, routing, or SFU changes by region and client cohort with quality guardrails plus a compatible rollback.
+
+The reusable lesson is that real-time media systems spend a limited latency and bandwidth budget on conversation. Capacity planning, receiver-specific adaptation, explicit recovery state, and quality telemetry must reinforce that same promise.
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz questionsFile="/api/content/case-studies/zoom-video/quiz/zoom-video.json" lessonSlug="zoom-video" title="Review the video meeting architecture" /%}

@@ -1,0 +1,167 @@
+---
+registryId: caching-strategies
+---
+
+{% section-card tone="intro" %}
+## What is a caching strategy?
+
+A caching strategy is the deliberate plan for keeping a bounded, temporary copy of data closer to a reader. It defines what may be copied, who owns the authoritative value, how long a copy may be used, and how the copy is repaired after a change or failure.
+
+Caching matters because a cache hit can avoid an expensive network and storage path, but a fast wrong answer is still wrong. It changes both performance and correctness: a high hit rate can protect an origin, while an unclear invalidation rule can show an old price, permission, or inventory count.
+
+The core invariant is: **every cache hit must be allowed by a documented freshness rule, and the system must name the authoritative owner that can repair the copy.** A cache is an accelerator, not an accidental source of truth.
+
+This reference assumes basic request-path concepts. Review [Latency](/reference/latencies) for latency budgets and [API Patterns](/reference/api-patterns) for retry and write contracts.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Start by drawing the read and write boundaries
+
+The same key can exist in a browser, edge cache, application process, shared cache, and durable database. Put a value at the highest layer that can safely serve it, but do not let a layer claim a freshness guarantee it cannot keep.
+
+{% system-flow title="A bounded cache-aside read path" caption="The source remains authoritative. A miss is a deliberate source read and bounded population action, not an invisible fallback." %}
+{% system-node title="Reader request" eyebrow="Intent" icon="users" tone="blue" %}
+
+Build a stable key from authorized inputs. Decide whether this representation may be served stale.
+
+{% /system-node %}
+{% system-node title="Cache lookup" eyebrow="Fast path" icon="cache" tone="cyan" %}
+
+Return only an unexpired or explicitly permitted stale value. Record hit, miss, age, and key namespace.
+
+{% /system-node %}
+{% system-node title="Authoritative source" eyebrow="Miss path" icon="database" tone="violet" %}
+
+Read the current durable record with the consistency required by the operation. A source miss can be negative-cached briefly when absence is stable.
+
+{% /system-node %}
+{% system-node title="Bounded population" eyebrow="Refresh" icon="repeat" tone="green" %}
+
+Store a versioned value with TTL, size limits, and a coalesced refresh path before returning it.
+
+{% /system-node %}
+{% /system-flow %}
+
+### Name the cacheable representation
+
+{% concept-grid columns="3" %}
+{% concept-card title="Public or immutable content" eyebrow="Long-lived copy" icon="globe" tone="blue" %}
+Versioned assets and public documents are strong edge-cache candidates. Content-addressed URLs let a new version use a new key instead of trying to revoke every old copy.
+{% /concept-card %}
+{% concept-card title="Read model or query result" eyebrow="Bounded freshness" icon="database" tone="cyan" %}
+Catalog pages, feature flags, and aggregate views can tolerate an explicit age bound. Include tenant, locale, authorization scope, and query shape in the key.
+{% /concept-card %}
+{% concept-card title="Sensitive or rapidly changing state" eyebrow="Constrained copy" icon="shield-alert" tone="amber" %}
+Permissions, balances, inventory reservations, and write preconditions often need a short TTL, version check, or no shared cache at all. Never cache one user's authority for another user.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: size the fast path and expose origin pressure
+
+A hit rate is meaningful only with request rate, object footprint, working-set shape, TTL, and mutation behavior. Change the model until memory pressure, origin load, and a synchronized-expiry warning disagree with your initial intuition.
+
+{% interactive-block id="reference/caching-strategies-demand-capacity-lab" dataFile="/api/content/reference/caching-strategies/data/cache-demand-model.json" /%}
+
+### Read the outputs as a design review
+
+- **Memory need** estimates the active distinct values retained during the selected TTL, including entry overhead. It is an input to capacity planning, not a promise that an eviction policy will produce the chosen hit rate.
+- **Origin QPS and bandwidth** use misses. A 95% hit rate is very different at 200 requests/second than at 200,000 requests/second.
+- **Mutation rate** is a freshness cost. A long TTL without a working invalidation path turns source changes into a longer stale-read window.
+- **Stampede warning** is driven by hot-key demand and expiry. TTL jitter reduces synchronized expiry; a lease or singleflight collapses many miss refreshes into one source read.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Turn the cache estimate into a bounded contract
+
+The cache contract should be written per representation, not as one global Redis setting. State the reader's deadline, acceptable age, invalidation mechanism, and source fallback before selecting an eviction policy.
+
+{% process-flow %}
+{% process-step number="1" title="Measure the working set" label="Demand" %}
+Segment request rate, key cardinality, object size, and skew by endpoint or data type. Daily averages hide the hot hour and a single hot key can defeat cluster-wide averages.
+{% /process-step %}
+{% process-step number="2" title="Set a freshness budget" label="Correctness" %}
+Name the maximum permitted age, whether stale-if-error is allowed, and which values must bypass shared cache. A five-minute catalog delay and a five-minute permission delay are different contracts.
+{% /process-step %}
+{% process-step number="3" title="Choose a miss owner" label="Mechanics" %}
+Specify who reads the source, who populates the cache, whether duplicate refreshes are coalesced, and how absent values are handled. Keep the lock or lease shorter than the request deadline.
+{% /process-step %}
+{% process-step number="4" title="Prove the failure path" label="Operations" %}
+Test source outage, cache loss, expiry bursts, invalidation lag, and a hot key. The system should degrade according to the documented stale and write policy rather than invent behavior during an incident.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="tip" %}
+An eviction policy is a capacity behavior, not a freshness policy. LRU, LFU, and FIFO decide which entry leaves a full cache; TTL, versions, and invalidation decide whether a remaining entry may be served.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose a write and invalidation pattern by failure behavior
+
+Read-through describes who loads a miss. Write-through and write-behind describe when a write becomes durable. Event invalidation describes how a source change reaches many derived copies. These patterns can be combined, but each moves ownership and failure risk.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Cache-aside or read-through" eyebrow="Read optimization" icon="search" tone="blue" %}
+Use when the source remains the clear authority and a miss can safely read it. Cache-aside gives the application direct control; read-through centralizes loading in the cache provider or adapter.
+{% /concept-card %}
+{% concept-card title="Write-through" eyebrow="Synchronous durability" icon="arrow-right-left" tone="green" %}
+Use when a write must not acknowledge until the durable source confirms it. The caller pays source latency, but there is no hidden accepted-but-unflushed state.
+{% /concept-card %}
+{% concept-card title="Write-behind" eyebrow="Asynchronous durability" icon="clock-3" tone="amber" %}
+Use only when delayed persistence, bounded loss risk, ordered flush, and replay semantics are acceptable. It needs a durable write log and an explicit overload policy.
+{% /concept-card %}
+{% concept-card title="Event invalidation" eyebrow="Distributed coherence" icon="radio" tone="violet" %}
+Use when one committed source change affects several caches or regions. A transactional outbox and replayable consumer make invalidation visible and repairable.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: inject a failure and inspect the authority boundary
+
+Select a pattern and a failure. The comparison changes the request path, stale and duplicate risk, authoritative owner, blast radius, and recovery work. There is no universal safest pattern; the right choice is the one whose failure behavior matches the data contract you can operate.
+
+{% interactive-block id="reference/caching-strategies-coherence-lab" dataFile="/api/content/reference/caching-strategies/data/invalidation-failure-model.json" /%}
+
+### Apply the result to a real service
+
+- A source-first cache-aside write normally commits the durable value, then deletes or versions its cache key. Deleting first can let another reader repopulate the old source value before the commit.
+- A write-through retry still needs an idempotency key. A timeout can leave the caller unsure whether the source write committed even when the cache path is synchronous.
+- A write-behind system must protect accepted writes from ordinary cache eviction and measure flush lag. Otherwise a cache restart or full buffer becomes data loss.
+- Event invalidation consumers should be idempotent and replayable. A late invalidation must not remove a newer version, so include a version or generation in the event and key design.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Implement source-first invalidation with a versioned repair path
+
+This example uses cache-aside for reads and commits the source update with an outbox event before deleting the local key. The local delete makes the common path fast; the outbox gives other consumers a replayable repair signal when the process crashes after the transaction.
+
+{% code-block file="/api/content/reference/caching-strategies/code/versioned-cache-aside.ts" language="typescript" title="Versioned cache-aside read and source-first write" /%}
+
+The transaction does not magically make every cache delete and remote consumer atomic. The value of the outbox is that a durable source commit records an event to publish later. Consumers can replay by event ID and version, and a periodic reconciliation can repair keys when an event was delayed or a cache was lost.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate freshness, capacity, and recovery together
+
+Cache incidents often begin as ordinary capacity or deployment changes. Monitor both the fast path and the repair path so a rising hit rate does not hide stale data or a broken invalidation pipeline.
+
+### Minimum operating evidence
+
+- **Efficiency:** hit and miss rate by namespace, cache and origin latency, origin QPS saved, bytes served, evictions, memory fragmentation, and connection or command errors.
+- **Freshness:** entry age on hit, TTL distribution, invalidation publish and consume lag, version mismatch, stale-if-error use, and cache/source reconciliation failures.
+- **Pressure:** hot-key rate, per-shard utilization, eviction churn, fill-lock contention, synchronized expiry count, source pool saturation, and origin error rate after miss spikes.
+- **Write safety:** write acknowledgement latency, outbox backlog, write-behind flush lag when used, idempotency replays, rejected conflicts, and durable repair completion.
+- **Recovery drills:** lose one cache node, pause invalidation consumers, create a hot key, partition a region, and restore source availability. Verify that operators can explain which values may be stale, which writes are durable, and which repair job owns convergence.
+
+### Common anti-patterns
+
+1. **Treating a TTL as invalidation:** TTL limits age; it does not make an urgent mutation visible immediately. Use a source version, delete, or event when the business requires it.
+2. **Using one cache key for different authorization contexts:** a cached response must include every identity and policy dimension that changes its contents, or shared caching becomes a data exposure.
+3. **Scaling cache nodes to solve a stampede:** more memory may postpone eviction but does not coalesce simultaneous source misses or desynchronize expiry.
+4. **Acknowledging write-behind without a durable log:** an in-memory queue is not a durability boundary. Define what happens when flush capacity, the cache node, or the source fails.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/caching-strategies/quiz/caching-strategy-decisions.json" title="Caching Strategy Decision Review" /%}

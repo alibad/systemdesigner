@@ -1,0 +1,151 @@
+{
+  "scenarios": [
+    {
+      "id": "checkout-pool",
+      "label": "Checkout latency",
+      "symptom": "Checkout p95 rises from 240 ms to 1.8 s while completed throughput stops near 320 requests per second.",
+      "userImpact": "Customers wait and some requests time out during the evening peak.",
+      "candidates": [
+        { "id": "cpu", "label": "Application CPU saturation", "baselineScore": 30 },
+        { "id": "pool", "label": "Database connection-pool exhaustion", "baselineScore": 30 },
+        { "id": "dependency", "label": "Payment dependency slowdown", "baselineScore": 25 },
+        { "id": "database", "label": "Slow database execution", "baselineScore": 25 }
+      ],
+      "probes": [
+        {
+          "id": "trace-waits",
+          "label": "Trace the wait breakdown",
+          "question": "Is time spent waiting for a resource, executing locally, or inside a dependency?",
+          "result": "Pool acquisition takes 610 ms p95; the database query itself takes 42 ms p95.",
+          "interpretation": "The long wait occurs before query execution, which points to a bounded local pool rather than a slow query.",
+          "scoreChanges": { "cpu": -5, "pool": 35, "dependency": -5, "database": -15 }
+        },
+        {
+          "id": "pool-state",
+          "label": "Inspect pool occupancy",
+          "question": "Are connections busy, and are requests queued waiting to borrow one?",
+          "result": "All 80 connections are busy and 146 requests are waiting; pool timeout errors are rising.",
+          "interpretation": "A full pool with waiters is direct saturation evidence for this bounded resource.",
+          "scoreChanges": { "cpu": -5, "pool": 45, "dependency": 0, "database": 5 }
+        },
+        {
+          "id": "host-pressure",
+          "label": "Check host saturation",
+          "question": "Are CPU run queues or throttling aligned with the latency increase?",
+          "result": "CPU stays at 54%, throttling is zero, and the run queue remains below one task per core.",
+          "interpretation": "CPU has visible headroom, so high checkout latency is unlikely to be caused by local compute saturation.",
+          "scoreChanges": { "cpu": -25, "pool": 5, "dependency": 0, "database": 0 }
+        },
+        {
+          "id": "payment-spans",
+          "label": "Compare payment spans",
+          "question": "Did the external payment call slow down in the same window?",
+          "result": "Payment p95 remains near 115 ms and its timeout ratio is unchanged.",
+          "interpretation": "The dependency is stable while local waiting grows, which rules down the payment provider as the active constraint.",
+          "scoreChanges": { "cpu": 0, "pool": 5, "dependency": -20, "database": 0 }
+        }
+      ],
+      "confirmedCandidateId": "pool",
+      "safeAction": "Cap admitted checkout concurrency and test a small pool increase on one canary only after confirming the database has connection and CPU headroom.",
+      "verification": "Under the same load, pool wait p95 should fall, completed throughput should rise above 320 requests per second, and database saturation must remain within its measured envelope."
+    },
+    {
+      "id": "gc-pauses",
+      "label": "Periodic API pauses",
+      "symptom": "API p99 latency jumps above 2 seconds roughly every 45 seconds, then returns to normal without a traffic increase.",
+      "userImpact": "A small but important tail of requests freezes in repeating waves.",
+      "candidates": [
+        { "id": "cpu", "label": "Sustained CPU saturation", "baselineScore": 25 },
+        { "id": "gc", "label": "Garbage-collection pauses", "baselineScore": 30 },
+        { "id": "disk", "label": "Disk I/O contention", "baselineScore": 20 },
+        { "id": "dependency", "label": "Downstream timeout", "baselineScore": 25 }
+      ],
+      "probes": [
+        {
+          "id": "heap-pause",
+          "label": "Overlay heap and pause time",
+          "question": "Does memory growth end in a runtime pause at the same moment as the latency spike?",
+          "result": "Heap grows from 4.1 GB to 7.8 GB, followed by a 1.4 s stop-the-world pause every 43-48 seconds.",
+          "interpretation": "The repeating heap sawtooth and aligned pause explain the p99 pattern directly.",
+          "scoreChanges": { "cpu": -5, "gc": 45, "disk": -5, "dependency": -5 }
+        },
+        {
+          "id": "cpu-run-queue",
+          "label": "Inspect CPU run queues",
+          "question": "Is runnable work waiting continuously for CPU time?",
+          "result": "CPU averages 63%; the run queue is low and CPU drops during each pause.",
+          "interpretation": "Sustained compute pressure would keep runnable work high, while a stop-the-world pause can make CPU fall.",
+          "scoreChanges": { "cpu": -20, "gc": 10, "disk": 0, "dependency": 0 }
+        },
+        {
+          "id": "io-latency",
+          "label": "Check disk latency",
+          "question": "Do storage wait and queue depth spike with the request tail?",
+          "result": "Disk wait stays below 2 ms and queue depth is flat throughout the event.",
+          "interpretation": "Stable storage evidence rules down disk contention for this incident window.",
+          "scoreChanges": { "cpu": 0, "gc": 5, "disk": -20, "dependency": 0 }
+        },
+        {
+          "id": "dependency-traces",
+          "label": "Compare dependency spans",
+          "question": "Are downstream calls slow before the local pause begins?",
+          "result": "Dependency spans remain stable; their apparent delay begins only after the local runtime resumes.",
+          "interpretation": "The local process stops making progress first, so downstream services are not leading the event.",
+          "scoreChanges": { "cpu": 0, "gc": 10, "disk": 0, "dependency": -20 }
+        }
+      ],
+      "confirmedCandidateId": "gc",
+      "safeAction": "Reduce allocation on the measured hot path or adjust heap and collector settings in a canary; keep a rollback threshold on pause time and memory growth.",
+      "verification": "Repeat the same workload and confirm p99 latency, pause duration, and allocation rate fall together without increasing out-of-memory risk."
+    },
+    {
+      "id": "cache-origin",
+      "label": "One-region media slowdown",
+      "symptom": "Media response latency and origin bandwidth rise sharply in one region after a cache-policy deployment, while application CPU remains normal.",
+      "userImpact": "Viewers in one region see slow starts and intermittent buffering.",
+      "candidates": [
+        { "id": "application", "label": "Application saturation", "baselineScore": 20 },
+        { "id": "cache", "label": "Cache-miss amplification", "baselineScore": 35 },
+        { "id": "network", "label": "Regional network loss", "baselineScore": 30 },
+        { "id": "origin", "label": "Origin storage slowdown", "baselineScore": 25 }
+      ],
+      "probes": [
+        {
+          "id": "cache-status",
+          "label": "Break down cache status",
+          "question": "Did hits become misses for the affected object classes?",
+          "result": "Cache hit rate falls from 92% to 38%; most new misses carry a changed cache-key variant.",
+          "interpretation": "The deployment changed routing through the cache, multiplying requests to the origin.",
+          "scoreChanges": { "application": -5, "cache": 40, "network": -5, "origin": 10 }
+        },
+        {
+          "id": "origin-queue",
+          "label": "Inspect origin queueing",
+          "question": "Does origin service time rise first, or only after miss traffic increases?",
+          "result": "Origin request rate triples before queue age rises; per-read storage time is initially unchanged.",
+          "interpretation": "Extra miss traffic creates the later origin pressure, making origin queueing a consequence rather than the initiating cause.",
+          "scoreChanges": { "application": 0, "cache": 25, "network": 0, "origin": -5 }
+        },
+        {
+          "id": "network-loss",
+          "label": "Check regional loss and RTT",
+          "question": "Did the path itself degrade independently of cache status?",
+          "result": "Packet loss and round-trip time remain within the region's normal range.",
+          "interpretation": "Stable path telemetry rules down network degradation as the primary trigger.",
+          "scoreChanges": { "application": 0, "cache": 5, "network": -20, "origin": 0 }
+        },
+        {
+          "id": "release-comparison",
+          "label": "Compare release cohorts",
+          "question": "Does reverting only the cache-key policy restore the previous request path?",
+          "result": "A 5% rollback cohort returns to a 91% hit rate and normal media-start latency.",
+          "interpretation": "A controlled reversal changes the end-to-end result, which is strong causal evidence for the cache policy.",
+          "scoreChanges": { "application": -5, "cache": 35, "network": -10, "origin": -10 }
+        }
+      ],
+      "confirmedCandidateId": "cache",
+      "safeAction": "Roll back the cache-key policy for the affected region and rate-limit origin misses while confirming freshness and authorization rules remain correct.",
+      "verification": "Hit rate should recover, origin request rate and queue age should fall, and media-start latency should return to baseline in the rollback cohort."
+    }
+  ]
+}

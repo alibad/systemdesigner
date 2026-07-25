@@ -1,0 +1,233 @@
+{
+  "title": "Partition, failover, and consistency lab",
+  "description": "Choose a replica condition to trace which acknowledgements count. Node failover can preserve W=2; a network partition with only one reachable copy forces an explicit CP or AP decision.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Application client",
+      "eyebrow": "Requested contract",
+      "detail": "Sends the key, value, idempotency token, deadline, and consistency level. A retry preserves the same operation identity.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 50
+    },
+    {
+      "id": "coordinator",
+      "label": "Request coordinator",
+      "eyebrow": "Quorum owner",
+      "detail": "Locates the replica set, sends concurrent operations, counts valid acknowledgements, and never reports a stronger result than it collected.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 25,
+      "y": 50
+    },
+    {
+      "id": "partition-map",
+      "label": "Partition map",
+      "eyebrow": "N=3 placement",
+      "detail": "Maps the key to one versioned replica set with a copy in zones A, B, and C. Membership changes publish a new generation.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 42,
+      "y": 50
+    },
+    {
+      "id": "replica-a",
+      "label": "Replica A",
+      "eyebrow": "Zone A",
+      "detail": "Persists the mutation and version before acknowledging. It can serve as one member of a read or write quorum.",
+      "kind": "database",
+      "tone": "green",
+      "x": 62,
+      "y": 16
+    },
+    {
+      "id": "replica-b",
+      "label": "Replica B",
+      "eyebrow": "Zone B",
+      "detail": "Holds an independent copy. A failed or isolated replica is excluded from the acknowledgement count until it responds correctly.",
+      "kind": "database",
+      "tone": "green",
+      "x": 62,
+      "y": 50
+    },
+    {
+      "id": "replica-c",
+      "label": "Replica C",
+      "eyebrow": "Zone C",
+      "detail": "Provides the third failure-domain copy and can replace Replica B in a W=2 quorum during a single-replica failure.",
+      "kind": "database",
+      "tone": "green",
+      "x": 62,
+      "y": 84
+    },
+    {
+      "id": "repair",
+      "label": "Hint and repair",
+      "eyebrow": "Convergence",
+      "detail": "Retains bounded hints and later compares versions. It restores convergence but cannot retroactively make a W=1 response strongly consistent.",
+      "kind": "stream",
+      "tone": "amber",
+      "x": 84,
+      "y": 16
+    },
+    {
+      "id": "response",
+      "label": "Operation result",
+      "eyebrow": "User consequence",
+      "detail": "Returns success only after the selected threshold is met, or returns a retryable quorum failure when the requested contract is impossible.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 86,
+      "y": 56
+    }
+  ],
+  "edges": [
+    {
+      "id": "client-coordinator",
+      "from": "client",
+      "to": "coordinator",
+      "label": "PUT + consistency",
+      "mode": "sync"
+    },
+    {
+      "id": "coordinator-map",
+      "from": "coordinator",
+      "to": "partition-map",
+      "label": "hash key",
+      "mode": "sync"
+    },
+    {
+      "id": "map-a",
+      "from": "partition-map",
+      "to": "replica-a",
+      "label": "copy A",
+      "mode": "sync",
+      "via": { "x": 50, "y": 17 }
+    },
+    {
+      "id": "map-b",
+      "from": "partition-map",
+      "to": "replica-b",
+      "label": "copy B",
+      "mode": "sync"
+    },
+    {
+      "id": "map-c",
+      "from": "partition-map",
+      "to": "replica-c",
+      "label": "copy C",
+      "mode": "sync",
+      "via": { "x": 50, "y": 83 }
+    },
+    {
+      "id": "a-response",
+      "from": "replica-a",
+      "to": "response",
+      "label": "ack A",
+      "mode": "sync",
+      "via": { "x": 75, "y": 32 }
+    },
+    {
+      "id": "b-response",
+      "from": "replica-b",
+      "to": "response",
+      "label": "ack B",
+      "mode": "sync"
+    },
+    {
+      "id": "c-response",
+      "from": "replica-c",
+      "to": "response",
+      "label": "ack C",
+      "mode": "sync",
+      "via": { "x": 75, "y": 75 }
+    },
+    {
+      "id": "coordinator-repair",
+      "from": "coordinator",
+      "to": "repair",
+      "label": "store hint",
+      "mode": "async",
+      "via": { "x": 51, "y": 4 }
+    },
+    {
+      "id": "repair-b",
+      "from": "repair",
+      "to": "replica-b",
+      "label": "repair later",
+      "mode": "async",
+      "via": { "x": 76, "y": 36 }
+    },
+    {
+      "id": "repair-c",
+      "from": "repair",
+      "to": "replica-c",
+      "label": "repair later",
+      "mode": "async",
+      "via": { "x": 91, "y": 83 }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-quorum",
+      "label": "Healthy W=2",
+      "summary": "All three replicas are reachable. The coordinator returns after A and B persist the write; C may complete after the user receives success.",
+      "activeEdges": [
+        "client-coordinator",
+        "coordinator-map",
+        "map-a",
+        "map-b",
+        "map-c",
+        "a-response",
+        "b-response"
+      ],
+      "focusNode": "coordinator",
+      "result": "Two durable acknowledgements satisfy W=2. The third attempt may finish asynchronously, and repair covers a missed copy."
+    },
+    {
+      "id": "replica-failover",
+      "label": "Replica B down",
+      "summary": "Replica B is unavailable, but zones A and C remain reachable. The coordinator keeps the requested W=2 contract by counting different healthy replicas.",
+      "activeEdges": [
+        "client-coordinator",
+        "coordinator-map",
+        "map-a",
+        "map-c",
+        "a-response",
+        "c-response",
+        "coordinator-repair",
+        "repair-b"
+      ],
+      "failedNodes": ["replica-b"],
+      "degradedNodes": ["repair"],
+      "focusNode": "replica-b",
+      "result": "The write still succeeds at W=2 through A and C. A bounded hint targets B, and anti-entropy verifies convergence after recovery."
+    },
+    {
+      "id": "cp-partition",
+      "label": "Partition: keep W=2",
+      "summary": "The coordinator can reach only Replica A. The caller requested W=2, so one acknowledgement is evidence of partial progress, not permission to report success.",
+      "activeEdges": ["client-coordinator", "coordinator-map", "map-a"],
+      "degradedNodes": ["replica-b", "replica-c"],
+      "focusNode": "response",
+      "result": "The coordinator returns a retryable quorum-unavailable result. Availability drops for this key range, but no W=2 write is falsely acknowledged."
+    },
+    {
+      "id": "ap-partition",
+      "label": "Partition: allow W=1",
+      "summary": "The workflow explicitly permits W=1 during isolation. Replica A accepts locally while B and C may still hold or accept another version on their side of the partition.",
+      "activeEdges": [
+        "client-coordinator",
+        "coordinator-map",
+        "map-a",
+        "a-response",
+        "coordinator-repair"
+      ],
+      "degradedNodes": ["replica-b", "replica-c", "repair"],
+      "focusNode": "repair",
+      "result": "The user receives an available but explicitly weaker success. Reads may be stale and versions may conflict until connectivity returns and domain-aware repair converges them."
+    }
+  ]
+}

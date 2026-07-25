@@ -1,0 +1,181 @@
+---
+registryId: sql-vs-nosql
+---
+
+{% section-card tone="intro" %}
+## What is the SQL vs NoSQL decision?
+
+The SQL versus NoSQL decision is a choice about how an application stores facts and which operations it can make safe and efficient. **SQL** usually means a relational database: facts live in related tables, and transactions and constraints can protect rules across several records. **NoSQL** is an umbrella term for other data models, including documents, key-value stores, wide-column stores, and graphs.
+
+In plain language: choose the model that makes the application's important write and important read natural. An order that must not charge twice needs a protected update. A session that is looked up by an ID and can expire has a different shape. Neither category wins by default.
+
+The core invariant is: **every important fact has one authoritative owner, and the write path preserves the guarantee that fact needs.** A cache, replica, search index, or second database can serve a different access pattern, but it must not silently become a competing source of truth.
+
+{% callout variant="info" %}
+Start with [database fundamentals](/fundamentals/database-fundamentals) if terms such as transaction, index, replica, and cache are new. Continue with [ACID properties](/fundamentals/acid-properties) when a workflow must explain exactly what a transaction protects.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose from the protected operation outward
+
+A database category is not an architecture. First name the user action, the fact it changes, and the cost of returning a stale or contradictory answer. Then select the model that expresses that work with the least application-side coordination.
+
+{% process-flow %}
+{% process-step number="1" title="Name the fact" label="Ownership" %}
+Write one rule in business language, such as "a seat is sold at most once" or "a session expires after 30 minutes." That rule identifies the fact that needs an owner.
+{% /process-step %}
+
+{% process-step number="2" title="Trace the access pattern" label="Workload" %}
+Record whether the request joins related records, fetches one aggregate, writes an append-heavy event, looks up a known key, or traverses a relationship path.
+{% /process-step %}
+
+{% process-step number="3" title="Set the freshness rule" label="Consistency" %}
+Decide which reads may be seconds old and which must see a completed write. Read-after-write confirmation, uniqueness, and inventory are concrete requirements, not a generic preference for "strong consistency."
+{% /process-step %}
+
+{% process-step number="4" title="Measure the constraint" label="Evidence" %}
+Inspect query shape, skew, payload size, lock waits, and recovery needs before adding partitions or a specialized store. A category label does not prove capacity.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab: select a model by workload and freshness
+
+Choose a scenario. The active path shows a useful starting model and its most important boundary. Select any node to inspect the responsibility it carries. The same product can use several paths, but only after each fact has a clear owner.
+
+{% topology-lab dataFile="/api/content/reference/sql-vs-nosql/data/workload-consistency-selector.json" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Estimate pressure without inventing a benchmark
+
+Throughput alone does not decide SQL versus NoSQL. It tells you where to investigate. Suppose a commerce service peaks at `12,000` requests per second, with `88%` catalog reads and `12%` checkout or inventory writes. That is about `10,560` reads per second and `1,440` authoritative writes per second before retries, background work, or replication.
+
+{% metric-strip %}
+{% metric value="12,000" label="Peak requests/s" detail="State the peak window and burst behavior" tone="blue" /%}
+{% metric value="10,560" label="Catalog reads/s" detail="88% of the example request mix" tone="green" /%}
+{% metric value="1,440" label="Critical writes/s" detail="12% of the example request mix" tone="amber" /%}
+{% metric value="3 questions" label="Before scaling" detail="Hot key, object size, and freshness budget" tone="violet" /%}
+{% /metric-strip %}
+
+Use the estimate to ask better questions:
+
+- **Is the pressure concentrated?** One popular SKU or tenant can create lock contention or a hot partition while the average rate looks harmless.
+- **How large is a record and how long is it retained?** `1,440` one-kilobyte events per second and `1,440` one-megabyte documents per second need very different storage and replication budgets.
+- **Which reads can be stale?** A product description can often come from a replica or cache. A page confirming a completed payment should normally read the authoritative writer or a read-your-write path.
+
+{% callout variant="tip" %}
+Measure a representative query plan and a realistic data distribution before moving data. A well-indexed relational database often removes the actual bottleneck; a poorly partitioned specialized store merely moves it into routing and operations.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Match the model to the data relationship
+
+The model should make the dominant relationship visible. It does not remove the need to name a canonical value or a recovery plan.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Relational" eyebrow="Related records" icon="database" tone="blue" %}
+Tables, joins, constraints, and transactions fit connected business facts such as orders, payments, inventory, accounts, and reporting queries.
+{% /concept-card %}
+
+{% concept-card title="Document" eyebrow="One aggregate" icon="braces" tone="green" %}
+Documents fit records usually displayed and changed together, such as a catalog listing with optional attributes. Duplicated fields still need one canonical owner.
+{% /concept-card %}
+
+{% concept-card title="Key-value" eyebrow="Known key" icon="key" tone="violet" %}
+Key-value access fits small bounded values fetched by a known identifier, including sessions, idempotency records, and caches with explicit expiry.
+{% /concept-card %}
+
+{% concept-card title="Wide-column or graph" eyebrow="Specialized path" icon="network" tone="amber" %}
+Wide-column models suit known, partitioned high-write access patterns. Graph models suit multi-hop relationship traversal. Both require queries to be designed before data is stored.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% tabs %}
+{% tab title="Checkout" %}
+### Keep the critical decision small and transactional
+
+An order, payment authorization, inventory reservation, and idempotency key can need one decision. Put the smallest invariant-preserving write in a transaction or conditional update. Send email, analytics, and search updates through an outbox after the authoritative commit.
+{% /tab %}
+
+{% tab title="Catalog" %}
+### Let a flexible aggregate evolve deliberately
+
+A document can hold product-specific fields that change over time and are normally read together. Keep SKU, price, and inventory ownership explicit if another service also reads or changes those values.
+{% /tab %}
+
+{% tab title="Telemetry" %}
+### Design around the partition and query window
+
+For append-heavy measurements, choose a partition key, retention window, and bounded query shape first. A write-optimized store cannot make unbounded cross-partition filtering inexpensive after the fact.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Architecture: separate authoritative writes from derived reads
+
+One common design keeps the correctness-sensitive write in a relational primary while serving a different read shape from a derived store. The useful boundary is not SQL versus NoSQL; it is authoritative versus reconstructable.
+
+{% system-flow title="A bounded ownership path" caption="The order store owns the transactional fact. Read models receive a published change after the commit and can be rebuilt or reconciled." %}
+{% system-node title="Checkout service" eyebrow="Decision" icon="code" tone="blue" %}
+Validates the request and carries an idempotency key.
+{% /system-node %}
+{% system-node title="Order database" eyebrow="Authoritative write" icon="database" tone="green" %}
+Commits the protected order and an outbox record together.
+{% /system-node %}
+{% system-node title="Outbox relay" eyebrow="Publish" icon="repeat" tone="violet" %}
+Delivers committed changes with retry and deduplication.
+{% /system-node %}
+{% system-node title="Read model" eyebrow="Derived query" icon="search" tone="amber" %}
+Serves a specialized search or document query and can lag briefly.
+{% /system-node %}
+{% /system-flow %}
+
+- **Do not dual-write from the request handler.** If the database commit succeeds and the second write times out, the system has an unknown split state.
+- **Do not treat a replica as a transaction participant.** It provides capacity or a failover candidate, but asynchronous replication can return an older version.
+- **Do make replay safe.** A relay can retry; consumers need an event identifier, ordering expectations, and an idempotent update strategy.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab: trace data-model trade-offs through a failure
+
+Switch scenarios to follow an order service through a healthy transaction, a stale derived view, a relay outage, and primary failover. The path, component status, and result change together. Select a node to see which responsibility keeps the system correct.
+
+{% topology-lab dataFile="/api/content/reference/sql-vs-nosql/data/data-model-failure-tradeoff-lab.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Compare operational costs, not slogans
+
+Every useful capability has a cost that must appear in the design and in on-call practice.
+
+- **Transactions and constraints:** reduce invalid business state, but require short critical sections, conflict handling, and a tested retry policy with idempotency.
+- **Flexible documents:** reduce migration friction for an aggregate, but make duplicated fields, cross-document updates, and query indexing explicit design work.
+- **Partitions and replicas:** add write or read capacity, but introduce routing, hot-key analysis, replication lag, rebalancing, and a clearly tested promotion procedure.
+- **Caches and read models:** reduce latency or support a new query shape, but require invalidation or rebuild behavior. They are not a replacement for a backup.
+- **Multiple stores:** allow each bounded workload to use an appropriate model, but add schema ownership, reconciliation, observability, access control, and recovery runbooks.
+
+{% callout variant="warn" %}
+Avoid a database choice based only on a product's headline throughput. The first production failure is usually about a missing invariant, a hot key, an unbounded query, stale data in the wrong place, or an untested recovery step.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate the guarantee you promised
+
+Monitoring should prove both performance and correctness. Track p50 and p99 query latency, connection-pool wait time, lock waits or conditional-write conflicts, cache hit rate, replica lag, partition skew, disk headroom, and backup age. Pair those signals with business outcomes such as duplicate idempotency keys, oversold inventory, or an outbox backlog.
+
+Before relying on a topology, rehearse these actions:
+
+1. **Restore:** recover an independent backup to a new environment and confirm the required point-in-time data and application behavior.
+2. **Fail over:** fence the old writer, promote exactly one candidate, redirect clients, verify freshness, and rebuild redundancy.
+3. **Reconcile:** compare authoritative facts with read models or downstream stores after an outage and replay the missing changes safely.
+
+A sensible default for a new transactional application is a relational database with deliberate indexes and backups. Add a cache, replica, document projection, or specialized store when a measured workload and an owned recovery model justify it.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/sql-vs-nosql/quiz/sql-vs-nosql-decisions.json" lessonSlug="sql-vs-nosql" title="SQL vs NoSQL Decision Review" /%}

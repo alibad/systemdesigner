@@ -1,0 +1,189 @@
+---
+registryId: one-mb-transfer
+---
+
+{% section-card tone="intro" %}
+## What is meant by transferring 1 MB?
+
+**Transferring 1 MB means moving a defined sequence of bytes across a specific boundary.** The boundary might be memory to an application, storage to a server, an origin to an edge cache, or an edge to a client. The useful question is not "How long does 1 MB take?" by itself. It is: **which bytes, over which path, with what round-trip delay, measured goodput, concurrency, and completion deadline?**
+
+This distinction matters because a one-megabyte source object can produce a smaller compressed response or a larger framed transfer. A fast link can still feel slow when setup needs several sequential round trips. One copy can fit comfortably while thousands of concurrent copies saturate egress.
+
+The core model is:
+
+`completion time ~= sequential path delay + wire bits / measured goodput`
+
+Use the formula for a first budget, then replace every illustrative input with measurements from the real client cohort and protocol path. For broader size estimation, review [Data Sizes](/reference/data-sizes); for complete request budgets, review [Full Request Path](/reference/full-request-path).
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Fix the unit before doing the math
+
+The symbol is part of the contract. NIST distinguishes decimal `MB` from binary `MiB`, while network rates such as `Mb/s` count bits rather than bytes. A silent unit substitution changes the result before any networking behavior is considered.
+
+{% metric-strip %}
+{% metric value="1,000,000 B" label="1 MB" detail="Decimal megabyte: 10^6 bytes." tone="blue" /%}
+{% metric value="1,048,576 B" label="1 MiB" detail="Binary mebibyte: 2^20 bytes, about 4.86% larger than 1 MB." tone="violet" /%}
+{% metric value="8,000,000 bits" label="1 MB in bits" detail="Multiply decimal bytes by 8 before dividing by a network rate." tone="cyan" /%}
+{% metric value="125 MB/s" label="1 Gb/s ceiling" detail="Decimal conversion before overhead, contention, and a utilization target." tone="amber" /%}
+{% /metric-strip %}
+
+### State which byte count you are measuring
+
+- **Logical object:** the fields or media the product considers one object before serialization.
+- **Representation body:** the encoded bytes after JSON, Protobuf, compression, image encoding, or another representation choice.
+- **Wire traffic:** the representation plus transport, security, application framing, acknowledgements, and retransmitted bytes.
+- **Delivered bytes:** the useful representation received by the application; this can differ from total bytes carried by the path.
+
+{% callout variant="tip" %}
+Write `1 MB = 1,000,000 bytes` or `1 MiB = 1,048,576 bytes` beside the estimate. Then keep `MB`, `MiB`, `Mb/s`, and `MB/s` distinct on every intermediate value.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow the payload from object to wire
+
+Serialization and protocol layers do not merely decorate a fixed size. They define which byte count enters the transfer equation.
+
+{% process-flow %}
+{% process-step number="1" title="Define the source object" label="Meaning" %}
+Name whether one megabyte describes an uncompressed image, an in-memory object, a database value, or an already encoded response.
+{% /process-step %}
+{% process-step number="2" title="Choose the representation" label="Encoding" %}
+Serialize fields, select media quality, or compress text. Measure the resulting body because different data has different compressibility.
+{% /process-step %}
+{% process-step number="3" title="Account for the path" label="Framing" %}
+Include application, security, transport, and network overhead as measured wire bytes or as an explicitly labeled planning allowance.
+{% /process-step %}
+{% process-step number="4" title="Measure useful completion" label="Outcome" %}
+Record when the application can use the result, not only when the server wrote the last byte to a socket.
+{% /process-step %}
+{% /process-flow %}
+
+{% system-flow title="One transfer has two different time costs" caption="Sequential path delay determines when useful bytes can begin to arrive; serialization determines how long the wire bytes occupy the available goodput." %}
+{% system-node title="Caller" eyebrow="Starts the clock" icon="globe" tone="blue" %}
+Names the client cohort, deadline, connection state, and completion event.
+{% /system-node %}
+{% system-node title="Round trips" eyebrow="Distance + setup" icon="route" tone="violet" %}
+DNS, connection establishment, request travel, and protocol exchanges consume sequential path time.
+{% /system-node %}
+{% system-node title="Wire bytes" eyebrow="Serialization" icon="boxes" tone="amber" %}
+Body bytes, framing, and retransmissions consume goodput over time.
+{% /system-node %}
+{% system-node title="Usable result" eyebrow="Application outcome" icon="check" tone="green" %}
+The transfer is complete only when the receiving application has the required representation.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Budget one transfer across delay and bandwidth
+
+Choose a unit, representation, illustrative path, and connection state. The lab exposes the transformed body size, modeled wire bytes, sequential round-trip cost, serialization time, bandwidth-delay product, and remaining deadline. Profile values and overhead percentages are teaching assumptions, not provider guarantees.
+
+{% interactive-block id="reference/one-mb-transfer-transfer-budget-lab" dataFile="/api/content/reference/one-mb-transfer/data/transfer-budget-model.json" /%}
+
+### Read the result in the right order
+
+1. Check whether the size is a decimal MB or binary MiB.
+2. Confirm that the representation ratio matches measured samples from the intended data class.
+3. Use end-to-end goodput, not the link's advertised line rate.
+4. Count only genuinely sequential round trips; parallel work does not add in the same way.
+5. Compare the result with a deadline that still leaves room for application processing, queueing, rendering, and tail variation.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Distinguish bandwidth, delay, and flow-control pressure
+
+The same payload can be limited by different mechanisms. The remedy must match the dominant term.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Delay-bound" eyebrow="RTT dominates" icon="timer" tone="violet" %}
+The path spends more time waiting for sequential exchanges than serializing bytes. Reuse connections, remove round trips, or move the answering service closer.
+{% /concept-card %}
+{% concept-card title="Bandwidth-bound" eyebrow="Bytes dominate" icon="gauge" tone="amber" %}
+Serialization consumes most of the budget. Reduce the representation, compress suitable data, paginate, or provide more measured goodput.
+{% /concept-card %}
+{% concept-card title="Window-bound" eyebrow="In-flight credit" icon="network" tone="cyan" %}
+A sender needs enough congestion and receive-window credit to keep a high-bandwidth, high-RTT path full. The bandwidth-delay product is the in-flight byte target, not transfer time by itself.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep the formulas reviewable
+
+- `wire bytes = representation bytes x (1 + modeled overhead fraction)`
+- `serialization seconds = wire bytes x 8 / measured goodput bits per second`
+- `sequential delay = modeled path round trips x RTT`
+- `bandwidth-delay product bytes = bottleneck bandwidth bits per second x RTT seconds / 8`
+- `estimated completion = sequential delay + serialization time`
+
+{% code-block file="/api/content/reference/one-mb-transfer/code/transfer-budget.py" language="python" title="A unit-safe transfer budget with explicit assumptions" /%}
+
+{% callout variant="info" %}
+The additive completion formula is a planning lower bound. Congestion control, flow-control credit, queueing, loss recovery, pacing, server work, and client processing can increase observed time. Measure the completed application operation and keep the model beside it for diagnosis.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Scale one object into concurrent deliveries
+
+One successful transfer does not prove the delivery system has capacity. Fan-out multiplies copies, retries multiply attempts, and cache misses cross an origin boundary that cache hits avoid. The edge and origin therefore need separate egress budgets.
+
+{% system-flow title="Fan-out creates two capacity boundaries" caption="Every delivery consumes client-facing egress. Only misses and revalidations consume origin-facing egress when cache policy permits reuse." %}
+{% system-node title="Origin" eyebrow="Authoritative bytes" icon="server" tone="violet" %}
+Produces or reads the representation and must survive miss, revalidation, and retry pressure.
+{% /system-node %}
+{% system-node title="Shared cache" eyebrow="Reuse boundary" icon="cloud" tone="cyan" %}
+Reuses a response only under explicit HTTP cache rules; a hit protects origin capacity but still sends bytes to a client.
+{% /system-node %}
+{% system-node title="Edge egress" eyebrow="All deliveries" icon="network" tone="amber" %}
+Carries cache hits, misses, and retries toward recipients. It can saturate even when the origin is quiet.
+{% /system-node %}
+{% system-node title="Recipients" eyebrow="Concurrent work" icon="users" tone="green" %}
+Client goodput and RTT determine how long deliveries remain active and how many are in flight at once.
+{% /system-node %}
+{% /system-flow %}
+
+{% interactive-block id="reference/one-mb-transfer-fanout-capacity-lab" dataFile="/api/content/reference/one-mb-transfer/data/fanout-capacity-model.json" /%}
+
+### Preserve the failure boundaries
+
+- **Edge saturation:** admission control, shaping, or a lower-quality representation must stop queues from growing without bound.
+- **Cache bypass:** the origin must not inherit the entire edge request rate. Collapse equivalent misses, cap origin concurrency, and reject or serve a policy-safe stale response when allowed.
+- **Retry amplification:** one logical delivery can create multiple wire attempts. Give retries one owner, cap them, and use backoff with jitter.
+- **Partial regional loss:** reserve must be calculated after the failed capacity is removed, not as a percentage attached to the healthy fleet.
+- **Uncertain completion:** count application acknowledgements separately from bytes sent. A timed-out client may have received part or all of the representation.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Turn the estimate into operating evidence
+
+A review-ready transfer budget should name what will replace each assumption.
+
+### Measure the single-transfer path
+
+- Record logical body bytes, encoded body bytes, bytes retransmitted, and total wire bytes when tooling exposes them.
+- Segment warm and cold connections, regions, device classes, and network cohorts instead of averaging them together.
+- Compare baseline RTT with RTT during load so queueing delay is visible.
+- Track time to first useful byte and time to application-ready completion; they answer different questions.
+
+### Measure the concurrent system
+
+- Observe edge and origin egress independently, including cache status and revalidation volume.
+- Track active transfers, queued bytes, rejected work, retry attempts, and completion rate together.
+- Load-test the cache-bypass and reduced-capacity states before launch.
+- Alert on sustained queue growth or missed completion deadlines, not only on nominal link utilization.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Sources and standards
+
+- [NIST definitions of binary prefixes](https://physics.nist.gov/cuu/Units/binary.html) defines `1 MB` as 1,000,000 bytes and `1 MiB` as 1,048,576 bytes.
+- [RFC 9110: HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.6) defines `Content-Length` as a decimal number of octets and notes that recipients can use it to estimate transfer time.
+- [RFC 6349: Framework for TCP Throughput Testing](https://www.rfc-editor.org/rfc/rfc6349.html) defines baseline RTT, bottleneck bandwidth, bandwidth-delay product, ideal transfer time, retransmission efficiency, and buffer delay measurements.
+- [RFC 7323: TCP Extensions for High Performance](https://www.rfc-editor.org/rfc/rfc7323.html) explains why receive-window limits matter when the bandwidth-delay product is large.
+- [RFC 9000: QUIC](https://www.rfc-editor.org/rfc/rfc9000.html) specifies stream and connection flow control and notes that insufficient credit relative to the bandwidth-delay product limits throughput.
+- [RFC 9111: HTTP Caching](https://www.rfc-editor.org/rfc/rfc9111.html) defines when a stored response can be reused and how cache validation preserves HTTP semantics.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/one-mb-transfer/quiz/one-mb-transfer-review.json" lessonSlug="one-mb-transfer" title="One MB Transfer Decision Check" /%}

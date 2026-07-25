@@ -1,0 +1,196 @@
+---
+registryId: ansible
+---
+
+{% section-card tone="intro" %}
+## What is Ansible?
+
+Ansible is an automation platform that applies repeatable changes to managed systems.
+A control node reads an inventory, selects hosts, and executes playbook tasks through
+modules. For common Linux management, the target usually needs SSH and Python rather
+than a permanently running Ansible agent.
+
+The core promise is **convergence**: a well-designed playbook moves each host toward a
+declared state, reports what changed, and becomes quiet when that state is already
+correct. YAML alone does not provide this property. The chosen module, task arguments,
+failure policy, and external command behavior determine whether a repeat run is safe.
+
+{% callout variant="warn" %}
+Ansible is a push-based executor, not a continuous reconciler. A successful run proves
+what happened during that execution; it does not guarantee that a host will remain
+compliant afterward.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Build a play from four explicit contracts
+
+{% concept-grid columns="4" %}
+{% concept-card title="Inventory" eyebrow="Who" icon="network" tone="blue" %}
+Hosts, groups, and variables define the known managed estate. Patterns and `--limit`
+select a subset from that inventory; they cannot target a host the inventory does not
+contain.
+{% /concept-card %}
+{% concept-card title="Play" eyebrow="Where and how" icon="workflow" tone="violet" %}
+A play maps a host pattern to ordered tasks and execution controls such as privilege
+escalation, strategy, `serial`, and failure thresholds.
+{% /concept-card %}
+{% concept-card title="Module" eyebrow="Desired operation" icon="terminal" tone="green" %}
+A module inspects target state and returns a result such as `ok`, `changed`, `failed`,
+or `skipped`. Prefer fully qualified collection names so the implementation is
+unambiguous.
+{% /concept-card %}
+{% concept-card title="Handler" eyebrow="Change-triggered effect" icon="repeat" tone="amber" %}
+A task notifies a handler only when it reports `changed`. This keeps expensive reloads
+and restarts tied to real configuration changes.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% process-flow %}
+{% process-step number="1" title="Resolve inventory" label="Select" %}
+Load inventory sources, compose groups and variables, and evaluate the play's host
+pattern plus any command-line limit.
+{% /process-step %}
+{% process-step number="2" title="Execute each task" label="Observe and act" %}
+For the current task, run its action against the eligible hosts according to the
+selected execution strategy and concurrency controls.
+{% /process-step %}
+{% process-step number="3" title="Record host results" label="Classify" %}
+Track `ok`, `changed`, `failed`, `unreachable`, and `skipped` independently for every
+host. A failure normally removes that host from later tasks in the play.
+{% /process-step %}
+{% process-step number="4" title="Flush notified handlers" label="Apply side effects" %}
+Run each notified handler once per host at the configured handler boundary, unless an
+earlier failure prevents it or the play explicitly flushes handlers.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Prove convergence with a second execution
+
+Idempotency means that repeating an operation against the same starting state produces
+the same target state without repeating unnecessary side effects. An Ansible module
+can support idempotency, but the playbook author still has to supply a complete desired
+state and avoid hidden work in commands, templates, callbacks, or APIs.
+
+Use the lab to start from a missing, drifted, or compliant file. Run each task design
+twice and compare the reported result, resulting host state, and handler behavior.
+{% /section-card %}
+
+{% interactive-block id="technology/ansible-performance" dataFile="/api/content/technology/ansible/data/execution-idempotency-model.json" /%}
+
+{% section-card accent="cyan" %}
+## Express desired state instead of procedural guesses
+
+The first run is not the proof. The stronger test is whether a second run reports no
+change while the host remains correct.
+
+{% code-block file="/api/content/technology/ansible/code/convergent-service.yml" language="yaml" title="A convergent configuration with a change-triggered handler" /%}
+
+Run a narrow dry run with `ansible-playbook --check --diff --limit <host>`, then run the
+same play in a disposable environment. [Check mode is a simulation](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_checkmode.html):
+modules may support it partially or not at all, registered results can differ from a
+real run, and diff output can expose secrets unless sensitive tasks disable it.
+
+### Treat these results as separate evidence
+
+- **`ok`:** the task observed no required change for that host.
+- **`changed`:** the task claims it modified state; this can trigger handlers.
+- **`failed`:** the module or an explicit condition rejected the result.
+- **`unreachable`:** Ansible could not establish the managed-node connection.
+- **`skipped`:** a condition, tag, check-mode rule, or other control omitted the task.
+
+Do not hide a non-idempotent command with `changed_when: false`. That changes reporting,
+not the command's side effect.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make inventory selection a safety boundary
+
+Inventory is more than a host list. It expresses environment, function, location, and
+other operational groups that a play can intersect or exclude. A host pattern selects
+from those groups, while `--limit` narrows the result further for a particular run.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Name environments explicitly" icon="layers" tone="blue" %}
+Keep production and non-production membership visible in inventory. Do not infer the
+environment from a hostname substring inside a task.
+{% /concept-card %}
+{% concept-card title="Preview the target set" icon="search" tone="violet" %}
+Use `ansible-inventory --graph`, `--list-hosts`, and a reviewed job template or command
+to confirm exactly which hosts match before a destructive run.
+{% /concept-card %}
+{% concept-card title="Bound each rollout batch" icon="shield" tone="green" %}
+`serial` limits concurrent exposure. `max_fail_percentage` is evaluated per batch and
+aborts only when the failure percentage is **greater than** the configured threshold.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/ansible/code/production-inventory.yml" language="yaml" title="Inventory groups that separate environment, role, and canary membership" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Contain a failed rollout before it becomes a fleet event
+
+A rolling deployment needs two independent boundaries: the inventory expression limits
+which hosts are eligible, and `serial` limits how many eligible hosts enter one batch.
+The failure threshold decides whether Ansible advances after that batch.
+
+Change the host pattern, batch size, threshold, and injected failures. The model uses
+Ansible's strict “greater than” rule, so one failure in a three-host batch is 33.3% and
+exceeds a threshold of 33.
+{% /section-card %}
+
+{% interactive-block id="technology/ansible-rollout-containment-lab" dataFile="/api/content/technology/ansible/data/inventory-rollout-model.json" /%}
+
+{% section-card accent="rose" %}
+## Design the rollout around user-visible health
+
+{% code-block file="/api/content/technology/ansible/code/rolling-deployment.yml" language="yaml" title="A bounded production rollout with an explicit health gate" /%}
+
+Before promoting this pattern, answer these operational questions:
+
+- **Target proof:** Which reviewed inventory query or job-template preview proves the
+  matched host set?
+- **Batch health:** Which application check must pass before a host returns to service?
+  A running process is not necessarily a healthy application.
+- **Abort semantics:** Should one failed host stop only its batch, the entire play, or
+  a larger multi-play procedure? Use `max_fail_percentage` and `any_errors_fatal`
+  deliberately.
+- **Recovery:** Is rollback another idempotent playbook, an immutable artifact switch,
+  or a restore? Test the recovery path instead of assuming rerun equals rollback.
+- **Concurrency:** Can the dependency behind the task tolerate the chosen forks and
+  batch size without rate limits, lock contention, or a restart storm?
+- **Secrets:** Are Vault and external-secret lookups protected from stdout, diff
+  output, callback plugins, and retained job artifacts?
+
+{% callout variant="tip" %}
+For a batch of `N` hosts, choose a threshold below `100 / N` when any single failure
+must abort. Because equality does not abort, a three-host batch needs 33 rather than 34.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Know where Ansible stops
+
+Use Ansible when an operator or delivery system should push a bounded procedure across
+known targets: configure operating systems, deploy application artifacts, rotate
+settings, or orchestrate a maintenance sequence.
+
+- Use [Terraform](/technology/terraform) when the primary problem is creating and
+  changing infrastructure resources through a dependency graph and persisted state.
+- Use image building when hosts should start from a tested immutable artifact rather
+  than accumulate configuration history.
+- Use a Kubernetes operator or GitOps controller when the system needs continuous
+  reconciliation after the automation command has finished.
+- Use a workflow engine when a procedure spans long waits, durable external events,
+  compensation, and resumable state beyond one playbook execution.
+
+Current reference points: Ansible's official documentation for
+[inventory patterns](https://docs.ansible.com/projects/ansible/latest/inventory_guide/intro_patterns.html),
+[execution strategies](https://docs.ansible.com/projects/ansible/latest/plugins/strategy.html),
+and [playbook error handling](https://docs.ansible.com/projects/ansible-core/2.19/playbook_guide/playbooks_error_handling.html).
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/ansible/quiz/ansible-production-decisions.json" lessonSlug="ansible" title="Ansible Production Decisions" /%}

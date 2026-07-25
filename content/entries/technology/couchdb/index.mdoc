@@ -1,0 +1,347 @@
+---
+registryId: couchdb
+---
+
+{% section-card tone="intro" %}
+## What is Apache CouchDB?
+
+**Apache CouchDB is a document database that stores JSON documents, exposes
+them through an HTTP API, and synchronizes databases with incremental
+replication.** Each document has a stable `_id` and a revision token named
+`_rev`. A write must name the revision it replaces, so CouchDB can reject a
+stale update instead of silently overwriting a newer one.
+
+CouchDB matters when an application needs:
+
+- JSON records that can evolve without one rigid table schema;
+- direct access through ordinary HTTP requests;
+- replicas that can exchange changes after a network interruption;
+- offline or intermittently connected writers;
+- explicit, application-owned conflict resolution.
+
+{% callout variant="info" %}
+### Core invariant
+
+**A revision token proves which document version a write observed; it is not a
+business version number and it is not a timestamp.** A single database rejects
+a stale `_rev` with `409 Conflict`. Independent databases can accept concurrent
+branches and preserve both after replication, so the application must decide
+what those branches mean.
+{% /callout %}
+
+CouchDB is not a relational database with joins, foreign keys, and multi-row
+transactions. Start with [database fundamentals](/fundamentals/database-fundamentals)
+if document identity, indexes, or replication are new.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Model one business aggregate as one document
+
+A CouchDB document should contain the state that must be read and changed
+together. The HTTP resource and the consistency boundary are the same object.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Document ID" eyebrow="Stable address" icon="key" tone="blue" %}
+`_id` is the permanent address of one document. Choose an ID from the business
+domain when callers already know it, such as `account:1842`.
+{% /concept-card %}
+{% concept-card title="JSON body" eyebrow="Aggregate state" icon="file" tone="cyan" %}
+Keep related fields together, include a schema version, and place a deliberate
+size bound on documents and attachments.
+{% /concept-card %}
+{% concept-card title="Revision token" eyebrow="Optimistic concurrency" icon="refresh-cw" tone="violet" %}
+`_rev` identifies the current leaf revision. Supply it on updates and deletes
+so a stale writer receives a conflict instead of replacing newer state.
+{% /concept-card %}
+{% concept-card title="Design document" eyebrow="Read model" icon="search" tone="amber" %}
+Design documents own views and related index definitions. Updating one can
+trigger index rebuild work, so treat it like deployable application code.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Put the boundary in the document
+
+- **Good aggregate:** a support ticket with its current status, assignment,
+  bounded tags, and latest customer-facing summary.
+- **Good partitioned series:** device readings whose IDs begin with a stable
+  device partition key, such as `device-42:reading-2026-07-25T10:15:00Z`.
+- **Poor aggregate:** one ever-growing document containing every event for
+  every customer.
+- **Poor relational translation:** separate documents that must all change
+  atomically to preserve one money-transfer invariant.
+
+Denormalization is normal in CouchDB. Duplicate a small piece of read-facing
+data when that makes one bounded document answer the request, but define which
+system owns the duplicated field and how stale copies are repaired.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Follow a revision through a normal update
+
+{% process-flow %}
+{% process-step number="1" title="Read the document" label="Observe" %}
+Fetch the current body and retain its `_rev`. Validate the schema before using
+the document in a business decision.
+{% /process-step %}
+{% process-step number="2" title="Apply one domain change" label="Modify" %}
+Change only fields owned by this operation. Preserve unknown fields when older
+clients may encounter a newer schema.
+{% /process-step %}
+{% process-step number="3" title="Write with `_rev`" label="Compare and append" %}
+Send the updated body with the observed revision. CouchDB appends a new
+revision when that leaf is still current.
+{% /process-step %}
+{% process-step number="4" title="Handle the result" label="Commit or retry" %}
+On success, keep the returned revision. On `409`, fetch the new state and
+re-evaluate the business operation instead of blindly retrying the stale body.
+{% /process-step %}
+{% /process-flow %}
+
+The revision history supports replication and conflict detection. It is not an
+audit log: compaction can remove old revision bodies, and replication does not
+copy every historical body. Store immutable business events separately when
+the product requires a durable audit trail.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 1: resolve a replicated document conflict
+
+Choose a concurrent edit, select a resolution rule, and decide whether to
+write the merged result back. The workbench separates three questions:
+
+1. Did a single-node write fail fast, or did disconnected databases accept two
+   branches?
+2. Does the resolution rule preserve the business meaning of both branches?
+3. Does the application create one new descendant and delete losing leaves so
+   later readers converge?
+
+{% interactive-block id="technology/couchdb-revision-conflict-lab" dataFile="/api/content/technology/couchdb/data/revision-conflict-model.json" /%}
+
+The deterministic winning revision only gives every replica the same default
+document to return. It does **not** make that branch the correct business
+answer. Read with `conflicts=true` or inspect all open leaf revisions, apply a
+domain rule, write the resolved descendant, and remove losing branches.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Replicate changes without pretending replication is consensus
+
+CouchDB replication is incremental and one-way: a source sends missing active
+revisions and deletions to a target over the public HTTP API. Bidirectional
+sync requires two replication jobs.
+
+{% system-flow %}
+{% system-node title="Source changes" eyebrow="Checkpointed feed" icon="send" tone="blue" %}
+The replicator reads changes since its last checkpoint and identifies revisions
+the target does not have.
+{% /system-node %}
+{% system-node title="Revision transfer" eyebrow="Incremental HTTP" icon="copy" tone="cyan" %}
+Missing leaf revisions and attachments move to the target. A failed job can
+resume from a checkpoint.
+{% /system-node %}
+{% system-node title="Target revision tree" eyebrow="Preserve branches" icon="database" tone="violet" %}
+The target inserts the replicated history. Concurrent leaves remain conflicts
+instead of being overwritten by arrival order.
+{% /system-node %}
+{% system-node title="Application resolution" eyebrow="Business meaning" icon="check" tone="amber" %}
+A resolver merges, chooses, or escalates the branches, then writes a new
+descendant that replicas can converge on.
+{% /system-node %}
+{% /system-flow %}
+
+### Replication contracts to define
+
+- **Direction:** name the source, target, and whether a reverse job also runs.
+- **Scope:** use selectors or filters only when every excluded document is
+  intentionally absent from the target.
+- **Identity:** preserve stable document IDs and schema semantics on both sides.
+- **Security:** use least-privilege credentials and protect them outside
+  replication documents and logs.
+- **Lag:** alert on scheduler state, pending changes, repeated errors, and the
+  age of the oldest business-critical change.
+- **Conflict ownership:** assign a resolver for every document type that can be
+  edited in more than one database.
+
+Replication copies bad writes and deletions as faithfully as good changes.
+Keep independent, tested backups for recovery.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Separate cluster replication from database-to-database replication
+
+A clustered CouchDB database is split into `q` shards and stores `n` replicas
+of each shard. Any node can coordinate a request and route it to the nodes that
+hold the relevant shard copies.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Shards (`q`)" eyebrow="Horizontal distribution" icon="database" tone="blue" %}
+`q` controls how many shard ranges a newly created database uses. More shards
+increase placement granularity but also increase fan-out and operational work.
+{% /concept-card %}
+{% concept-card title="Replicas (`n`)" eyebrow="Node-loss durability" icon="copy" tone="cyan" %}
+`n` is the number of copies of each shard. CouchDB places at most one copy of a
+shard on a node, so fault tolerance still depends on independent nodes and
+failure domains.
+{% /concept-card %}
+{% concept-card title="Quorum (`r`, `w`)" eyebrow="Request acknowledgement" icon="check" tone="violet" %}
+Document reads and writes can set response thresholds. `_find`, views, and
+search read one shard copy, so their freshness contract differs from a direct
+document read.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not confuse those cluster replicas with a replication job between two
+databases:
+
+- cluster replicas are internal copies of shard ranges that serve one logical
+  database;
+- database replication synchronizes revision trees between independently
+  addressable databases;
+- raising `r` or `w` does not remove distributed edit conflicts or create
+  multi-document ACID transactions;
+- changing cluster membership and shard placement requires deliberate
+  operational work.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Design each query with an index and a scope
+
+CouchDB offers three primary read paths:
+
+{% concept-grid columns="3" %}
+{% concept-card title="Document lookup" eyebrow="Known `_id`" icon="key" tone="blue" %}
+Use `GET /{db}/{docid}` when the caller knows the stable ID. This is the
+simplest and most predictable access path.
+{% /concept-card %}
+{% concept-card title="Mango query" eyebrow="JSON selector" icon="search" tone="cyan" %}
+Use `_find` with a named JSON index for bounded selectors. Run `_explain`
+before launch to verify which index CouchDB selected.
+{% /concept-card %}
+{% concept-card title="Map/reduce view" eyebrow="Derived read model" icon="settings" tone="violet" %}
+Use a design-document view for a stable emitted key and optional aggregation.
+The map function sees the winning document revision.
+{% /concept-card %}
+{% /concept-grid %}
+
+A partitioned database places documents with the same partition-key prefix in
+one shard range. A partition-scoped Mango query or view can then consult one
+shard copy instead of fanning out across every shard. Global indexes remain
+available when the product truly needs a cross-partition result, but they pay
+the wider read path.
+
+### Query review
+
+1. Name the user request and its maximum result size.
+2. Decide whether the request starts from a known document ID, one partition,
+   or the whole database.
+3. Create an index whose fields and partition mode match that request.
+4. Run `_explain` and record the chosen design document and index.
+5. Load test initial index build, steady reads, writes, and design-document
+   deployment with production-shaped data.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Lab 2: route a Mango query through the right index
+
+Select a query contract, pair it with an index, and change the database size.
+The model shows whether the index is eligible, how many shard ranges the query
+must contact, and how much candidate work an index mismatch can expose.
+
+{% interactive-block id="technology/couchdb-query-route-lab" dataFile="/api/content/technology/couchdb/data/query-route-model.json" /%}
+
+The estimates illustrate relative work, not a latency prediction. Real cost
+depends on selector operators, index cardinality, document size, shard
+placement, cache state, and concurrent indexing. Use `_explain` and measured
+load tests as the release gate.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Implement explicit conflict and query boundaries
+
+The first example resolves every open leaf revision, writes one merged
+descendant, and removes losing leaves. Replace the sample merge function with a
+tested rule owned by the document's domain.
+
+{% code-block file="/api/content/technology/couchdb/code/resolve-replicated-conflict.js" language="javascript" title="Resolve and close a replicated conflict" /%}
+
+The second example creates a partitioned Mango index and asks `_explain` which
+index would serve a tenant-scoped query before executing it.
+
+{% code-block file="/api/content/technology/couchdb/code/create-and-explain-partitioned-index.js" language="javascript" title="Create and verify a partitioned Mango index" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate CouchDB as a storage system, not only an HTTP endpoint
+
+### Observe foreground service
+
+- document and query latency percentiles by endpoint;
+- `409`, `429`, `5xx`, timeout, and authentication error rates;
+- replication scheduler state, pending changes, checkpoint progress, and lag;
+- conflicted-document counts by document type and resolver outcome;
+- index selection, query fan-out, result size, and bookmark usage.
+
+### Protect storage health
+
+- monitor active, external, and on-disk size instead of one disk metric;
+- schedule database and view compaction with enough temporary free space;
+- measure write amplification from revisions, attachments, indexes, and
+  replication;
+- inspect shard placement before and after node or zone changes;
+- test backup restoration into an isolated environment and verify application
+  reads, indexes, security objects, and replication definitions.
+
+### Rehearse failures
+
+1. Stop one node and prove the intended direct-read and write thresholds.
+2. Pause a replication target, restore it, and measure catch-up time.
+3. Create a real concurrent edit and verify detection, resolution, write-back,
+   and conflict-count recovery.
+4. Deploy an index change and observe build pressure beside foreground writes.
+5. Restore a database and prove that independent recovery is possible without
+   replaying an accidental deletion from its peer.
+{% /section-card %}
+
+{% section-card %}
+## Choose CouchDB for its real trade-offs
+
+{% concept-grid columns="2" %}
+{% concept-card title="CouchDB is a strong fit" eyebrow="Replicated documents" icon="check" tone="green" %}
+- The main consistency boundary fits in one bounded JSON document.
+- Clients benefit from HTTP-native access and incremental synchronization.
+- Disconnected writers are expected and the domain has conflict rules.
+- Important reads have known IDs, partition scopes, or designed indexes.
+- The team can operate compaction, replication, shards, indexes, and restore.
+{% /concept-card %}
+{% concept-card title="Choose another primary store" eyebrow="Different boundary" icon="x" tone="rose" %}
+- Correctness requires multi-row joins or cross-document transactions.
+- The workload depends on unrestricted ad hoc relational queries.
+- Concurrent edits cannot be merged, chosen, or safely escalated.
+- Every reader requires immediate global agreement after any replica write.
+- The team expects replication to replace tested backup and recovery.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Production review
+
+- **Document contract**
+  - Does every type have a schema version, size limit, owner, and stable ID?
+  - Are attachments, tombstones, and unknown fields handled deliberately?
+- **Concurrency contract**
+  - Which writes can return `409`, and which operation is safe to re-evaluate?
+  - Which replicated conflicts merge automatically and which require review?
+- **Query contract**
+  - Does every important selector have a named index and `_explain` evidence?
+  - Is each global query intentionally paying cross-shard fan-out?
+- **Operations contract**
+  - Are compaction, shard placement, replication lag, backup, and restore
+    tested at production data volume?
+  - Is there enough disk and network headroom for foreground work plus the
+    largest planned maintenance or catch-up flow?
+
+CouchDB makes disconnected document synchronization a first-class capability.
+That strength becomes safe only when revision semantics, conflict meaning,
+query scope, and recovery evidence are equally explicit.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/couchdb/quiz/couchdb-production-decisions.json" lessonSlug="couchdb" title="CouchDB Production Decisions" /%}

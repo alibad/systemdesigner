@@ -1,0 +1,205 @@
+---
+registryId: neural-architecture-search
+---
+
+{% section-card tone="intro" %}
+## What is neural architecture search?
+
+Neural architecture search (NAS) is the practice of **using an optimization system to propose, evaluate, and select neural network structures under explicit deployment constraints**. Instead of manually fixing every layer, width, connection, and operation, engineers define a legal search space and an evidence protocol that compares candidate architectures.
+
+NAS matters when architecture choices interact strongly with quality, latency, memory, energy, compiler behavior, and target hardware. **Core invariant: every candidate must be scored under a comparable, versioned protocol, and the final architecture must be retrained and measured independently of the proxy that guided the search.**
+
+Review [model optimization](/ml-systems/model-optimization) and [hyperparameter tuning](/ml-systems/hyperparameter-tuning) if training budgets and multi-objective search are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Treat NAS as a controlled experiment loop
+
+The search algorithm is only one stage. Most failures come from an invalid space, incomparable candidate evidence, a proxy that reverses rankings, or a final model that never satisfies the real deployment envelope.
+
+{% process-flow %}
+{% process-step number="1" title="Declare the deployment envelope" label="Contract" %}
+Set quality floors, p95 latency, memory, energy, throughput, hardware, compiler, training budget, and prohibited operations.
+{% /process-step %}
+{% process-step number="2" title="Define a legal search space" label="Representation" %}
+Choose operations, connections, depth, width, scaling rules, and shape constraints that can be built and measured consistently.
+{% /process-step %}
+{% process-step number="3" title="Propose the next candidates" label="Search" %}
+Use evolution, Bayesian optimization, reinforcement learning, or a differentiable relaxation to allocate evaluation budget.
+{% /process-step %}
+{% process-step number="4" title="Measure a comparable proxy" label="Evidence" %}
+Train or inherit candidate weights under one versioned protocol and record quality, cost, failures, and hardware measurements.
+{% /process-step %}
+{% process-step number="5" title="Update the Pareto frontier" label="Decision" %}
+Retain candidates that are not dominated across quality, latency, memory, energy, robustness, and uncertainty.
+{% /process-step %}
+{% process-step number="6" title="Retrain finalists independently" label="Confirm" %}
+Start from fresh initialization, repeat seeds, use full data and budget, and validate on target hardware and untouched test evidence.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Make the search budget explicit
+
+Accelerator-hours measure total work; wall time divides that work across parallel resources. Early stopping can reduce average candidate cost, but only when the stopping signal preserves the architectures that would win under full training.
+
+{% interactive-block id="ml-systems/neural-architecture-search-calculator" /%}
+
+### Account for all search work
+
+- Candidate proposal, training or weight inheritance, validation, hardware profiling, failed jobs, and retries
+- Data loading, controller or surrogate updates, checkpoint storage, queueing, and orchestration overhead
+- Full retraining of finalists across repeated seeds, plus robustness and transfer evaluation
+- Compiler, quantization, batch-shape, and target-device measurements for deployable candidates
+- Reserved budget for reproducibility runs and a no-search baseline
+
+{% callout variant="warn" %}
+Parallel accelerators reduce elapsed wall time but do not reduce accelerator-hours or cost. Report both quantities and the utilization assumptions behind them.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Design the smallest useful search space
+
+A useful space contains credible architecture families and excludes choices that cannot satisfy shape, training, or deployment contracts. A larger combinatorial count is not evidence of a better search.
+
+{% concept-grid %}
+{% concept-card title="Macro structure" icon="layers" tone="blue" %}
+Search stages, depth, width, downsampling, skip paths, and scaling rules that shape the whole network.
+{% /concept-card %}
+{% concept-card title="Cell or block structure" icon="grid" tone="violet" %}
+Search operations, expansion, kernel, attention, normalization, and local connectivity inside a repeatable unit.
+{% /concept-card %}
+{% concept-card title="Hardware-aware choices" icon="cpu" tone="green" %}
+Restrict operators, tensor shapes, memory access, precision, sparsity, and fusion to what the target runtime executes well.
+{% /concept-card %}
+{% concept-card title="Conditional constraints" icon="shield" tone="amber" %}
+Reject invalid residual shapes, unsupported kernels, oversized activations, or combinations that violate the deployment envelope.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep the representation operational
+
+- Every encoded candidate must decode into a valid, trainable, and exportable model.
+- Equivalent graphs should share a canonical identity so the search does not evaluate duplicates.
+- Mutations and crossovers should preserve validity or repair candidates deterministically.
+- The encoding must expose cost features needed by a surrogate and exact versions needed for replay.
+{% /section-card %}
+
+{% section-card %}
+## Choose a search method that matches the evidence cost
+
+{% concept-grid %}
+{% concept-card title="Regularized evolution" icon="repeat" tone="blue" %}
+Mutates strong candidates while retiring old population members. It parallelizes well and handles discrete spaces, but may require many evaluations.
+{% /concept-card %}
+{% concept-card title="Bayesian optimization" icon="chart" tone="violet" %}
+Fits a surrogate over architecture encodings and acquisition objectives. It can spend fewer expensive evaluations when the surrogate is informative.
+{% /concept-card %}
+{% concept-card title="Differentiable search" icon="workflow" tone="green" %}
+Relaxes operation choices into continuous weights and trains a supernet. Discretization and weight-sharing bias require independent confirmation.
+{% /concept-card %}
+{% concept-card title="Reinforcement learning" icon="target" tone="amber" %}
+Trains a controller from candidate rewards. It is flexible but often expensive, high variance, and sensitive to reward design.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/ml-systems/neural-architecture-search/code/evolutionary-search-loop.py" language="python" title="A bounded mutation and feasibility loop" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Validate that the proxy preserves candidate rankings
+
+A cheap proxy is useful only when it predicts the full-training decisions the search is trying to make. Short training, low resolution, inherited weights, subset data, or unmatched hardware can favor the wrong architecture family.
+
+{% interactive-block id="ml-systems/neural-architecture-search-proxy-fidelity-lab" dataFile="/api/content/ml-systems/neural-architecture-search/data/proxy-fidelity-scenarios.json" /%}
+
+### Audit proxy fidelity before scaling search
+
+1. Sample candidates across architecture families, sizes, and predicted quality bands.
+2. Score them with the proxy and a matched full-training protocol across repeated seeds.
+3. Measure rank and pairwise agreement, systematic bias, heteroscedastic error, and family-specific reversals.
+4. Repeat hardware profiling on the actual compiler, precision, batch shape, and target device.
+5. Use the proxy to shortlist, then retrain finalists from scratch; never publish inherited supernet weights as final evidence.
+
+{% code-block file="/api/content/ml-systems/neural-architecture-search/code/validate-proxy-ranking.py" language="python" title="Measure pairwise proxy ranking agreement" /%}
+{% /section-card %}
+
+{% section-card %}
+## Optimize a Pareto frontier, not one blended score
+
+One weighted reward hides which constraint the search violated and lets arbitrary scale choices change the winner. Preserve objective values and explicit hard gates.
+
+{% system-flow title="Candidate evidence becomes a Pareto decision" caption="Hard deployment constraints filter candidates before non-dominated trade-offs are compared." %}
+{% system-node title="Measured candidate" eyebrow="Raw evidence" icon="database" tone="blue" %}
+Stores quality, latency distribution, memory, energy, robustness, training cost, failures, and uncertainty with protocol identity.
+{% /system-node %}
+{% system-node title="Feasibility gate" eyebrow="Hard contract" icon="shield" tone="rose" %}
+Rejects unsupported operators, quality below floor, p95 latency above budget, memory overflow, or failed robustness checks.
+{% /system-node %}
+{% system-node title="Pareto frontier" eyebrow="Trade-offs" icon="chart" tone="violet" %}
+Retains candidates not dominated across the product's independent objectives and confidence intervals.
+{% /system-node %}
+{% system-node title="Finalist review" eyebrow="Decision" icon="check" tone="green" %}
+Retrains, repeats, profiles, and compares a small set with a strong manual baseline before release.
+{% /system-node %}
+{% /system-flow %}
+
+### Report uncertainty with each objective
+
+- Mean and spread across training seeds, data order, and hardware runs
+- Confidence intervals for quality differences and p95/p99 latency tails
+- Search-controller selection bias and the number of candidates considered
+- Sensitivity to proxy budget, compiler version, precision, and input shape
+{% /section-card %}
+
+{% section-card %}
+## Prevent search and evaluation leakage
+
+Repeatedly selecting from validation scores turns the validation set into training signal for the controller. The final claim needs evidence that the search never optimized directly.
+
+- Keep search-training data, controller validation, architecture-selection validation, and final test evidence distinct.
+- Version every split, augmentation, preprocessing rule, metric, seed policy, and excluded example.
+- Restrict access to the final test set until candidates and decision rules are frozen.
+- Report the number of evaluated candidates because more selection attempts increase winner's-curse risk.
+- Compare the selected architecture with no-search baselines trained under the same final budget.
+{% /section-card %}
+
+{% section-card %}
+## Build a reproducible search platform
+
+### Candidate identity
+
+- Canonical architecture graph, search-space version, parent lineage, mutation or controller action, and generation
+- Code, data, environment, compiler, hardware, seed, precision, training recipe, and proxy protocol versions
+- Raw logs, checkpoints, metrics, failures, resource use, and hardware traces
+
+### Platform controls
+
+- Idempotent candidate submission and deduplication across controller retries
+- Leases and heartbeats for distributed workers, with typed failure and retry policy
+- Budget quotas by project, search, generation, candidate, and full-confirmation stage
+- Comparable metric aggregation that rejects missing objectives or incompatible protocols
+- Pause, resume, rollback, and artifact-retention behavior tested before expensive runs
+{% /section-card %}
+
+{% section-card %}
+## Verify the discovered architecture in production conditions
+
+The search ends only after the selected model works under the real serving and maintenance constraints.
+
+### Final evidence
+
+- Retrain finalists from random initialization with the full data and budget across repeated seeds.
+- Measure p50/p95/p99 latency, memory peaks, throughput, energy, warmup, batching, and compiler stability on target hardware.
+- Test distribution shift, corrupt inputs, missing features, adversarial cases, calibration, and failure recovery.
+- Compare against a strong manual architecture and simpler scaled baselines using equal training and tuning budgets.
+- Ship through shadow and canary stages with model, compiler, and hardware-specific abort signals.
+
+{% callout variant="tip" %}
+NAS is valuable when it produces a reproducible improvement on the deployment frontier, not when it merely discovers a complicated graph after consuming a large search budget.
+{% /callout %}
+{% /section-card %}
+
+{% quiz title="Neural Architecture Search Review" questionsFile="/api/content/ml-systems/neural-architecture-search/quiz/neural-architecture-search.json" lessonSlug="neural-architecture-search" /%}

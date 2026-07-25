@@ -1,0 +1,277 @@
+---
+registryId: translation-systems
+---
+
+{% section-card tone="intro" %}
+## What is a machine translation system?
+
+A **machine translation system** turns a message in a source language into a target-language message that preserves the intended meaning. The model generates the words, but the production system also detects language, protects names and placeholders, applies approved terminology, estimates quality, and decides whether the result is safe to release.
+
+Translation is not word substitution. Word order, grammatical features, idioms, context, and writing direction can all change between languages. A fluent sentence can still be wrong if it drops a negation, changes a number, invents a fact, or mistranslates a required product term.
+
+**Core invariant: release the target text only when its meaning and protected facts remain attributable to the source.** A high model score never overrides a missing number, broken placeholder, unsafe addition, or unsupported language pair.
+
+Review [Large Language Models](/genai/llms) first if tokens, attention, or autoregressive decoding are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Define translation as a typed contract
+
+A request needs more than a text string. It should name the source and target locales, domain, terminology policy, protected spans, risk tier, and deadline. The response should carry the model and tokenizer versions, quality evidence, and a release decision.
+
+{% system-flow title="One translation request crosses five accountable boundaries" caption="Each stage adds evidence or enforces a constraint. The model is one stage, not the whole product." %}
+{% system-node title="Contract" eyebrow="Scope" icon="file" tone="blue" %}
+Validate language pair, locale, domain, content class, protected spans, and deadline.
+{% /system-node %}
+{% system-node title="Prepare" eyebrow="Represent" icon="braces" tone="cyan" %}
+Normalize safely, segment the document, tokenize, and preserve markup and placeholders.
+{% /system-node %}
+{% system-node title="Route and decode" eyebrow="Generate" icon="route" tone="violet" %}
+Choose an approved model and decoding policy for the pair, domain, risk, and latency tier.
+{% /system-node %}
+{% system-node title="Verify" eyebrow="Measure" icon="gauge" tone="amber" %}
+Check terminology, numbers, entities, placeholders, language, quality, and policy signals.
+{% /system-node %}
+{% system-node title="Release or hold" eyebrow="Decide" icon="shield" tone="green" %}
+Return target text, abstain, retry through a fallback, or send the segment to human review.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep these fields explicit
+
+- **Language direction:** `sourceLocale` and `targetLocale`, not a single ambiguous language field.
+- **Domain:** support, legal, medical, commerce, or another governed vocabulary and risk context.
+- **Protected spans:** variables, tags, URLs, product identifiers, numbers, and text that must be copied exactly.
+- **Terminology set:** versioned source-to-target terms with precedence and ownership.
+- **Risk tier:** determines release thresholds, fallback behavior, and human-review obligations.
+- **Trace identity:** request, segment, model, tokenizer, glossary, policy, and evaluation versions.
+
+{% code-block file="/api/content/genai/translation-systems/code/translation-request-contract.py" language="python" title="Validate a translation request and its protected spans" /%}
+{% /section-card %}
+
+{% section-card %}
+## Tokenization is part of the quality contract
+
+Models do not read words directly. A tokenizer maps source text to subword IDs and later maps generated target IDs back to text. [SentencePiece](https://aclanthology.org/D18-2012/) demonstrated language-independent subword tokenization learned from raw sentences, which is useful when whitespace does not provide a universal word boundary.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Normalize deliberately" eyebrow="Unicode" icon="braces" tone="blue" %}
+Choose and version normalization rules. Visually similar code points, combining marks, and compatibility forms can otherwise fragment evaluation and caching.
+{% /concept-card %}
+{% concept-card title="Share with evidence" eyebrow="Vocabulary" icon="network" tone="violet" %}
+A multilingual vocabulary can transfer signal across related scripts, but high-resource languages can consume disproportionate capacity. Measure fragmentation per language.
+{% /concept-card %}
+{% concept-card title="Protect before tokenizing" eyebrow="Integrity" icon="shield" tone="amber" %}
+Replace placeholders, markup, IDs, and immutable terms with typed sentinels, then verify exact restoration after decoding.
+{% /concept-card %}
+{% concept-card title="Version as one unit" eyebrow="Compatibility" icon="workflow" tone="green" %}
+Model weights, tokenizer, language tags, normalization, and glossary behavior form one deployable contract. Rolling back only one can corrupt output.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Audit representation by language and content shape
+
+- source tokens per character and per sentence;
+- unknown, byte-fallback, and replacement-character rates;
+- segmentation around names, numbers, URLs, and markup;
+- round-trip preservation of protected spans;
+- truncation rate by language, script, and document type;
+- tokenizer-version drift between training, evaluation, and serving.
+
+{% callout variant="warn" %}
+Never lowercase, strip accents, collapse whitespace, or normalize punctuation globally without language-specific evidence. A cleanup rule that appears harmless in one locale can change meaning or destroy a required surface form in another.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Use architecture to preserve source evidence
+
+The original [Transformer](https://proceedings.neurips.cc/paper_files/paper/2017/hash/3f5ee243547dee91fbd053c1c4a845aa-Abstract.html) was evaluated on machine translation with an encoder-decoder design based on attention. That structure still provides a useful mental model even when a production fleet mixes specialized translation models, multilingual models, and prompted general-purpose models.
+
+{% process-flow %}
+{% process-step number="1" title="Encode source context" label="Source side" %}
+Build contextual source representations so a token can be interpreted using the surrounding sentence or bounded document context.
+{% /process-step %}
+{% process-step number="2" title="Attend while decoding" label="Target side" %}
+Generate each target token using prior target tokens and cross-attention to the encoded source.
+{% /process-step %}
+{% process-step number="3" title="Constrain invariants" label="Policy" %}
+Apply target-language, terminology, placeholder, length, and prohibited-output constraints where the serving stack supports them.
+{% /process-step %}
+{% process-step number="4" title="Verify completed text" label="Release" %}
+Run deterministic checks and learned quality estimation before any irreversible downstream action.
+{% /process-step %}
+{% /process-flow %}
+
+### Choose a model route, not one universal winner
+
+- **Specialized pair model:** useful when one language direction and domain justify dedicated quality, vocabulary, and capacity.
+- **Dense multilingual model:** shares parameters across many directions and simplifies the fleet, but needs per-pair capacity and quality evidence.
+- **Sparse multilingual model:** activates a subset of parameters per token; routing balance and expert availability become operational concerns.
+- **General-purpose language model:** can use instructions and context flexibly, but needs translation-specific faithfulness, terminology, latency, and cost gates.
+- **Human workflow:** remains the correct route when impact is high and machine evidence cannot support release.
+
+The [No Language Left Behind](https://arxiv.org/abs/2207.04672) work is a useful primary reference for multilingual data mining, conditional computation, broad language-pair evaluation, and toxicity measurement. Its reported results describe that research system, not a universal production baseline.
+{% /section-card %}
+
+{% section-card %}
+## Decoding turns probabilities into a product decision
+
+Autoregressive translation generates one target token at a time. Greedy decoding keeps one locally best continuation. Beam search keeps several partial hypotheses and can recover a better complete sequence, but wider search spends more compute and can still prefer a fluent candidate that violates terminology or source facts. [Beam-search research](https://aclanthology.org/W17-3207/) explicitly treats candidate width as a quality-versus-speed decision.
+
+### Separate model preference from release constraints
+
+1. Generate or retrieve a bounded candidate set under a deadline.
+2. Reject candidates that break placeholders, numbers, language, or required terms.
+3. Rank the admissible candidates with model and quality evidence.
+4. Return no machine translation when the remaining evidence is insufficient.
+
+The workbench below uses illustrative candidate evidence so you can see why a higher model score is not equivalent to a releasable translation.
+{% /section-card %}
+
+{% interactive-block id="genai/translation-systems-decoding-workbench" dataFile="/api/content/genai/translation-systems/data/decoding-workbench.json" /%}
+
+{% section-card %}
+## Budget target-token throughput and tail latency
+
+Source encoding can process tokens in parallel, while a standard autoregressive decoder repeatedly generates target tokens. Capacity therefore depends on target length, beam width, batch composition, model route, and queue delay, not just requests per second.
+
+### Worked serving envelope
+
+Assume an illustrative peak of 1,500 requests per second, 95 generated target tokens per request, and 1,100 effective target tokens per second per serving replica for the approved mix:
+
+`1,500 requests/s x 95 target tokens/request = 142,500 target tokens/s`
+
+`142,500 / 1,100 = 129.5`, so the fleet needs at least 130 equivalent replicas before headroom. Adding 30% recovery and skew headroom gives `ceil(130 x 1.30) = 169` replicas.
+
+{% metric-strip %}
+{% metric value="142.5k/s" label="Illustrative target-token demand" tone="blue" /%}
+{% metric value="130" label="Minimum equivalent replicas" tone="violet" /%}
+{% metric value="169" label="With 30% headroom" tone="green" /%}
+{% metric value="p95/p99" label="Tail latency gates" tone="amber" /%}
+{% /metric-strip %}
+
+These are design assumptions, not benchmark claims. Measure the actual deployed model on representative language directions, lengths, hardware, batch policies, and decoding settings.
+
+### Control pressure before queues hide it
+
+- bucket batches by compatible model route and similar sequence length;
+- cap queue age and propagate the remaining request deadline;
+- admit by target-token budget rather than request count alone;
+- reduce beam width or use an approved smaller route only under an explicit degraded-mode policy;
+- reject or defer work that cannot finish safely before its deadline;
+- test loss of a model pool, tokenizer service, glossary store, and complete serving region.
+{% /section-card %}
+
+{% section-card %}
+## Evaluate meaning, form, and harm separately
+
+[BLEU](https://aclanthology.org/P02-1040/) measures n-gram overlap against references and remains useful for controlled regression tracking. Learned metrics such as [COMET](https://aclanthology.org/2020.emnlp-main.213/) can align more closely with human judgments by using source and reference representations. Neither proves that every number, entity, negation, or required term is correct.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Lexical evidence" eyebrow="Reference based" icon="file" tone="blue" %}
+BLEU or chrF can reveal surface-form regressions, but valid paraphrases and reference choice affect the score.
+{% /concept-card %}
+{% concept-card title="Semantic evidence" eyebrow="Learned metric" icon="network" tone="violet" %}
+Use source-aware and reference-aware metrics, then verify their behavior on the actual language and error slices.
+{% /concept-card %}
+{% concept-card title="Critical invariants" eyebrow="Deterministic" icon="shield" tone="amber" %}
+Check numbers, entities, negation, terminology, placeholders, script, locale formatting, and prohibited additions directly.
+{% /concept-card %}
+{% concept-card title="Human error analysis" eyebrow="Accountable" icon="users" tone="green" %}
+Use expert review for adequacy, fluency, terminology, style, and severity. Aggregate scores cannot explain the user impact of a critical error.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Slice every release claim
+
+- language direction, not language family alone;
+- domain, content type, and source quality;
+- sentence length, document context, and formatting density;
+- named entities, numbers, negation, ambiguity, and terminology;
+- gender, dialect, script, and other relevant user-impact slices;
+- model, tokenizer, glossary, decoding, and policy version.
+
+The [MQM-based human evaluation study](https://aclanthology.org/2021.tacl-1.87/) shows why expert context and explicit error categories matter when systems are already strong. Use automatic metrics for coverage and speed, then use targeted human evidence to understand consequential errors.
+{% /section-card %}
+
+{% interactive-block id="genai/translation-systems-release-gate-lab" dataFile="/api/content/genai/translation-systems/data/release-gate-slices.json" /%}
+
+{% section-card %}
+## Treat safety as source faithfulness plus user impact
+
+Translation can add toxicity, erase identity information, amplify stereotypes, expose private text, or turn a benign source into harmful target content. A large multilingual study found that added-toxicity behavior varied across its evaluated languages and recommended language-specific mitigation rather than assuming one global safety rate. See [Toxicity in Multilingual Machine Translation at Scale](https://aclanthology.org/2023.findings-emnlp.642/) for the study design and measured scope.
+
+### Put controls at independent boundaries
+
+- **Before inference:** authenticate, authorize, classify content, minimize retained text, and reject unsupported language or risk routes.
+- **During preparation:** preserve immutable spans, bound document context, and keep tenant terminology isolated.
+- **After generation:** detect target language, prohibited additions, unsupported claims, critical omissions, toxicity changes, and invariant failures.
+- **Before release:** require human review for high-impact content or weak evidence, and retain the decision lineage.
+- **After release:** support correction, incident investigation, deletion obligations, model rollback, and affected-segment replay.
+
+{% callout variant="warn" %}
+Do not silently translate legal consent, medical instructions, emergency alerts, or irreversible commands under a general-content policy. Risk is defined by what the translated text controls, not only by how fluent it appears.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Operate a versioned translation fleet
+
+{% process-flow %}
+{% process-step number="1" title="Observe by slice" label="Detect" %}
+Track volume, queue age, p95 and p99 latency, abstention, fallback, invariant failures, quality estimates, and human corrections by language direction and domain.
+{% /process-step %}
+{% process-step number="2" title="Attribute the change" label="Diagnose" %}
+Compare model, tokenizer, glossary, decoding, normalization, traffic mix, and dependency versions before blaming one aggregate score.
+{% /process-step %}
+{% process-step number="3" title="Contain the route" label="Respond" %}
+Pause the affected direction, restore a compatible bundle, tighten release gates, or move eligible work to a proven fallback.
+{% /process-step %}
+{% process-step number="4" title="Prove recovery" label="Verify" %}
+Replay critical suites and canaries, compare against the last approved bundle, and restore traffic gradually with slice-level evidence.
+{% /process-step %}
+{% /process-flow %}
+
+### Version and roll back together
+
+- model weights and architecture;
+- tokenizer, language tags, and normalization rules;
+- glossary, protected-span parser, and locale formatter;
+- decoding parameters and candidate-ranking policy;
+- quality estimators, thresholds, and safety classifiers;
+- evaluation sets, human-review rubric, and release manifest.
+
+{% code-block file="/api/content/genai/translation-systems/code/slice-release-gate.py" language="python" title="Gate a candidate bundle on every required evaluation slice" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production readiness checklist
+
+- The API contract names source and target locales, domain, risk tier, deadline, and trace identity.
+- Protected spans survive normalization, tokenization, decoding, and post-processing exactly.
+- Every language direction has an approved model, tokenizer, glossary, and fallback bundle.
+- Capacity tests use representative source and target lengths, beam settings, and traffic skew.
+- Release evaluation combines lexical, semantic, deterministic, safety, and human evidence.
+- Aggregate quality cannot hide a failing language, domain, or critical-error slice.
+- High-impact content has explicit abstention and accountable human-review paths.
+- Logs avoid raw sensitive text unless a documented purpose, access policy, and retention rule require it.
+- Deployments can roll back the full compatibility bundle rather than only model weights.
+- Incident drills cover glossary corruption, tokenizer mismatch, model-pool loss, and unsafe additions.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [Attention Is All You Need](https://proceedings.neurips.cc/paper_files/paper/2017/hash/3f5ee243547dee91fbd053c1c4a845aa-Abstract.html) introduces and evaluates the Transformer encoder-decoder architecture on translation tasks.
+- [SentencePiece](https://aclanthology.org/D18-2012/) describes language-independent subword tokenization learned directly from raw text.
+- [Beam Search Strategies for Neural Machine Translation](https://aclanthology.org/W17-3207/) studies candidate-width and decoding-speed trade-offs.
+- [BLEU](https://aclanthology.org/P02-1040/) and [COMET](https://aclanthology.org/2020.emnlp-main.213/) document two different automatic-evaluation families.
+- [Experts, Errors, and Context](https://aclanthology.org/2021.tacl-1.87/) presents contextual expert evaluation based on explicit MQM error analysis.
+- [No Language Left Behind](https://arxiv.org/abs/2207.04672) documents a multilingual translation research system, its evaluation breadth, and toxicity benchmark.
+- [Toxicity in Multilingual Machine Translation at Scale](https://aclanthology.org/2023.findings-emnlp.642/) measures added toxicity across a broad multilingual evaluation set.
+
+Research results are attributed to their published systems and datasets. Capacity numbers and thresholds in this lesson are explicitly illustrative design inputs.
+{% /section-card %}
+
+{% quiz title="Translation Systems Check" questionsFile="/api/content/genai/translation-systems/quiz/translation-systems-review.json" lessonSlug="translation-systems" /%}

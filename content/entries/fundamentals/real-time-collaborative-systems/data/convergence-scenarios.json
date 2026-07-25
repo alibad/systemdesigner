@@ -1,0 +1,141 @@
+{
+  "title": "See what opposite delivery orders do",
+  "description": "Apply the same two concurrent edits at replicas A and B. The replicas receive the remote edit in opposite orders, exposing whether the selected policy converges and whether accepted intent remains visible.",
+  "defaults": {
+    "scenarioId": "same-anchor-text",
+    "strategyId": "raw-offsets"
+  },
+  "strategies": [
+    {
+      "id": "snapshot-overwrite",
+      "label": "Whole snapshot, server last-writer-wins",
+      "detail": "The authority selects one complete submitted value and distributes it to both replicas.",
+      "principle": "This converges through central ordering, but the overwrite boundary is the entire document value."
+    },
+    {
+      "id": "raw-offsets",
+      "label": "Raw positions, arrival order",
+      "detail": "Each replica applies local and remote positions without transforming them or using stable element identity.",
+      "principle": "Delivery order changes the meaning of a position, so receiving the same edits is not enough for convergence."
+    },
+    {
+      "id": "typed-stable-merge",
+      "label": "Typed merge with stable identities",
+      "detail": "Sequence inserts use deterministic element identity; incompatible scalar writes retain conflict metadata for review.",
+      "principle": "Merge behavior is defined per datatype instead of treating the document as one undifferentiated value."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "same-anchor-text",
+      "label": "Two text inserts at one anchor",
+      "detail": "Both editors add an adjective after the same word while disconnected.",
+      "baseState": "Build systems.",
+      "operationA": { "actor": "A", "label": "Insert 'secure' after 'Build'" },
+      "operationB": { "actor": "B", "label": "Insert 'fast' after 'Build'" },
+      "outcomes": {
+        "snapshot-overwrite": {
+          "replicaA": "Build fast systems.",
+          "replicaB": "Build fast systems.",
+          "retainedIntents": 1,
+          "unresolvedConflicts": 0,
+          "orderA": ["A edits locally", "B snapshot wins"],
+          "orderB": ["B edits locally", "B snapshot wins"],
+          "explanation": "Both replicas agree only because the authority keeps B's full snapshot. A's accepted-looking text disappears."
+        },
+        "raw-offsets": {
+          "replicaA": "Build fast secure systems.",
+          "replicaB": "Build secure fast systems.",
+          "retainedIntents": 2,
+          "unresolvedConflicts": 0,
+          "orderA": ["A inserts secure", "B inserts fast at the original offset"],
+          "orderB": ["B inserts fast", "A inserts secure at the original offset"],
+          "explanation": "Both words survive, but each replica's second insert lands before its first. The final text depends on delivery order."
+        },
+        "typed-stable-merge": {
+          "replicaA": "Build secure fast systems.",
+          "replicaB": "Build secure fast systems.",
+          "retainedIntents": 2,
+          "unresolvedConflicts": 0,
+          "orderA": ["A creates identified element", "B element merges at the shared anchor"],
+          "orderB": ["B creates identified element", "A element merges at the shared anchor"],
+          "explanation": "Stable element identities and one deterministic tie-break order make delivery order irrelevant while retaining both inserts."
+        }
+      }
+    },
+    {
+      "id": "same-property",
+      "label": "Two owners for one task",
+      "detail": "The task schema permits one visible owner, but both editors assign a different person concurrently.",
+      "baseState": "Owner: unassigned",
+      "operationA": { "actor": "A", "label": "Set owner to Mina" },
+      "operationB": { "actor": "B", "label": "Set owner to Jules" },
+      "outcomes": {
+        "snapshot-overwrite": {
+          "replicaA": "Owner: Jules",
+          "replicaB": "Owner: Jules",
+          "retainedIntents": 1,
+          "unresolvedConflicts": 0,
+          "orderA": ["A assigns Mina", "B snapshot wins"],
+          "orderB": ["B assigns Jules", "B snapshot wins"],
+          "explanation": "The replicas converge, but the overwritten assignment is no longer inspectable. The product cannot explain that a conflict occurred."
+        },
+        "raw-offsets": {
+          "replicaA": "Owner: Jules",
+          "replicaB": "Owner: Mina",
+          "retainedIntents": 1,
+          "unresolvedConflicts": 0,
+          "orderA": ["A assigns Mina", "B value arrives last"],
+          "orderB": ["B assigns Jules", "A value arrives last"],
+          "explanation": "Each replica accepts the last value it happens to receive, so the same two writes produce different owners."
+        },
+        "typed-stable-merge": {
+          "replicaA": "Owner: Mina; conflict: Jules",
+          "replicaB": "Owner: Mina; conflict: Jules",
+          "retainedIntents": 2,
+          "unresolvedConflicts": 1,
+          "orderA": ["A writes identified value", "B value is retained as concurrent"],
+          "orderB": ["B writes identified value", "A value wins deterministic display order"],
+          "explanation": "Both replicas show the same provisional winner and retain the alternative. A user or domain command must resolve the single-owner invariant."
+        }
+      }
+    },
+    {
+      "id": "same-list-position",
+      "label": "Two cards inserted first",
+      "detail": "Both editors add a different task at position zero in the same ordered list.",
+      "baseState": "Review",
+      "operationA": { "actor": "A", "label": "Insert Security first" },
+      "operationB": { "actor": "B", "label": "Insert Accessibility first" },
+      "outcomes": {
+        "snapshot-overwrite": {
+          "replicaA": "Accessibility -> Review",
+          "replicaB": "Accessibility -> Review",
+          "retainedIntents": 1,
+          "unresolvedConflicts": 0,
+          "orderA": ["A inserts Security", "B list snapshot wins"],
+          "orderB": ["B inserts Accessibility", "B list snapshot wins"],
+          "explanation": "The list converges by replacing all of it. Security disappears even though it was accepted locally."
+        },
+        "raw-offsets": {
+          "replicaA": "Accessibility -> Security -> Review",
+          "replicaB": "Security -> Accessibility -> Review",
+          "retainedIntents": 2,
+          "unresolvedConflicts": 0,
+          "orderA": ["A inserts at index 0", "B inserts at index 0"],
+          "orderB": ["B inserts at index 0", "A inserts at index 0"],
+          "explanation": "Both cards survive, but applying an index-zero insert second puts it first. The replicas disagree on list order."
+        },
+        "typed-stable-merge": {
+          "replicaA": "Security -> Accessibility -> Review",
+          "replicaB": "Security -> Accessibility -> Review",
+          "retainedIntents": 2,
+          "unresolvedConflicts": 0,
+          "orderA": ["A creates identified list item", "B item merges at the same anchor"],
+          "orderB": ["B creates identified list item", "A item merges by stable order"],
+          "explanation": "The sequence datatype orders concurrent identified elements consistently, independent of arrival order."
+        }
+      }
+    }
+  ]
+}

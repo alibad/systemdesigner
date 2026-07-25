@@ -1,0 +1,118 @@
+{
+  "title": "See how one block changes between prefill and decode",
+  "description": "Choose an execution phase and checkpoint attention shape. The block stays logically equivalent, while score shape, KV traffic, and the pressure on each stage change.",
+  "model": {
+    "label": "Reference decoder",
+    "layers": 32,
+    "queryHeads": 32,
+    "headDimension": 128,
+    "bytesPerElement": 2,
+    "exampleContextTokens": 8192
+  },
+  "defaults": {
+    "phaseId": "decode",
+    "attentionId": "gqa"
+  },
+  "phases": [
+    {
+      "id": "prefill",
+      "label": "Prompt prefill",
+      "detail": "Process prompt positions together and create reusable KV state for every layer.",
+      "scoreShape": "n x n",
+      "cacheAction": "Write prompt KV",
+      "dominantPressure": "Parallel compute and attention IO",
+      "result": "The first generated token waits for the entire admitted prompt to traverse the stack."
+    },
+    {
+      "id": "decode",
+      "label": "Autoregressive decode",
+      "detail": "Process one new position per active sequence while reusing all retained KV state.",
+      "scoreShape": "1 x n",
+      "cacheAction": "Read prior KV, append one position",
+      "dominantPressure": "Weight and KV memory bandwidth",
+      "result": "Each iteration emits at most one next token per active sequence, so cadence matters."
+    }
+  ],
+  "attentionVariants": [
+    {
+      "id": "mha",
+      "label": "Multi-head attention",
+      "shortLabel": "MHA",
+      "kvHeads": 32,
+      "detail": "One key head and one value head for each query head.",
+      "effect": "Largest KV state in this comparison; preserves independent KV projections for every query head."
+    },
+    {
+      "id": "gqa",
+      "label": "Grouped-query attention",
+      "shortLabel": "GQA",
+      "kvHeads": 8,
+      "detail": "Groups of four query heads share one key and value head.",
+      "effect": "One quarter of the MHA KV bytes for this reference shape, with checkpoint-compatible grouped projections."
+    },
+    {
+      "id": "mqa",
+      "label": "Multi-query attention",
+      "shortLabel": "MQA",
+      "kvHeads": 1,
+      "detail": "All query heads share one key head and one value head.",
+      "effect": "Smallest KV state in this comparison; quality and kernel support remain release-gate concerns."
+    }
+  ],
+  "stages": [
+    {
+      "id": "input-norm",
+      "label": "Input normalization",
+      "owner": "Block contract",
+      "prefillState": "Apply over every admitted prompt position.",
+      "decodeState": "Apply to the newest position for each active sequence.",
+      "prefillPressure": "moderate",
+      "decodePressure": "low"
+    },
+    {
+      "id": "qkv-projection",
+      "label": "Q, K, V projections",
+      "owner": "Learned checkpoint shape",
+      "prefillState": "Project all prompt positions and prepare cache writes.",
+      "decodeState": "Project one new position; KV-head count controls appended state.",
+      "prefillPressure": "high",
+      "decodePressure": "moderate"
+    },
+    {
+      "id": "causal-attention",
+      "label": "Causal attention",
+      "owner": "Information boundary",
+      "prefillState": "Evaluate permitted prompt-token pairs without materializing future visibility.",
+      "decodeState": "Read retained keys and values for all visible prior positions.",
+      "prefillPressure": "high",
+      "decodePressure": "high"
+    },
+    {
+      "id": "attention-residual",
+      "label": "Attention residual",
+      "owner": "Signal path",
+      "prefillState": "Merge the attention update for every prompt position.",
+      "decodeState": "Merge the update for each newly decoded position.",
+      "prefillPressure": "moderate",
+      "decodePressure": "low"
+    },
+    {
+      "id": "feed-forward",
+      "label": "Feed-forward network",
+      "owner": "Position-wise transform",
+      "prefillState": "Run the expanded hidden transform across prompt positions.",
+      "decodeState": "Run the transform for the current position in every active sequence.",
+      "prefillPressure": "high",
+      "decodePressure": "moderate"
+    },
+    {
+      "id": "block-output",
+      "label": "Output residual",
+      "owner": "Next-layer handoff",
+      "prefillState": "Pass all prompt representations to the next layer.",
+      "decodeState": "Pass current-position representations to the next layer.",
+      "prefillPressure": "moderate",
+      "decodePressure": "low"
+    }
+  ]
+}

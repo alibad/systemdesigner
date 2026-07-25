@@ -1,0 +1,115 @@
+{
+  "title": "Trace Redis replication and Sentinel failover",
+  "description": "Select a scenario to see which path is active, which node owns writes, and where asynchronous replication can leave a loss window.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Redis client",
+      "eyebrow": "Topology-aware",
+      "detail": "Discovers the current primary through Sentinel and must reconnect after a failover. Timeouts can leave a write result ambiguous.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 10,
+      "y": 55
+    },
+    {
+      "id": "sentinel",
+      "label": "Sentinel quorum",
+      "eyebrow": "Control plane",
+      "detail": "Independent Sentinel processes monitor the primary, agree on objective failure, authorize failover, and publish the new address. A robust deployment uses at least three Sentinels.",
+      "kind": "allocator",
+      "tone": "amber",
+      "x": 34,
+      "y": 17
+    },
+    {
+      "id": "primary",
+      "label": "Primary",
+      "eyebrow": "Write owner",
+      "detail": "Applies client writes and streams their effects to replicas. Replication is asynchronous by default, so an acknowledgment from this node alone is not a durable quorum commit.",
+      "kind": "cache",
+      "tone": "rose",
+      "x": 39,
+      "y": 55
+    },
+    {
+      "id": "replica-a",
+      "label": "Replica A",
+      "eyebrow": "Promotion candidate",
+      "detail": "Consumes the replication stream, tracks an offset, and may be promoted when the primary is objectively down.",
+      "kind": "cache",
+      "tone": "violet",
+      "x": 72,
+      "y": 34
+    },
+    {
+      "id": "replica-b",
+      "label": "Replica B",
+      "eyebrow": "Additional copy",
+      "detail": "Adds another asynchronous copy and can acknowledge received replication bytes, but it does not make Redis strongly consistent.",
+      "kind": "cache",
+      "tone": "cyan",
+      "x": 72,
+      "y": 76
+    }
+  ],
+  "edges": [
+    { "id": "discover", "from": "client", "to": "sentinel", "label": "discover", "mode": "sync" },
+    { "id": "monitor", "from": "sentinel", "to": "primary", "label": "monitor", "mode": "async" },
+    { "id": "write-primary", "from": "client", "to": "primary", "label": "write", "mode": "sync" },
+    { "id": "replicate-a", "from": "primary", "to": "replica-a", "label": "async stream", "mode": "async" },
+    { "id": "replicate-b", "from": "primary", "to": "replica-b", "label": "async stream", "mode": "async" },
+    { "id": "ack-a", "from": "replica-a", "to": "primary", "label": "WAIT ack", "mode": "sync", "via": { "x": 57, "y": 17 } },
+    { "id": "ack-b", "from": "replica-b", "to": "primary", "label": "WAIT ack", "mode": "sync", "via": { "x": 58, "y": 94 } },
+    { "id": "promote-a", "from": "sentinel", "to": "replica-a", "label": "promote", "mode": "sync" },
+    { "id": "write-new-primary", "from": "client", "to": "replica-a", "label": "reconnect", "mode": "sync", "via": { "x": 38, "y": 91 } },
+    { "id": "reconfigure-b", "from": "replica-a", "to": "replica-b", "label": "new stream", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-async",
+      "label": "Healthy async",
+      "summary": "The primary acknowledges a write, then sends its effects to both replicas without waiting for them.",
+      "activeEdges": ["discover", "monitor", "write-primary", "replicate-a", "replicate-b"],
+      "focusNode": "primary",
+      "result": "This is the normal low-latency path. A failure before a replica receives the latest bytes can lose an acknowledged write during promotion."
+    },
+    {
+      "id": "wait-for-copies",
+      "label": "WAIT for two",
+      "summary": "The client asks the primary to wait until two replicas acknowledge receiving the preceding writes.",
+      "activeEdges": ["write-primary", "replicate-a", "replicate-b", "ack-a", "ack-b"],
+      "focusNode": "primary",
+      "result": "WAIT reduces the loss window by proving additional copies received the bytes. It does not create a strongly consistent CP system or guarantee which replica a later failover promotes."
+    },
+    {
+      "id": "primary-failure",
+      "label": "Primary fails",
+      "summary": "Sentinels agree that the primary is down, authorize a failover, and promote Replica A.",
+      "activeEdges": ["discover", "monitor", "promote-a", "write-new-primary", "reconfigure-b"],
+      "failedNodes": ["primary"],
+      "focusNode": "sentinel",
+      "result": "Writes pause during detection and promotion. Clients must discover and reconnect to Replica A, while Replica B follows the new primary."
+    },
+    {
+      "id": "lagged-promotion",
+      "label": "Lagged promotion",
+      "summary": "The old primary fails after acknowledging bytes that the promoted replica has not received.",
+      "activeEdges": ["monitor", "promote-a", "write-new-primary", "reconfigure-b"],
+      "failedNodes": ["primary"],
+      "degradedNodes": ["replica-a"],
+      "focusNode": "replica-a",
+      "result": "The promoted replica becomes authoritative without the missing tail. Sentinel availability does not guarantee retention of every acknowledged write."
+    },
+    {
+      "id": "sentinel-minority",
+      "label": "No quorum",
+      "summary": "The primary is unreachable, but too few Sentinel processes can agree and authorize a safe failover.",
+      "activeEdges": ["discover", "monitor"],
+      "failedNodes": ["primary"],
+      "degradedNodes": ["sentinel"],
+      "focusNode": "sentinel",
+      "result": "No replica is promoted, so writes remain unavailable. Placing all Sentinels in one failure domain defeats the control-plane design."
+    }
+  ]
+}

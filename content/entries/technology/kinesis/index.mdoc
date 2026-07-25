@@ -1,0 +1,265 @@
+---
+registryId: kinesis
+---
+
+{% section-card tone="intro" %}
+## What is Amazon Kinesis?
+
+**Amazon Kinesis is an AWS family for moving and processing data while it is still
+arriving.** Applications can publish clickstream events, transactions, logs,
+telemetry, audio, or video, then let several consumers react without waiting for a
+daily batch.
+
+The family contains separate services rather than one product with four modes.
+**Kinesis Data Streams** is the durable, replayable record stream used throughout this
+lesson. **Amazon Data Firehose** manages delivery to destinations. **Amazon Managed
+Service for Apache Flink** runs stateful stream processing. **Kinesis Video Streams**
+handles time-encoded media.
+
+{% callout variant="info" %}
+The core Data Streams invariant is **partition key to shard to ordered lane**. Capacity
+is summed across shards, but one partition key maps to one shard. Consumers can replay
+records during retention, so processing must tolerate repeated delivery.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose the Kinesis service from the job
+
+{% concept-grid columns="4" %}
+{% concept-card title="Kinesis Data Streams" eyebrow="Retained event stream" icon="layers" tone="blue" %}
+Choose Data Streams when custom producers and several independent applications need
+low-latency reads, controlled partitioning, or replay from an earlier position.
+{% /concept-card %}
+{% concept-card title="Amazon Data Firehose" eyebrow="Managed delivery" icon="route" tone="green" %}
+Choose Firehose when the primary job is buffering, transforming, and delivering data
+to S3, Redshift, OpenSearch, Apache Iceberg tables, or supported HTTP destinations.
+{% /concept-card %}
+{% concept-card title="Managed Service for Apache Flink" eyebrow="Stateful computation" icon="workflow" tone="violet" %}
+Choose managed Flink for windows, joins, event-time logic, checkpoints, and other
+stateful computations over one or more streaming sources.
+{% /concept-card %}
+{% concept-card title="Kinesis Video Streams" eyebrow="Time-encoded media" icon="activity" tone="amber" %}
+Choose Video Streams for video, audio, and related time-indexed data that needs secure
+ingestion, playback, analysis, or machine-learning integration.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not treat Firehose as a drop-in consumer runtime or Flink as a storage replacement.
+Many systems combine them: Data Streams retains the event log, Flink derives live
+state, and Firehose delivers an archive.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Follow one record through Data Streams
+
+Every record contains a data blob, a partition key, and a sequence number assigned
+after Kinesis accepts the write. Kinesis does not interpret the blob, so the producer
+owns serialization, schema versioning, identity, and key selection.
+
+{% system-flow title="Kinesis Data Streams record path" caption="The shard is the durable handoff. Each consumer application tracks its own progress and can replay while the record remains retained." %}
+{% system-node title="Producer" eyebrow="Encode and key" icon="activity" tone="blue" %}
+Create a stable event ID, serialize a versioned envelope, and choose the smallest
+business entity whose events need the same ordered lane.
+{% /system-node %}
+{% system-node title="Partition-key hash" eyebrow="Place" icon="key" tone="violet" %}
+Hash the partition key into a shard's hash-key range. Every record with that key maps
+to the same current shard.
+{% /system-node %}
+{% system-node title="Shard" eyebrow="Retain" icon="database" tone="amber" %}
+Store the immutable record in one ordered shard sequence until the configured retention
+window expires.
+{% /system-node %}
+{% system-node title="Consumer application" eyebrow="Process and checkpoint" icon="users" tone="green" %}
+Read each assigned shard, apply business work, and checkpoint only after the owned side
+effect succeeds.
+{% /system-node %}
+{% /system-flow %}
+
+### Separate the three ordering claims
+
+- **Same partition key:** records route to the same current shard.
+- **Same shard:** the shard contains a sequence of accepted records.
+- **Whole stream:** several shards have no single global order.
+
+`PutRecords` can partially succeed and does not guarantee record order across a
+retried batch. When submission order for one key is strict, serialize `PutRecord`
+writes for that key instead of treating batch order as a guarantee.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Plan shards from throughput and key skew
+
+In provisioned mode, one shard supports up to **1,000 write records per second** and
+**1 MB per second** of sustained write throughput. The aggregate floor is the larger
+of these two calculations:
+
+- `ceil(records per second / 1,000)`
+- `ceil(write MB per second / 1)`
+
+That floor is valid only when partition keys distribute work. A single hot key can
+still exceed one shard while the stream-wide average looks healthy.
+
+{% interactive-block id="technology/kinesis-cost" dataFile="/api/content/technology/kinesis/data/shard-capacity-model.json" /%}
+
+The workload fixtures use `PutRecords`, where Kinesis evaluates the cumulative bytes
+in a batch. A producer that calls `PutRecord` for individual sub-kilobyte records must
+round each record up to the nearest kilobyte in its throttling estimate.
+
+The lab models steady records below the large-record threshold. Current Data Streams
+can accept intermittent records above 1 MiB where large-record support is available,
+but that does not raise the sustained per-shard write budget. Keep large payloads in
+object storage when they are a normal workload shape and stream a reference instead.
+
+### Preserve meaning while distributing load
+
+1. Start with the smallest entity that needs order, such as `order_id` or `device_id`.
+2. Measure the hottest key, not only average records per shard.
+3. Add a stable bucket suffix only when one entity may be processed in parallel.
+4. Carry the original entity ID in the envelope so consumers can reconstruct ownership.
+5. Treat key changes as a contract migration; old and new records can occupy different
+   shards during the transition.
+
+{% code-block file="/api/content/technology/kinesis/code/put-records-with-partial-retry.py" language="python" title="Retry only failed independent PutRecords entries" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose a read path that leaves recovery headroom
+
+A consumer application is an independent logical reader. KCL workers that share one
+application name coordinate shard ownership and checkpoints. A second application name
+gets its own progress and sees the same retained records.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Shared-throughput consumer" eyebrow="GetRecords polling" icon="users" tone="blue" %}
+Polling consumers share each shard's read throughput and API budget.
+
+- Use it for one application or consumers that tolerate contention.
+- Budget spare read capacity so a recovered worker can process backlog while new
+  records continue to arrive.
+- More worker processes do not create more shard read capacity.
+{% /concept-card %}
+{% concept-card title="Enhanced fan-out consumer" eyebrow="SubscribeToShard push" icon="route" tone="green" %}
+Each registered consumer receives dedicated per-shard read throughput.
+
+- Use it when several low-latency applications must read independently.
+- Register one consumer per logical application, not one per process.
+- Treat registration quotas and the additional service charge as design inputs.
+{% /concept-card %}
+{% /concept-grid %}
+
+The default retention period is 24 hours and can be increased up to 365 days. Longer
+retention enlarges the replay window; it does not make a slow consumer healthy.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make replay a designed recovery path
+
+KCL load-balances shard processors, stores coordination state, and checkpoints
+progress. It provides **at-least-once delivery**. A worker crash, deployment, scaling
+event, or reshard can restart processing after the last successful checkpoint.
+
+{% interactive-block id="technology/kinesis-consumer-recovery-lab" dataFile="/api/content/technology/kinesis/data/consumer-recovery-model.json" /%}
+
+### Commit progress after the durable effect
+
+{% process-flow %}
+{% process-step number="1" title="Decode and validate" label="Contract" %}
+Reject an unsupported schema before it reaches a business mutation.
+{% /process-step %}
+{% process-step number="2" title="Claim the event identity" label="Deduplicate" %}
+Use a destination-native unique key or conditional write for the stable `event_id`.
+{% /process-step %}
+{% process-step number="3" title="Apply the business mutation" label="Side effect" %}
+Commit the identity claim and state change atomically whenever one datastore owns both.
+{% /process-step %}
+{% process-step number="4" title="Checkpoint the shard" label="Progress" %}
+Advance only after all work represented by the checkpoint has completed durably.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/kinesis/code/idempotent-dynamodb-consumer.py" language="python" title="Claim an event ID with its DynamoDB business mutation" /%}
+
+{% callout variant="warn" %}
+A Kinesis checkpoint is not a distributed transaction with an external database,
+payment provider, or email service. If the destination cannot atomically claim the
+event ID with its mutation, use that destination's idempotency key or a durable
+outbox/inbox boundary.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Use Firehose when delivery is the product
+
+Amazon Data Firehose buffers incoming records and delivers batches to a configured
+destination. For S3, buffer size or buffer interval triggers delivery when either
+condition is reached. Larger buffers can improve object shape and downstream scan
+efficiency, while longer intervals increase freshness delay.
+
+### Design the failure path before the destination
+
+- Configure an S3 backup or error path where the selected destination supports it.
+- Understand destination-specific retries; an HTTP endpoint and S3 do not fail the
+  same way.
+- Preserve the original record when a transform or format conversion can fail.
+- Monitor delivery freshness, failed conversion, throttling, and backup writes.
+- Keep source retention long enough to cover a downstream outage when Firehose reads
+  from Data Streams.
+
+Firehose simplifies delivery, but it does not remove destination permissions, schema
+compatibility, file-layout, or replay decisions.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate the stream from user-visible risk
+
+{% metric-strip %}
+{% metric value="Write" label="Producer acceptance" detail="Put success, throttled records, bytes, and hot-shard distribution" tone="blue" /%}
+{% metric value="Age" label="Consumer freshness" detail="Maximum IteratorAgeMilliseconds compared with retention" tone="rose" /%}
+{% metric value="Read" label="Recovery capacity" detail="Shared or dedicated throughput, throttling, and catch-up headroom" tone="amber" /%}
+{% metric value="Effect" label="Business correctness" detail="Duplicate claims, poison records, and terminal failure evidence" tone="green" /%}
+{% /metric-strip %}
+
+### Production checklist
+
+- Alarm on `WriteProvisionedThroughputExceeded` and inspect shard-level distribution
+  before adding capacity.
+- Alarm on maximum `GetRecords.IteratorAgeMilliseconds` early enough to recover before
+  the retention window.
+- Retry producer throttling and partial batch failures with bounded exponential backoff
+  and jitter.
+- Version the event envelope and define compatibility before multiple applications
+  depend on it.
+- Encrypt the stream, restrict producer and consumer IAM permissions, and grant KMS
+  access deliberately.
+- Exercise worker loss, partial producer failure, a hot partition key, resharding,
+  destination outage, replay, and record expiration.
+- Preserve failed-record evidence and run a controlled redrive instead of retrying a
+  deterministic poison event forever.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Know when Kinesis fits
+
+{% concept-grid columns="3" %}
+{% concept-card title="Choose Kinesis Data Streams" eyebrow="Managed replayable stream" icon="check" tone="green" %}
+Use it when AWS-native producers and several consumers need retained events, explicit
+partitioning, independent replay, and managed capacity without operating brokers.
+{% /concept-card %}
+{% concept-card title="Choose Amazon MSK or Kafka" eyebrow="Kafka protocol and ecosystem" icon="layers" tone="blue" %}
+Prefer Kafka-compatible infrastructure when protocol compatibility, existing Kafka
+clients, connector choices, or cross-cloud operational portability are primary
+requirements.
+{% /concept-card %}
+{% concept-card title="Choose a queue or Firehose" eyebrow="Narrower handoff" icon="route" tone="amber" %}
+Use a queue when one worker should own each task. Use Firehose when managed delivery to
+a destination matters more than custom replaying consumers.
+{% /concept-card %}
+{% /concept-grid %}
+
+The deciding question is not whether Kinesis can transport the bytes. It is whether
+the partition-key contract, replay window, consumer model, and AWS-managed operating
+surface fit the system's correctness and recovery requirements.
+{% /section-card %}
+
+{% quiz lessonSlug="kinesis" title="Amazon Kinesis Production Design Review" questionsFile="/api/content/technology/kinesis/quiz/kinesis-production-decisions.json" /%}

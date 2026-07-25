@@ -1,0 +1,318 @@
+---
+registryId: mongodb
+---
+
+{% section-card tone="intro" %}
+## What is MongoDB?
+
+**MongoDB is a document database that stores related fields as BSON documents inside
+collections.** BSON extends JSON-shaped data with types such as dates, decimal values,
+binary data, and object identifiers. Applications query documents directly instead of
+reconstructing every object from normalized rows.
+
+MongoDB is useful when an application's natural aggregate is nested, fields evolve at
+different rates, and the workload benefits from replica sets or horizontal sharding.
+Flexible fields do not remove the need for a schema: validation, indexes, bounded
+arrays, ownership, and migration rules still form the production contract.
+
+### Core invariant
+
+Keep data that must change atomically inside one bounded document. When a consistency
+boundary crosses documents, make the transaction, version check, or asynchronous
+repair mechanism explicit.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Model an aggregate" eyebrow="Document boundary" icon="files" tone="blue" %}
+Embed fields that are owned, read, and updated with one parent. Reference data that has
+an independent lifecycle or grows without a reliable bound.
+{% /concept-card %}
+{% concept-card title="Protect a path" eyebrow="Query contract" icon="search" tone="violet" %}
+Design compound indexes from real filters and sorts, then use `explain` to verify keys
+and documents examined instead of assuming an index helps.
+{% /concept-card %}
+{% concept-card title="Operate copies" eyebrow="Distributed state" icon="network" tone="green" %}
+Choose read preference, read concern, and write concern from the product guarantee;
+replicas and shards do not create one universal consistency mode.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose the document boundary from ownership and access
+
+MongoDB guarantees atomicity for a write to one document. That makes the document the
+first consistency boundary, not merely a JSON container. Start with the operations
+that must succeed together, then check whether the relationship stays bounded.
+
+### Embed when the child belongs to the parent
+
+- The child is normally read with its parent.
+- The parent owns the child's lifecycle and authorization boundary.
+- The number and total size of children have a defensible upper bound.
+- One atomic update should preserve an invariant across the parent and children.
+
+### Reference when the child stands on its own
+
+- The child is queried, updated, or retained independently.
+- The relationship is many-to-many or can grow without a useful bound.
+- Duplicating the child would create expensive synchronization work.
+- The application accepts another query, an aggregation lookup, or an explicit
+  multi-document transaction.
+
+### Use a subset when the hot read is small
+
+Keep a small, clearly owned snapshot in the parent and store the complete collection
+separately. The read becomes fast, but the duplicated subset needs a version, update
+owner, and repair path. A stale subset must be detectable rather than silently trusted.
+
+{% interactive-block id="technology/mongodb-performance" dataFile="/api/content/technology/mongodb/data/document-boundary-scenarios.json" /%}
+
+The workbench uses transparent planning assumptions, not benchmark results. Its point
+is to expose coupled consequences before a schema is committed.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace a write and read through a replica set
+
+A replica set keeps copies of the same dataset. One member is primary and accepts
+writes; secondary members copy operations from the primary's oplog and apply them in
+order. Drivers discover topology changes and route operations according to the client
+contract.
+
+{% system-flow title="Acknowledged write path" caption="Acknowledgment is a product guarantee. It is not the same thing as accepting a request on one process." %}
+{% system-node title="Application driver" eyebrow="Intent" icon="send" tone="blue" %}
+Send an idempotent operation with an explicit timeout and write concern.
+{% /system-node %}
+{% system-node title="Primary" eyebrow="Apply" icon="database" tone="violet" %}
+Match the operation, update the document atomically, and append the change to the oplog.
+{% /system-node %}
+{% system-node title="Secondaries" eyebrow="Replicate" icon="copy" tone="cyan" %}
+Pull and apply oplog entries. Lag is observable and can affect reads and failover safety.
+{% /system-node %}
+{% system-node title="Acknowledgment" eyebrow="Return" icon="check" tone="green" %}
+Return after the requested members acknowledge, or surface an indeterminate timeout
+that the client resolves with an idempotency key or state lookup.
+{% /system-node %}
+{% /system-flow %}
+
+### Read behavior has three independent controls
+
+1. **Read preference** chooses an eligible member, such as the primary or a nearby
+   secondary.
+2. **Read concern** limits which state that member may return, such as local or
+   majority-committed data.
+3. **Session semantics** connect operations when the application needs causal ordering
+   or read-your-own-writes behavior.
+
+Reading from a secondary can reduce geographic latency or isolate analytics traffic,
+but it does not guarantee the newest value. Reading from the primary with `local`
+concern can also expose a write that later rolls back. State the actual guarantee.
+
+{% interactive-block id="technology/mongodb-replication-lab" dataFile="/api/content/technology/mongodb/data/replica-consistency-scenarios.json" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Build indexes from production query shapes
+
+An index is an ordered copy of selected fields. It reduces scanning for matching
+queries, but consumes memory and storage and adds work to every insert, update, delete,
+replication apply, and backup.
+
+### Apply the equality-sort-range guideline deliberately
+
+- Put fields matched by equality first in a compound index.
+- Put sort fields next when avoiding an in-memory sort is the priority.
+- Put range fields after sort, unless a highly selective range saves more work than
+  preserving index order.
+- Preserve the leftmost prefix needed by the queries that share the index.
+
+For a tenant-scoped order history filtered by status and sorted newest first, a useful
+candidate is `{ tenantId: 1, status: 1, createdAt: -1 }`. Verify it with `explain` and
+production-like cardinalities; the guideline is a starting point, not proof.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Compound" eyebrow="Query path" icon="layers" tone="blue" %}
+Supports a specific combination of equality, sort, and range predicates through its
+ordered key prefixes.
+{% /concept-card %}
+{% concept-card title="Multikey" eyebrow="Array field" icon="list" tone="violet" %}
+Indexes array values. Large arrays can create many index entries and amplify writes.
+{% /concept-card %}
+{% concept-card title="Partial" eyebrow="Bounded subset" icon="filter" tone="green" %}
+Indexes only documents matching a filter, reducing cost when the query contract uses
+the same predicate.
+{% /concept-card %}
+{% concept-card title="TTL" eyebrow="Lifecycle" icon="clock" tone="amber" %}
+Expires eligible documents asynchronously. It is useful for retention, not an exact
+deadline or a substitute for authorization checks.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Review every important query
+
+- Compare `totalKeysExamined`, `totalDocsExamined`, rows returned, and execution time.
+- Watch for collection scans, blocking sorts, low-selectivity predicates, and large
+  skip-based pagination offsets.
+- Prefer stable range pagination over unbounded `skip` for deep result sets.
+- Remove redundant indexes only after proving no critical workload depends on them.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Shard only after the single replica set has a measured limit
+
+Sharding partitions one collection across replica-set-backed shards. Applications
+connect through `mongos` routers; config servers hold cluster metadata; the balancer
+moves chunks to maintain placement goals.
+
+{% process-flow %}
+{% process-step number="1" title="Route the query" label="mongos" %}
+Extract the shard-key predicate and target one shard when possible. Missing key
+constraints can scatter the query across every shard.
+{% /process-step %}
+{% process-step number="2" title="Find the chunk" label="Metadata" %}
+Map the shard-key value to a chunk and its owning shard using cached cluster metadata.
+{% /process-step %}
+{% process-step number="3" title="Execute locally" label="Shard replica set" %}
+Use the shard's indexes and read/write contract exactly as a replica set would.
+{% /process-step %}
+{% process-step number="4" title="Merge the result" label="Router" %}
+Combine shard responses, enforce limits and ordering, then return one client result.
+{% /process-step %}
+{% /process-flow %}
+
+### A shard key must satisfy competing goals
+
+- **High cardinality:** enough distinct values to divide data into many chunks.
+- **Low frequency:** no small set of values owns most records or traffic.
+- **Non-monotonic distribution:** new writes should not converge on one hot chunk.
+- **Query locality:** common requests should include the key and avoid scatter-gather.
+- **Stable ownership:** frequently moving a document between shard-key ranges adds
+  migration work.
+
+Hashed sharding can distribute monotonic identifiers evenly, but it weakens range
+locality. Range sharding preserves locality, but a monotonic key can create a hot write
+edge. Test cardinality, frequency, monotonicity, and real query targeting together.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Estimate bytes, working set, and recovery headroom
+
+The 16 MiB document limit is a correctness boundary, not a target. Keep margin for new
+fields and array growth. Large documents also increase network transfer, cache churn,
+and the bytes rewritten by some update patterns long before the hard limit is reached.
+
+{% metric-strip %}
+{% metric label="Logical data" value="documents x average bytes" detail="Measure size by collection and document percentile" tone="blue" /%}
+{% metric label="Indexes" value="keys x entry bytes" detail="Include every replica and build workspace" tone="violet" /%}
+{% metric label="Working set" value="hot data + hot indexes" detail="Cache misses turn request latency into storage latency" tone="green" /%}
+{% metric label="Recovery" value="data / restore rate" detail="Add oplog replay, index build, and validation time" tone="amber" /%}
+{% /metric-strip %}
+
+### Capacity review
+
+1. Measure p50, p95, and maximum document size by collection.
+2. Estimate hot documents and hot index pages separately from total stored data.
+3. Multiply stored bytes by replica count, backup generations, and migration overlap.
+4. Size write IOPS for index maintenance, journaling, replication, compaction, and
+   operational jobs as well as application writes.
+5. Confirm the oplog window exceeds the longest expected secondary outage and recovery
+   interval.
+6. Restore a representative backup and measure data copy, index build, oplog catch-up,
+   validation, and application cutover.
+
+{% code-block file="/api/content/technology/mongodb/code/working-set-estimator.js" language="javascript" title="Estimate documents, indexes, replicas, and recovery headroom" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design for failures and ambiguous outcomes
+
+MongoDB drivers can retry some operations, but application semantics still determine
+whether a duplicate request is safe. A timeout says the client did not observe the
+required result in time; it does not prove the write never happened.
+
+### Handle these production failures explicitly
+
+- **Primary election:** writes pause until an eligible majority elects a primary.
+  Bound retries and expect transient errors.
+- **Write concern timeout:** reconcile by idempotency key or authoritative state before
+  issuing a second business operation.
+- **Replication lag:** protect secondaries from unbounded analytics and alert on lag
+  plus remaining oplog window.
+- **Hot shard:** throttle the producer, confirm shard-key skew, and reshard or refine
+  the key rather than adding routers.
+- **Oversized or unbounded document:** reject growth before the limit and migrate the
+  relationship to a bounded bucket or referenced collection.
+- **Multi-document partial work:** use a short transaction only when one document
+  cannot represent the invariant; use an outbox or saga for long-running workflows.
+
+{% callout variant="warn" %}
+Replication is not backup. Every replica can faithfully copy an accidental delete,
+corrupt application write, or compromised credential. Keep independent, restorable,
+tested backups.
+{% /callout %}
+
+{% code-block file="/api/content/technology/mongodb/code/atomic-order-transition.js" language="javascript" title="Make a business transition idempotent and conditional" /%}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Secure and operate the deployment as one system
+
+### Enforce the trust boundary
+
+- Require authentication and role-based access control; grant applications only the
+  actions and databases they need.
+- Encrypt client and member traffic with TLS, and protect data at rest with managed or
+  self-managed key controls appropriate to the deployment.
+- Keep database nodes on private networks and restrict administrative paths.
+- Store credentials outside code, rotate them, and separate application, migration,
+  backup, monitoring, and operator roles.
+- Validate document shape and reject unexpected fields at the database boundary when
+  the application contract requires it.
+- Audit privileged actions and redact or avoid sensitive values in logs and traces.
+
+### Observe user-visible risk, not only server health
+
+- Query latency and errors by operation shape, collection, and shard targeting.
+- Keys and documents examined per result, blocking sorts, and slow-query samples.
+- WiredTiger cache pressure, eviction work, disk latency, CPU, memory, and connection
+  saturation.
+- Replication lag, election events, majority-commit progress, and oplog window.
+- Chunk imbalance, jumbo chunks, migrations, scatter-gather rate, and hot shards.
+- Backup age, restore duration, validation result, and recovery-point evidence.
+
+Runbooks should cover primary loss, secondary re-seeding, shard unavailability,
+credential rotation, runaway queries, disk pressure, restore, and rollback of schema or
+index changes. Rehearse each path before an incident chooses the timing.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Build a query and aggregation contract
+
+Aggregation pipelines process documents as ordered stages. Put selective indexed
+filters early, project only required fields, bound groups and sorts, and inspect the
+execution plan with production-like data.
+
+{% code-block file="/api/content/technology/mongodb/code/aggregation-pipeline-example.js" language="javascript" title="Create a bounded tenant sales pipeline" /%}
+
+The pipeline preserves tenant isolation in the first match, constrains time, groups by
+a bounded category field, and limits output. In a real deployment, verify its compound
+index, memory behavior, timeout, and result cardinality with `explain`.
+{% /section-card %}
+
+{% section-card %}
+## Sources and version notes
+
+MongoDB behavior and commands evolve. Verify exact syntax and defaults against the
+server and driver versions you operate.
+
+- [MongoDB data modeling: embedded data](https://www.mongodb.com/docs/manual/data-modeling/embedding/)
+- [MongoDB replica-set read and write semantics](https://www.mongodb.com/docs/manual/applications/replication/)
+- [MongoDB read concern](https://www.mongodb.com/docs/manual/reference/read-concern/)
+- [MongoDB replica-set write concern](https://www.mongodb.com/docs/manual/core/replica-set-write-concern/)
+- [MongoDB equality-sort-range guideline](https://www.mongodb.com/docs/manual/tutorial/equality-sort-range-guideline/)
+- [MongoDB shard-key selection](https://www.mongodb.com/docs/manual/core/sharding-choose-a-shard-key/)
+- [MongoDB transaction considerations](https://www.mongodb.com/docs/manual/core/transactions/)
+- [MongoDB security documentation](https://www.mongodb.com/docs/manual/security/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/mongodb/quiz/mongodb-production-design.json" lessonSlug="mongodb" title="MongoDB Production Design Review" /%}

@@ -1,0 +1,261 @@
+---
+registryId: ai-gateway-patterns
+---
+
+{% section-card tone="intro" %}
+## What is an AI gateway?
+
+An **AI gateway** is a trusted service boundary between an application and one or more model-serving APIs. It authenticates the caller, binds the request to a tenant, applies policy and budget controls, chooses an eligible route, invokes a provider-specific adapter, and records what happened.
+
+In plain language: the application sends one product-level request, but the gateway decides whether that request may run and which tested model route can satisfy it. The gateway is not the model, and it is not just a renamed provider SDK.
+
+This boundary matters because model calls carry more than text. They carry identity, sensitive data, token and cost exposure, deadlines, streaming connections, safety requirements, and fallback risk.
+
+**Core invariant: filter by identity, policy, capability, residency, and safety before ranking by quality, latency, or cost. A cheap or healthy route is still invalid if it is not eligible.**
+
+Review [LLM Serving](/genai/llm-serving) for serving fundamentals and [Token Management](/genai/token-management) for token limits and cost basics.
+{% /section-card %}
+
+{% section-card %}
+## Put the gateway and provider SDK on opposite sides of a clear boundary
+
+A provider SDK is a client for one provider's API. It understands that provider's request fields, authentication mechanism, error types, stream events, usage response, and optional features. An AI gateway coordinates product policy across those clients.
+
+{% system-flow title="One request, two contracts" caption="The gateway owns trusted decisions. Each adapter preserves the exact semantics of one provider API." %}
+{% system-node title="Application request" eyebrow="Product contract" icon="message" tone="blue" %}
+The application states the task, input, response shape, deadline, and cancellation signal. It does not select a secret or claim its own tenant.
+{% /system-node %}
+{% system-node title="Gateway decision" eyebrow="Trusted policy" icon="shield" tone="amber" %}
+The gateway binds identity, reserves budget, filters routes, chooses a tested policy version, and creates request and attempt IDs.
+{% /system-node %}
+{% system-node title="Provider adapter" eyebrow="API contract" icon="braces" tone="violet" %}
+The adapter maps the internal request to native fields and preserves provider-specific errors, finish reasons, tool calls, safety outcomes, stream events, and usage.
+{% /system-node %}
+{% system-node title="Model endpoint" eyebrow="Execution" icon="cpu" tone="green" %}
+The selected provider or self-hosted service executes the request under its own documented limits, billing rules, and regional behavior.
+{% /system-node %}
+{% /system-flow %}
+
+### Ownership by layer
+
+{% concept-grid columns="4" %}
+{% concept-card title="Application" eyebrow="User intent" icon="users" tone="blue" %}
+Owns the user experience, conversation state, product deadline, and downstream handling of a partial or canceled stream.
+{% /concept-card %}
+{% concept-card title="Gateway" eyebrow="Control plane" icon="route" tone="amber" %}
+Owns trusted identity, tenant policy, quota, budget, route eligibility, release policy, audit evidence, and failure containment.
+{% /concept-card %}
+{% concept-card title="Adapter" eyebrow="Translation" icon="braces" tone="violet" %}
+Owns native request mapping, SDK use, error classification, cancellation behavior, stream parsing, and usage normalization for one API.
+{% /concept-card %}
+{% concept-card title="Provider" eyebrow="Inference" icon="activity" tone="green" %}
+Owns the served model, platform limits, native safety mechanisms, billing semantics, and the actual completion or failure.
+{% /concept-card %}
+{% /concept-grid %}
+
+Provider APIs are **not interchangeable** merely because several accept messages and return text. A common envelope can standardize the fields your product needs, but unsupported fields must fail explicitly. Never silently drop a safety option, tool constraint, response format, or cancellation signal to make an adapter appear compatible.
+{% /section-card %}
+
+{% section-card %}
+## Build the decision from trusted context
+
+The request body is untrusted input. A client may suggest a task or deadline, but it must not authoritatively set `tenant_id`, residency permission, plan tier, or remaining budget.
+
+{% process-flow %}
+{% process-step number="1" title="Bind identity" label="Authenticate" %}
+Verify the caller, derive tenant and plan from trusted identity data, and attach allowed data classes, regions, and policy version.
+{% /process-step %}
+{% process-step number="2" title="Normalize intent" label="Classify" %}
+Create a product-level envelope with task type, input blocks, required capabilities, output limit, deadline, and cancellation signal.
+{% /process-step %}
+{% process-step number="3" title="Filter routes" label="Authorize" %}
+Reject candidates that violate capability, context, tenant, safety, residency, health, quota, budget, or deadline constraints.
+{% /process-step %}
+{% process-step number="4" title="Rank and invoke" label="Execute" %}
+Score only eligible candidates, obtain the chosen adapter's credential just in time, invoke it, and preserve native response semantics.
+{% /process-step %}
+{% /process-flow %}
+
+### Keep secret custody inside trusted infrastructure
+
+- Store provider credentials in a secret manager or use workload identity when the platform supports it.
+- Give each adapter only the provider, project, model, and region permissions it needs.
+- Resolve credentials after policy chooses a route; never send them to the browser, model context, cache key, event payload, or ordinary log.
+- Rotate and revoke credentials independently from application releases.
+- Attribute usage to the authenticated tenant even when several tenants share one provider project.
+
+The example keeps normalization, policy, route selection, adapter mapping, and usage reconciliation as separate responsibilities.
+
+{% code-block file="/api/content/genai/ai-gateway-patterns/code/gateway-boundary.py" language="python" title="Gateway boundary with provider-specific adapters" /%}
+{% /section-card %}
+
+{% section-card %}
+## Route only among eligible candidates
+
+Routing has two phases:
+
+1. **Eligibility:** deterministic constraints decide which routes may serve the request.
+2. **Ranking:** a versioned policy scores the remaining routes for quality, latency, and cost.
+
+This order prevents an optimization score from overriding a hard rule. Fallback uses the same eligibility filter as the primary route. It must also meet a measured quality floor for the current task; "returns text" is not an acceptable fallback contract.
+
+The model below uses fictional routes and illustrative prices. It teaches the decision mechanics, not provider performance claims.
+{% /section-card %}
+
+{% interactive-block id="genai/ai-gateway-patterns-policy-routing-lab" dataFile="/api/content/genai/ai-gateway-patterns/data/policy-routing-model.json" /%}
+
+{% section-card %}
+## Reserve budget before the call and reconcile after it
+
+Gateway budgets should control both **admission** and **accounting**.
+
+### Estimate before admission
+
+For an illustrative request with 1,000 input tokens, 300 maximum output tokens, a `$1.00` per million input-token rate, and a `$4.00` per million output-token rate:
+
+- Estimated input cost: `1,000 / 1,000,000 x $1.00 = $0.0010`
+- Estimated output cost: `300 / 1,000,000 x $4.00 = $0.0012`
+- Estimated request cost: `$0.0022`, or `$2.20` per 1,000 similar requests
+
+Reserve against the maximum permitted output, not an optimistic average. Enforce tenant and route limits across requests per minute, input tokens per minute, output tokens per minute, concurrent streams, and currency budget because providers expose different quota dimensions.
+
+### Reconcile after every attempt
+
+Record usage separately for the client request and each provider attempt:
+
+- input, cached-input, output, reasoning, audio, or image units when the provider reports them;
+- native model and version actually served;
+- primary, retry, hedge, and fallback attempt cost;
+- canceled or incomplete stream usage;
+- provider request ID and the gateway's request and attempt IDs.
+
+Do not reconstruct billable usage from text length when the provider returns authoritative usage. Do not assume cached tokens are counted or priced the same way across providers.
+
+### Distinguish two cache mechanisms
+
+{% concept-grid columns="2" %}
+{% concept-card title="Provider prompt cache" eyebrow="Provider execution" icon="database" tone="violet" %}
+The provider may reuse encoded prompt prefixes. Its keying, lifetime, quota effect, token fields, and price are provider-specific. The gateway records the native outcome but does not pretend it is portable.
+{% /concept-card %}
+{% concept-card title="Gateway response cache" eyebrow="Product result" icon="lock" tone="amber" %}
+A stored model response can bypass inference. Its key must include tenant scope, normalized input, model and adapter version, tool set, safety policy, response format, and freshness rules. Sensitive or personalized tasks often should not use it.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+A prompt hash alone is not a safe cross-tenant response-cache key. The same words can have different permissions, tool results, policy versions, or allowed regions.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Bound retries, timeouts, streams, and circuit breakers
+
+A timeout means the gateway did not observe completion before its deadline. It does not prove the provider did no work, and a retry can create another billable generation.
+
+### Retry by classified failure, not by exception count
+
+- Retry only failures the adapter classifies as transient and only while the original deadline and retry budget have room.
+- Respect native retry guidance such as `Retry-After` when present.
+- Add exponential backoff with jitter and cap the total attempts.
+- Reuse a gateway request ID to collapse duplicate client submissions. Do not claim that this makes separate provider attempts produce one deterministic completion.
+- Charge every attempt to the same tenant budget and expose attempt amplification as a metric.
+
+### Make streaming cancellation an end-to-end signal
+
+When a browser disconnects or the product cancels:
+
+1. stop forwarding events to the client;
+2. abort the gateway task;
+3. ask the active adapter to cancel or close the native stream;
+4. record whether the provider confirmed cancellation and any final usage;
+5. prevent a canceled result from entering a response cache.
+
+If an API cannot confirm cancellation, mark the outcome unknown and keep the budget reservation until usage is reconciled.
+
+### Scope circuit breakers to the failing route
+
+A useful circuit key includes provider, model or deployment, region, operation, and sometimes tenant class. Opening one circuit should eject the unhealthy route without disabling unrelated models. Half-open probes must be few, observable, and excluded from normal fallback storms.
+{% /section-card %}
+
+{% interactive-block id="genai/ai-gateway-patterns-failure-containment-lab" dataFile="/api/content/genai/ai-gateway-patterns/data/failure-containment-model.json" /%}
+
+{% section-card %}
+## Apply safety and residency policy before and after inference
+
+Safety and data residency are route constraints, not ranking hints.
+
+- **Before routing:** classify the data, resolve the allowed region and network path, select the required safety profile, and deny requests with no compliant route.
+- **At the adapter:** map the approved policy to native safety controls without weakening unsupported settings. Preserve native blocked, refused, filtered, and incomplete outcomes.
+- **After inference:** apply product-level output checks, data-loss prevention, citation or grounding requirements, and task-specific release rules.
+- **During fallback:** keep the same or stricter tenant, region, retention, safety, and quality contract. A fallback that leaves the allowed geography or loses required filtering is not eligible.
+- **In storage and telemetry:** minimize prompts and outputs, redact sensitive fields, and apply retention by data class. Sampling must not bypass policy.
+
+Regional availability and security controls differ by model and feature. Treat current provider documentation and your own contract as the source of truth; do not infer residency from a provider's global brand or from the gateway's deployment region.
+{% /section-card %}
+
+{% section-card %}
+## Observe the request, every attempt, and the release policy
+
+One client request may create zero attempts after a policy denial, one normal attempt, or several retry and fallback attempts. Give each level its own identifier and measurements.
+
+### Request-level signals
+
+- authenticated tenant or a privacy-preserving tenant key;
+- task and policy version, data class, requested capabilities, and deadline;
+- eligibility count, selected route class, denial reason, and client-visible outcome;
+- time to first token, total latency, cancellation, cache outcome, and final quality cohort.
+
+### Attempt-level signals
+
+- provider, native model version, region, adapter version, and provider request ID;
+- queue time, connection time, first-token time, stream duration, error class, and retry guidance;
+- native usage fields, normalized cost, retry ordinal, fallback reason, and circuit state;
+- safety or refusal category without logging sensitive content by default.
+
+Track distributions by bounded dimensions. Keep request IDs and provider request IDs in traces, not metric labels. OpenTelemetry's GenAI conventions are useful vocabulary, but the GenAI attributes are still evolving and some content attributes can be sensitive.
+
+{% code-block file="/api/content/genai/ai-gateway-patterns/code/gateway-policy.yaml" language="yaml" title="Versioned gateway policy and containment limits" /%}
+{% /section-card %}
+
+{% section-card %}
+## Roll out routing policy with evaluation evidence
+
+A gateway policy change can alter model quality, safety, cost, latency, and failure behavior even when no application code changes.
+
+{% process-flow %}
+{% process-step number="1" title="Evaluate offline" label="Evidence" %}
+Run task-specific and safety suites by tenant class, language, input length, tool use, and expected fallback route. Compare against a pinned control.
+{% /process-step %}
+{% process-step number="2" title="Shadow safely" label="Observe" %}
+Where policy permits, compute route decisions without serving the candidate response. Avoid duplicating restricted data or billable inference merely to create telemetry.
+{% /process-step %}
+{% process-step number="3" title="Canary by cohort" label="Contain" %}
+Expose a small, reversible share. Keep the stable policy live and cap retry amplification, fallback share, cost, safety failures, and quality regression.
+{% /process-step %}
+{% process-step number="4" title="Expand or roll back" label="Decide" %}
+Expand only after minimum evidence passes. Automatically stop or roll back on hard policy, safety, quality, or circuit-breaker gates.
+{% /process-step %}
+{% /process-flow %}
+
+Contain failure with narrow policy versions, tenant cohorts, regional routes, circuit keys, retry budgets, and canary percentages. A global switch that changes every tenant and provider at once has a larger blast radius and produces weaker diagnosis evidence.
+{% /section-card %}
+
+{% section-card %}
+## Current primary and official references
+
+- [HTTP Semantics, RFC 9110](https://datatracker.ietf.org/doc/html/rfc9110): method semantics, status codes, retry guidance, and `Retry-After`.
+- [IETF Idempotency-Key HTTP Header Internet-Draft](https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-idempotency-key-header): current draft semantics for identifying retries of one request; it is an Internet-Draft, not a published RFC.
+- [OpenAI streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses) and [usage API reference](https://platform.openai.com/docs/api-reference/usage): examples of provider-specific stream events and token accounting.
+- [Claude streaming messages](https://platform.claude.com/docs/en/build-with-claude/streaming), [rate limits](https://platform.claude.com/docs/en/api/rate-limits), and [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching): examples of native events, quota dimensions, retry headers, and cache accounting.
+- [Amazon Bedrock Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html): a common message API that still exposes model-specific request fields where semantics differ.
+- [Google Cloud generative AI security controls](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/security-controls): feature-specific regional and security-control availability.
+- [OpenTelemetry GenAI attributes](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/): evolving telemetry vocabulary and warnings for sensitive content fields.
+
+Provider documentation, model availability, prices, limits, and safety features change. Pin the documentation and contract version used by each adapter, and re-run qualification tests before changing routes.
+{% /section-card %}
+
+{% section-card %}
+## Check your gateway decisions
+
+{% quiz questionsFile="/api/content/genai/ai-gateway-patterns/quiz/ai-gateway-production-review.json" lessonSlug="ai-gateway-patterns" title="AI Gateway Production Review" /%}
+{% /section-card %}

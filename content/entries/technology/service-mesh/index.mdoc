@@ -1,0 +1,250 @@
+---
+registryId: service-mesh
+---
+
+{% section-card tone="intro" %}
+## What is a service mesh?
+
+**A service mesh is infrastructure that applies networking policy to communication
+between services.** Applications still call ordinary service addresses. Proxies or
+other traffic-enforcement points handle selected connections so a platform team can
+apply identity, authorization, routing, resilience, and telemetry consistently.
+
+The mesh matters when the same internal, or **east-west**, communication rules must
+work across many workloads and teams. It is not a replacement for application
+correctness, a Kubernetes Service, an API gateway, or a healthy operating model.
+
+{% callout variant="info" %}
+### Core invariant
+
+The **control plane** distributes desired state. The **data plane** handles application
+traffic and enforces the configuration it has received. A control plane should not sit
+synchronously in every application request.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Traffic policy" eyebrow="Where and how?" icon="route" tone="blue" %}
+Route to healthy endpoints, split traffic between versions, and apply bounded
+timeouts, retries, and connection limits.
+{% /concept-card %}
+{% concept-card title="Workload identity" eyebrow="Who is calling?" icon="shield" tone="green" %}
+Authenticate participating workloads and encrypt proxy-to-proxy traffic with mutual
+TLS. Authorization remains a separate decision.
+{% /concept-card %}
+{% concept-card title="Network evidence" eyebrow="What happened?" icon="activity" tone="violet" %}
+Measure request rate, errors, duration, connections, and policy outcomes at the traffic
+boundary without requiring one telemetry library in every runtime.
+{% /concept-card %}
+{% concept-card title="Platform cost" eyebrow="Who operates it?" icon="gauge" tone="amber" %}
+Budget for data-plane CPU, memory, and latency plus control-plane availability,
+certificate rotation, configuration review, upgrades, and incident response.
+{% /concept-card %}
+{% /concept-grid %}
+
+Review [Kubernetes](/technology/kubernetes) first if Pods, Services, namespaces, and
+NetworkPolicy are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Trace configuration separately from requests
+
+A mesh has two related paths. The configuration path can change while application
+traffic is running, so updates are not necessarily observed by every enforcement point
+at the same instant.
+
+{% process-flow %}
+{% process-step number="1" title="Declare intent" label="Platform API" %}
+Operators define routing, identity, telemetry, and authorization policy for an
+explicit service, namespace, route, or workload.
+{% /process-step %}
+{% process-step number="2" title="Distribute state" label="Control plane" %}
+The control plane combines policy with service discovery and sends each data-plane
+component the configuration it needs.
+{% /process-step %}
+{% process-step number="3" title="Enforce locally" label="Data plane" %}
+Traffic enforcement points authenticate, authorize, route, limit, or observe a request
+without asking the control plane to approve that request synchronously.
+{% /process-step %}
+{% process-step number="4" title="Verify outcome" label="Operations" %}
+Teams inspect effective configuration, allowed and denied calls, proxy health, and
+application results before expanding a policy.
+{% /process-step %}
+{% /process-flow %}
+
+Use the topology to compare a healthy request with control-plane loss, an authorization
+denial, an unmeshed caller, and a failed outbound enforcement point. Select a component
+to inspect what it owns.
+
+{% topology-lab dataFile="/api/content/technology/service-mesh/data/request-path-failure-topology.json" /%}
+
+The control-plane outage scenario preserves the last accepted data-plane state in this
+model. That can keep existing traffic moving, but it does not make new discovery,
+policy, identity, or configuration changes safe. A failed data-plane component is
+different: it is already on the request path and can directly affect availability.
+
+The current [Istio data-plane documentation](https://istio.io/latest/docs/overview/dataplane-modes/)
+describes both per-workload sidecars and a shared ambient design. The
+[Linkerd architecture](https://linkerd.io/2-edge/reference/architecture/) documents a
+sidecar data plane and separate control-plane services.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Treat resilience policy as bounded extra work
+
+Traffic controls are useful only when their failure behavior matches the application:
+
+- **Timeouts** bound how long a caller waits, but every downstream timeout must fit
+  inside the caller's end-to-end deadline.
+- **Retries** create additional upstream attempts. Use them for transient failures and
+  operations that are safe to repeat or protected by application idempotency.
+- **Circuit breaking and connection limits** reject or defer work before an unhealthy
+  dependency consumes every caller, connection, or queue slot.
+- **Traffic splitting** supports canaries and migrations, but a percentage is not a
+  safety check; health gates and rollback still decide whether to continue.
+
+If a route allows two retries, one incoming request can produce at most three upstream
+attempts when every eligible attempt fails. At 1,000 incoming requests per second, that
+policy can permit 3,000 attempts per second before accounting for backoff or the outer
+deadline. Size the dependency for the failure path, not only the healthy average.
+
+The example applies retries only to idempotent reads. Writes keep the same outer
+timeout but are not repeated by the mesh.
+
+{% code-block file="/api/content/technology/service-mesh/code/bounded-read-retries.yaml" language="yaml" title="Istio retries limited to idempotent reads" /%}
+
+Istio's current [traffic-management reference](https://istio.io/latest/docs/concepts/traffic-management/)
+and Linkerd's [retry guidance](https://linkerd.io/2-edge/features/retries-and-timeouts/)
+both warn that retry policy changes latency and load. The application must still own
+fallbacks and business-level recovery.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate encryption, authentication, and authorization
+
+Mutual TLS performs two jobs between participating data-plane peers: it encrypts the
+connection and authenticates both presented workload identities. It does **not** prove
+that an authenticated caller may read an invoice, create an order, or administer a
+service.
+
+Authorization should start from an explicit trust boundary:
+
+1. inventory the real callers and destination operations;
+2. enable identity and observe which calls are actually meshed;
+3. define least-privilege allow rules for stable workload identities;
+4. test one call that must succeed and one that must fail;
+5. enforce default deny only after coverage and recovery procedures are proven.
+
+This sidecar-mode Istio example requires mutual TLS for the `payments` workload,
+creates a default-deny authorization boundary, and allows only the `checkout` service
+account to call `POST /v1/charges`.
+
+{% code-block file="/api/content/technology/service-mesh/code/strict-payments-policy.yaml" language="yaml" title="Strict mTLS and least-privilege authorization" /%}
+
+Policy attachment differs across data-plane modes and products. In Istio ambient mode,
+Layer 7 policy for a Service is attached through a waypoint and `targetRefs`; do not
+copy a sidecar selector without checking the current mode.
+
+See the official
+[Istio AuthorizationPolicy reference](https://istio.io/latest/docs/reference/config/security/authorization-policy/)
+and [security best practices](https://istio.io/latest/docs/ops/best-practices/security/).
+Consul expresses service-to-service access through
+[service intentions](https://developer.hashicorp.com/consul/docs/secure-mesh/intention/create).
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Use proxy telemetry for network behavior, not business truth
+
+The data plane observes connections and request metadata at the network boundary. It
+can reveal a caller-callee edge even when the application has no shared instrumentation
+library.
+
+{% metric-strip %}
+{% metric value="Rate" label="Demand" detail="Requests or connections per second by source, destination, and route." tone="blue" /%}
+{% metric value="Errors" label="Outcome" detail="Response classes, resets, denials, and other proxy-visible failures." tone="rose" /%}
+{% metric value="Duration" label="Latency" detail="Use p50 with tail percentiles such as p95 and p99; averages hide outliers." tone="violet" /%}
+{% metric value="Attempts" label="Amplification" detail="Compare caller requests with upstream attempts to expose retries." tone="amber" /%}
+{% /metric-strip %}
+
+Proxy evidence cannot prove that a payment was captured once, inventory remained
+correct, or a response contained the right data. Keep application metrics, traces, and
+domain events for those claims.
+
+Control telemetry cost deliberately:
+
+- bound high-cardinality labels such as raw paths, user IDs, and untrusted headers;
+- sample traces from a documented policy rather than collecting every request forever;
+- redact credentials and sensitive payload fields from access logs;
+- export long-term evidence to an owned observability system;
+- monitor certificate expiry, rejected configuration, stale proxies, and control-plane
+  distribution lag as mesh health signals.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose the smallest architecture that solves the requirement
+
+Service count alone is a weak adoption signal. A small regulated system may need
+workload identity, while a large single-runtime system may already have safe shared
+libraries. The stronger question is whether a cross-cutting **internal traffic**
+requirement is repeated across workloads and whether someone can operate the new
+failure domain.
+
+Use the decision lab to change the primary requirement and the available operating
+owner. The comparison shows which controls are covered, which remain gaps, and whether
+the technically matching option is ready to run.
+
+{% interactive-block id="technology/service-mesh-impact" dataFile="/api/content/technology/service-mesh/data/adoption-decision-model.json" /%}
+
+Interpret a blocked result literally: the requirement may justify a mesh, while the
+current team cannot safely own one. Narrow the first use case, select a managed option,
+or build the operating capability before putting the mesh on every request path.
+
+Kubernetes already provides service discovery, load distribution, Gateway API
+implementations, and L3/L4 NetworkPolicy building blocks. Its
+[networking overview](https://kubernetes.io/docs/concepts/services-networking/)
+helps separate those responsibilities from the extra Layer 7, identity, and telemetry
+features a mesh may add.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Adopt a mesh as a measured platform product
+
+{% concept-grid columns="3" %}
+{% concept-card title="Istio" eyebrow="Sidecar or ambient" icon="network" tone="blue" %}
+Istio supports Envoy sidecars and an ambient mode with per-node ztunnel plus optional
+waypoints for Layer 7 processing. Check the current feature boundary before choosing a
+mode.
+{% /concept-card %}
+{% concept-card title="Linkerd" eyebrow="Focused sidecar mesh" icon="route" tone="green" %}
+Linkerd uses a purpose-built Rust proxy beside meshed workloads and separates outbound
+routing and resilience from inbound authorization.
+{% /concept-card %}
+{% concept-card title="Consul service mesh" eyebrow="Discovery and intentions" icon="shield" tone="violet" %}
+Consul combines service discovery with mesh gateways, proxy integration, identities,
+and intentions that authorize source-to-destination communication.
+{% /concept-card %}
+{% /concept-grid %}
+
+Product selection follows requirements, supported environments, data-plane placement,
+policy semantics, upgrade strategy, and measured cost. Do not choose from feature
+counts alone.
+
+Use a staged operating sequence:
+
+1. **Name one problem.** Choose identity coverage, a canary boundary, or consistent
+   telemetry, and define the user-visible success metric.
+2. **Measure a baseline.** Record latency distributions, CPU, memory, request rate,
+   error rate, certificate state, and incident workload before enrollment.
+3. **Pilot a bounded path.** Enroll a non-critical caller and destination, then test
+   allowed, denied, overloaded, stale-configuration, and control-plane-loss states.
+4. **Prove rollback.** Rehearse removing policy, bypassing or repairing a failed data
+   plane, restoring trust material, and returning to the previous traffic path.
+5. **Expand by evidence.** Add workloads only while ownership, dashboards, policy
+   review, capacity headroom, and upgrade procedures remain credible.
+
+Benchmark the exact protocols, payloads, telemetry, policies, and deployment mode used
+in production. Istio publishes a
+[performance methodology and reference results](https://istio.io/latest/docs/ops/deployment/performance-and-scalability/),
+but another cluster's numbers are not a capacity plan.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/service-mesh/quiz/service-mesh-production-decisions.json" lessonSlug="service-mesh" title="Service Mesh Production Decisions" /%}

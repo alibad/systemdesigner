@@ -1,0 +1,127 @@
+---
+registryId: data-modeling
+---
+
+{% section-card tone="intro" %}
+## What is data modeling?
+
+**Data modeling** is the work of turning business facts into records, relationships, and rules that a database can enforce. It answers simple but expensive questions before code ships: what is one thing, what can it be connected to, and which facts must never disagree?
+
+A model is not just a diagram. It is a contract between writes, reads, and operators. A useful first invariant for an order system is: an order belongs to one customer, its line items are never shared with another order, and the amount charged remains reproducible after a product price changes.
+
+Start with the business language, then map it to keys and constraints. See [Database Fundamentals](/fundamentals/database-fundamentals) for the storage and transaction concepts behind those constraints.
+{% /section-card %}
+
+{% section-card %}
+## Model the facts before choosing tables
+
+An **entity** is a thing the business cares about, such as a customer, order, or product. An **attribute** describes it, such as an email address or order status. A **relationship** says how records connect. The cardinality is the rule: one-to-one, one-to-many, or many-to-many.
+
+{% concept-grid %}
+{% concept-card title="Identity" icon="key" %}
+Give every durable entity a stable primary key. Human-readable fields such as an email address can change and usually need their own unique constraint.
+{% /concept-card %}
+{% concept-card title="Ownership" icon="link" %}
+Put the foreign key on the many side of a one-to-many relationship. It makes the owner of each child record explicit and indexable.
+{% /concept-card %}
+{% concept-card title="Invariants" icon="shield" %}
+Use database constraints for rules that must survive every caller: `NOT NULL`, `UNIQUE`, `CHECK`, and foreign keys are executable documentation.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="info" %}
+A relationship is not a UI choice. If a customer can place many orders, a one-to-one schema either drops valid history or forces application code to fight the database.
+{% /callout %}
+{% /section-card %}
+
+{% interactive-block id="fundamentals/data-modeling-schema-decision-lab" /%}
+
+{% section-card %}
+## Translate a relationship into storage
+
+For a one-to-many relationship, store the parent key in the child: `orders.customer_id` identifies the customer that owns an order. Index that foreign key when a common query is "show this customer's orders."
+
+For a many-to-many relationship, use a **junction table**. A `project_memberships` row connects one user and one project. Its composite primary key prevents the same membership from being recorded twice, while extra columns such as `role` and `joined_at` describe the relationship itself.
+
+{% process-flow %}
+{% process-step number="1" title="Write the sentence" label="Domain" %}
+State the fact in plain language: "A project has many members, and a member can join many projects."
+{% /process-step %}
+{% process-step number="2" title="Pick cardinality" label="Rule" %}
+Many on both sides means the relationship needs its own records; it is not a pair of copied ID lists.
+{% /process-step %}
+{% process-step number="3" title="Protect the fact" label="Database" %}
+Make both foreign keys non-null and make their pair unique. Decide explicitly whether deleting a project should delete memberships or be rejected.
+{% /process-step %}
+{% process-step number="4" title="Prove the path" label="Test" %}
+Test the reads and invalid writes: duplicate membership, missing parent, and attempted deletion with children.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Normalize the source of truth, then shape reads
+
+**Normalization** separates facts so each fact has one authoritative home. In a checkout model, customer identity belongs to `customers`; the products in an order belong to `order_items`; the price paid belongs on the order item because it is a historical transaction fact. This usually makes updates safer because a customer email or current product price is not copied into every order row.
+
+Normalization does not ban copies. A **read projection** is a deliberate, derived copy optimized for a query, such as a daily revenue aggregate or an order-history document. It needs an owner, a refresh path, and a way to rebuild it from the normalized source of truth.
+{% /section-card %}
+
+{% interactive-block id="fundamentals/data-modeling-query-tradeoff-lab" /%}
+
+{% section-card %}
+## Estimate the query before adding an index
+
+At 10 million orders, a query that scans the whole `orders` table to find one customer's latest 20 orders does work proportional to 10 million rows. An index on `(customer_id, created_at DESC)` lets the database seek to that customer's range and read the newest rows in order. The direction and column order must match the filter and sort you actually issue.
+
+An index is a write-time cost paid to reduce read-time work. Every insert, update, or delete may update each affected index. Measure its benefit with realistic row counts and query plans, not a generic claim that indexes are fast.
+
+{% metric-strip %}
+{% metric value="10M" label="Orders in the estimate" detail="Enough rows for a scan to be observable" tone="blue" /%}
+{% metric value="20" label="Recent orders returned" detail="A bounded customer-history page" tone="green" /%}
+{% metric value="2" label="Core access paths" detail="Customer history and operational status queue" tone="violet" /%}
+{% /metric-strip %}
+{% /section-card %}
+
+{% section-card %}
+## Implement the invariants in DDL
+
+The example uses PostgreSQL-style SQL. It makes the relationship, historical price snapshot, and order-history access path visible in the schema instead of relying on application convention.
+{% /section-card %}
+
+{% code-block
+  file="/api/content/fundamentals/data-modeling/code/order-schema.sql"
+  language="sql"
+  title="Order schema with ownership and query constraints" /%}
+
+{% section-card %}
+## Plan for change, failures, and operations
+
+Schema changes are production changes. Adding a nullable column is usually low risk; filling it, making it required, and removing an old column should be separate deployable steps. For a large table, create indexes with the database's online or concurrent option when available, and verify lock behavior in a staging-sized rehearsal.
+
+- **Migration failure:** keep a backwards-compatible read path until the backfill and validation complete. Do not deploy code that assumes a new column is populated before the backfill has run.
+- **Projection lag:** serve a labeled stale result or fall back to the normalized path when the read model is behind. Monitor lag, failed events, and rebuild duration.
+- **Constraint violation:** return a clear conflict or validation error. Retrying a duplicate membership or a failed uniqueness check without changing input cannot repair it.
+- **Query regression:** alert on p95 latency, rows scanned, lock wait time, and index growth. Compare the query plan after data distribution changes, not just after deployment.
+
+{% callout variant="warn" %}
+Do not use a denormalized projection as the only source for a correctness-critical write. Write the normalized facts in a transaction first, then update or rebuild the projection through a durable event or job.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## A practical decision checklist
+
+Before approving a model, make the decisions reviewable:
+
+1. Name the entities and state each relationship in one sentence.
+2. Record the invariant and the database constraint that enforces it.
+3. List the top reads, writes, expected row counts, and freshness target.
+4. Add the smallest index or projection that serves a measured query.
+5. Document ownership, backfill, rollback, and monitoring for every derived model.
+{% /section-card %}
+
+{% quiz
+  questionsFile="/api/content/fundamentals/data-modeling/quiz/data-modeling-decisions.json"
+  lessonSlug="data-modeling"
+  title="Data Modeling Decision Review" /%}

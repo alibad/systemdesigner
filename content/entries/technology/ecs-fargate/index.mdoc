@@ -1,0 +1,347 @@
+---
+registryId: ecs-fargate
+---
+
+{% section-card tone="intro" %}
+## What are Amazon ECS and AWS Fargate?
+
+**Amazon Elastic Container Service (ECS) schedules and operates containers; AWS
+Fargate supplies managed compute for those containers.** ECS decides which task
+definition to run, how many copies a service should maintain, and how a deployment
+progresses. Fargate creates the isolated task compute without asking your team to
+provision or patch a fleet of container instances.
+
+That separation matters. Choosing Fargate removes host-capacity management, but the
+application still needs explicit CPU and memory requests, network routes, security
+groups, IAM roles, health checks, scaling signals, graceful shutdown, and a recovery
+plan.
+
+### Core invariant
+
+Treat a **task definition as an immutable workload contract**, a **task as one running
+copy**, and a **service as the controller that reconciles running copies toward a
+desired state**. Fargate fulfills the task's compute request; it does not infer whether
+the request is correctly sized or whether the application is ready for traffic.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Describe one workload" eyebrow="Task definition" icon="file-code" tone="blue" %}
+Version the image, command, task-level CPU and memory, containers, ports, logs, roles,
+secrets, storage, health check, and shutdown behavior.
+{% /concept-card %}
+{% concept-card title="Run one copy" eyebrow="Task" icon="box" tone="violet" %}
+ECS instantiates a task-definition revision. On Fargate, the task receives managed
+compute and its own elastic network interface in your VPC.
+{% /concept-card %}
+{% concept-card title="Maintain desired state" eyebrow="Service" icon="refresh-cw" tone="green" %}
+A service starts replacements when tasks stop, integrates health and load balancing,
+and coordinates deployment of a new task-definition revision.
+{% /concept-card %}
+{% concept-card title="Choose compute capacity" eyebrow="Capacity provider" icon="server" tone="amber" %}
+`FARGATE` supplies regular capacity. `FARGATE_SPOT` uses spare capacity for workloads
+that can tolerate delayed placement and interruption.
+{% /concept-card %}
+{% /concept-grid %}
+
+AWS defines a [task definition](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html)
+as the application blueprint and a service as the controller that maintains the
+requested number of tasks.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow a service from revision to request
+
+Registering a task definition does not run it. A service selects a revision and a
+capacity-provider strategy, then asks the ECS scheduler to place tasks in configured
+subnets. Healthy task IP addresses become load-balancer targets.
+
+{% system-flow title="ECS on Fargate request path" caption="Control-plane decisions create task compute; application traffic then crosses the VPC data path." %}
+{% system-node title="Task definition revision" eyebrow="Workload contract" icon="file-code" tone="blue" %}
+Pins the container image and declares task resources, roles, logs, secrets, ports,
+health behavior, and shutdown timeout.
+{% /system-node %}
+{% system-node title="ECS service scheduler" eyebrow="Desired state" icon="refresh-cw" tone="violet" %}
+Selects capacity, starts or stops tasks, evaluates deployment progress, and replaces
+tasks that leave the service's desired state.
+{% /system-node %}
+{% system-node title="Fargate task and ENI" eyebrow="Managed compute" icon="box" tone="cyan" %}
+Runs the task in selected subnets. The task ENI receives VPC addresses and security
+groups; containers in the same task can communicate over `localhost`.
+{% /system-node %}
+{% system-node title="Load balancer target" eyebrow="Traffic admission" icon="network" tone="green" %}
+For an ALB or NLB, use an `ip` target group. Health checks decide whether the task IP
+receives new traffic; application authorization still happens inside the request path.
+{% /system-node %}
+{% /system-flow %}
+
+### Control plane and data plane fail differently
+
+- **Control-plane failure:** ECS cannot place a task, pull an image, obtain a secret,
+  create networking, or make the deployment reach steady state.
+- **Data-plane failure:** a running task is unreachable, unhealthy, overloaded,
+  unauthorized, slow, or returning incorrect results.
+- **Application-state failure:** a replacement starts successfully but cannot safely
+  read existing data, process an in-flight message, or roll back a schema change.
+
+Monitor all three. A running task count alone cannot prove user-facing correctness.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size the task from measured demand
+
+Fargate requires task-level CPU and memory from a supported combination. Container-level
+reservations and limits can divide that envelope, but their totals must fit inside the
+task. Start with measured peaks from a representative workload, select the smallest
+valid pair with deliberate headroom, then scale the number of tasks independently.
+
+{% metric-strip %}
+{% metric label="CPU unit" value="1024 = 1 vCPU" detail="Task definitions accept CPU units or vCPU strings" tone="cyan" /%}
+{% metric label="Smallest Linux task" value="0.25 vCPU / 0.5 GiB" detail="One supported pair, not a universal starting point" tone="blue" /%}
+{% metric label="Default ephemeral storage" value="20 GiB" detail="Additional configured storage has a separate charge" tone="violet" /%}
+{% metric label="Billing duration" value="per second" detail="Linux has a one-minute minimum; image download time is included" tone="amber" /%}
+{% /metric-strip %}
+
+{% interactive-block id="technology/ecs-fargate-calculator" dataFile="/api/content/technology/ecs-fargate/data/task-sizing-model.json" /%}
+
+The calculator uses a transparent reference rate only to expose how task shape, count,
+and running time combine. Verify the current operating system, architecture, Region,
+Spot price, Savings Plan, and additional service charges on the official
+[Fargate pricing page](https://aws.amazon.com/fargate/pricing/) before approving a
+budget.
+
+### Turn measurements into a resource request
+
+1. Load-test the exact image with representative payloads and dependencies.
+2. Record CPU, memory, latency, errors, queue depth, and out-of-memory behavior at the
+   container and task levels.
+3. Choose a supported task pair above the measured demand, including startup and burst
+   behavior.
+4. Set service scaling from a workload signal such as request rate, queue backlog, or
+   target utilization; do not treat a larger task as a substitute for horizontal
+   capacity planning.
+5. Re-measure after runtime, dependency, image, or traffic-shape changes.
+
+AWS maintains the current [Fargate task CPU and memory matrix](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html)
+and recommends summing required container resources before rounding up to a supported
+[task size](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-size-best-practice.html).
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Make the task definition a reviewable contract
+
+Use immutable image digests for promoted revisions. Separate application permissions
+from startup permissions, send logs outside the task, and give the process enough time
+to stop safely after `SIGTERM`.
+
+{% code-block file="/api/content/technology/ecs-fargate/code/fargate-task-definition.json" language="json" title="Fargate task definition with explicit runtime boundaries" /%}
+
+### Review each boundary independently
+
+- **Artifact:** deploy an image digest produced and tested by CI. A mutable tag can
+  point at different bytes later.
+- **Task resources:** declare a supported task-level CPU and memory pair. Container
+  allocations must fit within it.
+- **Execution role:** lets ECS and the Fargate agent perform startup work such as
+  pulling a private ECR image, retrieving referenced secrets, and using the `awslogs`
+  log driver.
+- **Task role:** supplies temporary AWS credentials to the application code in the
+  containers. Give each workload only the actions and resources it needs.
+- **Health check:** tests process behavior from inside the task. Keep it cheap,
+  deterministic, and distinct from a deep diagnostic endpoint.
+- **Shutdown:** handle `SIGTERM`, stop admitting work, finish or checkpoint bounded
+  work, and exit before `stopTimeout` expires.
+
+AWS documents the separate [task IAM role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html)
+and [task execution IAM role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html).
+Combining them gives the application startup privileges it does not need and makes
+permission ownership harder to audit.
+
+{% callout variant="warn" %}
+Injecting a Secrets Manager or Parameter Store value into a task definition does not
+hot-reload it inside a running task. Rotate the secret, then deploy replacement tasks
+and verify both the new credential and rollback behavior.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design networking from required flows
+
+Every Fargate task uses `awsvpc` networking and receives an ENI. Subnets decide where
+that ENI can route; security groups decide which connections it can accept or initiate.
+An internet-facing load balancer does not require the tasks themselves to have public
+IP addresses.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Inbound application traffic" eyebrow="Load balancer to task" icon="arrow-right" tone="green" %}
+Allow the task port from the load balancer security group, not from the whole internet.
+Use an `ip` target group because Fargate registers task ENI addresses.
+{% /concept-card %}
+{% concept-card title="Startup dependencies" eyebrow="ECR, logs, secrets" icon="download" tone="blue" %}
+Private tasks need a route to every startup dependency. Use NAT where internet egress
+is required, or the appropriate VPC endpoints for supported AWS services.
+{% /concept-card %}
+{% concept-card title="Application dependencies" eyebrow="Database and APIs" icon="database" tone="violet" %}
+Authorize only required destinations and ports. Include DNS, certificate, proxy, and
+cross-zone behavior in failure tests.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Trace startup before declaring the subnet private
+
+- Can the task obtain ECR authorization and pull every image layer?
+- Can it retrieve referenced secrets and parameters through the execution role?
+- Can it create the configured log stream before application output is needed?
+- Can the application resolve and reach its database, cache, queue, and external APIs?
+- Can operators observe denied flows through VPC Flow Logs and service events?
+
+The official [Fargate networking guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html)
+describes task ENIs, public IPs, NAT, ECR interface endpoints, load-balancer support, and
+`ip` target groups. Private subnet is a placement choice, not proof that all traffic is
+private or that required egress exists.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Make deployments fail visibly and recoverably
+
+For an ECS rolling deployment, the deployment circuit breaker watches whether new
+tasks reach `RUNNING`, then whether running tasks pass supported health checks. ECS
+computes a failure threshold as half the desired task count, rounded up and clamped to
+a minimum of 3 and maximum of 200. The threshold is not configurable.
+
+{% interactive-block id="technology/ecs-fargate-deployment-lab" dataFile="/api/content/technology/ecs-fargate/data/deployment-failure-model.json" /%}
+
+{% code-block file="/api/content/technology/ecs-fargate/code/circuit-breaker-threshold.py" language="python" title="Reproduce the documented deployment failure threshold" /%}
+
+The circuit breaker can mark a rolling deployment failed and can request rollback to
+the last deployment in the `COMPLETED` state. It does not make database migrations,
+queued work, or external side effects backward-compatible. Those are application
+release contracts.
+
+### A production service policy
+
+{% code-block file="/api/content/technology/ecs-fargate/code/fargate-service.tf" language="hcl" title="ECS service with capacity providers and deployment rollback" /%}
+
+### Prove the release path before relying on it
+
+1. Deploy an image that cannot start and confirm a `SERVICE_DEPLOYMENT_FAILED` event is
+   routed to the owning team.
+2. Deploy a running image whose container or load-balancer health check fails and
+   verify the second circuit-breaker stage.
+3. Test a slow but healthy startup with the real health-check grace period.
+4. Confirm rollback selects a known completed task-definition revision and that the
+   old application can still use current data and message formats.
+5. Preserve deployment events, stopped-task reasons, container logs, and the exact
+   image digest for incident review.
+
+AWS documents the [two failure-detection stages and threshold formula](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html).
+The circuit breaker applies to services using the ECS rolling deployment type.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Use Fargate Spot only for interruption-tolerant work
+
+A capacity-provider strategy can keep a baseline on regular `FARGATE` and distribute
+additional tasks between `FARGATE` and `FARGATE_SPOT` by weight. Base and weight guide
+placement; they do not create application-level durability.
+
+{% process-flow %}
+{% process-step number="1" title="Receive interruption" label="Two-minute warning" %}
+AWS sends a task state-change event and `SIGTERM` when Spot capacity is reclaimed. The
+container may have less time than a long business operation needs.
+{% /process-step %}
+{% process-step number="2" title="Stop admission and checkpoint" label="Application" %}
+Stop taking new work, make retried side effects idempotent, checkpoint or return queue
+leases, flush bounded telemetry, and exit before the configured timeout.
+{% /process-step %}
+{% process-step number="3" title="Request replacement" label="ECS service" %}
+The service attempts to restore desired count on the configured capacity provider.
+Spot capacity may be unavailable, delaying replacement.
+{% /process-step %}
+{% process-step number="4" title="Restore service capacity" label="Architecture" %}
+Regular Fargate baseline, multi-zone task placement, queue buffering, and admission
+control determine whether users remain served while Spot capacity is missing.
+{% /process-step %}
+{% /process-flow %}
+
+### Good Spot candidates
+
+- Idempotent queue workers whose message lease can expire or be returned.
+- Batch shards with checkpoints and bounded retry cost.
+- Stateless replicas above a regular-capacity baseline.
+- Distributed work that tolerates delayed placement without violating an SLO.
+
+### Poor Spot candidates
+
+- A singleton service with no regular-capacity path.
+- Long, non-checkpointable work with external side effects.
+- Tasks whose shutdown handler has never been tested against `SIGTERM`.
+- Workloads that assume ECS automatically substitutes regular Fargate when Spot is
+  unavailable.
+
+AWS states that Fargate Spot sends a two-minute warning and that unavailable Spot
+capacity is **not automatically replaced with on-demand capacity** in its
+[Fargate capacity-provider guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html).
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Operate the service with evidence
+
+Fargate manages hosts; your team still owns service reliability. Build dashboards and
+alerts around user impact, task lifecycle, deployment state, saturation, and dependency
+behavior rather than around CPU alone.
+
+### Signals to retain
+
+- **User path:** request rate, latency percentiles, errors, timeouts, retries, and a
+  business success metric.
+- **Task pressure:** CPU and memory utilization against the requested envelope, task
+  count, restart and stopped reasons, ephemeral-storage pressure, and queue backlog.
+- **Deployment:** task-definition revision, image digest, rollout state and reason,
+  health-check transitions, rollback, and deployment events.
+- **Network:** load-balancer target health, security-group changes, DNS failures, VPC
+  Flow Logs, NAT or endpoint errors, and dependency latency.
+- **Cost:** task shape and running duration, regular versus Spot capacity, logs, load
+  balancing, NAT, public IPv4, storage, and data transfer.
+
+### Failure drills to automate
+
+1. Kill one task and verify replacement, draining, and idempotency.
+2. Block one startup dependency and confirm stopped-task reasons identify the failed
+   image pull, secret, logging, or networking step.
+3. Exhaust memory and verify the signal, alert, and recovery path.
+4. Drain or impair one Availability Zone and verify remaining tasks and load-balancer
+   targets can carry the admitted traffic.
+5. Interrupt a Spot task and measure work loss, shutdown duration, replacement delay,
+   and user impact.
+
+{% callout variant="warn" %}
+Desired task count is not capacity proof. A service can have the expected number of
+tasks while every task is undersized, concentrated behind a failing dependency, or
+serving an incompatible release.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Review the production contract
+
+Before promoting a service revision, answer these questions with executable evidence:
+
+- Which image digest and task-definition revision are being deployed?
+- Do measured CPU and memory peaks fit the selected Fargate task pair with deliberate
+  headroom?
+- Which permissions belong to ECS startup and which belong to application code?
+- Can every task startup and application dependency be reached from the selected
+  subnets without unintended public exposure?
+- Which signal admits traffic, and how does its grace period relate to real startup
+  time?
+- What exact event alerts the team when a deployment fails or rolls back?
+- Can the previous release read current data and safely resume in-flight work?
+- What happens when Spot capacity, one Availability Zone, a dependency, or an operator
+  removes running capacity?
+- Can cost, health, and incident evidence be traced to one immutable revision?
+
+The correct architecture may use regular Fargate, Spot, ECS on EC2, or another compute
+option. Choose Fargate because managed task compute fits the operating model, not
+because it removes the need for capacity, security, or failure design.
+{% /section-card %}
+
+{% quiz quizId="ecs-fargate" lessonSlug="ecs-fargate" title="ECS and Fargate Production Review" questionsFile="/api/content/technology/ecs-fargate/quiz/ecs-fargate-production.json" /%}

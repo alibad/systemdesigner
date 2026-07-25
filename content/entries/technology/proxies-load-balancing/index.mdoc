@@ -1,0 +1,352 @@
+---
+registryId: proxies-load-balancing
+---
+
+{% section-card tone="intro" %}
+## What are proxies and load balancers?
+
+**A proxy is a network intermediary that accepts traffic and forwards it on behalf of
+a client or a service. A load balancer is a proxy role that chooses one destination
+from a pool of eligible backends.**
+
+In plain language, the proxy stands in the request path and makes a routing decision
+before the application receives the work. It may see only a TCP connection, or it may
+understand HTTP paths, headers, and responses. That difference determines which
+policies it can enforce and which failures it can observe.
+
+The production invariant is: **send each admitted request to a ready destination inside
+the intended failure envelope without changing its identity, security, deadline, or
+business meaning**. Distribution alone is not enough; retries, stale health, forged
+headers, hot affinity keys, or a failed zone can still overload or corrupt the service.
+
+Review [Networking Protocols](/reference/networking-protocols) first if methods,
+headers, status codes, or connection reuse are unfamiliar.
+{% /section-card %}
+
+{% metric-strip %}
+{% metric value="Path" label="Place the intermediary" detail="Know who selected it, which hops it owns, and where trust changes." tone="blue" /%}
+{% metric value="Signal" label="Choose eligible work" detail="Health, readiness, load, locality, and affinity all shape the target set." tone="violet" /%}
+{% metric value="Bounds" label="Contain amplification" detail="Deadlines, retry budgets, queues, and admission limits protect remaining capacity." tone="amber" /%}
+{% metric value="Evidence" label="Prove the outcome" detail="Observe client results, proxy decisions, and backend pressure together." tone="green" /%}
+{% /metric-strip %}
+
+{% section-card %}
+## Start with who the proxy represents
+
+"Proxy" describes the intermediary; "forward" and "reverse" describe its placement and
+owner. "Load balancer" describes one job the intermediary performs.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Forward proxy" eyebrow="Represents clients" icon="send" tone="blue" %}
+A client or its organization chooses the proxy for outbound traffic. It can allow or
+deny destinations, apply egress identity, scan content when permitted, and record which
+managed client contacted which service.
+{% /concept-card %}
+{% concept-card title="Reverse proxy" eyebrow="Represents services" icon="server" tone="violet" %}
+The service owner places the proxy before internal backends. It can terminate TLS,
+route hosts or paths, balance a pool, cache responses, enforce admission policy, and
+hide internal topology.
+{% /concept-card %}
+{% concept-card title="Layer 4 balancing" eyebrow="Transport-aware" icon="network" tone="cyan" %}
+An L4 proxy routes TCP, UDP, or QUIC flows using addresses, ports, transport metadata,
+and connection state. It is protocol-agnostic, but it cannot reason about an encrypted
+HTTP method, path, cookie, or status.
+{% /concept-card %}
+{% concept-card title="Layer 7 balancing" eyebrow="Application-aware" icon="route" tone="amber" %}
+An L7 proxy parses HTTP or another application protocol. It can route by host or path,
+normalize headers, apply request policy, observe status codes, and retry only where the
+application contract allows.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="info" %}
+A device can play several roles at once. One edge process may be a reverse proxy, L7
+load balancer, TLS endpoint, cache, and authentication gateway. Name each responsibility
+separately so its authority and failure behavior remain reviewable.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Lab: trace visibility and trust across the request path
+
+Choose the proxy direction, routing layer, TLS mode, and identity policy. The active
+path shows what the proxy can inspect, which TLS legs exist, and whether forwarding
+metadata is authoritative or forgeable.
+
+{% interactive-block id="technology/proxies-load-balancing-request-path-lab" dataFile="/api/content/technology/proxies-load-balancing/data/request-path-boundaries.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat every hop as a new connection and trust decision
+
+A request is end-to-end in application meaning, but a proxy usually splits the network
+path into separate downstream and upstream connections. Timeouts, TLS identity,
+connection pools, source addresses, and protocol versions may differ on each side.
+
+{% system-flow title="A reverse-proxied request" caption="The trusted edge creates canonical metadata; later hops consume it only from known peers." %}
+{% system-node title="Client" eyebrow="Untrusted input" icon="users" tone="blue" %}
+Chooses a service name, opens a connection, and supplies request bytes. Any forwarding,
+tenant, role, or trace header arriving directly from the client is untrusted input.
+{% /system-node %}
+{% system-node title="Edge proxy" eyebrow="First trusted boundary" icon="shield" tone="amber" %}
+Terminates or passes TLS, admits the request, strips reserved identity fields, writes a
+canonical request ID, and applies coarse authentication or rate policy.
+{% /system-node %}
+{% system-node title="Load balancer" eyebrow="Target selection" icon="route" tone="violet" %}
+Builds an eligible set from discovery, readiness, health, locality, and policy. It picks
+one backend and obtains or creates an upstream connection.
+{% /system-node %}
+{% system-node title="Owning service" eyebrow="Business authority" icon="server" tone="cyan" %}
+Authenticates the asserted identity, authorizes the resource and operation, enforces
+idempotency, performs the work, and returns an application outcome.
+{% /system-node %}
+{% system-node title="Telemetry" eyebrow="Evidence" icon="activity" tone="green" %}
+Correlates the request ID and trace across attempts while keeping route, target, zone,
+outcome, and timing dimensions bounded and free of credentials.
+{% /system-node %}
+{% /system-flow %}
+
+### Define TLS ownership explicitly
+
+- **Pass-through:** the proxy forwards encrypted bytes and the backend owns the
+  certificate and plaintext. This preserves end-to-end TLS to the backend but prevents
+  HTTP-aware inspection at the proxy.
+- **Termination:** the proxy decrypts the downstream connection. The upstream may be
+  plaintext only inside a documented controlled network.
+- **Termination and re-encryption:** the proxy decrypts for L7 policy, then verifies a
+  separate backend certificate. This creates two TLS trust relationships, not one.
+
+### Bind identity headers to a trusted hop
+
+`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Proto`, and application identity headers
+are ordinary bytes unless the receiver knows who wrote them. At the first trusted edge,
+remove caller-supplied reserved fields and write canonical values. On later hops,
+accept them only from authenticated or allowlisted proxy addresses. PROXY protocol has
+the same rule: enable it only when the receiver expects it from that transport peer.
+{% /section-card %}
+
+{% section-card %}
+## Choose an algorithm only after choosing a useful load signal
+
+An algorithm maps a signal to a target. It cannot compensate for stale membership,
+false readiness, hidden queues, or a signal unrelated to actual backend work.
+
+- **Round robin** distributes request count evenly. It is a strong baseline when
+  targets and request costs are similar.
+- **Weighted round robin** encodes measured capacity differences. Weights become stale
+  when instances, limits, or workloads change.
+- **Least connections** is useful for long-lived L4 sessions when open connections
+  approximate work. One multiplexed HTTP/2 connection can carry many active streams,
+  so connection count may be misleading.
+- **Least active requests** uses outstanding L7 work. It reacts to duration differences
+  but still misses CPU cost, queue depth, dependency fan-out, and background work.
+- **Power of two choices** samples two eligible targets and chooses the less loaded one.
+  It gets much of the benefit of a global least-load scan with lower coordination cost.
+- **Consistent hash or Maglev** keeps a key on a stable target for cache locality or
+  affinity. A hot tenant or key can still overload one target.
+
+### Affinity is a state decision, not a free optimization
+
+Cookie, client-IP, or key affinity can reduce cache misses and support a legacy
+in-memory session. It also concentrates hot keys, weakens failover predictability, and
+can pin callers to a degraded target. Prefer shared or client-carried session state.
+When affinity is required, choose a stable authenticated key, bound its lifetime, and
+test remapping when targets change.
+{% /section-card %}
+
+{% section-card %}
+## Lab: inject skew, bad health, retries, and a zone failure
+
+Change the workload, failure-domain layout, load signal, incident, and request rate.
+Then enable or remove readiness gating, passive outlier ejection, connection reuse, and
+a retry budget. Watch target pressure and user-visible consequences change together.
+
+{% interactive-block id="technology/proxies-load-balancing-traffic-resilience-lab" dataFile="/api/content/technology/proxies-load-balancing/data/traffic-resilience-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build one eligible set from discovery, readiness, and observed behavior
+
+Health is not one boolean:
+
+- **Discovery membership** says a target should exist. It may lag a deploy, drain, or
+  failure.
+- **Liveness** asks whether a stuck process should restart. It should not be a deep
+  dependency test that restarts healthy processes during a shared outage.
+- **Readiness** asks whether this target can accept its full production request
+  contract now. An alive process can be unready while warming caches or losing a
+  required dependency.
+- **Active health checks** probe a target even without user traffic. Use thresholds,
+  jitter, and a representative but cheap endpoint.
+- **Passive health or outlier detection** observes real resets, timeouts, status codes,
+  or latency divergence. It can catch failures that a synthetic endpoint misses.
+
+Ejection removes load from a bad target but adds load to every survivor. Cap how much
+of a pool may be ejected, retain failure-domain reserve, and distinguish local
+connection failures from application errors. After recovery, use consecutive success,
+connection draining, and slow start instead of returning a cold target to full weight
+immediately.
+
+{% callout variant="warn" %}
+A health endpoint that returns `200` while its required request path is unusable creates
+false capacity. A deep check that fails whenever any optional dependency is slow can
+remove the whole pool. Readiness must represent the minimum contract this target must
+serve in its declared degraded mode.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Reuse connections without hiding imbalance
+
+Opening an upstream connection consumes sockets, file descriptors, handshake CPU,
+ephemeral ports, and latency. HTTP/1.1 keep-alive reuses a connection sequentially;
+HTTP/2 and HTTP/3 multiplex streams. Pool limits, idle timeouts, maximum connection
+age, and graceful drain should be explicit.
+
+Reuse changes the meaning of "least connections." A few long-lived multiplexed
+connections may carry most requests, while an L4 balancer often selects a backend only
+when the connection opens. For long-lived WebSocket, gRPC, database, or tunnel traffic,
+balance connection establishment, monitor streams or requests separately, and drain
+old connections during rollout.
+
+{% code-block file="/api/content/technology/proxies-load-balancing/code/http-reverse-proxy.conf" language="nginx" title="L7 reverse proxy with normalized identity and verified upstream TLS" /%}
+
+This NGINX example uses passive failure parameters and an upstream keep-alive pool. Its
+timeouts are hop-local; the application and caller still need an end-to-end deadline
+contract.
+
+{% code-block file="/api/content/technology/proxies-load-balancing/code/tcp-tls-passthrough.cfg" language="haproxy" title="L4 TLS pass-through across two zones" /%}
+
+The HAProxy example cannot inspect HTTP inside TLS. It balances TCP connections and
+uses PROXY v2 to preserve transport identity, so each backend must explicitly trust
+that HAProxy hop.
+{% /section-card %}
+
+{% section-card %}
+## Bound timeouts, retries, and overload as one control loop
+
+A timeout stops one component from waiting; it does not prove that the backend stopped
+working or that a write did not commit. Carry one caller deadline through the path and
+shrink each hop budget for connection, queue, service, and response time.
+
+### Retry only when four conditions hold
+
+1. The failure is plausibly transient and another eligible target can improve the
+   outcome.
+2. The remaining end-to-end deadline can contain the new attempt.
+3. The operation is safe or idempotent, or the application binds every attempt to one
+   durable operation identity.
+4. A retry budget caps added concurrency and attempts across client, proxy, and service
+   layers.
+
+Blind retries turn failure into extra offered load. If an overloaded pool fails 20% of
+1,000 RPS and two layers each retry once, the same client demand can create hundreds of
+additional attempts exactly when capacity is scarce. Use exponential backoff with
+jitter for delayed retry, but use admission control, bounded queues, concurrency
+limits, circuit breaking, and load shedding to protect an already saturated service.
+
+Return explicit overload outcomes such as `429` for policy limits or `503` for temporary
+capacity, with retry guidance only when the server can support it. Preserve essential
+reads or control traffic by shedding optional work before every class competes for the
+same exhausted pool.
+{% /section-card %}
+
+{% section-card %}
+## Design for the failure domain you claim to survive
+
+Instances in one rack or zone are not independent capacity. Place proxy replicas,
+targets, control-plane dependencies, certificates, discovery, and required application
+state across the same failure boundary you advertise.
+
+Size the normal state so the planned failure state still fits. Four 600 RPS targets
+split evenly across two zones provide 2,400 RPS normally but only 1,200 RPS after one
+zone fails. A 1,600 RPS peak therefore needs 400 RPS of shedding, more reserve, or a
+tested lower-cost degraded mode before retries.
+
+Locality-aware routing can reduce latency and cross-zone cost, but it must spill traffic
+before a local zone saturates. Keep enough remote probing to know remote health,
+measure cross-zone volume, and test the exact sequence: detect, stop new assignment,
+drain or reset affected connections, route to reserve, and later reintroduce capacity.
+{% /section-card %}
+
+{% section-card %}
+## Observe the decision from client to backend
+
+Monitor both the proxy and the system it protects:
+
+- **Client outcome:** admitted rate, status or reset, end-to-end p50/p95/p99 latency,
+  and deadline exhaustion by stable route and method.
+- **Selection:** eligible targets, health transitions, ejection reason and duration,
+  selected algorithm, effective weight, locality, and affinity remaps.
+- **Backend pressure:** active requests, connections, streams, queue time, concurrency,
+  CPU, memory, dependency saturation, and target-level latency and errors.
+- **Amplification:** attempts per logical request, retry overflow, hedges, duplicate
+  reconciliation, and total offered load versus original client load.
+- **Connection and TLS:** pool reuse, new connections, handshake errors and latency,
+  resets, idle and maximum-age closes, certificate expiry, and upstream verification.
+- **Trust boundary:** rejected or replaced forwarding fields, unexpected PROXY protocol
+  peers, authentication outcome, and request or trace correlation without sensitive
+  header values.
+
+Do not use raw client IDs, paths, IP addresses, or affinity keys as unbounded metric
+labels. Keep detailed identity in access-controlled logs or traces and use bounded
+templates for aggregate metrics.
+{% /section-card %}
+
+{% section-card %}
+## Roll out routing policy with a tested fallback
+
+{% process-flow %}
+{% process-step number="1" title="Validate the candidate" label="Offline" %}
+Parse configuration, verify certificates and discovery, and test routes, headers,
+timeouts, retry eligibility, health transitions, draining, and overload behavior.
+{% /process-step %}
+{% process-step number="2" title="Canary one proxy slice" label="Bounded traffic" %}
+Expose a small cohort or proxy replica set. Compare client outcomes, target selection,
+attempt rate, saturation, and zone distribution with the current version.
+{% /process-step %}
+{% process-step number="3" title="Promote by evidence" label="Progressive" %}
+Increase traffic only while route correctness, identity, p99 latency, errors, ejection,
+retry amplification, and reserve capacity remain inside explicit guardrails.
+{% /process-step %}
+{% process-step number="4" title="Drain or restore" label="Fallback" %}
+Stop new assignment before removing targets. Restore the last known configuration when
+policy regresses, but shed traffic instead when rollback would route to failed capacity.
+{% /process-step %}
+{% /process-flow %}
+
+A fallback is a production path, not a configuration comment. Keep the previous
+artifact, certificates, discovery contract, and automation available; define who can
+trigger it; and rehearse whether existing connections drain, reset, or continue under
+the old policy. Rollback cannot repair a backend outage or erase writes already
+repeated by unsafe retries.
+{% /section-card %}
+
+{% section-card %}
+## Continue with primary and official references
+
+These sources define the protocol and product behaviors used in this lesson:
+
+- [RFC 9110: HTTP Semantics, Intermediaries](https://www.rfc-editor.org/rfc/rfc9110.html#name-intermediaries)
+  defines proxies, gateways, tunnels, and hop-by-hop behavior.
+- [RFC 7239: Forwarded HTTP Extension](https://www.rfc-editor.org/rfc/rfc7239)
+  defines the standardized forwarding field and its security considerations.
+- [Envoy supported load balancers](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/load_balancers.html)
+  documents weighted round robin, least request, ring hash, Maglev, and random policies.
+- [Envoy connection pooling](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/connection_pooling)
+  explains HTTP/1.1, HTTP/2, and HTTP/3 upstream pool behavior.
+- [Envoy outlier detection](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/outlier)
+  documents passive ejection signals and interaction with active health checking.
+- [NGINX HTTP load balancing](https://nginx.org/en/docs/http/load_balancing.html)
+  documents algorithms, passive health behavior, weights, and upstream controls.
+- [HAProxy health checks](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/reliability/health-checks/)
+  documents active and passive checks, thresholds, and recovery.
+- [Kubernetes liveness, readiness, and startup probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/)
+  distinguishes restart and traffic-eligibility signals.
+{% /section-card %}
+
+{% section-card %}
+## Check your production routing decisions
+
+{% quiz questionsFile="/api/content/technology/proxies-load-balancing/quiz/proxies-load-balancing-production.json" lessonSlug="proxies-load-balancing" title="Proxies and Load Balancing Production Review" /%}
+{% /section-card %}

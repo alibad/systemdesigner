@@ -1,0 +1,106 @@
+{
+  "kind": "attention-memory-budget",
+  "blockId": "ml-systems/flashattention-memory-optimization-calculator",
+  "title": "Trace attention inside the whole device budget",
+  "description": "Change sequence length, microbatch, workload, dtype, and execution strategy. The model separates quadratic attention intermediates from model state, KV cache, other activations, and runtime headroom.",
+  "assumptions": {
+    "materializedScoreCopies": 2,
+    "flashStatsBytesPerQuery": 8
+  },
+  "controls": {
+    "sequence": {
+      "min": 512,
+      "max": 32768,
+      "step": 512
+    },
+    "batch": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    }
+  },
+  "defaults": {
+    "workloadId": "checkpointed-training",
+    "acceleratorId": "80gb-worker",
+    "dtypeId": "bf16",
+    "implementationId": "tiled",
+    "sequenceLength": 4096,
+    "batchSize": 2
+  },
+  "dtypes": [
+    {
+      "id": "bf16",
+      "label": "BF16",
+      "detail": "Two bytes per modeled activation element; kernel and device support still need verification.",
+      "bytes": 2
+    },
+    {
+      "id": "fp16",
+      "label": "FP16",
+      "detail": "Two bytes per modeled activation element with different numeric range from BF16.",
+      "bytes": 2
+    },
+    {
+      "id": "fp32",
+      "label": "FP32",
+      "detail": "Four bytes per element; useful as a reference path but outside the CUDA FlashAttention-2 package contract.",
+      "bytes": 4
+    }
+  ],
+  "workloads": [
+    {
+      "id": "checkpointed-training",
+      "label": "Checkpointed 7B training shard",
+      "detail": "32 query/KV heads, d=128, 32 layers, with four attention layers resident in the teaching estimate.",
+      "mode": "training",
+      "layers": 32,
+      "residentActivationLayers": 4,
+      "queryHeads": 32,
+      "kvHeads": 32,
+      "headDimension": 128,
+      "modelStateGb": 25,
+      "runtimeReserveGb": 3,
+      "nonAttentionBytesPerTokenPerLayer": 24576,
+      "storesKvCache": false
+    },
+    {
+      "id": "gqa-prefill-serving",
+      "label": "8B serving prefill with GQA",
+      "detail": "32 query heads, 8 KV heads, d=128, 32 cached layers, and one active layer of transient attention state.",
+      "mode": "serving",
+      "layers": 32,
+      "residentActivationLayers": 1,
+      "queryHeads": 32,
+      "kvHeads": 8,
+      "headDimension": 128,
+      "modelStateGb": 16,
+      "runtimeReserveGb": 3.5,
+      "nonAttentionBytesPerTokenPerLayer": 8192,
+      "storesKvCache": true
+    }
+  ],
+  "accelerators": [
+    {
+      "id": "24gb-worker",
+      "label": "24 GB worker",
+      "detail": "Plans against 21.6 GiB after a 10% system and allocator reserve.",
+      "memoryGb": 24,
+      "systemReserveFraction": 0.1
+    },
+    {
+      "id": "48gb-worker",
+      "label": "48 GB worker",
+      "detail": "Plans against 43.2 GiB after a 10% system and allocator reserve.",
+      "memoryGb": 48,
+      "systemReserveFraction": 0.1
+    },
+    {
+      "id": "80gb-worker",
+      "label": "80 GB worker",
+      "detail": "Plans against 72 GiB after a 10% system and allocator reserve.",
+      "memoryGb": 80,
+      "systemReserveFraction": 0.1
+    }
+  ],
+  "note": "This is a transparent planning fixture, not an allocator prediction. Materialized attention budgets two B x Hq x N x N tensors; tiled attention budgets two FP32 row statistics. Real frameworks may save, fuse, recompute, pad, shard, or allocate additional workspaces differently, so confirm peak allocated and reserved bytes on the exact build."
+}

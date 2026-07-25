@@ -1,0 +1,136 @@
+{
+  "title": "Recover the failed boundary, not just the connection",
+  "description": "Select an observed failure and a response. The trace shows whether identity, session state, authorization, and side-effect certainty are actually restored.",
+  "defaultScenarioId": "expired-session",
+  "defaultActionId": "reinitialize",
+  "scenarios": [
+    {
+      "id": "expired-session",
+      "label": "Server returns HTTP 404 for the session",
+      "detail": "A Streamable HTTP request carries a previously valid MCP-Session-Id.",
+      "signal": "404 Not Found",
+      "boundary": "Session lifecycle",
+      "completion": "No new operation dispatched",
+      "recommendedActionId": "reinitialize",
+      "dangerousActionIds": ["blind-retry", "step-up-scope"],
+      "safeConsequence": "Discard the expired ID and send a fresh initialize request without a session ID.",
+      "wrongConsequence": "Reusing the old ID cannot revive server state and may create a retry loop.",
+      "evidence": [
+        "The response is tied to a request carrying the old session ID",
+        "No tool request was accepted in a replacement session",
+        "The new initialize exchange negotiates version and capabilities again"
+      ],
+      "trace": ["Authenticated request", "Session lookup", "404 session expired", "Fresh initialization"]
+    },
+    {
+      "id": "ambiguous-write",
+      "label": "Connection drops after a write is sent",
+      "detail": "The server may have committed the side effect before its response reached the client.",
+      "signal": "Transport disconnected",
+      "boundary": "Completion certainty",
+      "completion": "Unknown",
+      "recommendedActionId": "reconcile",
+      "dangerousActionIds": ["blind-retry", "reinitialize"],
+      "safeConsequence": "Query by operation ID, then retry only if the dependency proves the write did not commit.",
+      "wrongConsequence": "A blind replay can duplicate a payment, message, ticket, or file mutation.",
+      "evidence": [
+        "A stable operation or idempotency key identifies the intended effect",
+        "The dependency exposes committed, absent, or still-running state",
+        "The audit record links the original call and any safe replay"
+      ],
+      "trace": ["Tool call accepted", "Dependency write", "Response path lost", "Reconcile operation state"]
+    },
+    {
+      "id": "insufficient-scope",
+      "label": "Server rejects the token scope",
+      "detail": "The identity is known, but the current token cannot authorize the requested operation.",
+      "signal": "insufficient_scope",
+      "boundary": "OAuth authorization",
+      "completion": "Request denied before execution",
+      "recommendedActionId": "step-up-scope",
+      "dangerousActionIds": ["blind-retry", "reinitialize"],
+      "safeConsequence": "Explain the added scope, obtain user consent, and request a new audience-bound token.",
+      "wrongConsequence": "Retrying the same token or rebuilding only the MCP session leaves authorization unchanged.",
+      "evidence": [
+        "The challenge names the required scope",
+        "The user sees the expanded permission before consent",
+        "The replacement token remains bound to the canonical MCP server resource"
+      ],
+      "trace": ["Token validated", "Scope check", "Request denied", "Visible step-up authorization"]
+    },
+    {
+      "id": "session-hijack",
+      "label": "A session ID arrives with a different user token",
+      "detail": "An attacker has obtained a valid-looking session ID but not the original user's authorization.",
+      "signal": "Subject-session mismatch",
+      "boundary": "Authentication and session binding",
+      "completion": "Unauthorized request blocked",
+      "recommendedActionId": "reject-rotate",
+      "dangerousActionIds": ["blind-retry", "reinitialize", "reconcile"],
+      "safeConsequence": "Reject the request, revoke or rotate the session, and investigate how the identifier leaked.",
+      "wrongConsequence": "Trusting the session ID as identity lets another subject impersonate the original client.",
+      "evidence": [
+        "Authorization is verified independently on every inbound request",
+        "Server-side state binds the session to the authenticated subject",
+        "Session IDs are random, short-lived, protected, and revocable"
+      ],
+      "trace": ["Bearer token validated", "Session state loaded", "Subject mismatch", "Reject and rotate"]
+    },
+    {
+      "id": "progress-hang",
+      "label": "Progress continues but the request never finishes",
+      "detail": "The server emits progress often enough to reset an idle timer while consuming resources indefinitely.",
+      "signal": "Absolute deadline exceeded",
+      "boundary": "Timeout and cancellation",
+      "completion": "Still running or unknown",
+      "recommendedActionId": "cancel-deadline",
+      "dangerousActionIds": ["blind-retry"],
+      "safeConsequence": "Send cancellation, stop waiting, and enforce the maximum deadline even if progress continues.",
+      "wrongConsequence": "An endlessly renewed timeout allows a faulty server to hold client and server resources forever.",
+      "evidence": [
+        "The request has an idle timeout and a separate absolute deadline",
+        "Cancellation and final status are recorded independently",
+        "A later retry follows the tool's completion and idempotency contract"
+      ],
+      "trace": ["Request starts", "Progress notifications", "Maximum deadline", "Cancel and contain"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "reinitialize",
+      "label": "Start a fresh initialize exchange",
+      "detail": "Discard expired state and negotiate a new session without the old ID.",
+      "restores": "Protocol session"
+    },
+    {
+      "id": "reconcile",
+      "label": "Reconcile by operation ID",
+      "detail": "Check committed state before deciding whether a write may be replayed.",
+      "restores": "Completion certainty"
+    },
+    {
+      "id": "step-up-scope",
+      "label": "Request visible scope step-up",
+      "detail": "Obtain new consent and a replacement token for the same MCP resource.",
+      "restores": "Operation authority"
+    },
+    {
+      "id": "reject-rotate",
+      "label": "Reject, revoke, and rotate",
+      "detail": "Treat the mismatch as a security event, not a recoverable client typo.",
+      "restores": "Identity boundary"
+    },
+    {
+      "id": "cancel-deadline",
+      "label": "Cancel at the absolute deadline",
+      "detail": "Stop waiting even when progress continues and contain resource use.",
+      "restores": "Resource bound"
+    },
+    {
+      "id": "blind-retry",
+      "label": "Retry the same request immediately",
+      "detail": "Replay without changing authorization, session state, or completion evidence.",
+      "restores": "Nothing"
+    }
+  ]
+}

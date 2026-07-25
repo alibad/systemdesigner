@@ -1,0 +1,262 @@
+---
+registryId: policy-gradient-theorem
+---
+
+{% section-card tone="intro" %}
+## What is the policy gradient theorem?
+
+The policy gradient theorem explains how to improve a **policy**: a model that assigns probabilities to actions. It says that an action should become more likely when it produces a better-than-expected outcome, and less likely when it produces a worse one.
+
+This matters because the environment may contain simulators, users, databases, or physical dynamics that cannot be differentiated. The learner only needs sampled actions, their log probabilities, and later outcomes. It can estimate a useful gradient without backpropagating through the environment itself.
+
+The core invariant is that every policy update is a policy-score direction multiplied by an action-quality signal. Subtracting a baseline that depends on the state but not the sampled action changes variance, not the expected policy gradient.
+
+Review [ML Systems Design](/ml-systems/ml-systems-design) if model training, evaluation, and deployment boundaries are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Read the theorem as three questions
+
+Let `πθ(a | s)` be a differentiable policy and let `J(θ)` be its expected discounted return. One common form of the theorem is:
+
+`∇θ J(θ) = Eπ[∇θ log πθ(a | s) · Qπ(s, a)]`
+
+The equivalent sampled-trajectory form replaces `Qπ(s, a)` with a return or advantage estimate. Discount and state-occupancy conventions can add a constant scaling factor, but they do not change the update direction.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Where should the policy move?" eyebrow="Score" icon="route" tone="cyan" %}
+`∇θ log πθ(a | s)` points toward parameters that make the sampled action more likely. For a softmax policy, other actions move in the opposite direction.
+{% /concept-card %}
+{% concept-card title="How strongly should it move?" eyebrow="Quality" icon="scale" tone="violet" %}
+`Qπ(s, a)`, a sampled return `G_t`, or an advantage `A_t` weights that direction. Positive values reinforce the action; negative values suppress it.
+{% /concept-card %}
+{% concept-card title="Which experiences count?" eyebrow="Expectation" icon="activity" tone="amber" %}
+The expectation averages states and actions visited by the current policy. Changing the data-collecting policy changes the distribution behind the gradient.
+{% /concept-card %}
+{% /concept-grid %}
+
+The theorem does **not** say that every positive reward should increase an action forever. With an advantage signal, the relevant question is whether the outcome was better than the policy expected in that state.
+{% /section-card %}
+
+{% section-card %}
+## Explore one exact policy update
+
+Consider a policy with two actions and logits `z_chosen` and `z_other`. If the chosen action currently has probability `p`, its score derivatives are `1 − p` for the chosen logit and `−p` for the other logit. A gradient-ascent step therefore changes their difference by `αA`, giving:
+
+`p_new = sigmoid(logit(p) + αA)`
+
+Use the explorer to test three cases: positive advantage, negative advantage, and a nearly saturated action probability. Watch both update direction and magnitude.
+
+{% interactive-block id="ml-systems/policy-gradient-theorem-gradient-explorer" /%}
+
+{% callout variant="tip" %}
+The explorer updates both logits. Looking only at the chosen logit hides the equal-and-opposite competition built into a softmax distribution.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Derive the estimator without differentiating the environment
+
+The derivation starts from complete trajectories `τ = (s_0, a_0, r_0, …)` and progressively removes terms that the policy does not control.
+
+{% process-flow %}
+{% process-step number="1" title="Write the objective" label="Return" %}
+Express expected return as `J(θ) = Eτ~pθ(τ)[R(τ)]`, where trajectory probability includes the initial state, policy actions, and environment transitions.
+{% /process-step %}
+{% process-step number="2" title="Apply the log derivative" label="Score" %}
+Use `∇pθ(τ) = pθ(τ)∇log pθ(τ)` to turn the gradient of an expectation into an expectation of a gradient.
+{% /process-step %}
+{% process-step number="3" title="Drop environment terms" label="Model-free" %}
+Initial-state and transition probabilities do not depend on `θ`, so only `Σ_t log πθ(a_t | s_t)` remains inside the gradient.
+{% /process-step %}
+{% process-step number="4" title="Assign future credit" label="Causality" %}
+Rewards before action `a_t` cannot be caused by that action. Weight its score only by return from time `t` onward, producing `G_t`.
+{% /process-step %}
+{% /process-flow %}
+
+The score-function identity is the key step:
+
+`∇θ E_{x~pθ}[f(x)] = E_{x~pθ}[f(x)∇θ log pθ(x)]`
+
+It allows samples to estimate a gradient even when `f(x)` is discontinuous. The policy distribution must still be differentiable with respect to `θ` wherever sampled actions have support.
+
+{% code-block file="/api/content/ml-systems/policy-gradient-theorem/code/theorem_derivation.py" language="python" title="Verify the score-function gradient by enumeration" /%}
+
+{% code-block file="/api/content/ml-systems/policy-gradient-theorem/code/policy_gradient_theorem.py" language="python" title="Estimate a two-action policy gradient from samples" /%}
+{% /section-card %}
+
+{% section-card %}
+## Separate unbiasedness from variance
+
+REINFORCE can use the sampled return `G_t` directly:
+
+`ĝ_t = ∇θ log πθ(a_t | s_t) · G_t`
+
+Under on-policy sampling and the usual regularity assumptions, this is an unbiased gradient estimator. It can still be impractical because each return contains variation from later actions, stochastic transitions, and reward noise.
+
+For any action-independent baseline `b(s_t)`:
+
+`E_{a~π}[∇θ log πθ(a | s) · b(s)] = 0`
+
+Therefore `G_t − b(s_t)` has the same expected policy gradient. Choosing `b(s_t) ≈ Vπ(s_t)` often reduces variance because the weight becomes an advantage: how much better the action performed than the expected outcome from that state.
+
+### Compare trajectory estimators
+
+The lab keeps one rollout scenario fixed while you change the estimator, critic quality, rollout horizon, and GAE parameter `λ`. Inspect all three methods together; a baseline and bootstrapping solve different problems.
+
+{% interactive-block id="ml-systems/policy-gradient-theorem-estimator-lab" /%}
+
+{% callout variant="warn" %}
+Detach the advantage or baseline target in the actor loss. If actor gradients flow through a shared critic calculation, the implementation is no longer the simple baseline identity described above.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Choose an algorithm by its estimator and update constraint
+
+The algorithms below share the policy-gradient direction. They differ in how they estimate action quality, when they update, and how far they permit the policy to move.
+
+### REINFORCE: full-return Monte Carlo
+
+REINFORCE waits for sampled rewards, computes each reward-to-go `G_t`, and minimizes `−log πθ(a_t | s_t)G_t`.
+
+- **Use it for:** small episodic problems, theorem verification, and estimator tests.
+- **Strength:** simple on-policy estimator with no critic approximation.
+- **Cost:** high variance, delayed updates, and poor sample efficiency on long trajectories.
+
+{% code-block file="/api/content/ml-systems/policy-gradient-theorem/code/reinforce.py" language="python" title="REINFORCE with an optional state baseline" /%}
+
+### Actor-Critic: learn the baseline
+
+An actor chooses actions while a critic estimates `Vπ(s)`. A one-step TD residual,
+
+`δ_t = r_t + γV(s_{t+1}) − V(s_t)`,
+
+can serve as an advantage estimate. Bootstrapping lowers variance and permits short rollouts, but critic error can bias the estimate.
+
+- **Use it for:** continuing tasks or online updates where complete episodes are expensive.
+- **Strength:** more frequent, lower-variance updates than raw Monte Carlo.
+- **Cost:** actor and critic learning can destabilize each other.
+
+{% code-block file="/api/content/ml-systems/policy-gradient-theorem/code/actor_critic.py" language="python" title="One-step actor-critic losses" /%}
+
+### A2C with GAE: blend many TD residuals
+
+Generalized Advantage Estimation computes:
+
+`Â_t^GAE = Σ_{k=0}^{T-t-1}(γλ)^k δ_{t+k}`
+
+Smaller `λ` relies more on the critic and usually lowers variance; larger `λ` approaches a Monte Carlo-style estimate with less bootstrap bias and more trajectory variance.
+
+{% code-block file="/api/content/ml-systems/policy-gradient-theorem/code/a2c.py" language="python" title="GAE and synchronous actor-critic loss" /%}
+
+### PPO: constrain reuse of on-policy data
+
+PPO stores each action's probability under the behavior policy and compares it with the current policy using `r_t(θ) = πθ(a_t | s_t) / πold(a_t | s_t)`. Its clipped surrogate is:
+
+`Lclip = E[min(r_tÂ_t, clip(r_t, 1 − ε, 1 + ε)Â_t)]`
+
+Clipping discourages some overly large probability-ratio changes while allowing several minibatch passes over a rollout. It does not guarantee monotonic improvement and does not replace KL, entropy, reward, or safety monitoring.
+
+{% code-block file="/api/content/ml-systems/policy-gradient-theorem/code/ppo.py" language="python" title="PPO clipped actor objective" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build a training batch with explicit ownership
+
+{% process-flow %}
+{% process-step number="1" title="Freeze a behavior version" label="Collect" %}
+Roll out one identifiable policy version and store states, actions, rewards, termination flags, values, and old action log probabilities.
+{% /process-step %}
+{% process-step number="2" title="Construct targets" label="Estimate" %}
+Compute returns and advantages with correct terminal versus time-limit handling. Normalize advantages over an intentional batch boundary.
+{% /process-step %}
+{% process-step number="3" title="Optimize bounded losses" label="Update" %}
+Combine the actor objective, critic loss, and entropy bonus. Clip gradient norm and stop early when policy divergence exceeds the release threshold.
+{% /process-step %}
+{% process-step number="4" title="Evaluate before recollecting" label="Gate" %}
+Measure reward distributions, constraints, action entropy, critic error, and behavior slices before the new policy becomes the data collector.
+{% /process-step %}
+{% /process-flow %}
+
+The batch is a contract between rollout and optimization. Preserve these invariants:
+
+- Store `log πold(a_t | s_t)` at collection time; recomputing it after policy updates corrupts PPO ratios.
+- Distinguish true terminal states from time-limit truncation; bootstrap through a truncation when the task continues.
+- Mask padded sequence positions before computing returns, advantages, entropy, or losses.
+- Stop gradients through actor weights such as `Â_t`; train the critic with its own explicit target.
+- Version reward code, observation transforms, action masks, policy weights, and rollout data together.
+{% /section-card %}
+
+{% section-card %}
+## Diagnose failures from their signatures
+
+### The policy collapses to one action
+
+- Action entropy falls quickly while reward is flat or unstable.
+- Likely causes include an excessive learning rate, weak entropy regularization, reward scale spikes, or an incorrect action mask.
+- Reduce update size, inspect per-action logits, and replay the exact batch that triggered collapse.
+
+### The critic looks accurate but the policy does not improve
+
+- Value loss can be low while advantage signs are wrong on important states.
+- Check target leakage, terminal masks, reward timing, and whether actor gradients were accidentally detached at the log-probability term.
+- Evaluate explained variance and calibration by state slice, not value loss alone.
+
+### PPO reports clipping on most samples
+
+- High clip fraction and KL divergence mean the optimizer is trying to move far from the behavior policy.
+- Reduce learning rate or epochs, increase batch size, or stop the epoch early.
+- Do not interpret clipping as proof that the final policy is safe or close everywhere.
+
+### Reward rises while user outcomes worsen
+
+- The policy may be exploiting a proxy, simulator flaw, or evaluator blind spot.
+- Maintain independent outcome metrics and adversarial behavior slices.
+- Pause optimization when the reward model, environment, or policy leaves its validated operating range.
+{% /section-card %}
+
+{% section-card %}
+## Operate policy-gradient training as a feedback system
+
+Track enough information to separate estimator noise from policy movement and reward failure.
+
+- **Policy movement**
+  - Approximate KL divergence between behavior and updated policies
+  - Probability ratio distribution and PPO clip fraction
+  - Gradient norm, parameter-step norm, and action entropy
+- **Estimator health**
+  - Advantage mean, standard deviation, and tail percentiles
+  - Critic loss, explained variance, and value calibration
+  - Return variance by trajectory length and behavior slice
+- **Outcome and safety**
+  - Reward mean plus lower-tail and constraint metrics
+  - Independent task-success and human-outcome measures
+  - Action frequencies, invalid-action rate, and regression slices
+- **Reproducibility**
+  - Policy and critic checkpoints, optimizer state, random seeds, and environment version
+  - Reward definition, rollout manifest, advantage settings, and code revision
+  - A tested rollback path to the last accepted behavior policy
+
+Use canary rollouts or shadow evaluation before broad deployment. A statistically higher mean reward is not a release decision when tail risk, constraints, or protected slices regress.
+{% /section-card %}
+
+{% section-card %}
+## Apply the theorem where actions have delayed consequences
+
+### Language-model alignment
+
+In RLHF-style training, token generation forms a long action sequence. A learned reward and KL penalty supply the optimization signal, while a critic or return estimator assigns credit. Continue to [RLHF](/ml-systems/rlhf) for the broader preference-data and reward-model pipeline.
+
+### Robotics and control
+
+Continuous policies often parameterize distributions over motor commands. Policy gradients avoid enumerating actions, but safe exploration, simulator mismatch, and real-world sample cost dominate the system design.
+
+### Ranking and recommendation
+
+A stochastic ranking policy can optimize delayed engagement or satisfaction signals. Off-policy logging, exposure bias, and reward-proxy failures require careful evaluation before an on-policy method is appropriate.
+
+Across all three domains, the theorem supplies a gradient direction. It does not supply a trustworthy reward, sufficient exploration, a stable critic, or a safe release process; those remain system responsibilities.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/policy-gradient-theorem/quiz/policy-gradient-theorem.json" lessonSlug="policy-gradient-theorem" title="Policy Gradient Decision Check" /%}

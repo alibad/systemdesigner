@@ -1,0 +1,260 @@
+---
+registryId: spanner
+---
+
+{% section-card tone="intro" %}
+## What is Spanner?
+
+**Spanner is Google Cloud's fully managed distributed database for applications that
+need relational data, SQL, ACID transactions, and horizontal scale without giving up a
+single consistent history.** It stores rows in primary-key order, divides them into
+key-range splits, and synchronously replicates each split.
+
+Spanner matters when one database must keep orders, balances, entitlements, or inventory
+correct while serving traffic from more than one region. With the default serializable
+isolation, its core invariant is **external consistency**: committed transactions
+behave as if they ran one at a time, and their order respects the order in which
+clients could observe them finishing.
+
+That guarantee does not make every design fast. Primary-key shape determines where
+writes land, the leader and voting replicas determine write coordination, and the
+chosen timestamp bound determines how fresh a read must be.
+
+New to transactions, indexes, or replication? Start with
+[Database Fundamentals](/fundamentals/database-fundamentals).
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Decide whether Spanner matches the workload
+
+A database fit decision connects application invariants to the database's operating
+model. Choose Spanner because the workload needs its combination of scale and
+transactional correctness, not merely because the application runs in Google Cloud.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="One global source of truth" icon="globe" tone="green" %}
+Operational systems with relational data, multi-row transactions, sustained scale, and
+users in several regions can benefit from one strongly consistent database.
+{% /concept-card %}
+{% concept-card title="Possible fit" eyebrow="Prove the economics" icon="scale" tone="amber" %}
+A regional service with growing traffic may fit when managed scaling and availability
+justify the coordination and cost. Benchmark its real transactions and access paths.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Use a simpler boundary" icon="warning" tone="rose" %}
+Small single-region applications, blob storage, append-only analytics, and workloads
+that tolerate independent regional state often have simpler and less expensive stores.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Write the contract before selecting a configuration
+
+- Name the rows that must change atomically and the maximum acceptable transaction
+  latency.
+- Separate reads that require the latest committed state from reads that can use a
+  historical snapshot.
+- Identify where writers and readers run, plus the zone or region failures the product
+  must survive.
+- Estimate data size, write rate, read rate, transaction concurrency, and skew by key.
+- Define recovery point and recovery time objectives independently of replication.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Follow one write into the global history
+
+A committed write is a transaction that Spanner has ordered, replicated to a write
+quorum, and made visible at its commit timestamp. TrueTime supplies bounded clock
+uncertainty so commit timestamps can preserve externally observed ordering across
+machines and regions.
+
+{% system-flow title="A read-write transaction from client to committed version" caption="The leader and quorum are per split; a transaction may coordinate more than one split." %}
+{% system-node title="Client transaction" eyebrow="Business invariant" icon="code" tone="cyan" %}
+The client library runs a transaction function containing the reads and writes that
+must succeed together. An aborted attempt can cause that function to run again.
+{% /system-node %}
+{% system-node title="Split leader" eyebrow="Ordering point" icon="route" tone="blue" %}
+Writes are processed first by the leader replica for each affected split. Work spanning
+more splits creates a wider coordination boundary.
+{% /system-node %}
+{% system-node title="Voting replicas" eyebrow="Synchronous quorum" icon="network" tone="violet" %}
+The leader forwards the write to eligible voting replicas. A majority must agree before
+the mutation can commit.
+{% /system-node %}
+{% system-node title="Timestamped versions" eyebrow="Consistent history" icon="database" tone="green" %}
+Multi-version concurrency control keeps immutable versions. Reads select a timestamp
+and see a consistent prefix of committed transactions.
+{% /system-node %}
+{% /system-flow %}
+
+External consistency is stronger than saying replicas eventually agree. If transaction
+`T1` finishes before `T2` starts to commit, a reader cannot observe `T2` without also
+observing `T1`. TrueTime helps assign that order; Paxos-based replication makes the
+selected order durable.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design the primary key before adding capacity
+
+A primary key is both a row identifier and the leading physical sort order for a
+Spanner table. Nearby keys occupy the same range until Spanner splits and redistributes
+that range. A monotonically increasing first key part, such as a timestamp or
+auto-incrementing number, directs new inserts toward one moving edge of the key space.
+
+Use the lab to pair a workload with a key strategy. The 64 writes and eight logical key
+ranges are an explanatory model, not a throughput benchmark or a prediction of
+Spanner's current split count.
+
+{% interactive-block id="technology/spanner-performance" dataFile="/api/content/technology/spanner/data/key-distribution-model.json" /%}
+
+### Preserve the access path explicitly
+
+A distributed key such as UUID version 4 spreads inserts but removes natural time or
+tenant locality from the primary key. Add a secondary index for an important alternate
+lookup, then test whether that index has its own monotonically increasing leading key or
+high-cardinality hotspot.
+
+{% code-block file="/api/content/technology/spanner/code/orders-schema.sql" language="sql" title="GoogleSQL schema with a generated UUID and customer lookup index" /%}
+
+This schema lets Spanner generate an unordered UUID for each order. The secondary index
+supports a customer's recent-order query, but one exceptionally hot customer can still
+concentrate work under that index prefix.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Choose a timestamp bound for each read
+
+A timestamp bound tells Spanner which committed database version a read may observe.
+All three choices below return a consistent snapshot; none is eventual consistency.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong read" eyebrow="Current committed state" icon="shield" tone="blue" %}
+This default observes all transactions committed before the read began, regardless of
+which eligible replica receives it. Use it for read-after-write and correctness-critical
+decisions.
+{% /concept-card %}
+{% concept-card title="Exact staleness" eyebrow="Known historical point" icon="timer" tone="violet" %}
+Read at an explicit timestamp or a fixed duration in the past. Use it for a reproducible
+historical view when the chosen age is acceptable.
+{% /concept-card %}
+{% concept-card title="Bounded staleness" eyebrow="Freshest within a limit" icon="gauge" tone="green" %}
+Let Spanner choose the newest timestamp inside a maximum staleness bound. It can use a
+nearby caught-up replica, but this mode is limited to single-use read-only transactions.
+{% /concept-card %}
+{% /concept-grid %}
+
+Use a multi-use read-only transaction when several queries must share one logical
+snapshot. It takes no read locks, does not block concurrent writers, and does not
+commit. A standalone strong read is current at its own start, but two separate strong
+reads can naturally see different commits between them.
+
+{% code-block file="/api/content/technology/spanner/code/read-stale-orders.py" language="python" title="Read a consistent snapshot exactly 15 seconds in the past" /%}
+
+Fifteen seconds is an application choice in this example, not a universal setting.
+Record the allowed staleness in the product contract and measure the real client-to-
+replica path.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Keep transaction retries correct
+
+A read-write transaction is the smallest atomic boundary for application state that
+must change together. Spanner client libraries retry eligible `ABORTED` attempts, so a
+transaction function must be safe to execute more than once.
+
+{% code-block file="/api/content/technology/spanner/code/transfer-funds.py" language="python" title="Transfer funds inside a retryable Python transaction function" /%}
+
+### Keep the callback database-only
+
+- Parameterize values instead of constructing SQL from user input.
+- Keep network calls, card charges, email, and message publication outside the retried
+  function. Use a transactional outbox or another idempotent handoff when an external
+  effect must follow the commit.
+- Read only the rows needed to protect the invariant and keep the write set small.
+- Treat an abort as contention feedback. Retries absorb races; they do not repair a hot
+  key or an oversized transaction.
+- Set request deadlines at the application boundary and preserve enough error context
+  to distinguish contention, quota, permission, and availability failures.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Test quorum behavior before a regional incident
+
+A Spanner instance configuration defines where replicas live and which replicas vote.
+The topology below models the five-voter layout of a **base multi-region
+configuration**: two read-write regions with two replicas each and one witness. A
+read-only replica is included to show why built-in or custom read regions stay outside
+the write quorum.
+
+{% metric-strip %}
+{% metric label="Voting replicas" value="5" detail="Four read-write replicas plus one witness in this base multi-region model" tone="blue" /%}
+{% metric label="Write quorum" value="3 votes" detail="The leader and enough additional voters form a majority" tone="violet" /%}
+{% metric label="Read-only votes" value="0" detail="Read-only replicas serve reads but do not vote or become leader" tone="amber" /%}
+{% metric label="Leader scope" value="Per split" detail="Leaders normally run in the configured default leader region" tone="green" /%}
+{% /metric-strip %}
+
+Select the healthy write, remove voters, lose the leader region, or route a stale read.
+The active path, failed components, selected responsibility, and user-visible result
+change together.
+
+{% topology-lab dataFile="/api/content/technology/spanner/data/multi-region-quorum-topology.json" /%}
+
+Place most latency-sensitive writers near the default leader region. Read-only replicas
+can improve geographic read locality without enlarging the write quorum, but strong
+reads at a non-leader replica may still need leader coordination unless the deployment
+uses an appropriate read lease. Read leases can reduce strong-read latency in another
+region while increasing write latency, so test the trade-off.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate from bottleneck and recovery evidence
+
+Production operation is the practice of connecting Spanner signals to a user-visible
+latency, correctness, availability, or recovery objective.
+
+{% process-flow %}
+{% process-step number="1" title="Tag and measure" label="Request evidence" %}
+Tag important transactions and queries. Track latency percentiles, errors, aborts,
+lock statistics, CPU utilization, storage, and request volume by operation.
+{% /process-step %}
+{% process-step number="2" title="Find the boundary" label="Plan and split evidence" %}
+Use query plans, Key Visualizer, transaction insights, and lock insights to distinguish
+a scan, hot key range, contention problem, and under-provisioned instance.
+{% /process-step %}
+{% process-step number="3" title="Change one cause" label="Controlled correction" %}
+Reshape a key or index, narrow a transaction, change a read bound, or adjust capacity.
+Replay representative traffic and compare the same signals.
+{% /process-step %}
+{% process-step number="4" title="Prove recovery" label="Independent restore" %}
+Configure backups and point-in-time recovery for the required objective, restore into
+an isolated database, and verify application-level invariants and access controls.
+{% /process-step %}
+{% /process-flow %}
+
+Spanner retains earlier data and schema versions for one hour by default; the current
+point-in-time recovery setting can be increased to seven days. A longer retention
+period can increase storage and compute pressure, and replication does not protect
+against a valid but accidental delete. Monitor the changed operating envelope and test
+restore rather than inferring recoverability from replica health.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Review the decision with primary documentation
+
+Primary documentation is the authoritative contract for service behavior that can
+change over time. These official Google Cloud references define the behaviors used in
+this lesson:
+
+- [TrueTime and external consistency](https://cloud.google.com/spanner/docs/true-time-external-consistency)
+  explains transaction ordering, timestamps, and consistent snapshots.
+- [Schema design best practices](https://cloud.google.com/spanner/docs/schema-design)
+  covers key-range hotspots, UUID version 4 keys, and bit-reversed sequences.
+- [Transactions](https://cloud.google.com/spanner/docs/transactions) defines strong,
+  exact-staleness, bounded-staleness, read-only, and read-write transaction semantics.
+- [Replication](https://cloud.google.com/spanner/docs/replication) defines leaders,
+  replica roles, synchronous voting, and write quorums.
+- [Regional, dual-region, and multi-region configurations](https://cloud.google.com/spanner/docs/instance-configurations)
+  describes current base configuration topologies and placement trade-offs.
+- [Point-in-time recovery](https://cloud.google.com/spanner/docs/pitr) defines version
+  retention, recovery limits, and operational considerations.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/spanner/quiz/spanner-design-review.json" lessonSlug="spanner" title="Spanner Design Review" /%}

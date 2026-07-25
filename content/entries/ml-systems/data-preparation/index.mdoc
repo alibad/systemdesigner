@@ -1,0 +1,206 @@
+---
+registryId: data-preparation
+---
+
+{% section-card tone="intro" %}
+## What is ML data preparation?
+
+ML data preparation is the controlled process that turns raw observations into **validated, split, transformed, and reproducible model inputs**. It defines which records are eligible, what each field means, what the model is allowed to know at prediction time, and how the same transformation state reaches evaluation and serving.
+
+It matters because a model can learn shortcuts from repeated entities, future events, post-outcome fields, and preprocessing statistics just as easily as it can learn a useful signal. A clean-looking table can still produce a false evaluation if its evidence boundary is wrong.
+
+The core invariant is: **split on the deployment boundary first; fit every learned transformation on training data only; preserve rejected records and transformation state as versioned evidence.** Review [ML Fundamentals](/ml-systems/ml-fundamentals) if train, validation, test, and generalization are new concepts.
+
+{% callout variant="warn" %}
+Preparation does not guarantee higher accuracy. It makes the training inputs and evaluation claims explainable. Any performance change must still be measured on a leakage-safe held-out set.
+{% /callout %}
+{% /section-card %}
+
+{% system-flow title="Turn raw observations into a defensible training input" caption="Every arrow changes either eligibility, evidence ownership, representation, or release state." %}
+{% system-node title="Profile" eyebrow="Observe before changing" icon="search" tone="cyan" %}
+Measure schema, missingness, ranges, category cardinality, duplicates, event times, labels, and source freshness.
+{% /system-node %}
+{% system-node title="Validate" eyebrow="Enforce the contract" icon="shield" tone="amber" %}
+Accept valid records and route malformed or semantically impossible records to a reviewable quarantine path.
+{% /system-node %}
+{% system-node title="Split" eyebrow="Protect evaluation" icon="route" tone="violet" %}
+Keep future periods, repeated entities, or other deployment-time unknowns on the held-out side of the boundary.
+{% /system-node %}
+{% system-node title="Transform" eyebrow="Fit train, reuse everywhere" icon="workflow" tone="blue" %}
+Learn imputation, scaling, vocabularies, and selection from training rows; apply frozen state to every other partition.
+{% /system-node %}
+{% system-node title="Publish" eyebrow="Release evidence" icon="database" tone="green" %}
+Version prepared partitions with their raw snapshot, code, schema, statistics, checks, reason codes, and transform artifact.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Write the data contract before choosing a cleaning rule
+
+A data contract states what must be true at a pipeline boundary. It prevents a generic “quality score” from hiding failures with different consequences.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Structural contract" eyebrow="Can the row be parsed?" icon="braces" tone="blue" %}
+Names, types, required fields, shapes, valid encodings, and schema compatibility. A missing required field is different from a valid null.
+{% /concept-card %}
+{% concept-card title="Semantic contract" eyebrow="Does the value make sense?" icon="shield" tone="amber" %}
+Units, ranges, category vocabulary, event-time rules, ownership, consent, label meaning, and impossible combinations.
+{% /concept-card %}
+{% concept-card title="Operational contract" eyebrow="Can the release be trusted?" icon="timer" tone="green" %}
+Freshness, completeness, volume, duplicate policy, quarantine limit, lineage, split policy, and downstream service-level objectives.
+{% /concept-card %}
+{% /concept-grid %}
+
+For each check, record:
+
+- the metric and its population, such as missing `customer_id` among eligible orders;
+- the warning and blocking thresholds, with an owner who can change them;
+- the disposition: reject the batch, quarantine records, use a documented default, or continue with a warning;
+- the reason code and affected downstream dataset or model;
+- the evidence needed to replay or repair the failed records.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/data-preparation-calculator" dataFile="/api/content/ml-systems/data-preparation/data/preparation-release-policy.json" /%}
+
+{% section-card %}
+## Separate capacity from quality
+
+The capacity lab uses measured per-worker throughput and an explicit efficiency factor to estimate elapsed time:
+
+- `effective throughput = workers x observed rows per second per worker x efficiency`
+- `preparation time = input rows / effective throughput`
+- `quarantined rows = input rows x invalid rate`
+- `publishable rows = input rows - quarantined rows`
+
+More workers can reduce elapsed time until storage, shuffle, scheduler, or service quotas become the bottleneck. They do not reduce the invalid-record rate. Keep at least two independent release gates: **can the batch finish on time**, and **does the output satisfy its data contract**.
+
+The thresholds in the lab are teaching defaults. A production team should derive them from the cost of silent corruption, the expected source baseline, and the repair path rather than copying a universal percentage.
+{% /section-card %}
+
+{% section-card %}
+## Choose the split from the deployment question
+
+The split is not a clerical percentage. It defines what the held-out metric claims the model can generalize to.
+
+- Use a random or stratified row split only when examples are sufficiently independent and exchangeable for the deployment question.
+- Use a group-aware split when several rows belong to one customer, patient, device, document, location, or experiment subject.
+- Use a chronological split when the model predicts a later period from information available earlier.
+- Add a gap or embargo when nearby records can share delayed labels, aggregates, or other information across the cutoff.
+
+Try the wrong boundary and then repair it in the lab. Notice that split choice and preprocessing fit scope cause different failures.
+{% /section-card %}
+
+{% interactive-block id="ml-systems/data-preparation-split-lab" dataFile="/api/content/ml-systems/data-preparation/data/split-boundary-scenarios.json" /%}
+
+{% section-card %}
+## Fit learned state on the training side
+
+An imputer's median, a scaler's mean and variance, a vocabulary, a target encoder, feature selection, and dimensionality reduction all learn state from data. The safe order is:
+
+1. Assign entities or events to train, validation, and test using the deployment-aligned boundary.
+2. Fit learned preprocessing on training rows only.
+3. Freeze the fitted state as a versioned artifact.
+4. Transform train, validation, and test with that same state.
+5. Reuse equivalent logic and the same contract during serving.
+
+This small example keeps each customer on one side of the split and proves that a held-out customer's large balance cannot influence the training imputation value.
+
+{% code-block file="/api/content/ml-systems/data-preparation/code/leakage-safe-group-split.py" language="python" title="Group-aware split and train-only imputation" /%}
+
+Library pipelines reduce the chance that one transformation is fitted or applied inconsistently. The following `scikit-learn` pipeline fits numeric and categorical preprocessing only when the complete estimator is fitted on `X_train`; unseen categories remain representable through `handle_unknown="ignore"`.
+
+{% code-block file="/api/content/ml-systems/data-preparation/code/sklearn-preprocessing-pipeline.py" language="python" title="One fitted preprocessing and model graph" /%}
+
+The [scikit-learn common pitfalls guide](https://scikit-learn.org/stable/common_pitfalls.html) explicitly recommends splitting before preprocessing and never calling `fit` on test data. Its [cross-validation guide](https://scikit-learn.org/stable/modules/cross_validation.html) explains why grouped subjects and time series need boundaries beyond ordinary random folds.
+{% /section-card %}
+
+{% section-card %}
+## Quarantine invalid records without losing evidence
+
+Silently dropping or coercing invalid records makes the batch look cleaner while hiding source regressions and changing the training population. A quarantine path should retain enough non-sensitive evidence to diagnose and replay the failure.
+
+For every rejected record, keep:
+
+- stable source and record identifiers;
+- one or more machine-readable reason codes;
+- contract and transformation versions;
+- ingestion and event timestamps;
+- a privacy-safe pointer or checksum for the original payload;
+- review status, owner, and final disposition.
+
+The valid and invalid outputs need separate counts whose sum reconciles to the input count. The example below implements that invariant and tests the result without external dependencies.
+
+{% code-block file="/api/content/ml-systems/data-preparation/code/validate-and-quarantine.py" language="python" title="Validation with reason-coded quarantine" /%}
+
+Apache Beam documents this pattern as redirecting bad records to a separate output for later handling instead of silently accepting them or failing every record in the batch. See the official [Beam error-handling guide](https://beam.apache.org/documentation/sdks/yaml-errors/).
+{% /section-card %}
+
+{% section-card %}
+## Keep representation decisions inside the contract
+
+Choose a transformation because it preserves meaning for the model and serving path, not because it is a default recipe.
+
+### Missing values
+
+- Distinguish “unknown,” “not applicable,” “not yet observed,” and source failure before imputing.
+- Add a missingness indicator when absence itself can carry legitimate signal.
+- Fit numeric or categorical fill values on training data only.
+- Quarantine a missing value when the field is required for identity, label correctness, consent, or a hard business rule.
+
+### Numeric values
+
+- Standardize or normalize when the model or optimizer is sensitive to feature scale.
+- Preserve units in metadata and test conversions at the boundary.
+- Treat outliers as observations to investigate; clipping a legitimate extreme silently changes the task.
+
+### Categorical values
+
+- Use bounded one-hot encoding for small vocabularies and define behavior for unseen values.
+- Consider hashing, regularized encodings, or embeddings for high-cardinality fields only after evaluating collisions, leakage, and serving support.
+- Never fit target encoding on held-out labels; compute it inside training folds when cross-validating.
+
+Google's official [data transformation guide](https://developers.google.com/machine-learning/crash-course/overfitting/transforming-data) provides beginner context for numerical and categorical representation. TensorFlow Transform can export one preprocessing graph for training and serving when a TensorFlow stack needs full-pass analyzers such as vocabularies or dataset statistics; see the official [Transform guide](https://www.tensorflow.org/tfx/guide/transform).
+{% /section-card %}
+
+{% section-card %}
+## Operate the contract after deployment
+
+Monitor the preparation system at three levels because one aggregate score cannot explain where a failure entered.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Pipeline health" eyebrow="Can data move?" icon="activity" tone="cyan" %}
+Track freshness, input/output counts, lag, runtime, retries, worker saturation, quarantine backlog, and replay success.
+{% /concept-card %}
+{% concept-card title="Contract health" eyebrow="Does data still mean the same thing?" icon="shield" tone="amber" %}
+Track schema anomalies, missingness, ranges, categories, duplicate keys, event-time violations, and label availability by source and slice.
+{% /concept-card %}
+{% concept-card title="Model boundary health" eyebrow="Does production match preparation?" icon="repeat" tone="violet" %}
+Compare training, evaluation, and serving feature definitions, versions, missingness, and distributions. Investigate skew before retraining on it.
+{% /concept-card %}
+{% /concept-grid %}
+
+When an alert fires:
+
+1. Identify the first broken boundary and affected partitions, features, models, and time ranges.
+2. Stop publication when the contract says the evidence is invalid; do not let a downstream success mask it.
+3. Preserve the failed candidate, reason counts, raw snapshot identity, and transformation version.
+4. Repair the source or rule, replay idempotently, and compare the repaired statistics with the intended baseline.
+5. Publish a new immutable dataset version rather than mutating the evidence used by an existing model run.
+
+TensorFlow Data Validation documents schema-based anomaly checks plus training-serving skew and span-to-span drift detection in its official [TFDV guide](https://www.tensorflow.org/tfx/guide/tfdv). Threshold selection still requires domain knowledge and validation; a drift alert does not explain root cause by itself.
+{% /section-card %}
+
+{% section-card %}
+## Review a dataset candidate before release
+
+- [ ] The prediction target, eligible population, entity key, event time, label time, and prediction time are explicit.
+- [ ] The split reproduces the deployment-time unknown and has no entity or temporal overlap that violates that claim.
+- [ ] Learned transformations fit only on training rows and are versioned for reuse.
+- [ ] Input count equals publishable count plus every documented rejection path.
+- [ ] Quarantined records carry reason codes, source identity, ownership, and a replay path.
+- [ ] Schema, semantic, privacy, freshness, and slice checks have independent results.
+- [ ] Training and serving use compatible feature definitions and transformation state.
+- [ ] The released partitions resolve to immutable raw data, code, configuration, statistics, and checks.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/data-preparation/quiz/data-preparation.json" lessonSlug="data-preparation" title="ML Data Preparation Check" /%}

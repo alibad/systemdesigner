@@ -1,0 +1,258 @@
+---
+registryId: istio
+---
+
+{% section-card tone="intro" %}
+## What is Istio?
+
+**Istio is a service mesh: an infrastructure layer that applies traffic, identity,
+security, and telemetry policy to communication between workloads.** Applications keep
+calling normal service addresses. Istio programs proxies in the request path so teams
+can change routing and policy without rebuilding every service.
+
+Istio is most useful when many workloads need the same controls and the platform team
+can operate those controls as a product. It is not free reliability. A mesh adds a
+control plane, data-plane processing, configuration propagation, resource demand, and
+failure modes that must be measured.
+
+{% callout variant="info" %}
+### Core invariant
+
+Istiod distributes desired configuration; data-plane proxies enforce the configuration
+they have accepted. The control plane does not normally forward application requests.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Workload identity" eyebrow="Who is calling?" icon="shield" tone="cyan" %}
+Istio identities are based on workload credentials rather than source IP alone. Mutual
+TLS authenticates both peers and encrypts the connection between participating proxies.
+{% /concept-card %}
+{% concept-card title="Traffic policy" eyebrow="Where and how?" icon="route" tone="blue" %}
+Routing, timeout, retry, load-balancing, and outlier policies shape a request after the
+proxy has matched the destination and protocol.
+{% /concept-card %}
+{% concept-card title="Policy scope" eyebrow="Which workloads?" icon="boxes" tone="violet" %}
+Namespace, host, subset, selector, and attachment rules decide where configuration
+applies. Valid YAML can still target the wrong scope.
+{% /concept-card %}
+{% concept-card title="Observed evidence" eyebrow="What happened?" icon="activity" tone="amber" %}
+Proxy metrics, access logs, traces, status, and configuration inspection explain the
+network path. Application evidence is still required for business correctness.
+{% /concept-card %}
+{% /concept-grid %}
+
+Review [Kubernetes](/technology/kubernetes) first if Services, namespaces, labels, and
+declarative resources are unfamiliar.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose the data plane before choosing features
+
+Istio supports sidecar and ambient data-plane modes. Both use Istiod as the control
+plane, but they place request processing differently.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Sidecar mode" eyebrow="Proxy per workload pod" icon="boxes" tone="blue" %}
+Each participating pod runs an Envoy sidecar. That proxy can enforce Layer 4 and Layer
+7 behavior for the workload. Adding a sidecar normally requires pod injection and a
+restart, and each workload must reserve proxy resources.
+{% /concept-card %}
+{% concept-card title="Ambient mode" eyebrow="Layered shared infrastructure" icon="network" tone="cyan" %}
+A per-node ztunnel provides the secure Layer 4 overlay. Add a waypoint proxy when a
+workload needs Layer 7 routing, authorization, or telemetry. Workloads can join without
+putting a proxy in every application pod.
+{% /concept-card %}
+{% /concept-grid %}
+
+Choose from requirements, supported deployment shapes, feature status, and measured
+operating cost:
+
+- use the base ambient secure overlay when workload identity, mutual TLS, Layer 4
+  authorization, and Layer 4 telemetry are sufficient;
+- add an ambient waypoint where HTTP, gRPC, or other Layer 7 policy is required;
+- use sidecar mode when its workload-local processing or supported deployment shapes
+  fit the platform better;
+- verify current support before adopting multi-cluster, VM, extension, or mixed-mode
+  designs because those boundaries change across Istio releases.
+
+The current [Istio data-plane comparison](https://istio.io/latest/docs/overview/dataplane-modes/)
+documents the supported modes and feature boundaries. Do not copy benchmark numbers
+from another cluster into a capacity plan; measure your protocols, payloads, policies,
+telemetry, and resource limits.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Follow one request from configuration to enforcement
+
+{% process-flow %}
+{% process-step number="1" title="Declare intent" label="Platform API" %}
+Apply Istio or Kubernetes Gateway API resources with explicit hosts, namespaces,
+selectors, and policy attachment. Admission validation catches schema errors, not every
+semantic conflict.
+{% /process-step %}
+{% process-step number="2" title="Compile and distribute" label="Istiod" %}
+Istiod combines service discovery and policy, then sends proxy-specific configuration
+over xDS. Distribution is eventually consistent, so proxies may observe a rollout at
+different moments.
+{% /process-step %}
+{% process-step number="3" title="Match the request" label="Data plane" %}
+The proxy identifies protocol, destination, and the first matching route. It then
+applies destination policy, security policy, and any eligible resilience behavior.
+{% /process-step %}
+{% process-step number="4" title="Verify the outcome" label="Operations" %}
+Test positive and negative traffic, inspect proxy status and effective configuration,
+and correlate proxy evidence with application outcomes before expanding the rollout.
+{% /process-step %}
+{% /process-flow %}
+
+If Istiod is briefly unavailable, an already-configured proxy can continue serving from
+its last accepted configuration. New workloads, certificate operations, discovery
+changes, and policy updates still depend on a healthy control plane.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Bound retries inside one caller deadline
+
+A retry creates another upstream attempt; it does not create more time. Treat the
+caller's end-to-end deadline as the outer budget and make every downstream timeout and
+retry fit inside it.
+
+The lab uses a transparent upper-bound model:
+
+- **Configured attempts** = 1 initial attempt + retry attempts.
+- **Timeout windows that fit** = the smaller of configured attempts and
+  `floor(route timeout / per-try timeout)`, with at least the initial attempt.
+- **Maximum attempt pressure** = incoming requests per second x timeout windows that
+  fit.
+
+This is a stress bound, not a throughput prediction. Actual retries depend on the
+selected `retryOn` conditions, response timing, backoff, remaining route deadline, and
+whether the request is still valid to repeat.
+
+{% interactive-block id="technology/istio-mesh" dataFile="/api/content/technology/istio/data/retry-budget-model.json" /%}
+
+Use retries only for transient failures and operations that are safe to repeat or
+protected by an idempotency mechanism. A three-attempt policy can turn 1,000 incoming
+requests per second into as many as 3,000 upstream attempts per second while the
+dependency is already unhealthy.
+
+Istio's current [traffic-management documentation](https://istio.io/latest/docs/concepts/traffic-management/)
+defines route ordering, timeouts, retries, destination rules, and circuit breaking.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Make route precedence and fallback explicit
+
+A `VirtualService` evaluates HTTP routes in order. Put specific match conditions before
+the final catch-all route. A destination subset must be defined by a
+`DestinationRule`, and its labels must match real workload labels before traffic is
+sent to it.
+
+The canary example uses fully qualified service hosts, defines stable and canary
+subsets, sends an internal tester to the canary, and keeps a weighted fallback for
+everyone else.
+
+{% code-block file="/api/content/technology/istio/code/canary-routing.yaml" language="yaml" title="Ordered canary routes and destination subsets" /%}
+
+Roll out route resources as a state transition:
+
+1. deploy the new workload and wait for ready endpoints;
+2. create the subset and verify that proxies received it;
+3. add a small weighted route and observe user-facing and proxy metrics;
+4. increase traffic only while error, latency, saturation, and rollback signals remain
+   healthy;
+5. retain a catch-all route so unmatched requests never fall into an accidental path.
+
+Istio configuration distribution is eventually consistent. Applying a subset and a
+route in one command does not guarantee every proxy observes them atomically. The
+[traffic-management best practices](https://istio.io/latest/docs/ops/best-practices/traffic-management/)
+describe how to avoid 503 responses during route changes.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Decide when strict mTLS is safe to enforce
+
+`PeerAuthentication` controls what the receiving workload accepts. In sidecar mode,
+`PERMISSIVE` accepts both mutual TLS and plaintext so teams can migrate incrementally;
+`STRICT` requires mutual TLS. Istio automatically uses mutual TLS when both participating
+workloads have mesh proxy capability and policy permits it.
+
+The migration lab makes the cutover consequence visible. The model assumes the
+destination is enrolled and separates traffic into:
+
+- **mesh-capable sources**, which reach the destination through Istio mutual TLS; and
+- **legacy sources**, which still reach it as plaintext.
+
+Change the legacy share, receiving policy, and data-plane mode. In ambient mode, require
+a waypoint when the scenario needs Layer 7 routing or authorization.
+
+{% interactive-block id="technology/istio-mtls-migration-lab" dataFile="/api/content/technology/istio/data/mtls-migration-model.json" /%}
+
+Move to `STRICT` only after workload coverage is complete and both allowed and denied
+paths have been tested. Mutual TLS proves workload identity and encrypts transport; it
+does not decide whether an authenticated caller may perform an action. Add
+`AuthorizationPolicy` for that decision.
+
+In ambient mode, ztunnel provides mutual TLS for enrolled workloads and `DISABLE` is
+not supported. `STRICT` is useful for rejecting traffic that bypasses the mesh. See the
+current [PeerAuthentication reference](https://istio.io/latest/docs/reference/config/security/peer_authentication/)
+and [security best practices](https://istio.io/latest/docs/ops/best-practices/security/).
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Express resilience and authorization as narrow policy
+
+The resilience example gives idempotent reads bounded retries while write requests get
+only the shared route timeout. It names the exact retry conditions rather than relying
+on a default that may not match the application.
+
+{% code-block file="/api/content/technology/istio/code/bounded-retries.yaml" language="yaml" title="Bounded retries for idempotent reads" /%}
+
+The security example requires namespace-wide mutual TLS, denies access by default, and
+allows only the checkout service account to call the payment endpoint.
+
+{% code-block file="/api/content/technology/istio/code/strict-mtls-policy.yaml" language="yaml" title="Strict mTLS with positive authorization" /%}
+
+Before enforcement:
+
+- run `istioctl analyze` against the complete candidate file set and the target cluster;
+- inspect `istioctl proxy-status` for stale or rejected proxy configuration;
+- inspect the effective listener, route, cluster, endpoint, and secret configuration
+  with `istioctl proxy-config`;
+- test one request that should succeed and one that should fail for every policy
+  boundary;
+- monitor `pilot_total_xds_rejects`, proxy response flags, upstream resets, retry
+  attempts, mTLS identity, and certificate expiry;
+- keep application metrics and traces because proxy telemetry cannot prove that a
+  payment, order, or state transition is correct.
+
+`istioctl analyze` can inspect local files, the live cluster, or both. The official
+[diagnostic guide](https://istio.io/latest/docs/ops/diagnostic-tools/istioctl-analyze/)
+documents the current commands and limits.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Adopt the mesh as a measured platform capability
+
+{% concept-grid columns="3" %}
+{% concept-card title="Start from one pain" eyebrow="Adoption" icon="gauge" tone="blue" %}
+Choose a bounded service group and one measurable outcome such as identity coverage,
+safer canaries, or consistent deadline enforcement. Do not begin by enabling every
+feature.
+{% /concept-card %}
+{% concept-card title="Own configuration scope" eyebrow="Governance" icon="workflow" tone="violet" %}
+Define who may create gateways, routes, destination policy, and security policy. Review
+host ownership, namespace export, selectors, and cross-team attachment.
+{% /concept-card %}
+{% concept-card title="Rehearse mesh failure" eyebrow="Operations" icon="warning" tone="amber" %}
+Test control-plane loss, stale configuration, expired identity, rejected xDS, proxy
+resource pressure, bad routes, and a dependency that triggers maximum retry pressure.
+{% /concept-card %}
+{% /concept-grid %}
+
+An Istio rollout is ready to expand when the team can explain the effective request
+path, estimate retry amplification, prove mTLS and authorization outcomes, inspect the
+configuration inside a proxy, and roll back policy without guessing.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/istio/quiz/istio-production-decisions.json" lessonSlug="istio" title="Istio Production Decisions" /%}

@@ -1,0 +1,6 @@
+from(bucket: "environment")
+  |> range(start: -1h)
+  |> filter(fn: (row) => row._measurement == "environment_sensor")
+  |> filter(fn: (row) => row._field == "temperature_c")
+  |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
+  |> yield(name: "five_minute_mean")

@@ -1,0 +1,176 @@
+{
+  "title": "Trace the URL shortener under pressure",
+  "description": "Switch scenarios to see which components enter the request path, where failures are isolated, and what remains available. Select any component for its responsibility.",
+  "nodes": [
+    {
+      "id": "browser",
+      "label": "Browser",
+      "eyebrow": "GET /aZ91k",
+      "detail": "Requests a compact link and follows the redirect response to the destination owner.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 9,
+      "y": 20
+    },
+    {
+      "id": "edge",
+      "label": "Edge + routing",
+      "eyebrow": "Nearest region",
+      "detail": "Terminates TLS, applies DDoS and coarse abuse controls, and routes the request to a healthy redirect region.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 27,
+      "y": 20
+    },
+    {
+      "id": "redirect",
+      "label": "Redirect service",
+      "eyebrow": "Stateless",
+      "detail": "Validates the code, checks local policy, resolves the destination, and returns the HTTP redirect without waiting for analytics.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 46,
+      "y": 20
+    },
+    {
+      "id": "cache",
+      "label": "Distributed cache",
+      "eyebrow": "Hot mappings",
+      "detail": "Serves popular code-to-destination mappings in memory. Misses fall through to the authoritative store with bounded concurrency.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 67,
+      "y": 20
+    },
+    {
+      "id": "store",
+      "label": "Mapping store",
+      "eyebrow": "Authoritative",
+      "detail": "Owns durable code uniqueness, destination and policy data. It must survive cache misses but should not receive every redirect.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 88,
+      "y": 20
+    },
+    {
+      "id": "stream",
+      "label": "Durable stream",
+      "eyebrow": "Best effort emit",
+      "detail": "Buffers compact redirect events outside the response path so a slow analytics consumer cannot increase redirect latency.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 54,
+      "y": 48
+    },
+    {
+      "id": "processor",
+      "label": "Stream processor",
+      "eyebrow": "Aggregate",
+      "detail": "Filters bots, applies privacy rules, and builds bounded time-window aggregates for reporting.",
+      "kind": "stream",
+      "tone": "green",
+      "x": 73,
+      "y": 48
+    },
+    {
+      "id": "analytics",
+      "label": "Analytical store",
+      "eyebrow": "Query",
+      "detail": "Serves owner dashboards and long-range analysis without competing with redirect lookups in the mapping store.",
+      "kind": "analytics",
+      "tone": "amber",
+      "x": 91,
+      "y": 48
+    },
+    {
+      "id": "create",
+      "label": "Create API",
+      "eyebrow": "POST /links",
+      "detail": "Authenticates the caller, validates the destination shape, and enforces account, tenant, and anonymous quotas.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 10,
+      "y": 78
+    },
+    {
+      "id": "safety",
+      "label": "Safety check",
+      "eyebrow": "Guardrail",
+      "detail": "Rejects known harmful destinations and sends uncertain cases through stricter policy without touching the redirect path.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 31,
+      "y": 78
+    },
+    {
+      "id": "allocator",
+      "label": "Code allocator",
+      "eyebrow": "Unique ownership",
+      "detail": "Allocates generated codes from non-overlapping ranges or conditionally reserves a requested custom alias.",
+      "kind": "allocator",
+      "tone": "cyan",
+      "x": 53,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "browser-edge", "from": "browser", "to": "edge", "label": "request" },
+    { "id": "edge-redirect", "from": "edge", "to": "redirect", "label": "route" },
+    { "id": "redirect-cache", "from": "redirect", "to": "cache", "label": "lookup" },
+    { "id": "cache-store", "from": "cache", "to": "store", "label": "miss" },
+    { "id": "redirect-store", "from": "redirect", "to": "store", "label": "bounded fallback", "via": { "x": 67, "y": 34 } },
+    { "id": "redirect-stream", "from": "redirect", "to": "stream", "label": "click event", "mode": "async" },
+    { "id": "stream-processor", "from": "stream", "to": "processor", "label": "consume", "mode": "async" },
+    { "id": "processor-analytics", "from": "processor", "to": "analytics", "label": "aggregate", "mode": "async" },
+    { "id": "create-safety", "from": "create", "to": "safety", "label": "validate" },
+    { "id": "safety-allocator", "from": "safety", "to": "allocator", "label": "approved" },
+    { "id": "allocator-store", "from": "allocator", "to": "store", "label": "conditional write", "via": { "x": 81.5, "y": 68 } },
+    { "id": "store-cache", "from": "store", "to": "cache", "label": "publish", "via": { "x": 77.5, "y": 6 } }
+  ],
+  "scenarios": [
+    {
+      "id": "redirect-hit",
+      "label": "Cache hit",
+      "summary": "The dominant request stays on the short path: edge, stateless redirect service, and distributed cache. Analytics leaves asynchronously.",
+      "activeEdges": ["browser-edge", "edge-redirect", "redirect-cache", "redirect-stream", "stream-processor", "processor-analytics"],
+      "focusNode": "cache",
+      "result": "The destination is returned without mapping-store I/O; a slow analytics consumer cannot delay the redirect."
+    },
+    {
+      "id": "cache-miss",
+      "label": "Cache miss",
+      "summary": "The service checks the authoritative mapping store only after the cache misses, then repopulates the hot mapping for later requests.",
+      "activeEdges": ["browser-edge", "edge-redirect", "redirect-cache", "cache-store", "store-cache", "redirect-stream", "stream-processor", "processor-analytics"],
+      "degradedNodes": ["redirect"],
+      "focusNode": "store",
+      "result": "The redirect is slower but remains correct. Miss coalescing and fallback limits prevent a hot code from stampeding storage."
+    },
+    {
+      "id": "create-link",
+      "label": "Create link",
+      "summary": "Creation is a separate, lower-volume path that performs safety checks and commits unique code ownership before publishing the mapping.",
+      "activeEdges": ["create-safety", "safety-allocator", "allocator-store", "store-cache"],
+      "focusNode": "allocator",
+      "result": "The API returns success only after durable ownership is committed; cache publication makes the new link ready for redirects."
+    },
+    {
+      "id": "cache-outage",
+      "label": "Cache outage",
+      "summary": "The cache is unavailable, so controlled traffic bypasses it. The redirect tier sheds abuse and caps store fallback concurrency.",
+      "activeEdges": ["browser-edge", "edge-redirect", "redirect-store", "redirect-stream", "stream-processor", "processor-analytics"],
+      "failedNodes": ["cache"],
+      "degradedNodes": ["redirect", "store"],
+      "focusNode": "cache",
+      "result": "Availability is reduced but bounded fallback protects the mapping store from becoming the next failure."
+    },
+    {
+      "id": "analytics-outage",
+      "label": "Analytics outage",
+      "summary": "The event pipeline is unavailable while the correctness path remains healthy. Redirects continue and events may be dropped or buffered locally.",
+      "activeEdges": ["browser-edge", "edge-redirect", "redirect-cache", "redirect-stream"],
+      "failedNodes": ["stream", "processor", "analytics"],
+      "focusNode": "stream",
+      "result": "Redirect latency and availability remain unchanged because analytics is explicitly outside the response path."
+    }
+  ]
+}

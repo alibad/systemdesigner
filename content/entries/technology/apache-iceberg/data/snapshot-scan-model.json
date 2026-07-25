@@ -1,0 +1,264 @@
+{
+  "title": "Trace one read from snapshot to data files",
+  "description": "Pin a committed snapshot and choose a source-column predicate. The model shows how partition evolution changes pruning without changing the query.",
+  "defaultSnapshotId": "after-evolution",
+  "defaultQueryId": "eu-history",
+  "partitionSpecs": [
+    {
+      "id": 0,
+      "label": "Spec 0",
+      "fields": [
+        "day(event_time)"
+      ],
+      "detail": "The original writer grouped files by event day."
+    },
+    {
+      "id": 1,
+      "label": "Spec 1",
+      "fields": [
+        "hour(event_time)",
+        "identity(region)"
+      ],
+      "detail": "New writers add hourly and regional pruning; old files stay under spec 0."
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "before-evolution",
+      "label": "Snapshot 4401",
+      "committedAt": "2026-07-19 09:00 UTC",
+      "operation": "append",
+      "defaultSpecId": 0,
+      "manifestIds": [
+        "manifest-day-17",
+        "manifest-day-18"
+      ],
+      "detail": "Only daily manifests are committed. Later files do not exist in this snapshot."
+    },
+    {
+      "id": "after-evolution",
+      "label": "Snapshot 4402",
+      "committedAt": "2026-07-19 12:05 UTC",
+      "operation": "append",
+      "defaultSpecId": 1,
+      "manifestIds": [
+        "manifest-day-17",
+        "manifest-day-18",
+        "manifest-hour-10",
+        "manifest-hour-11"
+      ],
+      "detail": "The snapshot reuses old daily manifests and adds new manifests written with spec 1."
+    }
+  ],
+  "manifests": [
+    {
+      "id": "manifest-day-17",
+      "label": "Daily manifest: July 17",
+      "specId": 0,
+      "addedSnapshotId": "before-evolution",
+      "partitionSummary": "event day = 2026-07-17",
+      "fileIds": [
+        "day17-a",
+        "day17-b"
+      ]
+    },
+    {
+      "id": "manifest-day-18",
+      "label": "Daily manifest: July 18",
+      "specId": 0,
+      "addedSnapshotId": "before-evolution",
+      "partitionSummary": "event day = 2026-07-18",
+      "fileIds": [
+        "day18-a",
+        "day18-b"
+      ]
+    },
+    {
+      "id": "manifest-hour-10",
+      "label": "Hourly manifest: July 19 10:00",
+      "specId": 1,
+      "addedSnapshotId": "after-evolution",
+      "partitionSummary": "event hour = 10:00; region range = eu..us",
+      "fileIds": [
+        "hour10-eu",
+        "hour10-us"
+      ]
+    },
+    {
+      "id": "manifest-hour-11",
+      "label": "Hourly manifest: July 19 11:00",
+      "specId": 1,
+      "addedSnapshotId": "after-evolution",
+      "partitionSummary": "event hour = 11:00; region range = eu..us",
+      "fileIds": [
+        "hour11-eu",
+        "hour11-us"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "id": "day17-a",
+      "label": "day17-a.parquet",
+      "partition": "day=2026-07-17",
+      "rows": 1200
+    },
+    {
+      "id": "day17-b",
+      "label": "day17-b.parquet",
+      "partition": "day=2026-07-17",
+      "rows": 900
+    },
+    {
+      "id": "day18-a",
+      "label": "day18-a.parquet",
+      "partition": "day=2026-07-18",
+      "rows": 1300
+    },
+    {
+      "id": "day18-b",
+      "label": "day18-b.parquet",
+      "partition": "day=2026-07-18",
+      "rows": 1100
+    },
+    {
+      "id": "hour10-eu",
+      "label": "hour10-eu.parquet",
+      "partition": "hour=10:00, region=eu",
+      "rows": 320
+    },
+    {
+      "id": "hour10-us",
+      "label": "hour10-us.parquet",
+      "partition": "hour=10:00, region=us",
+      "rows": 410
+    },
+    {
+      "id": "hour11-eu",
+      "label": "hour11-eu.parquet",
+      "partition": "hour=11:00, region=eu",
+      "rows": 360
+    },
+    {
+      "id": "hour11-us",
+      "label": "hour11-us.parquet",
+      "partition": "hour=11:00, region=us",
+      "rows": 440
+    }
+  ],
+  "queries": [
+    {
+      "id": "all-history",
+      "label": "All committed history",
+      "predicate": "event_time >= '2026-07-17'",
+      "detail": "A broad time predicate retains every manifest and file committed to the selected snapshot.",
+      "plans": {
+        "before-evolution": {
+          "selectedManifestIds": [
+            "manifest-day-17",
+            "manifest-day-18"
+          ],
+          "selectedFileIds": [
+            "day17-a",
+            "day17-b",
+            "day18-a",
+            "day18-b"
+          ],
+          "reasoning": [
+            "Both daily partition summaries overlap the predicate.",
+            "Files committed after snapshot 4401 are invisible because the read is pinned to that snapshot."
+          ]
+        },
+        "after-evolution": {
+          "selectedManifestIds": [
+            "manifest-day-17",
+            "manifest-day-18",
+            "manifest-hour-10",
+            "manifest-hour-11"
+          ],
+          "selectedFileIds": [
+            "day17-a",
+            "day17-b",
+            "day18-a",
+            "day18-b",
+            "hour10-eu",
+            "hour10-us",
+            "hour11-eu",
+            "hour11-us"
+          ],
+          "reasoning": [
+            "The predicate overlaps manifests written with both partition specs.",
+            "The snapshot's logical rows are the union of files selected through all four manifests."
+          ]
+        }
+      }
+    },
+    {
+      "id": "one-hour-eu",
+      "label": "One hour in Europe",
+      "predicate": "event_time >= '2026-07-19 11:00' AND event_time < '2026-07-19 12:00' AND region = 'eu'",
+      "detail": "The newer hourly and regional fields make the narrow predicate directly visible to partition pruning.",
+      "plans": {
+        "before-evolution": {
+          "selectedManifestIds": [],
+          "selectedFileIds": [],
+          "reasoning": [
+            "Snapshot 4401 predates every July 19 file in the fixture.",
+            "Pinning a snapshot controls visibility before partition pruning begins."
+          ]
+        },
+        "after-evolution": {
+          "selectedManifestIds": [
+            "manifest-hour-11"
+          ],
+          "selectedFileIds": [
+            "hour11-eu"
+          ],
+          "reasoning": [
+            "The manifest list rejects both daily manifests and the 10:00 manifest by event-time range.",
+            "The selected manifest uses spec 1, so its region partition tuple rejects the US file."
+          ]
+        }
+      }
+    },
+    {
+      "id": "eu-history",
+      "label": "European history since July 18",
+      "predicate": "event_time >= '2026-07-18' AND region = 'eu'",
+      "detail": "One logical predicate crosses old daily files and new region-aware files.",
+      "plans": {
+        "before-evolution": {
+          "selectedManifestIds": [
+            "manifest-day-18"
+          ],
+          "selectedFileIds": [
+            "day18-a",
+            "day18-b"
+          ],
+          "reasoning": [
+            "The day transform rejects the July 17 manifest.",
+            "Spec 0 has no region partition field, so this partition-only fixture keeps both July 18 files for row-level filtering."
+          ]
+        },
+        "after-evolution": {
+          "selectedManifestIds": [
+            "manifest-day-18",
+            "manifest-hour-10",
+            "manifest-hour-11"
+          ],
+          "selectedFileIds": [
+            "day18-a",
+            "day18-b",
+            "hour10-eu",
+            "hour11-eu"
+          ],
+          "reasoning": [
+            "The reader projects the same source-column predicate through spec 0 and spec 1.",
+            "Old daily files remain candidates because they have no region partition value.",
+            "New spec-1 files expose region in their partition tuples, so the two US files are pruned."
+          ]
+        }
+      }
+    }
+  ]
+}

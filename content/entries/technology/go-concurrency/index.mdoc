@@ -1,0 +1,356 @@
+---
+registryId: go-concurrency
+---
+
+{% section-card tone="intro" %}
+## What is Go concurrency?
+
+**Go concurrency** is a way to structure a program as independently progressing
+tasks. A **goroutine** runs one task, a **channel** transfers ownership of a
+value or signal, and the Go runtime schedules runnable goroutines across
+operating-system threads.
+
+Concurrency is not the same as parallelism:
+
+- **Concurrency** means several tasks can make progress over the same period.
+- **Parallelism** means several tasks execute at the same instant on different
+  CPU cores.
+- An I/O service can benefit from high concurrency while many goroutines wait.
+- A CPU-bound service usually gains useful parallelism only up to its available
+  execution capacity.
+
+The production invariant is simple: **every goroutine needs an owner, a bounded
+resource, and a finite exit path**. Cheap goroutines make structure convenient;
+they do not make queues, memory, CPU, or dependencies unlimited.
+{% /section-card %}
+
+{% section-card %}
+## Build the runtime mental model
+
+A goroutine starts with a small stack that can grow and shrink. When it blocks
+on a channel, timer, network poller, or synchronization primitive, the runtime
+can schedule another runnable goroutine. This multiplexing is why a Go process
+can manage far more concurrent tasks than operating-system threads.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Goroutine" eyebrow="Unit of work" icon="code" tone="blue" %}
+Created with `go f()`. Its lifetime is independent from the caller unless the
+program deliberately connects them with a context, result, or join.
+{% /concept-card %}
+{% concept-card title="Channel" eyebrow="Handoff and signal" icon="route" tone="violet" %}
+A typed synchronization point. A send and receive transfer a value while the
+buffer determines how far producer and consumer timing can diverge.
+{% /concept-card %}
+{% concept-card title="Scheduler" eyebrow="Maps work to threads" icon="layers" tone="green" %}
+The runtime maps runnable goroutines onto a bounded set of execution resources.
+Blocked work can yield; CPU-bound work still consumes real cores.
+{% /concept-card %}
+{% /concept-grid %}
+
+Go's channel-oriented style was influenced by **Communicating Sequential
+Processes (CSP)**: independent processes coordinate through communication. Go
+does not require every state update to use a channel; mutexes and atomics remain
+appropriate when shared ownership expresses the invariant more clearly.
+
+{% system-flow title="One concurrent request path" caption="The request owns cancellation; admission and workers bound how much work enters the dependency." %}
+{% system-node title="Request" eyebrow="Owner" icon="users" tone="neutral" %}
+Carries a deadline and cancellation signal for work that becomes useless when
+the request ends.
+{% /system-node %}
+{% system-node title="Admission" eyebrow="Bound" icon="shield" tone="blue" %}
+Accepts, waits for capacity, or rejects. It prevents demand from silently
+becoming an unbounded number of goroutines.
+{% /system-node %}
+{% system-node title="Worker pool" eyebrow="Execution" icon="server" tone="violet" %}
+Runs a measured number of jobs and stops receiving when the owner cancels.
+{% /system-node %}
+{% system-node title="Dependency" eyebrow="Downstream budget" icon="database" tone="green" %}
+Receives the remaining deadline instead of starting a new independent lifetime.
+{% /system-node %}
+{% /system-flow %}
+
+`GOMAXPROCS` controls how many operating-system threads may execute Go code at
+the same time. It does not cap goroutine count, queue depth, open connections,
+or work admitted to a dependency.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size useful concurrency before choosing a pool
+
+**Useful concurrency** is the average work that must be in flight to sustain the
+target arrival rate. Little's Law provides the first estimate:
+
+`in-flight work = arrival rate × time in the system`
+
+At 1,000 requests per second and 80 ms average service time, the mean is about
+80 requests in flight. Production capacity needs additional headroom for
+latency tails, bursts, retries, garbage collection, and partial failures.
+
+{% metric-strip %}
+{% metric value="λ" label="Arrival rate" detail="New jobs or requests per second" tone="blue" /%}
+{% metric value="W" label="Time in system" detail="Queue wait plus active service time" tone="violet" /%}
+{% metric value="L = λW" label="In-flight demand" detail="Average useful concurrency before safety headroom" tone="cyan" /%}
+{% metric value="Bound" label="Admission limit" detail="The explicit overload and dependency protection contract" tone="amber" /%}
+{% /metric-strip %}
+
+The estimate exposes different limits:
+
+- For **I/O-bound work**, enough concurrency hides waiting time, but database
+  connections, sockets, queue age, and remote quotas usually become the bound.
+- For **CPU-bound work**, throughput approaches the available CPU budget.
+  Additional runnable goroutines add waiting and scheduler pressure.
+- For **mixed work**, measure CPU time and wall time under representative load;
+  neither thread count nor average latency alone reveals the bottleneck.
+- For every profile, use a bounded queue or semaphore so overload has a visible
+  result instead of consuming memory until the process fails.
+
+### Lab 1: find the controlling capacity
+
+Select a workload shape, then change arrival rate, service time, and worker
+limit. Reach both a healthy state and an overloaded state. Notice when adding
+workers changes throughput and when CPU remains the controlling resource.
+
+{% interactive-block id="technology/go-concurrency-capacity-lab" dataFile="/api/content/technology/go-concurrency/data/concurrency-capacity-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Use channels as ownership boundaries
+
+A channel is not a general-purpose queue. It is an in-process handoff with
+synchronization semantics.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Unbuffered" eyebrow="Rendezvous" icon="route" tone="blue" %}
+A send completes only when a receiver is ready. This tightly couples producer
+and consumer progress and is useful when the handoff itself is the contract.
+{% /concept-card %}
+{% concept-card title="Buffered" eyebrow="Bounded timing gap" icon="layers" tone="amber" %}
+A sender can get ahead by at most the buffer capacity. The buffer absorbs a
+short mismatch; it does not create processing capacity or durable storage.
+{% /concept-card %}
+{% concept-card title="Directional" eyebrow="API constraint" icon="shield" tone="green" %}
+Expose `<-chan T` to receivers and `chan<- T` to senders. Direction documents
+ownership and lets the compiler reject accidental use.
+{% /concept-card %}
+{% /concept-grid %}
+
+Follow three channel rules:
+
+1. The sender that knows no more values will be produced owns `close`.
+2. Receivers use the second value from a receive, or `range`, to detect closure.
+3. Every potentially blocking send or receive on a request path needs a
+   cancellation or shutdown case.
+
+Closing broadcasts that no more values will arrive; it does not cancel work,
+flush a queue, or make concurrent senders safe. Sending on a closed channel
+panics, while receiving from a closed channel returns remaining buffered values
+and then the zero value.
+
+{% callout variant="warn" %}
+Do not close a channel from a receiver merely because that receiver is done.
+Other senders may still own valid work. Express receiver cancellation through a
+context or a separate signal and let the sending owner close the data channel.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Propagate cancellation through the whole work graph
+
+A **context** carries cancellation, deadlines, and request-scoped values across
+an API boundary. It should be the first parameter, should not be stored in a
+long-lived struct, and should reach downstream operations that can stop early.
+
+{% process-flow %}
+{% process-step number="1" title="Create one lifetime" label="Owner" %}
+Derive a context at the request, batch, or service boundary. Call its cancel
+function so timers and child resources are released.
+{% /process-step %}
+{% process-step number="2" title="Make admission cancellable" label="Before work" %}
+Use `select` when acquiring a semaphore or sending to a jobs channel. A cancelled
+caller must not remain blocked while trying to start work.
+{% /process-step %}
+{% process-step number="3" title="Pass the remaining budget" label="During work" %}
+Workers and database, HTTP, or RPC calls receive the same context. Do not replace
+it with `context.Background()` inside the operation.
+{% /process-step %}
+{% process-step number="4" title="Join and close outputs" label="After work" %}
+Wait for producers or workers, close outputs exactly once, and make every result
+consumer terminate on closure or cancellation.
+{% /process-step %}
+{% /process-flow %}
+
+The cancellation path matters most when the happy path is slow. A goroutine can
+leak while blocked on:
+
+- a send whose receiver returned early;
+- a receive whose producer exited without closing;
+- a lock or semaphore with no deadline;
+- a timer or ticker that is never stopped;
+- a dependency call created from a detached context;
+- a result channel nobody will read after a request timeout.
+
+### Lab 2: trace cancellation and backpressure
+
+Inject a client timeout, downstream stall, or producer burst. Compare detached
+goroutines with worker-only cancellation and end-to-end structured cancellation.
+Change the buffer and worker count, then inspect where blocked or abandoned work
+survives.
+
+{% interactive-block id="technology/go-concurrency-cancellation-backpressure-lab" dataFile="/api/content/technology/go-concurrency/data/cancellation-backpressure-model.json" /%}
+{% /section-card %}
+
+{% section-card %}
+## Implement a bounded worker pool
+
+A **worker pool** limits active work while a bounded jobs channel controls how
+far producers may get ahead. The pool should define:
+
+- who creates and closes the jobs channel;
+- how submission returns overload or cancellation;
+- how many workers may call the dependency concurrently;
+- whether shutdown drains accepted jobs or cancels them;
+- how errors reach the owner;
+- how all workers are joined before resources are released.
+
+{% code-block file="/api/content/technology/go-concurrency/code/bounded-worker-pool.go" language="go" title="Bound admission and propagate one cancellation cause" /%}
+
+The example uses `select` in both submission and processing. If the batch
+deadline expires, blocked producers and active workers can all leave through the
+same lifecycle boundary.
+{% /section-card %}
+
+{% section-card %}
+## Compose pipelines without orphaning a stage
+
+A **pipeline** transforms a stream through stages. **Fan-out** runs one stage
+with several workers; **fan-in** merges their results. The difficult part is not
+starting stages, but stopping every stage when a downstream consumer returns
+early.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Pipeline" eyebrow="Ordered stages" icon="route" tone="blue" %}
+Each stage owns its output channel and closes it after all sends finish. Inputs
+are receive-only and outputs are returned as receive-only.
+{% /concept-card %}
+{% concept-card title="Fan-out" eyebrow="Parallel stage" icon="layers" tone="violet" %}
+Several workers receive from the same input. Use it when jobs are independent
+and the dependency permits that concurrency.
+{% /concept-card %}
+{% concept-card title="Fan-in" eyebrow="Join" icon="repeat" tone="green" %}
+One goroutine closes the merged output only after all forwarding goroutines
+finish. Closing earlier creates a send-on-closed-channel panic.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/go-concurrency/code/cancellation-safe-pipeline.go" language="go" title="Cancel every pipeline send and close output after workers join" /%}
+
+Ordering is not preserved automatically when several workers consume one input.
+Attach sequence IDs and reorder deliberately when the result contract requires
+input order.
+{% /section-card %}
+
+{% section-card %}
+## Choose channels or shared memory by ownership
+
+“Share memory by communicating” is guidance, not a ban on mutexes. Choose the
+primitive that makes ownership and invariants easiest to prove.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Channel" eyebrow="Transfer work or state" icon="route" tone="blue" %}
+Use when one goroutine hands work, data ownership, or a lifecycle signal to
+another. Channels make backpressure and completion part of the API.
+{% /concept-card %}
+{% concept-card title="Mutex" eyebrow="Protect one invariant" icon="lock" tone="amber" %}
+Use when several goroutines need short access to shared in-memory state. Keep
+the protected fields and lock together; never hold the lock across slow I/O.
+{% /concept-card %}
+{% concept-card title="Atomic" eyebrow="One small state transition" icon="code" tone="violet" %}
+Use for counters, flags, or carefully designed lock-free state. Multiple fields
+that must change together usually need a mutex or one owning goroutine.
+{% /concept-card %}
+{% /concept-grid %}
+
+Avoid copying values that contain `sync.Mutex`, `sync.Once`, or
+`sync.WaitGroup` after first use. Pass pointers to the owning structure and keep
+the synchronization boundary narrow.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat overload as a contract, not a larger buffer
+
+When arrival rate exceeds completion rate, work must wait, be rejected, be
+coalesced, or move to durable asynchronous processing. An in-memory channel
+buffer only chooses how long overload stays hidden.
+
+Use a policy matched to the work:
+
+- **Block with a deadline** when brief waiting is acceptable and the caller
+  still owns the work.
+- **Reject immediately** when preserving service latency is more important than
+  accepting every request.
+- **Drop or coalesce** replaceable telemetry, refresh signals, or stale updates.
+- **Persist to a durable queue** when accepted work must survive process
+  restart and can complete asynchronously.
+- **Partition by tenant or key** when one producer must not consume every worker
+  or queue slot.
+
+Record rejected and cancelled work separately from failed work. A cancellation
+often means the result stopped being useful, not that the dependency was
+incorrect.
+{% /section-card %}
+
+{% section-card %}
+## Test timing, ownership, and shutdown
+
+Concurrency bugs depend on schedules that ordinary unit tests may not exercise.
+Build a test strategy around invariants:
+
+1. Run `go test -race ./...` in CI and under realistic concurrent tests.
+2. Repeat timing-sensitive tests with `go test -count=100` or a focused stress
+   harness instead of adding arbitrary sleeps.
+3. Use fake clocks or explicit synchronization points when time controls the
+   behavior under test.
+4. Cancel at every lifecycle boundary:
+   - before admission;
+   - while a producer is blocked on a channel send;
+   - during dependency I/O;
+   - while results are being consumed.
+5. Close inputs early and make consumers stop early to expose blocked stages.
+6. Verify shutdown reaches zero active workers and that no test depends on
+   goroutine execution order.
+
+Useful production signals include:
+
+- admitted, rejected, queued, active, completed, failed, and cancelled jobs;
+- queue depth and age, not depth alone;
+- worker utilization and dependency concurrency;
+- request latency split into queue wait and service time;
+- goroutine count by build and traffic level;
+- mutex and block profiles during contention;
+- scheduler, garbage collector, and heap signals from runtime metrics;
+- pprof goroutine dumps during suspected leaks.
+{% /section-card %}
+
+{% section-card %}
+## Review the production boundary
+
+Before shipping a concurrent subsystem, confirm:
+
+- Every goroutine has a named owner and termination condition.
+- Admission, active work, queue depth, and dependency concurrency are bounded.
+- Channel closure has one owner and no receiver closes a shared producer path.
+- Every blocking send, receive, acquisition, and dependency call can stop.
+- Request cancellation propagates without replacing the context mid-path.
+- CPU-bound parallelism is measured against available cores.
+- Buffers are sized from an explicit burst or wait budget.
+- Overload is returned, dropped, coalesced, or persisted by policy.
+- Shared state is protected by one clear invariant boundary.
+- Race, cancellation, early-return, and shutdown tests exercise failure paths.
+- Metrics distinguish queueing, service, rejection, failure, and cancellation.
+- Goroutine and profile evidence is captured before guessing at scheduler tuning.
+
+The design is complete when excess demand has a bounded outcome and every
+started task can prove how it finishes.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/go-concurrency/quiz/go-concurrency-production.json" lessonSlug="go-concurrency" title="Test Your Go Concurrency Production Judgment" /%}

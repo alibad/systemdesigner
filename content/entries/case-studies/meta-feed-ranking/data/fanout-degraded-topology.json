@@ -1,0 +1,142 @@
+{
+  "title": "Trace fanout and safe feed fallbacks",
+  "description": "Select a publication or serving scenario. Each route shows where freshness, write amplification, and final policy checks are owned when the normal path is healthy or degraded.",
+  "nodes": [
+    {
+      "id": "author",
+      "label": "Author publishes",
+      "eyebrow": "Write event",
+      "detail": "Creates a versioned post event. Publication does not itself mean every viewer is eligible to see the post.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 22
+    },
+    {
+      "id": "fanout",
+      "label": "Fanout workers",
+      "eyebrow": "Inbox preparation",
+      "detail": "Precompute ordinary follower inbox references from durable events. They are bounded and backpressured to prevent hot-author write storms.",
+      "kind": "stream",
+      "tone": "violet",
+      "x": 28,
+      "y": 22
+    },
+    {
+      "id": "candidate-store",
+      "label": "Candidate store",
+      "eyebrow": "Bounded-age recall",
+      "detail": "Holds recent, versioned candidate references. It improves read latency but cannot replace current policy checks.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 50,
+      "y": 22
+    },
+    {
+      "id": "viewer",
+      "label": "Viewer opens feed",
+      "eyebrow": "Read request",
+      "detail": "Requests a short, ordered slate with session context. The viewer should receive a decision within the serving deadline.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 72
+    },
+    {
+      "id": "retrieval",
+      "label": "Read-time retrieval",
+      "eyebrow": "Fresh recall",
+      "detail": "Combines candidate-store state, follow relationships, high-fanout authors, and recommendation pools when a precomputed path is incomplete.",
+      "kind": "service",
+      "tone": "cyan",
+      "x": 31,
+      "y": 72
+    },
+    {
+      "id": "ranker",
+      "label": "Ranker and features",
+      "eyebrow": "Deadline-bound prediction",
+      "detail": "Scores a small candidate set with session and content features. It may degrade without allowing unvalidated items to be released.",
+      "kind": "analytics",
+      "tone": "violet",
+      "x": 54,
+      "y": 72
+    },
+    {
+      "id": "policy",
+      "label": "Final slate policy",
+      "eyebrow": "Hard constraints",
+      "detail": "Rechecks privacy, safety, blocks, removals, repetition, creator caps, and current policy before returning a slate.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 77,
+      "y": 52
+    },
+    {
+      "id": "response",
+      "label": "Eligible feed response",
+      "eyebrow": "Viewer contract",
+      "detail": "Returns an ordered, explainable slate and emits exposure events asynchronously. It never emits an item only because it has a high stale score.",
+      "kind": "edge",
+      "tone": "green",
+      "x": 91,
+      "y": 78
+    }
+  ],
+  "edges": [
+    { "id": "author-fanout", "from": "author", "to": "fanout", "label": "post event", "mode": "async" },
+    { "id": "fanout-store", "from": "fanout", "to": "candidate-store", "label": "follower references", "mode": "async" },
+    { "id": "viewer-retrieval", "from": "viewer", "to": "retrieval", "label": "feed request" },
+    { "id": "store-retrieval", "from": "candidate-store", "to": "retrieval", "label": "recent candidates" },
+    { "id": "retrieval-ranker", "from": "retrieval", "to": "ranker", "label": "eligible candidates" },
+    { "id": "ranker-policy", "from": "ranker", "to": "policy", "label": "scored candidates" },
+    { "id": "retrieval-policy", "from": "retrieval", "to": "policy", "label": "bounded-age fallback", "via": { "x": 68, "y": 92 } },
+    { "id": "policy-response", "from": "policy", "to": "response", "label": "valid slate" },
+    { "id": "response-viewer", "from": "response", "to": "viewer", "label": "ordered posts", "via": { "x": 50, "y": 96 } }
+  ],
+  "scenarios": [
+    {
+      "id": "ordinary-publication",
+      "label": "Ordinary author publication",
+      "summary": "A normal author publishes. Fanout workers asynchronously prepare follower references, so later feed reads can recall the update without synchronously writing every decision at read time.",
+      "activeEdges": ["author-fanout", "fanout-store"],
+      "focusNode": "fanout",
+      "result": "The write path is durable and backpressured. Candidate references improve recall, but the post is still checked again when a particular viewer receives a slate."
+    },
+    {
+      "id": "fresh-read",
+      "label": "Fresh personalized read",
+      "summary": "A viewer requests a feed. Read-time retrieval combines prepared and fresh sources, the ranker scores the short list, and final slate policy enforces the current rules before responding.",
+      "activeEdges": ["viewer-retrieval", "store-retrieval", "retrieval-ranker", "ranker-policy", "policy-response", "response-viewer"],
+      "focusNode": "ranker",
+      "result": "This is the highest-personalization path. Its capacity must be protected by candidate reuse, deadlines, and independent fallback sources."
+    },
+    {
+      "id": "hot-author-backlog",
+      "label": "Hot author fanout backlog",
+      "summary": "A high-fanout author creates more follower writes than the fanout workers should accept at once. The system avoids a write storm and retrieves the author on read for suitable viewers instead.",
+      "activeEdges": ["author-fanout", "viewer-retrieval", "retrieval-ranker", "ranker-policy", "policy-response", "response-viewer"],
+      "degradedNodes": ["fanout", "candidate-store"],
+      "focusNode": "fanout",
+      "result": "Hybrid fanout trades some freshness and extra read work for controlled write amplification. The system must expose the backlog and freshness cost rather than silently dropping the post."
+    },
+    {
+      "id": "ranker-timeout",
+      "label": "Ranker deadline exceeded",
+      "summary": "The heavy ranker misses its deadline. Retrieval supplies a bounded-age candidate batch, and the final policy gate still filters it for current restrictions and session repetition.",
+      "activeEdges": ["viewer-retrieval", "store-retrieval", "retrieval-policy", "policy-response", "response-viewer"],
+      "degradedNodes": ["ranker"],
+      "focusNode": "ranker",
+      "result": "Personalization quality may fall, but the response remains within the deadline and stale candidates do not bypass privacy, safety, or slate constraints."
+    },
+    {
+      "id": "policy-hold",
+      "label": "Policy uncertainty on a candidate",
+      "summary": "A post has a pending restriction or uncertain safety evidence. Retrieval and ranking can complete, but final policy removes the item rather than treating a cached score as permission to show it.",
+      "activeEdges": ["viewer-retrieval", "store-retrieval", "retrieval-ranker", "ranker-policy"],
+      "degradedNodes": ["policy"],
+      "focusNode": "policy",
+      "result": "The feed selects another eligible candidate or returns fewer items. Failing closed on the affected item preserves the invariant even when the rest of the serving path is healthy."
+    }
+  ]
+}

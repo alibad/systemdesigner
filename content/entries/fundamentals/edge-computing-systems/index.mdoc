@@ -1,0 +1,254 @@
+---
+registryId: edge-computing-systems
+---
+
+{% section-card tone="intro" %}
+## What is edge computing?
+
+**Edge computing runs selected storage and computation near the people, devices, or physical processes that produce and use the data.** An edge node may be a sensor, vehicle computer, store gateway, cellular site, factory server, or small regional cluster. It works with a cloud or central data center rather than replacing one.
+
+In plain language: the cloud is powerful but far away and network-dependent. The edge handles work that cannot wait for a round trip, cannot afford to upload every raw byte, or must continue while disconnected. Central systems still coordinate identity, policy, software, models, long-term data, and fleet-wide analysis.
+
+{% callout variant="info" %}
+The core invariant is **a local decision must remain correct and bounded when the network is slow or unavailable, and every accepted local fact must have a durable path to reconciliation**. Moving code closer to a device is not enough; authority, storage, replay, updates, and recovery must also be designed.
+{% /callout %}
+
+Review [event-driven architecture](/fundamentals/event-driven-architecture) if durable events, retries, and asynchronous consumers are unfamiliar. [Scalability basics](/fundamentals/scalability-basics) provides the capacity vocabulary used in the estimates below.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Recognize the four places work can run
+
+"The edge" is not one machine class. It is a placement spectrum with different owners, constraints, and failure domains.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Device edge" eyebrow="Closest to the signal" icon="speed" tone="cyan" %}
+Microcontrollers, cameras, vehicles, and appliances sample inputs and execute the smallest safety-critical or privacy-sensitive decisions under tight power and memory limits.
+{% /concept-card %}
+
+{% concept-card title="Site edge" eyebrow="Local coordination" icon="server" tone="green" %}
+A gateway or on-premises server aggregates devices, translates protocols, applies local policy, buffers data, and keeps one location operating during a WAN outage.
+{% /concept-card %}
+
+{% concept-card title="Regional edge" eyebrow="Shared low latency" icon="network" tone="violet" %}
+A metro or provider location serves several sites with more compute, storage, and network capacity while remaining nearer than a central region.
+{% /concept-card %}
+
+{% concept-card title="Cloud core" eyebrow="Global coordination" icon="cloud" tone="blue" %}
+Central services train models, keep long-lived authoritative data, evaluate the fleet, distribute policy, and run elastic work that does not need local autonomy.
+{% /concept-card %}
+{% /concept-grid %}
+
+The useful question is not "edge or cloud?" It is **which part of this workload belongs at each layer, under which authority, and what happens when a link or node fails?**
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Derive placement from deadlines, data, and autonomy
+
+Start with a workload contract. Name the decision deadline, raw data rate, acceptable evidence loss, privacy boundary, and longest expected disconnection. Then compare the local and remote paths with the same assumptions.
+
+Suppose a site processes `120` camera frames per second, each averaging `350 KB`. The raw stream is approximately `120 x 350 x 8 / 1000 = 336 Mbps`. If local inference forwards only `4%` as alerts and selected evidence, the uplink carries about `13.44 Mbps`.
+
+{% metric-strip %}
+{% metric value="150 ms" label="Decision deadline" detail="The safety alert must be useful before this limit" tone="rose" /%}
+{% metric value="336 Mbps" label="Raw source traffic" detail="120 frames/s at 350 KB each" tone="blue" /%}
+{% metric value="13.44 Mbps" label="Selected evidence" detail="4% remains after local reduction" tone="green" /%}
+{% metric value="85 ms" label="WAN round trip" detail="Before transfer and cloud compute" tone="amber" /%}
+{% /metric-strip %}
+
+Use a small model before choosing infrastructure:
+
+1. **Calculate raw ingress:** multiply event rate by payload size; include bursts, retries, and protocol overhead in capacity tests.
+2. **Estimate both latency paths:** local processing still has queueing and device I/O; remote processing adds transmission and WAN delay.
+3. **State the disconnected rule:** decide which operations continue, degrade, queue, or stop when central authority is unreachable.
+4. **Preserve evidence:** define what raw samples, summaries, model outputs, and audit events must remain available after a local decision.
+
+{% code-block file="/api/content/fundamentals/edge-computing-systems/code/plan-edge-placement.py" language="python" title="Estimate an edge and cloud placement envelope" /%}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: place a workload under real constraints
+
+Choose a workload contract, then vary event rate, payload size, local reduction, and WAN latency. The lab updates both execution paths, the site uplink, deadline status, and the resulting placement recommendation.
+
+{% interactive-block id="fundamentals/edge-computing-systems-placement-lab" dataFile="/api/content/fundamentals/edge-computing-systems/data/workload-placement-model.json" /%}
+
+Read the result as a contract, not a universal score:
+
+- **Edge-primary, cloud-coordinated** means the local path owns a bounded decision while the cloud distributes policy and learns from selected evidence.
+- **Hybrid** means local processing protects latency, privacy, or bandwidth but central services still own global state or expensive computation.
+- **Cloud-primary** is appropriate when the link, deadline, and disconnected behavior permit central execution.
+- **Redesign required** means adding an edge label cannot repair an impossible deadline or undersized path; reduce work, change the model, or move authority.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Separate the data plane from the control plane
+
+The **data plane** handles live measurements, decisions, and local effects. The **control plane** manages who may run what, which version is desired, and whether the fleet is healthy. A control-plane outage should not silently disable a safety path that was explicitly designed for local autonomy.
+
+{% system-flow title="A bounded edge-to-cloud path" caption="Time-critical decisions stay near the source. Selected evidence and health move upward; signed policy, software, and models move downward." %}
+{% system-node title="Devices and sensors" eyebrow="1. Observe" icon="activity" tone="cyan" %}
+Capture measurements with device identity, event time, quality, and a stable event or operation ID.
+{% /system-node %}
+{% system-node title="Site edge runtime" eyebrow="2. Decide locally" icon="server" tone="green" %}
+Validate input, enforce local authority, run the bounded decision, persist the result, and queue selected evidence.
+{% /system-node %}
+{% system-node title="Regional services" eyebrow="3. Aggregate" icon="network" tone="violet" %}
+Terminate fleet connections, absorb uploads, coordinate nearby sites, and provide a lower-latency fallback when appropriate.
+{% /system-node %}
+{% system-node title="Cloud control plane" eyebrow="4. Coordinate" icon="cloud" tone="blue" %}
+Maintain global identity, desired configuration, releases, model lineage, long-term records, and fleet-wide analysis.
+{% /system-node %}
+{% /system-flow %}
+
+Define ownership at each boundary:
+
+- A device owns its measured signal and stable identity; it does not invent global policy.
+- A site owns only the local decisions explicitly delegated to it, such as a safety stop or preallocated inventory.
+- The regional layer may aggregate and route, but it must not become an undocumented source of truth.
+- The cloud owns global desired state and evidence, while accepting that observed edge state can temporarily differ during disconnection.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Treat disconnection as a normal operating mode
+
+Offline operation is more than caching the last response. The node needs a durable local log, a bounded authority model, storage-pressure behavior, safe replay, and domain-specific conflict rules.
+
+{% process-flow %}
+{% process-step number="1" title="Persist before acting" label="Record" %}
+Write the input, policy or model version, decision, and stable operation identity to durable local storage before acknowledging work that must survive restart.
+{% /process-step %}
+{% process-step number="2" title="Operate within authority" label="Bound" %}
+Continue only operations allowed by the disconnected policy. Use local allocations, expiry times, and safe degradation rather than pretending global state is current.
+{% /process-step %}
+{% process-step number="3" title="Replay idempotently" label="Transfer" %}
+Resume from a durable checkpoint, retry with the same identity, and let the receiver suppress duplicates after ambiguous acknowledgements.
+{% /process-step %}
+{% process-step number="4" title="Reconcile with evidence" label="Converge" %}
+Compare versions and resolve concurrent facts using a domain rule, compensation, or quarantine instead of a blind timestamp winner.
+{% /process-step %}
+{% /process-flow %}
+
+The storage envelope is simple but important: `event rate x average record bytes x outage duration`. Add index, journal, encryption, and compaction overhead, then keep reserve space for the operating system and rollback artifact.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 2: recover an isolated edge node
+
+Inject a WAN outage, site partition, or restart during synchronization. Change the outage duration and local buffer, then compare replay and conflict policies. The lab distinguishes buffer overflow, duplicate effects, erased local intent, and quarantined conflicts.
+
+{% interactive-block id="fundamentals/edge-computing-systems-recovery-lab" dataFile="/api/content/fundamentals/edge-computing-systems/data/offline-recovery-model.json" /%}
+
+{% code-block file="/api/content/fundamentals/edge-computing-systems/code/reconcile-offline-events.py" language="python" title="Model buffer pressure and deterministic replay" /%}
+
+Three guarantees must remain separate:
+
+- **Durability:** accepted local events survive process and node restart until their retention contract expires.
+- **Idempotency:** replaying one operation does not create a second business effect.
+- **Conflict resolution:** concurrent valid changes converge under a stated domain rule or enter a visible review path.
+
+One mechanism does not imply the others. A durable queue can replay duplicates, and an idempotent receiver can still apply the wrong conflict policy.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate software and models as a remote fleet
+
+Thousands of heterogeneous nodes turn deployment into a distributed-systems protocol. Each node may have a different hardware revision, free-space level, network schedule, and current version.
+
+{% process-flow %}
+{% process-step number="1" title="Publish an immutable release" label="Identify" %}
+Sign the artifact and bind its digest to compatible hardware, configuration schema, dependencies, rollback requirements, and model lineage.
+{% /process-step %}
+{% process-step number="2" title="Stage a representative cohort" label="Limit" %}
+Start with lab nodes and a small production cohort that includes slow links, old hardware, and high-value sites.
+{% /process-step %}
+{% process-step number="3" title="Gate on local health" label="Prove" %}
+Check process health, decision latency, storage headroom, upload backlog, error rate, and domain outcomes before expanding.
+{% /process-step %}
+{% process-step number="4" title="Promote or roll back" label="Recover" %}
+Advance gradually only when evidence remains healthy. Keep the previous signed artifact and enough disk space for an autonomous rollback.
+{% /process-step %}
+{% /process-flow %}
+
+For machine-learning inference, report both software and model versions with every decision. Validate model size, runtime compatibility, latency, calibration, and domain outcomes on the target hardware; fleet averages can hide one failing device class.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Secure the physical-to-cloud trust chain
+
+Edge systems expand the attack surface because devices are remote, physically exposed, and connected through networks the operator may not control.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Establish device identity" eyebrow="Provision" icon="key" tone="blue" %}
+Give each node a unique hardware-backed or strongly protected credential. Support rotation, revocation, ownership transfer, and secure re-enrollment without shared fleet secrets.
+{% /concept-card %}
+{% concept-card title="Verify every boot and release" eyebrow="Integrity" icon="shield" tone="green" %}
+Use secure boot, signed immutable artifacts, measured versions, and rollback protection so a node cannot silently run unauthorized code or models.
+{% /concept-card %}
+{% concept-card title="Minimize local data" eyebrow="Privacy" icon="storage" tone="violet" %}
+Store only required evidence, encrypt it, expire it predictably, redact before upload, and bind access to purpose as well as identity.
+{% /concept-card %}
+{% concept-card title="Constrain local authority" eyebrow="Authorization" icon="lock" tone="amber" %}
+Issue short-lived, scoped policy for the operations a site may perform offline. Expired or uncertain authority should degrade safely rather than expand.
+{% /concept-card %}
+{% concept-card title="Protect management paths" eyebrow="Control plane" icon="network" tone="rose" %}
+Authenticate commands mutually, prevent replay, rate-limit expensive work, and separate fleet administration from the application data path.
+{% /concept-card %}
+{% concept-card title="Detect tampering" eyebrow="Evidence" icon="warning" tone="cyan" %}
+Report attestation, configuration drift, unexpected restarts, clock anomalies, enclosure events, and impossible device behavior to a response owner.
+{% /concept-card %}
+{% /concept-grid %}
+
+Assume a node can be stolen or compromised. Segment credentials and authority so one device cannot impersonate the fleet, publish a global release, or read another site's retained data.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Observe the fleet by distribution and freshness
+
+Fleet averages hide the exact nodes that need attention. Measure local behavior, control-plane convergence, and user-visible outcomes by site, hardware class, software version, model version, and network condition.
+
+### Measure the local data plane
+
+- Decision throughput and p95/p99 latency against the local deadline.
+- Input quality, dropped samples, queue depth, buffer time-to-full, disk wear, CPU throttling, memory pressure, and thermal limits.
+- Local effects, duplicate suppression, rejected authority, degraded-mode duration, and safety fallback activation.
+- Upload backlog age, replay rate, conflict count, quarantine age, and time to converge after reconnect.
+
+### Measure the fleet control plane
+
+- Desired-versus-observed software, configuration, policy, certificate, and model versions.
+- Cohort rollout health, failed install rate, rollback success, unreachable-node age, and artifact download pressure.
+- Command acknowledgement uncertainty, attestation failures, credential expiry, clock drift, and configuration drift.
+- Regional ingestion saturation, connection churn, retry storms, and recovery traffic competing with live traffic.
+
+Use service objectives that expose the promise: percentage of local decisions within deadline, percentage of accepted events reconciled within an hour of reconnect, percentage of healthy nodes on an approved version, and percentage of nodes with enough buffer for the declared outage window.
+{% /section-card %}
+
+{% section-card %}
+## Use edge computing only when it protects a real constraint
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong edge fit" eyebrow="Local invariant" icon="speed" tone="green" %}
+Safety control, interactive media, privacy-preserving filtering, local authorization, and disconnected operation justify local execution when the deadline or authority is explicit.
+{% /concept-card %}
+{% concept-card title="Strong hybrid fit" eyebrow="Split responsibilities" icon="layers" tone="blue" %}
+Local inference plus central training, local buffering plus global history, and site decisions plus fleet policy use each layer for the work it can operate well.
+{% /concept-card %}
+{% concept-card title="Strong cloud fit" eyebrow="Elastic coordination" icon="cloud" tone="violet" %}
+Global analytics, model training, long-horizon optimization, cross-site transactions, and batch processing belong centrally when latency and disconnection are not hard constraints.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before production, verify the complete contract:
+
+- Define the local deadline, delegated authority, safe degraded behavior, and cloud fallback.
+- Test the longest outage, full local buffer, restart during replay, duplicate upload, conflict, and clock drift.
+- Sign and stage releases; prove remote rollback on the oldest supported hardware and slowest supported link.
+- Rotate and revoke one device credential without disrupting the rest of the fleet.
+- Restore one node from replacement hardware and prove it cannot reuse stale authority or replay completed effects.
+- Capacity-test recovery traffic alongside live traffic so reconnecting a fleet does not overload regional services.
+
+An edge design is complete when the local path, central coordination, and reconciliation behavior are all explicit and testable.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/edge-computing-systems/quiz/edge-computing-systems-production.json" lessonSlug="edge-computing-systems" title="Edge Computing Production Decisions" /%}

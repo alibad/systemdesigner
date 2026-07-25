@@ -1,0 +1,136 @@
+{
+  "title": "Trace validation, resolution, and partial failure",
+  "description": "Select an execution scenario to see which path runs, where the failure is contained, and what the client can safely infer from the response.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "GraphQL client",
+      "eyebrow": "Named operation",
+      "detail": "Sends one document plus variables and must inspect both data and errors in the response.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 9,
+      "y": 52
+    },
+    {
+      "id": "gateway",
+      "label": "Request gate",
+      "eyebrow": "Parse and validate",
+      "detail": "Selects the operation, validates it against the schema, applies authentication and demand-control policy, and rejects invalid requests before execution.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 31,
+      "y": 22
+    },
+    {
+      "id": "executor",
+      "label": "Field executor",
+      "eyebrow": "Resolve selection",
+      "detail": "Invokes field resolvers, completes values according to their declared types, and records field errors with response paths.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 40,
+      "y": 67
+    },
+    {
+      "id": "policy",
+      "label": "Authorization policy",
+      "eyebrow": "Per object and field",
+      "detail": "Uses trusted identity and domain rules. A valid operation is not automatically authorized to read every selected field.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 63,
+      "y": 18
+    },
+    {
+      "id": "catalog",
+      "label": "Catalog store",
+      "eyebrow": "Products and prices",
+      "detail": "Returns the authoritative product fields. Request-scoped loaders can batch compatible product keys into one backend call.",
+      "kind": "database",
+      "tone": "cyan",
+      "x": 70,
+      "y": 57
+    },
+    {
+      "id": "reviews",
+      "label": "Review service",
+      "eyebrow": "Nullable enrichment",
+      "detail": "Supplies optional review summaries. If this field is nullable, its failure can be represented as null while sibling product fields survive.",
+      "kind": "service",
+      "tone": "green",
+      "x": 69,
+      "y": 87
+    },
+    {
+      "id": "response",
+      "label": "Execution result",
+      "eyebrow": "Data and errors",
+      "detail": "Mirrors the requested response names. Execution errors include paths; a non-null violation propagates to the nearest nullable parent.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 91,
+      "y": 48
+    }
+  ],
+  "edges": [
+    { "id": "submit", "from": "client", "to": "gateway", "label": "document + variables", "mode": "sync" },
+    { "id": "admit", "from": "gateway", "to": "executor", "label": "validated operation", "mode": "sync" },
+    { "id": "check-policy", "from": "executor", "to": "policy", "label": "authorize field", "mode": "sync" },
+    { "id": "load-catalog", "from": "executor", "to": "catalog", "label": "batched load", "mode": "sync" },
+    { "id": "load-reviews", "from": "executor", "to": "reviews", "label": "optional field", "mode": "sync" },
+    { "id": "catalog-result", "from": "catalog", "to": "response", "label": "product data", "mode": "sync" },
+    { "id": "review-result", "from": "reviews", "to": "response", "label": "review data", "mode": "sync", "via": { "x": 84, "y": 92 } },
+    { "id": "execution-result", "from": "executor", "to": "response", "label": "complete values", "mode": "sync", "via": { "x": 65, "y": 41 } },
+    { "id": "return", "from": "response", "to": "client", "label": "data + errors", "mode": "sync", "via": { "x": 50, "y": 3 } },
+    { "id": "request-error", "from": "gateway", "to": "response", "label": "request error", "mode": "sync", "via": { "x": 63, "y": 5 } },
+    { "id": "policy-denied", "from": "policy", "to": "response", "label": "field error", "mode": "sync" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy-batched",
+      "label": "Healthy batched",
+      "summary": "The request passes validation and demand control, then request-scoped loaders batch catalog and review lookups.",
+      "activeEdges": ["submit", "admit", "check-policy", "load-catalog", "load-reviews", "catalog-result", "review-result", "execution-result", "return"],
+      "focusNode": "executor",
+      "result": "The client receives the selected fields in the requested shape. Batching reduces backend calls but does not change the schema contract."
+    },
+    {
+      "id": "cost-rejected",
+      "label": "Cost rejected",
+      "summary": "A broad, deeply nested operation exceeds the service's measured cost policy before any field resolver runs.",
+      "activeEdges": ["submit", "request-error", "return"],
+      "degradedNodes": ["gateway"],
+      "focusNode": "gateway",
+      "result": "Execution does not begin and the response has errors without data. The rejection protects downstream systems from work the schema could otherwise express."
+    },
+    {
+      "id": "nullable-review-failure",
+      "label": "Review timeout",
+      "summary": "The optional review summary times out while core product fields resolve successfully.",
+      "activeEdges": ["submit", "admit", "check-policy", "load-catalog", "load-reviews", "catalog-result", "execution-result", "return"],
+      "failedNodes": ["reviews"],
+      "focusNode": "reviews",
+      "result": "The review field becomes null and its execution error includes a response path. Product data can remain present because the failed field is nullable."
+    },
+    {
+      "id": "nonnull-price-failure",
+      "label": "Non-null price failure",
+      "summary": "The catalog cannot produce a required price field declared non-null on a product result.",
+      "activeEdges": ["submit", "admit", "check-policy", "load-catalog", "execution-result", "return"],
+      "failedNodes": ["catalog"],
+      "degradedNodes": ["response"],
+      "focusNode": "response",
+      "result": "The null propagates from price to the nearest nullable parent. The error path still identifies the original price field, so clients must not treat HTTP success alone as complete operation success."
+    },
+    {
+      "id": "field-denied",
+      "label": "Field denied",
+      "summary": "The document is valid, but the current principal may not read one selected account field.",
+      "activeEdges": ["submit", "admit", "check-policy", "policy-denied", "execution-result", "return"],
+      "degradedNodes": ["policy"],
+      "focusNode": "policy",
+      "result": "Schema validation is not authorization. The domain policy denies the field, and nullability determines how much surrounding data can remain in the result."
+    }
+  ]
+}

@@ -1,0 +1,251 @@
+---
+registryId: orc
+---
+
+{% section-card tone="intro" %}
+## What is Apache ORC?
+
+**Apache ORC, short for Optimized Row Columnar, is a self-describing file format for
+typed, tabular data.** It stores each column in separate encoded streams inside large
+horizontal row batches called stripes. An analytical reader can therefore fetch
+`event_day` and `revenue` without also reading a large `payload` field.
+
+ORC matters because warehouse queries often scan many rows but project only a few
+columns. Its core invariant is: **the reader starts from metadata, rejects stripes and
+row groups that cannot match, then decodes only required column streams from the
+remaining candidates.** File ordering, valid statistics, pushed predicates, and reader
+support determine how much work is actually skipped.
+
+ORC is a write-once file format, not a database. It does not provide a transaction
+manager, catalog, or in-place row updates by itself. Apache Hive can layer ACID
+visibility, base and delta files, and compaction around ORC files.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Strong fit" eyebrow="Warehouse scans" icon="search" tone="green" %}
+Use ORC for typed analytical data read by Hive, Spark, Trino, and other engines whose
+ORC implementations support the file features you write.
+{% /concept-card %}
+{% concept-card title="Weak fit" eyebrow="Point mutation" icon="warning" tone="rose" %}
+Do not treat one ORC file as an OLTP table. Updating a record normally means writing
+new file data and publishing the change through a table or transaction layer.
+{% /concept-card %}
+{% concept-card title="Compatibility rule" eyebrow="Reader fleet" icon="shield" tone="blue" %}
+Test every writer, reader, codec, schema change, and optional index used in production.
+The format contract is broader than any one engine's implementation.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read an ORC file from the tail backward
+
+An **ORC file layout** is the physical map a reader follows to find encoded values.
+The file starts with the `ORC` magic bytes, continues with independently readable
+stripes, and ends with the metadata, footer, postscript, and postscript-length byte
+that make up its tail.
+
+{% system-flow title="ORC physical layout" caption="A reader first obtains the file tail, then uses stripe locations and stripe footers to request the required index and data streams." %}
+{% system-node title="ORC header" eyebrow="Identify" icon="storage" tone="blue" %}
+Three magic bytes let tools recognize an ORC file.
+{% /system-node %}
+{% system-node title="Stripe indexes" eyebrow="Prune and seek" icon="search" tone="cyan" %}
+Optional row-index and Bloom-filter streams describe row groups inside a stripe.
+{% /system-node %}
+{% system-node title="Column streams" eyebrow="Decode" icon="layers" tone="violet" %}
+Typed values are separated into streams such as presence, data, length, and dictionary
+data. The stripe footer records their locations and encodings.
+{% /system-node %}
+{% system-node title="File tail" eyebrow="Plan" icon="braces" tone="green" %}
+The footer defines schema, stripe locations, row count, statistics, and row-index
+stride. The postscript identifies compression and tail lengths.
+{% /system-node %}
+{% /system-flow %}
+
+The hierarchy has four important boundaries:
+
+- **File:** one self-describing sequence of typed rows and its top-level metadata.
+- **Stripe:** an independently readable group of whole rows containing indexes, column
+  data streams, and a stripe footer.
+- **Row group:** the rows represented by one row-index entry. The current ORC
+  specification documents a writer-controlled default of 10,000 rows.
+- **Column stream:** one physical stream for one column's presence, values, lengths,
+  dictionary, index, or Bloom-filter data.
+
+The stripe footer is required because stream order is not fixed. It is the directory
+that maps byte ranges to stream kinds, columns, and encodings. The official
+[ORC specification](https://orc.apache.org/specification/ORCv1/) defines the tail,
+stripes, streams, row indexes, and Bloom-filter indexes.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Make projection and pruning visible
+
+**Projection** chooses which columns to read. **Predicate pruning** uses metadata to
+remove candidate row ranges. These are independent decisions and their effects
+compound:
+
+1. File and stripe statistics can reject whole stripes.
+2. Row-index min/max statistics can reject row groups inside candidate stripes.
+3. An optional Bloom filter can reject more equality candidates after min/max
+   evaluation.
+4. The reader requests only projected column streams from groups that remain.
+5. The execution engine still evaluates the predicate on decoded rows.
+
+The lab uses fixed, inspectable inputs rather than a benchmark:
+
+- Nine row groups contain 10,000 rows each, arranged as three groups per stripe.
+- Per-group compressed chunks are `0.25 MiB` for `event_day`, `0.15 MiB` for
+  `region`, `0.75 MiB` for `customer_id`, `0.35 MiB` for `revenue`, and `4 MiB`
+  for `payload`.
+- The modeled file tail is `96 KiB`; each stripe footer is `12 KiB`.
+- Complete row indexes add `18 KiB` per group to the file. A query reads `3 KiB`
+  per group in each candidate stripe for its predicate-column index.
+- Query selectivity is shown as a workload assumption, but it does not invent latency,
+  throughput, or storage savings.
+
+{% interactive-block id="technology/orc-performance" dataFile="/api/content/technology/orc/data/scan-pruning-model.json" /%}
+
+### A metadata skip is a proof of absence
+
+- A non-overlapping minimum and maximum proves that a stripe or group cannot match.
+- An overlapping range means only "possibly matches"; it does not prove that any row
+  qualifies.
+- Bloom filters can return false positives, so a positive result keeps a group as a
+  candidate. A valid negative result can reject it.
+- Indexes accelerate selection and seeking. They do not contain enough row data to
+  answer an arbitrary query.
+- Sorting or clustering can narrow ranges, but it adds write and maintenance cost.
+
+The Apache Hive
+[ORC language manual](https://hive.apache.org/docs/latest/language/languagemanual-orc/)
+also distinguishes row-group selection from final query evaluation.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Encode typed values, then compress the streams
+
+An **ORC encoding** changes the representation of typed values. A **compression codec**
+then compresses stream chunks. They are separate layers, and the postscript tells a
+reader which general codec is needed.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Run-length encoding" eyebrow="Repeated values" icon="repeat" tone="blue" %}
+Represent repeated or patterned integers with compact runs instead of storing every
+full-width value.
+{% /concept-card %}
+{% concept-card title="Bit packing and delta" eyebrow="Small changes" icon="activity" tone="green" %}
+Use fewer bits for bounded integers and encode differences when nearby values are
+correlated.
+{% /concept-card %}
+{% concept-card title="Dictionary encoding" eyebrow="Repeated strings" icon="boxes" tone="violet" %}
+Store distinct values once and reference them with smaller identifiers while the
+dictionary remains worthwhile.
+{% /concept-card %}
+{% concept-card title="Generic codec" eyebrow="Stream chunks" icon="layers" tone="amber" %}
+Compress encoded bytes with a reader-supported codec such as Zlib, Snappy, LZ4, or
+Zstandard. Codec support and results depend on the implementation and data.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not choose compression from a universal ratio chart. Measure representative data
+for output size, writer CPU, reader CPU, memory, and support across the complete reader
+fleet. The current ORC Java
+[configuration reference](https://orc.apache.org/docs/core-java-config.html) lists
+supported writer settings, but an engine may expose a different subset or different
+defaults.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Keep file, schema, and table semantics separate
+
+An **ORC file schema** describes the typed objects stored in one file. A query engine
+can request a reader schema and map compatible file fields, but mixed files do not
+become a safely evolved table merely because each file is self-describing.
+
+Treat changes as a cross-engine contract:
+
+- Adding a nullable field may let older files expose a missing value, but every reader
+  still needs a tested mapping.
+- Renaming or reordering fields is ambiguous when readers differ between name-based
+  and positional evolution.
+- Type widening, decimal precision changes, timestamp semantics, and case sensitivity
+  need mixed old/new file tests.
+- Removing a field from new files does not remove its historical values from old
+  files.
+
+Hive ACID is a separate table-level mechanism. ORC remains write-once; Hive records
+changes in base and delta files, supplies a committed-transaction snapshot to the
+reader, and compacts without mutating source files in place. See Apache ORC's
+[ACID design](https://orc.apache.org/docs/acid.html) and the Apache Hive
+[transaction documentation](https://hive.apache.org/docs/latest/user/hive-transactions/).
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Decide when metadata fallback is safe
+
+A **safe fallback** reads more bytes while preserving every qualifying row. A
+**best-effort recovery** may return partial output. Those outcomes must never share the
+same success state.
+
+Optional index absence is not the same as corruption. Without a Bloom filter, a reader
+can use min/max and final predicate evaluation. Without row-index streams, it can read
+candidate stripes without row-group pruning. By contrast, a damaged stripe footer
+removes the stream directory, and a truncated file tail removes information needed to
+locate stripes and interpret schema and compression.
+
+{% interactive-block id="technology/orc-metadata-recovery-lab" dataFile="/api/content/technology/orc/data/metadata-failure-model.json" /%}
+
+The ORC Java configuration keeps `orc.skip.corrupt.data` disabled by default. Enabling
+it can be useful for explicit salvage workflows, but a partial scan is not a complete
+count, sum, audit export, or training dataset. Quarantine damaged files, preserve the
+original bytes, identify the affected partitions, and repair from another trusted
+copy whenever completeness matters.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Inspect actual files before changing the layout
+
+An **ORC inspection workflow** compares assumptions with file metadata and query plans.
+The official Java tools can print schema and stripe metadata, list data and metadata
+sizes, and test whether statistics or Bloom filters can reject a value.
+
+{% code-block file="/api/content/technology/orc/code/inspect-orc-file.sh" language="bash" title="Inspect metadata, size, and predicate indexes" /%}
+
+The dependency-free example below reproduces the scan lab's range-overlap arithmetic.
+It reads the co-located JSON model; it does not parse an ORC binary or claim to model
+engine latency.
+
+{% code-block file="/api/content/technology/orc/code/plan-orc-scan.py" language="python" title="Plan stripes and row groups from transparent metadata" /%}
+
+The Apache ORC
+[Java tools reference](https://orc.apache.org/docs/java-tools.html) documents `meta`,
+`sizes`, `check`, and offline recovery options. Pin the tool version to the file
+features and runtime readers you support.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate ORC as a measured storage contract
+
+- Read-path evidence
+  - Capture projected columns, pushed predicates, candidate stripes, skipped row
+    groups, bytes read, decode CPU, and final row counts.
+  - Verify that production plans actually invoke ORC predicate pushdown.
+  - Compare clustered and mixed-order files with representative query windows.
+- File construction
+  - Keep stripes large enough for efficient sequential work but numerous enough for
+    useful parallelism in the target engine.
+  - Avoid tiny files that multiply listing, footer-read, and scheduling work.
+  - Add Bloom filters only to equality predicates where measured pruning repays their
+    file and memory cost.
+- Compatibility and correctness
+  - Test old and new schemas together across every supported engine.
+  - Validate row counts, null counts, min/max ranges, checksums, and codec support
+    before publishing files.
+  - Treat corrupt-data skipping as a labeled salvage mode, never an invisible default.
+- Hive ACID operations
+  - Monitor base/delta file counts and compaction health.
+  - Keep transaction visibility and compaction ownership in the table layer.
+  - Do not infer transactional correctness from a healthy ORC footer alone.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/orc/quiz/orc-read-design.json" lessonSlug="orc" title="Apache ORC Read Design Review" /%}

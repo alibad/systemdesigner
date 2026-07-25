@@ -1,0 +1,257 @@
+---
+registryId: practice-face-generation
+---
+
+{% section-card tone="intro" %}
+## What is a face generation system?
+
+A face generation system creates a new portrait from a prompt and bounded visual controls. A diffusion model may draw the pixels, but a production system also decides whether a request is allowed, schedules scarce GPU work, verifies the result, records provenance, and delivers only an authorized asset.
+
+The core invariant is **no unverified likeness release**: do not publish an image unless the request is permitted, consent and identity evidence are sufficient for the product, the generated pixels pass policy, and an auditable provenance record exists. This practice design assumes a fictional consumer and enterprise portrait product handling **120,000 final images per day**, with a **45-second p95** target for standard jobs.
+
+- **Prerequisite:** Review [text-to-image generation](/practice/text-to-image) for diffusion, asynchronous jobs, and image-safety basics.
+- **First-version boundary:** Create fictional portraits and consent-backed self portraits. Do not support public-figure generation, third-party face uploads, deceptive identity editing, or real-time video.
+{% /section-card %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the use case and guardrails" %}
+
+### Begin with an authorized, bounded journey
+
+1. A user chooses either a fictional portrait or a self-portrait flow and selects bounded controls such as framing, lighting, background class, and style family.
+2. For a self portrait, the service gathers a consent receipt, checks that the supplied references contain one eligible subject, and records a retention choice before reserving GPU capacity.
+3. A durable job produces low-cost previews, then a selected final candidate in quarantine storage.
+4. Independent identity, policy, technical-quality, and provenance gates decide whether the candidate is released, reviewed, retried, or deleted.
+
+### State what the product promises
+
+{% concept-grid columns="2" %}
+{% concept-card title="Functional scope" eyebrow="Product" icon="image" tone="blue" %}
+- Prompted fictional faces and consent-backed self portraits.
+- Bounded controls for crop, lighting, background, clothing category, and style family.
+- Preview, final render, cancellation, download, and deletion workflows.
+- Tenant-scoped presets with a versioned audit trail.
+{% /concept-card %}
+
+{% concept-card title="Service objectives" eyebrow="SLO" icon="gauge" tone="green" %}
+- Accept a valid job quickly and complete standard final jobs within 45 seconds at p95.
+- Keep accepted jobs durable across worker loss and make cancellation and retries idempotent.
+- Deliver through signed URLs from isolated object storage.
+- Report an ETA or reject admission before queues become unbounded.
+{% /concept-card %}
+
+{% concept-card title="Safety boundaries" eyebrow="Likeness" icon="shield" tone="rose" %}
+- Require explicit consent for reference-based likeness generation.
+- Block public-figure, deceptive impersonation, and disallowed sexual or violent requests.
+- Do not use controls to materially change protected traits, apparent age, health, or credentials.
+- Hold low-confidence evidence for review instead of silently lowering a threshold.
+{% /concept-card %}
+
+{% concept-card title="Out of scope" eyebrow="Boundary" icon="boxes" tone="neutral" %}
+- No open-ended face editor or identity-cloning API.
+- No training on user uploads without a separate, revocable agreement.
+- No cross-tenant reference reuse or shared fine-tune artifacts.
+- No release when a required gate or audit dependency is unavailable.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="tip" %}
+The correct degraded response is an honest delay, lower-cost preview, request for better inputs, or review queue. It is never to skip a consent, identity, safety, or provenance gate.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="calculations" title="2. Estimate token, media, and accelerator capacity" %}
+
+### Turn final images into accelerator work
+
+Assume 120,000 final images per day, 1.5 preview candidates per final image, a 3x peak multiplier, and 25% headroom for retries, worker loss, and placement gaps. A preview is product work, not free work: it consumes accelerator time, storage, moderation, and a release decision if it is ever delivered.
+
+{% metric-strip %}
+{% metric value="120K/day" label="Final images" detail="The baseline final-output demand before preview and retry work." tone="blue" /%}
+{% metric value="180K/day" label="Preview candidates" detail="At 1.5 previews per final, direction finding dominates a meaningful share of compute." tone="violet" /%}
+{% metric value="3x" label="Peak multiplier" detail="Size the fleet for bursty demand, not the daily average." tone="amber" /%}
+{% metric value="25%" label="Reserve" detail="Capacity for worker loss, retries, and fragmentation without breaking the target." tone="green" /%}
+{% /metric-strip %}
+
+### Test a capacity and cost plan
+
+{% interactive-block id="practice/face-generation-capacity-cost-lab" /%}
+
+The lab uses planning assumptions rather than a vendor benchmark. In a real design, measure seconds per preview and final at the intended model version, resolution, sampler, safety stack, batch policy, and p95 target. Use those measurements to price **cost per released image**, not only cost per render attempt.
+
+### Keep media and metadata separate
+
+- **Reference inputs:** store encrypted originals in tenant-isolated object storage. A job database holds object IDs and consent references, never image bytes.
+- **Quarantined candidates:** keep previews and finals inaccessible until the release state machine permits publication. Apply short retention to abandoned previews.
+- **Release metadata:** persist the job ID, model and policy versions, input and output score reports, consent receipt ID, disposition, and provenance ID.
+- **Deletion:** fan a deletion request through originals, derived assets, caches, CDN invalidation, evaluation samples, and eligible logs. Legal hold must be an explicit, reviewable state.
+
+{% /accordion-item %}
+
+{% accordion-item id="architecture" title="3. Design the architecture and model tiers" %}
+
+### Keep the job controller separate from model workers
+
+{% system-flow title="Face generation job path" caption="The controller owns durable state and authorization evidence. Workers perform bounded, retryable stages and write candidates only to quarantine." %}
+{% system-node title="Admission" eyebrow="Protect" icon="shield" tone="rose" %}
+Authenticate, reserve quota, classify the request, validate consent evidence, and reject unsupported inputs before queueing expensive work.
+{% /system-node %}
+{% system-node title="Conditioning" eyebrow="Prepare" icon="fingerprint" tone="blue" %}
+Validate reference quality and a single eligible subject; derive a job-scoped conditioning package without exposing raw references broadly.
+{% /system-node %}
+{% system-node title="Tiered generation" eyebrow="Render" icon="server" tone="violet" %}
+Use preview and final queues with compatible model, resolution, and deadline classes so batching is measurable and bounded.
+{% /system-node %}
+{% system-node title="Release and delivery" eyebrow="Inspect" icon="check" tone="green" %}
+Independently assess pixels, identity, policy, and provenance before publishing immutable assets through signed delivery URLs.
+{% /system-node %}
+{% /system-flow %}
+
+### Assign each tier one responsibility
+
+- **Admission tier:** inexpensive policy and consent checks fail closed. Record the decision and policy version before the scheduler sees the job.
+- **Preview tier:** lower resolution or fewer denoising steps provide direction, not an automatic release. It cannot bypass the final identity and policy evidence.
+- **Final tier:** renders the selected configuration with a versioned model and seed manifest, then writes candidates to quarantine storage.
+- **Validation tier:** runs separately from the generator so a model-worker retry cannot publish an image. It owns the only transition to `released`.
+
+Persist an immutable request manifest, stage attempts, leases, input assets, score reports, and a final disposition. Queue messages should contain a job ID and stage, not image bytes. A conditional state transition prevents duplicate messages from publishing multiple final assets.
+
+{% /accordion-item %}
+
+{% accordion-item id="deep-dive" title="4. Deep dive into consent, identity, and safety release gates" %}
+
+### Treat likeness evidence as a release constraint
+
+A high aesthetic score does not prove that an image may be published. For reference-based portraits, require independent evidence:
+
+- **Consent and authority:** a scoped, revocable record links the requester, allowed subject, permitted use, and retention. A checkbox without identity binding is insufficient.
+- **Reference quality:** inputs should contain one eligible subject with enough resolution, pose variation, and lighting diversity to support a faithful result.
+- **Identity similarity and edit bounds:** calibrated protected embeddings compare reference and candidate while a separate detector flags material facial, age, trait, health, or credential changes.
+- **Output safety and provenance:** output classifiers inspect the actual pixels, while the manifest links the released asset to model, policy, threshold, and decision evidence.
+
+### Exercise the release decision
+
+{% interactive-block id="practice/face-generation-release-gate-lab" /%}
+
+Thresholds are not universal constants. Calibrate them against false accepts and false rejects across image quality and relevant demographic slices. Keep uncertain jobs in quarantine, and make consent absence or a hard policy violation a fail-closed stop even if the portrait looks convincing.
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="5. Define evaluation and safety metrics" %}
+
+### Measure independent failure modes
+
+{% concept-grid columns="3" %}
+{% concept-card title="Faithfulness" eyebrow="Identity" icon="fingerprint" tone="blue" %}
+Measure false accepts and false rejects for reference-to-output similarity. Slice results by input quality, lighting, and relevant population coverage.
+{% /concept-card %}
+
+{% concept-card title="Visual quality" eyebrow="Pixels" icon="scan-search" tone="violet" %}
+Measure artifact rate, face framing, pose, focus, lighting, prompt adherence, and human preference separately from likeness evidence.
+{% /concept-card %}
+
+{% concept-card title="Safe release" eyebrow="Policy" icon="shield-check" tone="green" %}
+Track consent failures, blocked and reviewed jobs, safety precision and recall, provenance-write failures, deletion completion, and confirmed escapes.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Use hard gates for launch
+
+1. Freeze a consented, versioned evaluation set with documented gaps and retention rules.
+2. Compare a candidate model with the current model on identity errors, safety precision and recall, human quality, p95 completion, job failure rate, and cost per released image.
+3. Review a stratified blind sample, concentrating on borderline scores and high-impact policy categories.
+4. Canary by tenant and preset; alert on score drift and retain a tested rollback path for both model and threshold configuration.
+
+{% callout variant="warn" %}
+Do not optimize acceptance rate or aesthetic preference alone. A model can improve polish while increasing false likeness accepts or changing outcomes unevenly across groups.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="governance" title="6. Control cost, privacy, and governance" %}
+
+### Make the trade-offs explicit
+
+- **Preview-first versus final-only:** previews reduce wasted final renders and clarify intent, but add compute, storage, and a retention obligation. Expire unselected previews quickly.
+- **Higher similarity threshold versus review volume:** a tighter threshold reduces false accepts but increases retries and review demand. Budget reviewers and make an appeal path part of the policy.
+- **More user control versus edit risk:** bounded selectors are reviewable and testable. Open-ended controls can silently transform identity-relevant features.
+- **Multi-region overflow versus residency:** overflow improves availability only when inputs, metadata, and derived assets may lawfully cross that boundary.
+
+### Assign decision owners
+
+- **Data owner:** defines source rights, consent, deletion, residency, and whether any dataset may be used for evaluation or training.
+- **Model owner:** owns model lineage, benchmarks, slice coverage, worker compatibility, and rollback artifacts.
+- **Policy owner:** owns thresholds, reviewer instructions, appeals, incident response, and the release invariant.
+
+Every released asset must be reproducible from a job ID and manifest without making raw user photos broadly available in logs or dashboards.
+
+{% /accordion-item %}
+
+{% accordion-item id="scaling" title="7. Scale reliably through failures" %}
+
+### Autoscale on deadline risk, not utilization alone
+
+GPU utilization can be high and healthy; an old interactive job is a direct user-visible failure. Scale and shed load from oldest-job age, predicted service time, deadline-miss probability, available VRAM by tier, and regional capacity imbalance.
+
+{% process-flow %}
+{% process-step number="1" title="Cancel obsolete work" label="Queue" %}
+Remove queued jobs the user cancelled or replaced before they consume accelerator time.
+{% /process-step %}
+{% process-step number="2" title="Offer a preview tier" label="Quality" %}
+Make lower resolution or fewer steps explicit, with an ETA and no change to the release gates.
+{% /process-step %}
+{% process-step number="3" title="Delay or reject admission" label="Backpressure" %}
+Return an honest ETA or refuse new work before a growing queue makes the p95 target meaningless.
+{% /process-step %}
+{% process-step number="4" title="Hold release safely" label="Integrity" %}
+Keep candidates quarantined when identity, safety, consent, or provenance dependencies are unavailable.
+{% /process-step %}
+{% /process-flow %}
+
+### Make failure behavior explicit
+
+- Retry transient worker loss with a bounded attempt count and a new attempt ID; do not repeat deterministic out-of-memory errors on the same worker profile.
+- Treat a new stochastic generation as a product retry, not an invisible transport retry. It can change the face, costs, and user-visible outcome.
+- If validation or provenance fails, preserve the candidate in a retention-bounded quarantine and return an honest `pending review` or `cannot complete safely` state.
+- Monitor admission blocks, consent failures, queue age, GPU occupancy, out-of-memory errors, candidate quarantine rate, review age, score drift, provenance failures, deletion lag, and confirmed policy escapes.
+
+{% /accordion-item %}
+
+{% accordion-item id="wrap-up" title="8. Defend the recommendation and extensions" %}
+
+### Present the recommendation in one minute
+
+Use a durable asynchronous job API with consent-aware admission, job-scoped conditioning, separate preview and final GPU queues, quarantine storage, independent identity and output validation, provenance, and signed delivery. The system may trade preview quality, wait time, and admission under pressure, but it never trades away evidence required for release.
+
+### Defend the main choices
+
+- **Diffusion versus GAN:** diffusion usually gives flexible quality and controllability, but serving cost and latency require explicit tiering and scheduling. A GAN can be cheaper for a narrow, stable output space but still needs the same rights and release controls.
+- **Protected embeddings versus raw-reference access:** derived, access-controlled representations limit exposure during validation, but they require calibration, lifecycle controls, and careful handling of biometric sensitivity.
+- **Automatic release versus review:** automation gives scale for clear cases; review protects boundary cases but becomes a queue with cost, latency, and consistency risks.
+- **Watermarking versus provenance records:** a watermark may help downstream detection but can be removed or distorted. Treat it as a supplement to signed provenance and auditable release records.
+
+### Call out risks and extensions
+
+- Generators and classifiers can share biases or adversarial blind spots; red-team both together and independently.
+- Regulation, training-data rights, and allowed identity uses can change the product boundary faster than the model changes.
+- A model upgrade can alter visual quality, identity behavior, latency, VRAM use, and unit economics simultaneously.
+- Add editing, enterprise adapters, or video only as new job types with new consent scopes, evaluation sets, and rollback plans; do not hide them behind the original portrait flow.
+
+### Use these interview follow-ups
+
+1. A launch event doubles peak demand. Which controls protect the queue before p95 collapses?
+2. The output classifier passes but the provenance writer is unavailable. What state should the candidate enter?
+3. A new model raises aesthetic preference but increases false identity accepts in a low-light slice. Should it canary?
+4. An enterprise asks for a style preset that changes apparent age. How does the policy and consent model change?
+5. The human-review queue reaches six hours. Which jobs are blocked, retried, or allowed to release automatically?
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/face-generation/quiz/face-generation-design-review.json"
+   lessonSlug="practice-face-generation"
+   title="Face Generation Design Review" /%}

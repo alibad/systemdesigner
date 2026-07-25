@@ -1,0 +1,211 @@
+# Microservices Architecture with Docker Compose
+version: '3.8'
+
+services:
+  # API Gateway
+  api-gateway:
+    build: ./gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+    depends_on:
+      - model-service
+      - embedding-service
+      - safety-service
+    networks:
+      - llm-network
+
+  # Model Serving Service
+  model-service:
+    build: ./model-service
+    deploy:
+      replicas: 3
+    environment:
+      - MODEL_PATH=/models
+      - BATCH_SIZE=8
+      - MAX_WORKERS=4
+    volumes:
+      - ./models:/models:ro
+    networks:
+      - llm-network
+
+  # Embedding Service
+  embedding-service:
+    build: ./embedding-service
+    deploy:
+      replicas: 2
+    environment:
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+    networks:
+      - llm-network
+
+  # Safety/Moderation Service
+  safety-service:
+    build: ./safety-service
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    networks:
+      - llm-network
+
+  # Caching Layer
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - llm-network
+
+  # Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=password
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - llm-network
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - llm-network
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - llm-network
+
+networks:
+  llm-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  rabbitmq-data:
+  grafana-data:
+
+# Individual Service Example - Model Service
+# model-service/main.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import asyncio
+from typing import List, Dict
+import os
+
+app = FastAPI(title="Model Service")
+
+class GenerationRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 100
+    temperature: float = 0.7
+    batch_id: str = None
+
+class ModelService:
+    def __init__(self):
+        self.model = None
+        self.tokenizer = None
+        self.batch_queue = []
+        self.batch_size = int(os.getenv("BATCH_SIZE", "4"))
+        self.max_workers = int(os.getenv("MAX_WORKERS", "2"))
+
+    async def load_model(self):
+        """Load model and tokenizer"""
+        model_path = os.getenv("MODEL_PATH", "microsoft/DialoGPT-medium")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+
+        # Start batch processing
+        asyncio.create_task(self.batch_processor())
+
+    async def batch_processor(self):
+        """Process requests in batches for efficiency"""
+        while True:
+            if len(self.batch_queue) >= self.batch_size:
+                batch = self.batch_queue[:self.batch_size]
+                self.batch_queue = self.batch_queue[self.batch_size:]
+
+                await self.process_batch(batch)
+
+            await asyncio.sleep(0.1)
+
+    async def process_batch(self, batch: List[Dict]):
+        """Process a batch of requests"""
+        prompts = [item["request"].prompt for item in batch]
+
+        # Tokenize batch
+        inputs = self.tokenizer(prompts, return_tensors="pt",
+                              padding=True, truncation=True)
+
+        # Generate
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=batch[0]["request"].max_tokens,
+                temperature=batch[0]["request"].temperature,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+        # Decode results
+        results = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        # Set results for each request
+        for i, item in enumerate(batch):
+            item["future"].set_result(results[i])
+
+service = ModelService()
+
+@app.on_event("startup")
+async def startup():
+    await service.load_model()
+
+@app.post("/generate")
+async def generate(request: GenerationRequest):
+    """Generate text from prompt"""
+    if service.model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    # Create future for async result
+    future = asyncio.Future()
+
+    # Add to batch queue
+    service.batch_queue.append({
+        "request": request,
+        "future": future
+    })
+
+    # Wait for result
+    try:
+        result = await asyncio.wait_for(future, timeout=30.0)
+        return {"generated_text": result}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Generation timeout")
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "model_loaded": service.model is not None,
+        "queue_size": len(service.batch_queue)
+    }

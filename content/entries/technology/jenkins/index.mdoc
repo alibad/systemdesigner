@@ -1,0 +1,261 @@
+---
+registryId: jenkins
+---
+
+{% section-card tone="intro" %}
+## What is Jenkins?
+
+**Jenkins is an automation server that turns repository events and operator decisions
+into repeatable work.** Teams commonly use it for continuous integration: compile a
+change, run tests, record evidence, package one artifact, and promote that artifact
+through controlled environments.
+
+Jenkins separates coordination from execution. The **controller** stores configuration,
+evaluates pipeline state, serves the UI and API, and schedules work. **Agents** provide
+the machines or containers where build steps run. An **executor** is one concurrent work
+slot on a node.
+
+{% callout variant="info" %}
+### Core invariant
+
+Repository-controlled code should run only on an agent whose isolation, capacity, and
+credentials match that code's trust level. The controller remains a control plane, not
+a general-purpose build machine.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Controller" eyebrow="Coordinates" icon="workflow" tone="blue" %}
+Authenticates users, loads job and plugin configuration, schedules work, and persists
+pipeline state.
+{% /concept-card %}
+{% concept-card title="Pipeline" eyebrow="Defines policy" icon="code" tone="cyan" %}
+A source-controlled `Jenkinsfile` describes stages, agents, conditions, options, and
+steps.
+{% /concept-card %}
+{% concept-card title="Agent" eyebrow="Runs commands" icon="server" tone="green" %}
+A static or dynamically provisioned worker supplies tools, workspaces, and executors.
+{% /concept-card %}
+{% concept-card title="Executor" eyebrow="Limits concurrency" icon="gauge" tone="amber" %}
+One slot can perform one scheduled task at a time; adding slots also adds resource
+contention.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one change through the system
+
+A pipeline begins with an event, but the event does not perform the build. The
+controller decides which job and agent are eligible, then the selected agent executes
+the workspace commands and returns logs, test results, and artifact references.
+
+{% system-flow title="One Jenkins feedback path" caption="Control stays on the controller; repository-controlled commands run on an agent." %}
+{% system-node title="Repository event" eyebrow="Trigger" icon="code" tone="cyan" %}
+A push, pull request, schedule, API call, or manual action identifies the revision and
+pipeline to evaluate.
+{% /system-node %}
+{% system-node title="Controller decision" eyebrow="Queue" icon="workflow" tone="blue" %}
+Jenkins evaluates conditions and labels, records state, and waits until an eligible
+executor is available.
+{% /system-node %}
+{% system-node title="Agent execution" eyebrow="Workspace" icon="server" tone="green" %}
+The agent checks out source and runs the declared tools inside its operating-system
+boundary.
+{% /system-node %}
+{% system-node title="Evidence and artifact" eyebrow="Output" icon="boxes" tone="violet" %}
+Tests, logs, provenance, and an immutable package support review, promotion, rollback,
+and investigation.
+{% /system-node %}
+{% /system-flow %}
+
+The official [node documentation](https://www.jenkins.io/doc/book/managing/nodes/)
+distinguishes controllers, nodes, agents, and executors. Labels express required
+capabilities such as an operating system or signing tool; they do not create isolation
+by themselves.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size agent capacity from executor time
+
+Executor count is not a performance score. A CPU-heavy build may need one executor on a
+machine, while several small I/O-bound tasks may coexist. Start with measured work:
+
+- **Demand:** builds per hour multiplied by aggregate executor-minutes per build.
+- **Capacity:** agent executors multiplied by 60 executor-minutes per hour.
+- **Utilization:** demand divided by capacity.
+- **Burst recovery:** queued builds divided by spare throughput after arrivals return
+  to normal.
+
+The lab uses deterministic averages. It excludes provisioning delay, retries, job
+priority, label mismatches, controller overhead, and random service-time variation.
+Treat its planning target as an explicit assumption, then compare the result with real
+queue duration, CPU, memory, disk, and network telemetry.
+
+{% interactive-block id="technology/jenkins-capacity" dataFile="/api/content/technology/jenkins/data/executor-pressure-model.json" /%}
+
+Adding executors can reduce queueing only when agents have enough resources. Jenkins'
+[agent guidance](https://www.jenkins.io/doc/book/using/using-agents/) recommends
+considering CPU, memory, I/O, and network demand, and describes one executor per node
+as the safest starting configuration.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Separate code trust from deployment authority
+
+Build scripts execute repository-controlled code. A pull request can change a test,
+package hook, compiler plugin, or helper script without changing the `Jenkinsfile`.
+That code must not share the controller host or a credential-bearing worker merely
+because both jobs need the same operating system.
+
+Switch among the topology scenarios. The selected route updates the active path,
+component status, and user-visible consequence.
+
+{% topology-lab dataFile="/api/content/technology/jenkins/data/execution-boundary-scenarios.json" /%}
+
+Apply the boundary deliberately:
+
+- set built-in-node executors to zero and provide agents before moving production
+  workloads;
+- use fresh agents or workspaces for mutually untrusted projects where practical;
+- keep pull-request validation away from production credentials and host control;
+- reserve protected deployment agents for reviewed code and narrowly scoped authority;
+- keep Agent-to-Controller Access Control enabled, while recognizing that it does not
+  turn an agent into a complete sandbox.
+
+Jenkins documents these boundaries in
+[Controller Isolation](https://www.jenkins.io/doc/book/security/controller-isolation/),
+[Securing Builds](https://www.jenkins.io/doc/book/security/securing-builds/), and its
+[multibranch credential guidance](https://www.jenkins.io/doc/book/security/securing-org-folders-and-multibranch-pipelines/).
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Encode the delivery contract in a Jenkinsfile
+
+Jenkins supports Declarative and Scripted Pipeline syntax. Declarative Pipeline provides
+an opinionated `pipeline` structure and is the clearer default for a reviewable delivery
+contract. Scripted Pipeline exposes Groovy control flow; keep substantial reusable logic
+in tested scripts or Shared Libraries rather than growing one large controller-executed
+program.
+
+The example below makes the execution and authority boundaries visible:
+
+- `agent none` avoids reserving one executor for the whole pipeline;
+- each stage selects a purpose-specific agent label;
+- retention, concurrency, and total runtime are bounded;
+- missing JUnit output fails instead of silently erasing test evidence;
+- approval happens before allocating the deployment agent;
+- the protected stage receives one named credential and uses shell expansion rather
+  than Groovy interpolation.
+
+{% code-block file="/api/content/technology/jenkins/code/declarative-delivery-pipeline.groovy" language="groovy" title="A bounded Declarative Pipeline" /%}
+
+The example uses `stash` and `unstash` for a small transfer inside one pipeline run.
+Those files are normally discarded after the run. For a large or long-lived release,
+publish once to an external artifact repository, record an immutable version and
+digest, then promote that identity.
+
+Validate directives and installed-plugin steps with the controller's Declarative
+Directive Generator and Snippet Generator. The current
+[Pipeline syntax reference](https://www.jenkins.io/doc/book/pipeline/syntax/),
+[basic step reference](https://www.jenkins.io/doc/pipeline/steps/workflow-basic-steps/),
+and [JUnit step reference](https://www.jenkins.io/doc/pipeline/steps/junit/) define the
+behavior used here.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat credentials as executable authority
+
+A Jenkins credential ID is a lookup handle, not a sandbox. Binding a secret makes it
+available to the selected process environment. Log masking helps prevent accidental
+printing, but pipeline code with access can still copy, transmit, or transform the
+secret.
+
+Use these controls together:
+
+- define credentials at the lowest folder or item scope that needs them;
+- do not bind trusted credentials around tests or tools controlled by an untrusted
+  change;
+- avoid sharing a multi-executor host between secret-bearing work and untrusted jobs;
+- use single-quoted Groovy shell bodies so the shell, not Groovy, expands secret
+  variables;
+- disable command tracing around secret use and prevent tools from dumping their
+  environment;
+- rotate or revoke credentials after suspected controller, agent, log, or backup
+  exposure.
+
+The official [credentials guidance](https://www.jenkins.io/doc/book/security/credentials/)
+and [`withCredentials` step reference](https://www.jenkins.io/doc/pipeline/steps/credentials-binding/)
+describe scope, masking limits, process visibility, and secret-file workspace risks.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Manage the controller separately from application pipelines
+
+A `Jenkinsfile` controls one delivery workflow. Controller configuration controls the
+system that evaluates every workflow: executors, security realm, authorization,
+credentials, clouds, tools, plugin settings, and retention defaults.
+
+The optional Configuration as Code plugin can represent supported controller settings
+as YAML. This minimal guardrail keeps the built-in node from executing builds.
+
+{% code-block file="/api/content/technology/jenkins/code/controller-isolation.yaml" language="yaml" title="Controller isolation with Configuration as Code" /%}
+
+Export configuration from the same staged controller and plugin set that will consume
+it; plugin-provided YAML keys can change with plugin versions. Store reviewable
+configuration in source control, keep secrets outside it, validate the file, and test a
+restart before promotion. Jenkins' current
+[Configuration as Code guide](https://www.jenkins.io/doc/book/managing/casc/) explains
+the plugin requirement, YAML sections, export, reload, and source-control workflow.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Operate Jenkins as a production system
+
+Jenkins behavior is the combination of controller state, core version, Java runtime,
+plugins, configuration, agents, and external dependencies. Upgrade and recovery plans
+must preserve that combination rather than treating the controller as a replaceable UI.
+
+{% process-flow %}
+{% process-step number="1" title="Observe the feedback path" label="Measure" %}
+Track queue duration by label, executor occupancy, agent provisioning and disconnects,
+build duration, failure and retry rate, controller CPU and heap, disk latency, and
+artifact-transfer failures.
+{% /process-step %}
+{% process-step number="2" title="Bound retained state" label="Control" %}
+Set job timeouts, concurrency rules, build and artifact retention, log limits, workspace
+cleanup, and caps on dynamically provisioned agents.
+{% /process-step %}
+{% process-step number="3" title="Rehearse core and plugins" label="Upgrade" %}
+Inventory exact versions, read the applicable LTS upgrade guides and security
+advisories, restore production-like state in staging, and run representative pipelines.
+{% /process-step %}
+{% process-step number="4" title="Prove recovery" label="Restore" %}
+Back up required `JENKINS_HOME` state, protect controller key material separately,
+restore into isolation, verify credentials, and measure recovery against the objective.
+{% /process-step %}
+{% /process-flow %}
+
+Keep the plugin set small and owned. Plugins execute inside the controller and can add
+Pipeline steps, configuration formats, dependencies, permissions, and upgrade
+constraints. Use the Update Center and plugin health information, but test the exact
+core-plus-plugin graph before production rollout.
+
+See Jenkins' official guidance for
+[managing plugins](https://www.jenkins.io/doc/book/managing/plugins/),
+[backing up and restoring](https://www.jenkins.io/doc/book/system-administration/backing-up/),
+and [platform support](https://www.jenkins.io/doc/book/platform-information/). Exact
+supported Java versions and upgrade requirements change over time, so check them for
+the Jenkins release you are deploying.
+
+{% callout variant="warn" %}
+### Failure drill
+
+Disable one agent label, exhaust one pool, remove one required test report, interrupt
+artifact transfer, and restore the controller into an isolated environment. Verify
+that work queues on the intended boundary, missing evidence fails visibly, no
+production secret reaches pull-request code, and the restored controller can resume
+the required service.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/jenkins/quiz/jenkins-production-decisions.json" lessonSlug="jenkins" title="Jenkins Production Decisions" /%}

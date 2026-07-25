@@ -1,0 +1,135 @@
+{
+  "title": "Trace the serving path through dependency failure",
+  "description": "Switch scenarios to see which stages consume the request deadline, which controls isolate failure, and what the caller receives.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Product caller",
+      "eyebrow": "Deadline",
+      "detail": "Sends a versioned request with an end-to-end deadline and handles success, fallback, abstention, or explicit failure.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 8,
+      "y": 22
+    },
+    {
+      "id": "gateway",
+      "label": "Inference gateway",
+      "eyebrow": "Admission",
+      "detail": "Authenticates, validates, rate-limits, rejects expired work, and routes only traffic that the serving tier can accept.",
+      "kind": "edge",
+      "tone": "blue",
+      "x": 27,
+      "y": 22
+    },
+    {
+      "id": "features",
+      "label": "Feature service",
+      "eyebrow": "Compatible state",
+      "detail": "Returns timestamped features compatible with the requested model or an explicit stale, missing, or unavailable status.",
+      "kind": "cache",
+      "tone": "violet",
+      "x": 47,
+      "y": 22
+    },
+    {
+      "id": "runtime",
+      "label": "Model runtime",
+      "eyebrow": "Bounded queue",
+      "detail": "Batches compatible requests, executes the pinned model, and sheds load before memory or queue growth breaks every request.",
+      "kind": "service",
+      "tone": "green",
+      "x": 68,
+      "y": 22
+    },
+    {
+      "id": "policy",
+      "label": "Decision policy",
+      "eyebrow": "Guardrails",
+      "detail": "Applies thresholds, uncertainty handling, product constraints, and the approved fallback for this decision class.",
+      "kind": "security",
+      "tone": "amber",
+      "x": 89,
+      "y": 22
+    },
+    {
+      "id": "fallback",
+      "label": "Fallback store",
+      "eyebrow": "Independent",
+      "detail": "Provides a cached, heuristic, smaller-model, or abstention response without calling the failed dependency again.",
+      "kind": "database",
+      "tone": "rose",
+      "x": 47,
+      "y": 62
+    },
+    {
+      "id": "telemetry",
+      "label": "Outcome stream",
+      "eyebrow": "Asynchronous",
+      "detail": "Records prediction, fallback, exposure, and outcome join keys without delaying or determining the response.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 76,
+      "y": 62
+    }
+  ],
+  "edges": [
+    { "id": "client-gateway", "from": "client", "to": "gateway", "label": "request" },
+    { "id": "gateway-features", "from": "gateway", "to": "features", "label": "fetch" },
+    { "id": "features-runtime", "from": "features", "to": "runtime", "label": "tensor" },
+    { "id": "runtime-policy", "from": "runtime", "to": "policy", "label": "prediction" },
+    { "id": "policy-telemetry", "from": "policy", "to": "telemetry", "label": "outcome link", "mode": "async" },
+    { "id": "gateway-fallback", "from": "gateway", "to": "fallback", "label": "degrade", "via": { "x": 27, "y": 62 } },
+    { "id": "features-fallback", "from": "features", "to": "fallback", "label": "missing or stale" },
+    { "id": "runtime-fallback", "from": "runtime", "to": "fallback", "label": "overloaded", "via": { "x": 62, "y": 48 } },
+    { "id": "fallback-policy", "from": "fallback", "to": "policy", "label": "safe alternative", "via": { "x": 76, "y": 42 } },
+    { "id": "fallback-telemetry", "from": "fallback", "to": "telemetry", "label": "fallback event", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy request",
+      "summary": "The request stays inside its deadline from admission through compatible features, model execution, and policy.",
+      "activeEdges": ["client-gateway", "gateway-features", "features-runtime", "runtime-policy", "policy-telemetry"],
+      "focusNode": "runtime",
+      "result": "The caller receives the model-backed decision and telemetry leaves asynchronously."
+    },
+    {
+      "id": "stale-features",
+      "label": "Stale features",
+      "summary": "Feature freshness fails the model contract, so the request does not continue into inference with misleading inputs.",
+      "activeEdges": ["client-gateway", "gateway-features", "features-fallback", "fallback-policy", "fallback-telemetry"],
+      "degradedNodes": ["features", "policy"],
+      "focusNode": "features",
+      "result": "The policy returns a declared fallback or abstains, preserving correctness over apparent availability."
+    },
+    {
+      "id": "runtime-overload",
+      "label": "Runtime overload",
+      "summary": "The runtime reaches its queue or memory envelope and rejects work before tail latency becomes unbounded.",
+      "activeEdges": ["client-gateway", "gateway-features", "features-runtime", "runtime-fallback", "fallback-policy", "fallback-telemetry"],
+      "degradedNodes": ["gateway", "runtime", "policy"],
+      "focusNode": "runtime",
+      "result": "Lower-priority work degrades through a safe alternative while admission control protects critical traffic."
+    },
+    {
+      "id": "runtime-outage",
+      "label": "Runtime outage",
+      "summary": "The model tier is unavailable, but the fallback path remains independent and does not retry the same failed service.",
+      "activeEdges": ["client-gateway", "gateway-fallback", "fallback-policy", "fallback-telemetry"],
+      "failedNodes": ["runtime"],
+      "degradedNodes": ["policy"],
+      "focusNode": "runtime",
+      "result": "The product returns a bounded fallback, abstention, or explicit unavailable response according to error cost."
+    },
+    {
+      "id": "telemetry-outage",
+      "label": "Telemetry outage",
+      "summary": "Outcome logging is unavailable while the prediction and policy path remains healthy.",
+      "activeEdges": ["client-gateway", "gateway-features", "features-runtime", "runtime-policy"],
+      "failedNodes": ["telemetry"],
+      "focusNode": "telemetry",
+      "result": "Inference continues; bounded local buffering or loss is visible but cannot delay the caller."
+    }
+  ]
+}

@@ -1,0 +1,279 @@
+{
+  "title": "Trace one AutoGen run across its real boundaries",
+  "description": "Compare execution models, advance one transition at a time, and inject failures to see where messages, state, and recovery responsibility live.",
+  "defaults": {
+    "topologyId": "round-robin",
+    "failureId": "tool-timeout",
+    "checkpointed": true,
+    "idempotentTools": false
+  },
+  "topologies": [
+    {
+      "id": "single-agent",
+      "label": "AgentChat single agent",
+      "detail": "Application code owns one AssistantAgent and its bounded model/tool loop.",
+      "boundary": "Application-owned",
+      "stateOwner": "Agent context",
+      "messageMode": "Task / response",
+      "termination": "Agent returns or budget stops",
+      "steps": [
+        {
+          "id": "single-task",
+          "actor": "Application",
+          "target": "AssistantAgent",
+          "message": "run(task)",
+          "boundary": "Authenticated request",
+          "detail": "The application constructs the task and chooses which tools this invocation may expose.",
+          "failurePoint": "none"
+        },
+        {
+          "id": "single-model",
+          "actor": "AssistantAgent",
+          "target": "Model client",
+          "message": "messages plus tool schemas",
+          "boundary": "Inference proposal",
+          "detail": "The model can propose content or a tool call; it does not receive application authority.",
+          "failurePoint": "runtime"
+        },
+        {
+          "id": "single-tool",
+          "actor": "AssistantAgent",
+          "target": "Scoped tool adapter",
+          "message": "validated function call",
+          "boundary": "External effect",
+          "detail": "The adapter checks trusted identity, ownership, approval, and idempotency before execution.",
+          "failurePoint": "tool"
+        },
+        {
+          "id": "single-observe",
+          "actor": "Tool adapter",
+          "target": "AssistantAgent",
+          "message": "typed observation",
+          "boundary": "Untrusted result",
+          "detail": "The result is bounded and validated before it becomes model-visible context.",
+          "failurePoint": "handler"
+        },
+        {
+          "id": "single-result",
+          "actor": "AssistantAgent",
+          "target": "Application",
+          "message": "TaskResult",
+          "boundary": "Application validation",
+          "detail": "The application checks the final contract and records a completed, blocked, or incomplete disposition.",
+          "failurePoint": "none"
+        }
+      ]
+    },
+    {
+      "id": "round-robin",
+      "label": "Round-robin team",
+      "detail": "Participants share the thread and take turns in a fixed order.",
+      "boundary": "Application-owned team",
+      "stateOwner": "Team + participants",
+      "messageMode": "Shared responses",
+      "termination": "Checked after each agent response",
+      "steps": [
+        {
+          "id": "round-task",
+          "actor": "Application",
+          "target": "Team",
+          "message": "run_stream(task)",
+          "boundary": "Run admission",
+          "detail": "The application starts a run with limits, identity, telemetry context, and a termination policy.",
+          "failurePoint": "none"
+        },
+        {
+          "id": "round-planner",
+          "actor": "Team manager",
+          "target": "Planner",
+          "message": "shared task thread",
+          "boundary": "Fixed speaker turn",
+          "detail": "The manager selects the next participant by order; the planner response is shared with the team.",
+          "failurePoint": "runtime"
+        },
+        {
+          "id": "round-operator",
+          "actor": "Team manager",
+          "target": "Operator",
+          "message": "planner response",
+          "boundary": "Shared context",
+          "detail": "Every participant in the team can receive the group thread, so disclosure scope must be deliberate.",
+          "failurePoint": "handler"
+        },
+        {
+          "id": "round-tool",
+          "actor": "Operator",
+          "target": "Scoped tool adapter",
+          "message": "tool call and receipt",
+          "boundary": "External effect",
+          "detail": "AgentChat executes the tool within the agent; the team manager is not an authorization service.",
+          "failurePoint": "tool"
+        },
+        {
+          "id": "round-review",
+          "actor": "Team manager",
+          "target": "Reviewer",
+          "message": "updated shared thread",
+          "boundary": "Review turn",
+          "detail": "The reviewer sees the trajectory and emits a response; extra turns consume latency and context.",
+          "failurePoint": "none"
+        },
+        {
+          "id": "round-stop",
+          "actor": "Termination condition",
+          "target": "Application",
+          "message": "stop reason and TaskResult",
+          "boundary": "Consistent turn boundary",
+          "detail": "The condition evaluates the response delta and the application validates the resulting disposition.",
+          "failurePoint": "none"
+        }
+      ]
+    },
+    {
+      "id": "core-direct",
+      "label": "Core direct message",
+      "detail": "A runtime-managed agent sends one addressed request and awaits the handler response.",
+      "boundary": "Runtime-owned agents",
+      "stateOwner": "Per agent",
+      "messageMode": "Request / response",
+      "termination": "Caller or runtime becomes idle",
+      "steps": [
+        {
+          "id": "direct-register",
+          "actor": "Application",
+          "target": "Core runtime",
+          "message": "register agent factories",
+          "boundary": "Lifecycle configuration",
+          "detail": "The runtime receives factories and creates an agent instance when its AgentId first receives a message.",
+          "failurePoint": "none"
+        },
+        {
+          "id": "direct-send",
+          "actor": "Caller agent",
+          "target": "Runtime",
+          "message": "send_message(message, AgentId)",
+          "boundary": "Addressed delivery",
+          "detail": "The sender awaits one receiver and can use the returned value as a response.",
+          "failurePoint": "runtime"
+        },
+        {
+          "id": "direct-handler",
+          "actor": "Runtime",
+          "target": "Receiver handler",
+          "message": "typed serializable message",
+          "boundary": "Type-routed handler",
+          "detail": "A handler exception propagates to the awaiting sender instead of becoming a successful response.",
+          "failurePoint": "handler"
+        },
+        {
+          "id": "direct-tool",
+          "actor": "Receiver handler",
+          "target": "Scoped dependency",
+          "message": "bounded call",
+          "boundary": "External effect",
+          "detail": "Runtime delivery does not replace authorization, timeout, or duplicate-effect controls.",
+          "failurePoint": "tool"
+        },
+        {
+          "id": "direct-return",
+          "actor": "Receiver handler",
+          "target": "Caller agent",
+          "message": "typed response",
+          "boundary": "Awaited result",
+          "detail": "The caller receives either the handler value or a propagated exception and chooses the next transition.",
+          "failurePoint": "none"
+        }
+      ]
+    },
+    {
+      "id": "core-broadcast",
+      "label": "Core topic broadcast",
+      "detail": "A publisher emits a one-way message to all matching subscriptions.",
+      "boundary": "Runtime-owned agents",
+      "stateOwner": "Per subscriber",
+      "messageMode": "One-way fan-out",
+      "termination": "Runtime becomes idle",
+      "steps": [
+        {
+          "id": "broadcast-subscribe",
+          "actor": "Application",
+          "target": "Core runtime",
+          "message": "register subscriptions",
+          "boundary": "Delivery policy",
+          "detail": "Topic and agent types determine which runtime-managed subscribers receive the message.",
+          "failurePoint": "none"
+        },
+        {
+          "id": "broadcast-publish",
+          "actor": "Publisher agent",
+          "target": "Topic",
+          "message": "publish_message(message, TopicId)",
+          "boundary": "One-way fan-out",
+          "detail": "Publication returns no subscriber response, even if a handler returns a value.",
+          "failurePoint": "runtime"
+        },
+        {
+          "id": "broadcast-deliver",
+          "actor": "Runtime",
+          "target": "Matching subscribers",
+          "message": "independent deliveries",
+          "boundary": "Failure isolation",
+          "detail": "A subscriber exception is logged and is not propagated back to the publisher.",
+          "failurePoint": "handler"
+        },
+        {
+          "id": "broadcast-effect",
+          "actor": "Subscriber",
+          "target": "Scoped dependency",
+          "message": "subscriber-owned action",
+          "boundary": "Independent effect",
+          "detail": "Each subscriber needs its own authorization, deduplication, and observability contract.",
+          "failurePoint": "tool"
+        },
+        {
+          "id": "broadcast-observe",
+          "actor": "Telemetry",
+          "target": "Operator",
+          "message": "delivery and handler events",
+          "boundary": "Operational evidence",
+          "detail": "The publisher cannot infer fan-out success, so subscriber health must be measured separately.",
+          "failurePoint": "none"
+        }
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "id": "none",
+      "label": "No injected failure",
+      "detail": "Observe the normal message path and ownership changes.",
+      "point": "none",
+      "controlledResult": "The run reaches its declared completion boundary.",
+      "uncontrolledResult": "The run reaches its declared completion boundary."
+    },
+    {
+      "id": "tool-timeout",
+      "label": "Tool write times out",
+      "detail": "The external system may have committed even though no response arrived.",
+      "point": "tool",
+      "controlledResult": "Reconcile by idempotency key, then reuse the recorded result or retry safely.",
+      "uncontrolledResult": "Stop as an ambiguous effect; an automatic retry could duplicate the write."
+    },
+    {
+      "id": "runtime-restart",
+      "label": "Runtime restarts",
+      "detail": "The process stops after a completed transition but before the run finishes.",
+      "point": "runtime",
+      "controlledResult": "Load the last compatible quiescent checkpoint and reconcile in-flight effects.",
+      "uncontrolledResult": "Conversation and routing state are unavailable; restart only as a new run."
+    },
+    {
+      "id": "handler-error",
+      "label": "Agent handler raises",
+      "detail": "Compare awaited direct delivery with one-way topic fan-out.",
+      "point": "handler",
+      "controlledResult": "Delivery semantics determine who observes the error; telemetry still records the failed handler.",
+      "uncontrolledResult": "Without a monitored error path, the caller or publisher can misclassify the run."
+    }
+  ]
+}

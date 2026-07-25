@@ -1,0 +1,215 @@
+---
+registryId: model-compression-techniques
+---
+
+{% section-card tone="intro" %}
+## What is model compression?
+
+**Model compression** transforms a trained model or its architecture so the deployed artifact uses less storage, memory, compute, bandwidth, energy, or latency while preserving the quality required by the product. Quantization lowers numerical precision, pruning removes weights or structures, distillation trains a smaller student, and factorization replaces expensive operations with compact approximations.
+
+Compression is useful only in relation to a target system. A mathematically smaller model can run at the same speed or slower when the serving backend lacks compatible kernels, inserts format conversions, or remains bottlenecked by activations, memory movement, batching, or another service stage.
+
+### The invariant to remember
+
+**The exact exported artifact must improve a declared deployment constraint without violating any required quality, safety, or compatibility gate.** The source checkpoint is not the production artifact, and theoretical compression is not measured acceleration.
+
+Review [model serving](/ml-systems/model-serving) first if batching, runtime artifacts, and tail latency are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Start from the deployment constraint
+
+{% process-flow %}
+{% process-step number="1" title="Name the binding constraint" label="Target" %}
+Define device memory, package size, cold start, p99 latency, throughput, power, network transfer, or cost under a specific workload.
+{% /process-step %}
+{% process-step number="2" title="Profile the baseline" label="Evidence" %}
+Measure weights, activations, cache, runtime workspace, operators, memory bandwidth, compute, and non-model request stages.
+{% /process-step %}
+{% process-step number="3" title="Choose a compatible technique" label="Transform" %}
+Match precision, sparsity, architecture, and operator changes to kernels the target backend can actually execute.
+{% /process-step %}
+{% process-step number="4" title="Export the real artifact" label="Lower" %}
+Pin the recipe, calibration set, operator graph, packing, compiler, runtime, device, and artifact integrity.
+{% /process-step %}
+{% process-step number="5" title="Evaluate and canary" label="Release" %}
+Compare quality slices and system metrics with the baseline, then expand traffic only while explicit gates remain satisfied.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Understand what each technique changes
+
+{% concept-grid columns="2" %}
+{% concept-card title="Quantization" eyebrow="Fewer bits" icon="gauge" tone="violet" %}
+Represents weights, activations, or both with lower precision. The design includes granularity, scale and zero-point rules, calibration or training, accumulation precision, packing, and backend support.
+{% /concept-card %}
+{% concept-card title="Pruning" eyebrow="Less structure" icon="scissors" tone="rose" %}
+Removes individual weights, blocks, channels, heads, layers, or other structures. Structured removal is easier for dense kernels to exploit; unstructured sparsity needs specialized execution.
+{% /concept-card %}
+{% concept-card title="Distillation" eyebrow="Smaller student" icon="repeat" tone="blue" %}
+Trains a separate student using labels plus teacher logits, hidden representations, attention, or task-specific signals. Student architecture and loss weights are new modeling decisions.
+{% /concept-card %}
+{% concept-card title="Factorization" eyebrow="Lower-rank work" icon="layers" tone="green" %}
+Approximates large matrices or tensors with smaller factors. Rank controls the quality and compute trade-off, while factor shapes must map efficiently to the runtime.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Quantize for a declared backend
+
+{% tabs %}
+{% tab title="Weight-only" %}
+Store weights at lower precision while activations remain in a higher precision. This often reduces weight memory and bandwidth, but conversion and kernel support determine speed.
+{% /tab %}
+{% tab title="Dynamic" %}
+Quantize activations at runtime where supported. It avoids a static activation calibration pass, while runtime quantization adds work and operator coverage is backend-specific.
+{% /tab %}
+{% tab title="Static PTQ" %}
+Collect representative activation statistics, derive quantization parameters, convert the graph, and evaluate the exported model. Calibration coverage is part of the artifact evidence.
+{% /tab %}
+{% tab title="QAT" %}
+Simulate quantization during training so weights can adapt to numerical error. It costs more engineering and compute but can recover quality when PTQ misses the gate.
+{% /tab %}
+{% /tabs %}
+
+Modern PyTorch quantization development is centered in `torchao`, and exported-device flows use backend-specific quantizers. Pin the actual library and backend APIs used by the release rather than copying an older generic recipe.
+{% /section-card %}
+
+{% section-card %}
+## Distinguish storage math from runtime memory
+
+Theoretical weight storage is straightforward: `parameters x retained fraction x bits / 8`. Production memory also includes scales and metadata, activations, attention or recurrent caches, temporary buffers, compiled workspaces, runtime code, input batches, output buffers, and safety reserve.
+
+{% interactive-block id="ml-systems/model-compression-techniques-calculator" /%}
+
+{% code-block file="/api/content/ml-systems/model-compression-techniques/code/plan-compressed-artifact.py" language="python" title="Check the complete runtime memory envelope" /%}
+
+{% callout variant="warn" %}
+Do not call `32 / bits` a speedup. It is a weight-storage ratio. Speedup must be measured after export on the target device, backend, batch shape, and request distribution.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Prune only the structure the runtime can exploit
+
+{% metric-strip %}
+{% metric value="zeros" label="Unstructured sparsity" detail="Individual zero weights reduce logical density but may still execute through ordinary dense kernels." tone="rose" /%}
+{% metric value="N:M" label="Pattern sparsity" detail="A fixed number of retained values per group can map to supported sparse hardware when dimensions and kernels match." tone="violet" /%}
+{% metric value="channel" label="Structured pruning" detail="Removing complete channels, heads, neurons, or layers changes dense tensor shapes and can reduce ordinary dense work." tone="blue" /%}
+{% metric value="retrain" label="Recovery step" detail="Fine-tuning after pruning lets remaining capacity adapt; every recovery recipe still needs independent evaluation." tone="green" /%}
+{% /metric-strip %}
+
+### Profile before and after export
+
+- Confirm the pruned structure survives graph export, constant folding, and backend lowering.
+- Check that tensor dimensions remain aligned with efficient kernels and vector widths.
+- Measure operator time, memory movement, end-to-end p99, throughput, and power.
+- Evaluate sensitive layers and required quality slices instead of applying one global ratio blindly.
+{% /section-card %}
+
+{% section-card %}
+## Train a student as a new model
+
+Distillation does not shrink a checkpoint in place. It defines a student architecture and a training objective that may combine hard labels, softened teacher logits, feature matching, attention transfer, or task-specific constraints.
+
+{% system-flow title="A distillation pipeline has two evidence paths" caption="Teacher behavior guides optimization, while independent labels and product metrics decide whether the student is acceptable." %}
+{% system-node title="Teacher artifact" eyebrow="Reference behavior" icon="cpu" tone="violet" %}
+Runs under a pinned version and temperature to produce logits or representations for approved training examples.
+{% /system-node %}
+{% system-node title="Student training" eyebrow="Transfer" icon="workflow" tone="blue" %}
+Optimizes the student against weighted label, teacher, representation, and regularization losses.
+{% /system-node %}
+{% system-node title="Independent evaluation" eyebrow="Do not grade from teacher alone" icon="check" tone="green" %}
+Measures task quality, calibration, robustness, fairness, safety, and out-of-distribution behavior against product evidence.
+{% /system-node %}
+{% system-node title="Target runtime" eyebrow="System benchmark" icon="server" tone="amber" %}
+Exports and measures the student on the exact serving device, compiler, backend, batch, and traffic shape.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Combine techniques in an order you can reproduce
+
+Compression techniques interact. Quantizing after pruning can expose different ranges; distilling from a quantized teacher can transfer numerical artifacts; factorization can change which layers remain sensitive; and fine-tuning can undo sparsity unless masks or parameterizations are enforced.
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the baseline" label="Reference" %}
+Pin the source model, data, evaluation, serving runtime, and baseline quality and performance report.
+{% /process-step %}
+{% process-step number="2" title="Apply one transformation" label="Attribution" %}
+Record the exact recipe and measure its isolated effect before composing it with another technique.
+{% /process-step %}
+{% process-step number="3" title="Recover quality" label="Train or calibrate" %}
+Use representative data and keep recovery hyperparameters, masks, teacher outputs, and calibration statistics versioned.
+{% /process-step %}
+{% process-step number="4" title="Export after the final change" label="Artifact" %}
+Evaluate the graph and weights the runtime will load, not an intermediate framework object.
+{% /process-step %}
+{% process-step number="5" title="Compare with every baseline" label="Decision" %}
+Attribute gains and losses to each step, reject fragile combinations, and preserve a simpler fallback.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Find regressions aggregate retention hides
+
+Average accuracy can remain stable while compression harms rare languages, small objects, long sequences, confidence calibration, safety classifiers, or inputs outside the calibration distribution. Latency can also remain flat because the target runtime falls back to unsupported operators.
+
+{% interactive-block id="ml-systems/model-compression-release-lab" dataFile="/api/content/ml-systems/model-compression-techniques/data/compression-release-scenarios.json" /%}
+
+{% code-block file="/api/content/ml-systems/model-compression-techniques/code/gate-compressed-release.py" language="python" title="Approve only a measured artifact that clears all gates" /%}
+{% /section-card %}
+
+{% section-card %}
+## Publish a complete compression manifest
+
+{% concept-grid columns="2" %}
+{% concept-card title="Source identity" eyebrow="What changed" icon="git" tone="blue" %}
+Record the source checkpoint, architecture, tokenizer or preprocessing, transformation order, recipes, training code, and random seeds.
+{% /concept-card %}
+{% concept-card title="Data identity" eyebrow="What shaped numerics" icon="database" tone="violet" %}
+Version calibration, recovery-training, teacher-output, and evaluation datasets with sampling rules and privacy constraints.
+{% /concept-card %}
+{% concept-card title="Runtime identity" eyebrow="What executes" icon="server" tone="green" %}
+Pin exported graph, weight format, operator set, compiler, backend, kernel library, device, driver, and serving configuration.
+{% /concept-card %}
+{% concept-card title="Evidence identity" eyebrow="Why it shipped" icon="check" tone="amber" %}
+Attach slice metrics, latency distributions, throughput, memory, power, cost, canary results, approval, and rollback target.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Review the production checklist
+
+### Build these controls
+
+- Define the target constraint and profile the uncompressed end-to-end system first.
+- Use backend-supported formats, operators, sparsity patterns, and tensor shapes.
+- Version representative calibration, teacher, recovery, and evaluation evidence.
+- Evaluate aggregate and required slice quality on the exact exported artifact.
+- Benchmark cold and warm latency, throughput, memory, power, and cost on target hardware.
+- Canary under an immutable version and retain the uncompressed rollback path.
+
+### Avoid these traps
+
+- Treating storage reduction as a guaranteed latency or cost improvement.
+- Applying one pruning or quantization setting uniformly to every sensitive layer.
+- Evaluating a framework model while deploying a separately lowered artifact.
+- Approving average retention while a required cohort or safety behavior regresses.
+- Combining transformations without isolating their effects or preserving provenance.
+
+### Maintained primary references
+
+- [PyTorch quantization documentation](https://docs.pytorch.org/docs/stable/quantization.html)
+- [ExecuTorch quantization overview](https://docs.pytorch.org/executorch/stable/quantization-overview.html)
+- [PyTorch knowledge distillation tutorial](https://docs.pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html)
+- [PyTorch pruning tutorial](https://docs.pytorch.org/tutorials/intermediate/pruning_tutorial.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/ml-systems/model-compression-techniques/quiz/model-compression-techniques.json" lessonSlug="model-compression-techniques" /%}

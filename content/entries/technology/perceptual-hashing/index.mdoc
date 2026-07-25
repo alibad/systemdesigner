@@ -1,0 +1,158 @@
+---
+registryId: perceptual-hashing
+---
+
+{% section-card tone="intro" %}
+## What is perceptual hashing?
+
+Perceptual hashing maps media into a compact signature so visually similar inputs tend
+to produce nearby signatures. A cryptographic hash answers, "Are these bytes exactly
+the same?" A perceptual image hash instead helps answer, "Should these two images be
+examined as possible variants of the same visual source?"
+
+The distinction matters in deduplication, content moderation, media catalogs, and copy
+detection. JPEG compression, resizing, or a small brightness change can alter many
+bytes while preserving what a person sees. A perceptual hash tries to keep those edits
+close under a distance function, usually Hamming distance for binary signatures.
+
+{% callout variant="info" %}
+### Core invariant
+
+A perceptual-hash match is a candidate, not a semantic identity or
+a final moderation decision. The algorithm, preprocessing, threshold, and verification
+stage together define the system's actual behavior.
+{% /callout %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Normalize" eyebrow="Comparable input" icon="image" tone="blue" %}
+Decode the image, fix orientation and color handling, then resize or transform it as
+the selected algorithm requires.
+{% /concept-card %}
+{% concept-card title="Fingerprint" eyebrow="Compact signature" icon="fingerprint" tone="violet" %}
+Summarize brightness, gradients, frequency coefficients, or wavelet features into a
+fixed-width representation.
+{% /concept-card %}
+{% concept-card title="Retrieve" eyebrow="Distance search" icon="search" tone="cyan" %}
+Find stored hashes within a declared distance radius without assuming a full pairwise
+scan will remain affordable.
+{% /concept-card %}
+{% concept-card title="Verify" eyebrow="Decision boundary" icon="shield" tone="amber" %}
+Use metadata, a stronger model, geometric checks, or human review before taking a
+high-impact action.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Treat Hamming distance as a retrieval control
+
+For equal-width binary hashes, Hamming distance counts bit positions that differ. A
+threshold of `10` on a 64-bit hash accepts a much larger fraction of the signature
+space than a threshold of `10` on a 256-bit hash. Store the algorithm name, version,
+width, and preprocessing contract with every signature so comparisons stay meaningful.
+
+{% interactive-block id="technology/perceptual-hashing-calculator" /%}
+
+The random-match calculation in the lab assumes independent, uniformly distributed
+bits. Real image hashes violate that assumption, so it is a useful capacity intuition,
+not a false-positive forecast. Production precision and recall must come from labeled
+image pairs sampled from the real content domain.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Compare algorithms by the feature they preserve
+
+{% concept-grid columns="4" %}
+{% concept-card title="Average hash" eyebrow="Global brightness" icon="sun" tone="blue" %}
+Resizes to a small grayscale image and compares pixels with an average. It is simple,
+but global brightness structure is not a strong discriminator for many corpora.
+{% /concept-card %}
+{% concept-card title="Difference hash" eyebrow="Local gradients" icon="activity" tone="green" %}
+Compares neighboring grayscale pixels. It is fast and useful as a baseline for common
+near-duplicate edits, but cropping and geometric changes can disrupt the gradient map.
+{% /concept-card %}
+{% concept-card title="DCT pHash" eyebrow="Low frequencies" icon="waves" tone="violet" %}
+Quantizes low-frequency discrete-cosine-transform coefficients. It emphasizes broad
+visual structure while discarding much high-frequency detail.
+{% /concept-card %}
+{% concept-card title="Wavelet hash" eyebrow="Multi-scale structure" icon="layers" tone="amber" %}
+Uses wavelet coefficients to represent structure at multiple resolutions. Its behavior
+still needs corpus-specific evaluation rather than a universal robustness ranking.
+{% /concept-card %}
+{% /concept-grid %}
+
+No algorithm is automatically "best." Measure the edits the product expects: resize,
+compression, re-encoding, color changes, borders, overlays, cropping, rotation, memes,
+screenshots, and adversarial manipulation. The pHash project documents DCT and
+wavelet-based designs in its [algorithm overview](https://www.phash.org/docs/design.html).
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Trace the production decision path
+
+Select a scenario to see why preprocessing, indexing, and verification are separate
+owners. The same threshold can behave very differently when an input is cropped, when
+the index is incomplete, or when unrelated images collide.
+
+{% topology-lab dataFile="/api/content/technology/perceptual-hashing/data/matching-pipeline-scenarios.json" /%}
+
+The verifier should receive the original query, candidate metadata, algorithm version,
+distance, and enough evidence to explain the decision. A bare integer distance is not
+an auditable moderation outcome.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Build and evaluate a threshold with labeled pairs
+
+{% process-flow %}
+{% process-step number="1" title="Define the positive class" label="Product contract" %}
+State whether a positive means byte-identical, same source after benign edits, same
+composition after cropping, or visually related content. These are different tasks.
+{% /process-step %}
+{% process-step number="2" title="Sample hard pairs" label="Evaluation set" %}
+Include benign variants, difficult unrelated images, repetitive layouts, screenshots,
+text-heavy images, and transformations seen in production.
+{% /process-step %}
+{% process-step number="3" title="Sweep thresholds" label="Evidence" %}
+Compute precision and recall across candidate radii. Inspect error slices instead of
+choosing a threshold from one aggregate score.
+{% /process-step %}
+{% process-step number="4" title="Attach a verifier" label="Decision" %}
+Use a stronger comparison or review queue for retrieved candidates, especially when a
+false positive can block a user or remove content.
+{% /process-step %}
+{% /process-flow %}
+
+At large scale, avoid comparing every new hash with every stored hash. Use a binary
+index, multi-index strategy, buckets, or another approximate retrieval structure, then
+measure recall and latency for that index separately from hash quality.
+
+{% code-block file="/api/content/technology/perceptual-hashing/code/near-duplicate-candidates.py" language="python" title="Compute dHash candidates with an explicit threshold" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the system as a versioned classifier
+
+### Store enough provenance
+
+- source object ID and immutable media version;
+- algorithm, hash width, implementation version, and preprocessing version;
+- binary signature in a representation that preserves leading zero bits;
+- ingestion time and index generation;
+- decision threshold and verifier version used for any action.
+
+### Monitor the failure modes
+
+- **False negatives:** expected variants fall outside the retrieval radius.
+- **False positives:** unrelated images enter the candidate set or pass verification.
+- **Domain drift:** new content styles change distance distributions.
+- **Index lag:** freshly ingested signatures are absent from search.
+- **Hot buckets:** common visual structures create oversized candidate lists.
+- **Adversarial edits:** an attacker optimizes transformations against known behavior.
+
+Re-evaluate thresholds whenever preprocessing, algorithm implementation, corpus mix, or
+verification policy changes. During a migration, dual-compute old and new signatures
+and compare outcomes before making the new version authoritative.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/perceptual-hashing/quiz/perceptual-hashing-production.json" lessonSlug="perceptual-hashing" title="Perceptual Hashing Review" /%}

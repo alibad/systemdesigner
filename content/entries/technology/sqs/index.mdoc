@@ -1,0 +1,275 @@
+---
+registryId: sqs
+---
+
+{% section-card tone="intro" %}
+## What is Amazon SQS?
+
+**Amazon Simple Queue Service (SQS) is a managed buffer between a producer that creates work and a consumer that performs it.** A producer sends a message and can
+finish its request without waiting for the consumer. SQS stores the message until a
+consumer receives it, completes the work, and explicitly deletes the receipt.
+
+SQS matters because arrival rate and processing rate rarely match perfectly. A queue
+absorbs short bursts, lets workers scale independently, and keeps a temporary consumer
+failure away from the user-facing request path. AWS operates the queue service;
+application teams still own message identity, processing safety, retry limits,
+backlog recovery, and the downstream side effect.
+
+{% callout variant="info" %}
+The core invariant is **receive does not mean complete**. Receiving a message only
+leases it through a visibility timeout. The message is complete only after the
+consumer's durable work succeeds and `DeleteMessage` succeeds with the current receipt
+handle.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Follow one message through the queue
+
+SQS is a point-to-point work queue: one delivery is intended for one consumer at a
+time. It is not a retained event log, and one queue does not independently deliver the
+same message to several subscriber applications.
+
+{% system-flow title="SQS work handoff" caption="The queue is a durable handoff, not the business transaction. Completion happens at the consumer's side-effect boundary." %}
+{% system-node title="Producer" eyebrow="Send" icon="cloud" tone="blue" %}
+Create a small, versioned command with a stable operation ID. Keep large objects in
+object storage and put the durable pointer in the message.
+{% /system-node %}
+{% system-node title="SQS queue" eyebrow="Buffer" icon="layers" tone="violet" %}
+Store the message across service-managed infrastructure, expose it to a poller, and
+hide an in-flight receipt for the configured visibility period.
+{% /system-node %}
+{% system-node title="Consumer" eyebrow="Apply" icon="workflow" tone="amber" %}
+Validate the contract, perform a bounded unit of work, and use a stable idempotency key
+at any business-effect boundary.
+{% /system-node %}
+{% system-node title="Delete or retry" eyebrow="Acknowledge" icon="repeat" tone="green" %}
+Delete after success. If the receipt is not deleted, it becomes visible again; after a
+finite receive budget, a redrive policy can move it to a dead-letter queue.
+{% /system-node %}
+{% /system-flow %}
+
+### Keep the message contract explicit
+
+- **Identity:** include a stable message ID or business operation ID that survives
+  transport retries.
+- **Version:** name the schema version and preserve compatibility during producer and
+  consumer rollouts.
+- **Payload:** carry only what the consumer needs; avoid secrets and large binary
+  bodies.
+- **Trace context:** include correlation metadata so enqueue, receive, retry, side
+  effect, and delete can be connected during an incident.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose Standard or FIFO from the business invariant
+
+Queue type is not a performance preference. It determines what the consumer is
+allowed to assume about order and duplicate transport behavior.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Standard queue" eyebrow="Independent work at scale" icon="speed" tone="blue" %}
+Standard queues provide at-least-once delivery and best-effort ordering. Choose one
+when messages can run independently, duplicates are safe, and horizontal throughput
+matters more than sequence.
+
+- Make every effect idempotent.
+- Do not infer order from send timestamps.
+- Use `MessageGroupId` only when deliberately applying Standard-queue fair-queue
+  behavior, not as a strict-order guarantee.
+{% /concept-card %}
+{% concept-card title="FIFO queue" eyebrow="Order within a group" icon="layers" tone="violet" %}
+FIFO queues preserve order within each `MessageGroupId` and suppress duplicate sends
+through deduplication IDs. Different groups can run concurrently; one hot or blocked
+group remains serial.
+
+- Group by the smallest entity that needs order.
+- Reuse a deduplication ID only for the same logical send.
+- Keep consumers idempotent because a crash before delete can repeat processing.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+FIFO deduplication does not make an external payment, email, or database update exactly
+once. SQS cannot atomically combine `DeleteMessage` with an unrelated system. Put the
+idempotency record and business mutation in one destination transaction when possible.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size for recovery, not only steady traffic
+
+A healthy consumer pool needs spare capacity after a deployment pause, dependency
+outage, or worker failure. If messages arrive at rate `A` and consumers can sustain
+rate `C`, the backlog drains only when `C > A`.
+
+- **Outage backlog:** `arrival rate x outage seconds`.
+- **Catch-up rate:** `consumer capacity - ongoing arrival rate`.
+- **Recovery time:** `outage backlog / catch-up rate`.
+- **FIFO active workers:** no more than the number of currently available message
+  groups, even if the worker pool is larger.
+
+{% interactive-block id="technology/sqs-cost" dataFile="/api/content/technology/sqs/data/queue-capacity-model.json" /%}
+
+{% code-block file="/api/content/technology/sqs/code/model-backlog-recovery.py" language="python" title="Model outage backlog and catch-up time" /%}
+
+The lab's request-pressure estimate is a planning model, not a price quote. SQS pricing
+and regional throughput quotas can change, so validate the modeled payload units and
+API pattern against the current deployment region before approval.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Treat visibility as a renewable processing lease
+
+When SQS returns a message, the message stays in the queue but becomes temporarily
+invisible. The consumer receives a receipt handle for that delivery. It should delete
+with that handle only after owned work is durable.
+
+{% process-flow %}
+{% process-step number="1" title="Long-poll a bounded batch" label="Receive" %}
+Wait for available work instead of continuously issuing empty receives. Keep each
+batch small enough that every message can finish before its processing lease expires.
+{% /process-step %}
+{% process-step number="2" title="Validate before side effects" label="Contract" %}
+Reject malformed, unauthorized, or unsupported versions deliberately. Permanent
+contract errors should not consume an unlimited transient-retry budget.
+{% /process-step %}
+{% process-step number="3" title="Apply with an operation key" label="Process" %}
+Write the idempotency key and business effect atomically at the destination. A repeated
+delivery should return the first result or become a no-op.
+{% /process-step %}
+{% process-step number="4" title="Extend only live work" label="Heartbeat" %}
+Use `ChangeMessageVisibility` for legitimate long-running work. Stop extending when
+the worker loses ownership or cannot prove progress.
+{% /process-step %}
+{% process-step number="5" title="Delete the current receipt" label="Complete" %}
+Delete after success. Batch deletes can reduce request pressure, but every entry in a
+batch can fail independently and must be checked.
+{% /process-step %}
+{% /process-flow %}
+
+Current SQS documentation allows visibility from 0 seconds to 12 hours, with a
+30-second default. Long polling can wait up to 20 seconds, and batch APIs accept up to
+10 messages. Treat those as service bounds, not recommended application defaults.
+Confirm changes in the [AWS SQS message quotas](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html).
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Inject the failure between side effect and delete
+
+The most important SQS failure happens after the business operation succeeds but
+before the receipt is deleted. From SQS's perspective, that looks identical to a worker
+that never finished. Change the contracts below and trace what another delivery can do.
+
+{% interactive-block id="technology/sqs-visibility-lab" dataFile="/api/content/technology/sqs/data/delivery-failure-model.json" /%}
+
+{% code-block file="/api/content/technology/sqs/code/process-idempotently.py" language="python" title="Commit the idempotency key with the business effect" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Quarantine poison messages without hiding incidents
+
+A dead-letter queue (DLQ) is an isolation queue for messages that cross a configured
+`maxReceiveCount`. It protects healthy work from an endlessly failing message, but it
+does not diagnose, repair, or safely replay that message by itself.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Classify the failure" eyebrow="Retry decision" icon="warning" tone="rose" %}
+Retry timeouts, throttling, and brief dependency outages with backoff and jitter.
+Quarantine invalid schemas, missing required identity, and deterministic business-rule
+failures unless a code or data change can repair them.
+{% /concept-card %}
+{% concept-card title="Preserve evidence" eyebrow="Diagnosis" icon="search" tone="amber" %}
+Keep the original body, attributes, operation ID, receive count, exception category,
+and consumer version. Protect sensitive payloads with the same or stronger access and
+retention controls as the source queue.
+{% /concept-card %}
+{% concept-card title="Redrive deliberately" eyebrow="Recovery" icon="repeat" tone="violet" %}
+Fix the cause, test representative messages, choose a bounded redrive rate, and watch
+the destination's capacity. Redriven FIFO work can interleave with newly produced
+messages.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Set the retry budget from failure behavior
+
+- A very low receive count can quarantine work during an ordinary transient failure.
+- A very high receive count increases repeated work, delays diagnosis, and can hold a
+  FIFO message group behind one poison message.
+- Keep DLQ retention long enough for alerting, triage, remediation, and controlled
+  redrive.
+- Alarm on any DLQ arrival when the queue represents money movement, account state, or
+  another high-integrity workflow.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the user-visible freshness contract
+
+Queue depth alone is ambiguous: ten expensive jobs can be worse than ten thousand fast
+ones. Track age, processing rate, and downstream outcomes together.
+
+{% metric-strip %}
+{% metric value="Age" label="Oldest message" detail="How stale the next useful effect can become" tone="rose" /%}
+{% metric value="Rate" label="Sent vs deleted" detail="Whether consumers are keeping up with arrivals" tone="blue" /%}
+{% metric value="Retries" label="Receive count" detail="How often work returns without successful delete" tone="amber" /%}
+{% metric value="DLQ" label="Quarantine arrivals" detail="Permanent or exhausted failures requiring ownership" tone="violet" /%}
+{% /metric-strip %}
+
+### Build alarms around outcomes
+
+- Alert when oldest-message age crosses the product's freshness objective, not only
+  when depth is non-zero.
+- Compare sent, received, deleted, empty-receive, and visibility-change rates to find
+  polling waste or failing handlers.
+- Track processing latency percentiles and visibility extensions by workload type.
+- Correlate DLQ messages with exception class, deployment version, tenant, and message
+  schema.
+- Test worker loss, dependency throttling, duplicate delivery, poison messages, and
+  redrive under a realistic incoming load.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Secure each queue as a workload boundary
+
+SQS removes broker administration, not authorization or data-governance work.
+
+- Give producer identities only `SendMessage`; give consumer identities receive,
+  visibility-change, and delete actions only on their queues.
+- Restrict queue resource policies and VPC endpoints by expected account, service, and
+  source conditions; avoid broad principals.
+- Use server-side encryption and grant the minimum KMS permissions when a customer
+  managed key is required.
+- Keep secrets and unnecessary personal data out of bodies, attributes, queue names,
+  logs, and DLQ inspection tools.
+- Set queue, DLQ, and payload-store retention from the same deletion and compliance
+  policy.
+- Audit configuration changes, redrive actions, policy updates, and cross-account
+  access.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Know when SQS is not the right primitive
+
+{% concept-grid columns="3" %}
+{% concept-card title="Use SQS" eyebrow="One worker owns each task" icon="check" tone="green" %}
+Choose SQS for background jobs, burst absorption, decoupled service commands, and
+bounded retries where one consumer should complete each message.
+{% /concept-card %}
+{% concept-card title="Use SNS or EventBridge" eyebrow="Fan-out or event routing" icon="route" tone="blue" %}
+Use a publisher-and-subscriber service when several independent applications each need
+their own delivery. Fan out to separate SQS queues when each subscriber needs buffering
+and retry isolation.
+{% /concept-card %}
+{% concept-card title="Use a stream or database" eyebrow="Replay or query" icon="database" tone="amber" %}
+Use a retained stream when independent consumers must replay history. Use a database
+when the primary need is transactions, mutable state, or ad hoc queries rather than
+asynchronous ownership transfer.
+{% /concept-card %}
+{% /concept-grid %}
+
+The design question is not "Can SQS carry this message?" It is "Does one bounded,
+idempotent consumer own this work, and can the system detect when that ownership is no
+longer making progress?"
+{% /section-card %}
+
+{% quiz quizId="sqs" lessonSlug="sqs" title="SQS Production Design Review" questionsFile="/api/content/technology/sqs/quiz/sqs-production-design.json" /%}

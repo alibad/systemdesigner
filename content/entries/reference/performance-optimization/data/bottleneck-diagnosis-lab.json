@@ -1,0 +1,111 @@
+{
+  "title": "Trace the path that is actually limiting checkout",
+  "description": "Choose a symptom, trace the active request path, and inspect each component. The goal is to identify the evidence that supports the next change rather than choose a favorite optimization.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Client",
+      "eyebrow": "User action",
+      "detail": "Starts checkout and experiences the end-to-end latency. A fast internal operation does not help if the complete request still waits elsewhere.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 50
+    },
+    {
+      "id": "api",
+      "label": "Checkout API",
+      "eyebrow": "Request owner",
+      "detail": "Validates the request and coordinates the critical path. It should expose child timing, pool wait, and the remaining caller deadline.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 28,
+      "y": 50
+    },
+    {
+      "id": "cache",
+      "label": "Product cache",
+      "eyebrow": "Fast read path",
+      "detail": "Serves reconstructable product details within a stated freshness budget. A falling hit rate transfers work to the authoritative store.",
+      "kind": "cache",
+      "tone": "green",
+      "x": 50,
+      "y": 20
+    },
+    {
+      "id": "database",
+      "label": "Order database",
+      "eyebrow": "Authoritative state",
+      "detail": "Commits orders and inventory decisions. Query plans, rows examined, lock wait, and pool wait identify whether this store limits the user path.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 73,
+      "y": 50
+    },
+    {
+      "id": "queue",
+      "label": "Fulfillment queue",
+      "eyebrow": "Asynchronous handoff",
+      "detail": "Buffers work after the order is durable. Queue age and rejected work matter more than queue depth alone when deciding whether customers will receive a confirmation on time.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 49,
+      "y": 82
+    },
+    {
+      "id": "worker",
+      "label": "Fulfillment worker",
+      "eyebrow": "Background capacity",
+      "detail": "Consumes post-checkout work. More workers help only when the queue is backed up and the worker's downstream dependencies still have headroom.",
+      "kind": "service",
+      "tone": "rose",
+      "x": 75,
+      "y": 82
+    }
+  ],
+  "edges": [
+    { "id": "client-api", "from": "client", "to": "api", "label": "checkout request" },
+    { "id": "api-cache", "from": "api", "to": "cache", "label": "product read" },
+    { "id": "cache-database", "from": "cache", "to": "database", "label": "cache miss" },
+    { "id": "api-database", "from": "api", "to": "database", "label": "commit order" },
+    { "id": "api-queue", "from": "api", "to": "queue", "label": "enqueue fulfillment", "mode": "async" },
+    { "id": "queue-worker", "from": "queue", "to": "worker", "label": "consume job", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy baseline",
+      "summary": "Checkout p95 is 260 ms at 1,200 requests per second. The product cache is warm, database pool wait is near zero, and the fulfillment queue remains young.",
+      "activeEdges": ["client-api", "api-cache", "api-database", "api-queue", "queue-worker"],
+      "focusNode": "api",
+      "result": "No intervention is justified yet. Preserve this workload mix and timing breakdown as the baseline for a later comparison."
+    },
+    {
+      "id": "cache-regression",
+      "label": "Cache-hit regression",
+      "summary": "A key-format deployment drops cache hits from 92% to 76%. Product reads now miss through to the database and its connection pool begins to wait.",
+      "activeEdges": ["client-api", "api-cache", "cache-database", "api-database", "api-queue", "queue-worker"],
+      "degradedNodes": ["cache", "database"],
+      "focusNode": "cache",
+      "result": "Inspect hit rate by key and cache state, then repair the key policy or coalesce duplicate misses. Scaling API workers would increase the database pressure."
+    },
+    {
+      "id": "query-plan",
+      "label": "Slow order query",
+      "summary": "A new account-history query examines millions of rows to return 50. Database CPU is high, but the important evidence is a plan scan and rising query time on the checkout path.",
+      "activeEdges": ["client-api", "api-database", "api-queue", "queue-worker"],
+      "degradedNodes": ["database"],
+      "focusNode": "database",
+      "result": "Run EXPLAIN with production-like parameters, inspect rows examined and buffers, then test a selective index or query rewrite. Add write-cost and rollback checks to the experiment."
+    },
+    {
+      "id": "worker-saturation",
+      "label": "Fulfillment backlog",
+      "summary": "Checkout completes, but a promotion sends more fulfillment events than workers can drain. Queue age grows and delivery confirmations become late while the synchronous API remains healthy.",
+      "activeEdges": ["client-api", "api-cache", "api-database", "api-queue", "queue-worker"],
+      "degradedNodes": ["queue", "worker"],
+      "focusNode": "queue",
+      "result": "Measure arrival rate, completion rate, queue age, and worker dependency headroom. Increase safe consumer capacity or throttle non-critical work; do not make checkout wait for fulfillment."
+    }
+  ]
+}

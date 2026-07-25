@@ -1,0 +1,166 @@
+{
+  "blockId": "technology/consul-discovery-contract-lab",
+  "title": "Trace a discovery decision under failure",
+  "description": "Choose how a workload reads the catalog, define what healthy means, then inject a failure. The lab keeps discovery freshness, check semantics, and traffic eligibility separate.",
+  "defaults": {
+    "interfaceId": "dns-stale",
+    "checkId": "http-readiness",
+    "incidentId": "healthy"
+  },
+  "interfaces": [
+    {
+      "id": "dns-stale",
+      "label": "Consul DNS",
+      "detail": "Low-friction service lookup through the local agent. DNS uses stale reads by default.",
+      "consistency": "Stale by default",
+      "requestPath": [
+        "Workload resolver",
+        "Local Consul agent",
+        "Any Consul server",
+        "Passing endpoints"
+      ],
+      "healthyBehavior": "Fast, scalable lookups without application-specific Consul API code.",
+      "outageBehavior": "A reachable follower can answer without a leader, but the result has no hard upper staleness bound.",
+      "supportsPassingFilter": true
+    },
+    {
+      "id": "http-default",
+      "label": "HTTP health API",
+      "detail": "Query the local agent for passing instances using the HTTP API's default consistency mode.",
+      "consistency": "Default",
+      "requestPath": [
+        "Application client",
+        "Local Consul agent",
+        "Current leader",
+        "Passing endpoints"
+      ],
+      "healthyBehavior": "Returns an authoritative-enough catalog view for most application discovery.",
+      "outageBehavior": "The request needs a leader path and can fail when the server quorum is unavailable.",
+      "supportsPassingFilter": true
+    },
+    {
+      "id": "http-consistent",
+      "label": "HTTP consistent read",
+      "detail": "Require the leader to verify its authority with a quorum before returning the catalog result.",
+      "consistency": "Consistent",
+      "requestPath": [
+        "Application client",
+        "Local Consul agent",
+        "Leader plus quorum",
+        "Passing endpoints"
+      ],
+      "healthyBehavior": "Provides the strongest catalog-read contract at the cost of another quorum round trip.",
+      "outageBehavior": "Unavailable without a leader and quorum; do not use it for every routine lookup by default.",
+      "supportsPassingFilter": true
+    },
+    {
+      "id": "http-cached",
+      "label": "HTTP agent cache",
+      "detail": "Use a cache-capable endpoint with explicit max-age and stale-if-error behavior.",
+      "consistency": "Bounded by client policy",
+      "requestPath": [
+        "Application client",
+        "Local agent cache",
+        "Background server query",
+        "Passing endpoints"
+      ],
+      "healthyBehavior": "Collapses repeated reads onto a local cache while a background query refreshes supported resources.",
+      "outageBehavior": "Can fail static from a warm cache; the Age header becomes part of the traffic-safety decision.",
+      "supportsPassingFilter": true
+    }
+  ],
+  "checks": [
+    {
+      "id": "http-readiness",
+      "label": "HTTP readiness",
+      "detail": "Probe an application endpoint that verifies the process can accept useful work.",
+      "detects": "Application-level rejection, dependency policy, and bad HTTP status",
+      "blindSpot": "A shallow endpoint can still report passing while critical dependencies are unusable",
+      "failureDelay": "Interval plus failure threshold"
+    },
+    {
+      "id": "tcp-port",
+      "label": "TCP reachability",
+      "detail": "Verify that a connection can be established to an address and port.",
+      "detects": "Closed port, refused connection, and basic network reachability failure",
+      "blindSpot": "A hung or logically unhealthy process may still accept TCP connections",
+      "failureDelay": "Interval plus failure threshold"
+    },
+    {
+      "id": "ttl-heartbeat",
+      "label": "TTL heartbeat",
+      "detail": "Require the workload or an external controller to renew status before a deadline.",
+      "detects": "Missing heartbeat from a process that owns the liveness contract",
+      "blindSpot": "The check is only as truthful as the component that updates it",
+      "failureDelay": "Configured TTL"
+    }
+  ],
+  "incidents": [
+    {
+      "id": "healthy",
+      "label": "Healthy steady state",
+      "detail": "The service is ready, the local agent can reach servers, and the server cluster has quorum.",
+      "serviceState": "ready",
+      "controlPlaneState": "quorum",
+      "cacheAgeSeconds": 0,
+      "checkOutcomes": {
+        "http-readiness": {
+          "status": "passing",
+          "explanation": "The readiness endpoint accepts the probe and represents the intended traffic contract."
+        },
+        "tcp-port": {
+          "status": "passing",
+          "explanation": "The port accepts a connection. In this scenario the process is also genuinely ready."
+        },
+        "ttl-heartbeat": {
+          "status": "passing",
+          "explanation": "The workload renews its heartbeat before the TTL expires."
+        }
+      }
+    },
+    {
+      "id": "hung-process",
+      "label": "Process accepts TCP but is hung",
+      "detail": "The socket still opens, but application requests cannot complete useful work.",
+      "serviceState": "hung",
+      "controlPlaneState": "quorum",
+      "cacheAgeSeconds": 0,
+      "checkOutcomes": {
+        "http-readiness": {
+          "status": "critical",
+          "explanation": "A bounded readiness probe fails and removes the instance after the configured threshold."
+        },
+        "tcp-port": {
+          "status": "passing",
+          "explanation": "The port accepts a connection, so a TCP-only check keeps an unsafe endpoint eligible."
+        },
+        "ttl-heartbeat": {
+          "status": "critical",
+          "explanation": "If the application owns the heartbeat loop, the missing renewal turns the check critical after the TTL."
+        }
+      }
+    },
+    {
+      "id": "server-quorum-loss",
+      "label": "Consul servers lose quorum",
+      "detail": "Client agents and some servers remain reachable, but the Raft peer set cannot elect or confirm a leader.",
+      "serviceState": "last-observed",
+      "controlPlaneState": "no-quorum",
+      "cacheAgeSeconds": 75,
+      "checkOutcomes": {
+        "http-readiness": {
+          "status": "unknown",
+          "explanation": "The last observed readiness result may still be served, but new catalog writes cannot commit."
+        },
+        "tcp-port": {
+          "status": "unknown",
+          "explanation": "A previously passing result can outlive the current control-plane observation window."
+        },
+        "ttl-heartbeat": {
+          "status": "unknown",
+          "explanation": "The workload may renew locally, but the authoritative catalog cannot commit updates without quorum."
+        }
+      }
+    }
+  ]
+}

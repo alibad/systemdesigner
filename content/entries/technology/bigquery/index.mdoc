@@ -1,0 +1,284 @@
+---
+registryId: bigquery-detailed
+---
+
+{% section-card tone="intro" %}
+## What is Google BigQuery?
+
+**Google BigQuery is a fully managed analytical data warehouse.** It stores large
+datasets and runs SQL across them without asking a team to provision database servers.
+Applications, pipelines, and analysts submit jobs; BigQuery plans the work, assigns
+parallel compute called **slots**, reads columnar data, and returns a result.
+
+BigQuery matters when one question must summarize millions or billions of records:
+revenue by market, product usage by cohort, security events by signature, or model
+features over months of history. It is built for analytical scans and aggregations,
+not for the small row-by-row transactions that power a checkout or account balance.
+
+The central design rule is simple: **query latency and cost follow the work the query
+creates.** Data layout can reduce bytes read, SQL shape can reduce shuffle, and workload
+management can keep important jobs from competing with every other query.
+
+{% callout variant="info" %}
+If projects, IAM, service accounts, and regions are unfamiliar, review the
+[Google Cloud foundations lesson](/technology/gcp) first. This lesson explains the
+BigQuery-specific decisions from first principles.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## How a BigQuery query runs
+
+A query is not executed by one large database process. BigQuery turns SQL into stages,
+divides each stage into parallel work units, and assigns slots to those units. Stages
+exchange intermediate records through distributed shuffle before the final result is
+assembled.
+
+{% system-flow title="From SQL to an analytical result" caption="The planner can prune data before execution, but joins, grouping, sorting, and concurrency still determine how much slot and shuffle work remains." %}
+{% system-node title="SQL job" eyebrow="Request" icon="code" tone="blue" %}
+Authorize the caller, resolve tables and views, and validate the statement.
+{% /system-node %}
+{% system-node title="Execution plan" eyebrow="Plan" icon="braces" tone="violet" %}
+Choose stages, prune eligible partitions and blocks, and divide work into parallel units.
+{% /system-node %}
+{% system-node title="Slots + shuffle" eyebrow="Execute" icon="server" tone="cyan" %}
+Read columns, join and aggregate records, and exchange intermediate data between stages.
+{% /system-node %}
+{% system-node title="Result + telemetry" eyebrow="Observe" icon="activity" tone="green" %}
+Return rows and record bytes processed, slot milliseconds, wait time, and stage behavior.
+{% /system-node %}
+{% /system-flow %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Storage is columnar" icon="storage" tone="blue" %}
+Analytical queries can read referenced columns instead of every field in each row.
+Partitioning and clustering can reduce the relevant storage blocks further.
+{% /concept-card %}
+{% concept-card title="Slots are an accounting unit" icon="speed" tone="violet" %}
+A slot represents compute capacity for query work. One query can use many slots over
+time, so `total_slot_ms` is more useful than counting queries alone.
+{% /concept-card %}
+{% concept-card title="Shuffle connects stages" icon="network" tone="amber" %}
+Joins and aggregations move intermediate data. Skewed keys or explosive joins can
+create high shuffle pressure even after the initial table scan is small.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Convert query work into slot pressure
+
+Capacity planning starts with observed work, not a universal bytes-per-slot rule. For
+a completed query, divide `total_slot_ms` by 1,000 to get slot-seconds. A steady workload
+with `Q` queries per minute and `S` slot-seconds per query demands approximately
+`Q x S / 60` average slots.
+
+This estimate exposes three different decisions:
+
+- **Query decision:** reduce slot-seconds by pruning inputs, aggregating earlier, or
+  removing unnecessary shuffle.
+- **Scheduling decision:** move batch work away from interactive peaks or isolate it in
+  another reservation.
+- **Capacity decision:** add baseline or autoscaling capacity when optimized work still
+  exceeds the service target.
+
+{% callout variant="warn" %}
+Average utilization hides bursts and skew. Leave measured headroom and inspect p95 wait
+time, timeline demand, and queue behavior before treating 100% average utilization as a
+safe operating target.
+{% /callout %}
+
+{% interactive-block id="technology/bigquery-slot-cost-query-pressure-lab" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Partitioning and clustering reduce different work
+
+**Partitioning** divides a table into coarse segments, commonly by day. A query with a
+usable predicate on the partition column can skip unrelated segments. **Clustering**
+organizes storage blocks by selected columns inside the table; selective filters may
+then skip blocks that cannot contain matching values.
+
+Use the query pattern to choose the layout:
+
+1. Start with a stable date or timestamp that appears in most bounded queries.
+2. Add clustering for selective filter or join columns used repeatedly inside those
+   partitions.
+3. Require a partition filter when an accidental full-retention scan is unacceptable.
+4. Confirm the result with dry-run bytes and production job history. Clustering is
+   block pruning, not a guaranteed index lookup.
+
+The next lab uses a 90 TiB table retained for 365 days. Its clustered reduction is an
+explicit planning assumption so the reader can compare decisions; real block selectivity
+depends on data distribution and table evolution.
+
+{% interactive-block id="technology/bigquery-partition-failure-optimization-lab" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Place BigQuery in a real analytics system
+
+Consider a retail platform that needs operational dashboards, finance reports, and
+churn features from the same governed history. The serving application remains on a
+transactional database; analytical events and replicated business facts flow into
+BigQuery asynchronously.
+
+{% system-flow title="Retail analytics path" caption="Each stage has a different responsibility: durable ingestion, trustworthy transformation, efficient storage layout, and controlled consumption." %}
+{% system-node title="Events + source changes" eyebrow="Produce" icon="activity" tone="blue" %}
+Applications emit events while change-data capture exports committed business facts.
+{% /system-node %}
+{% system-node title="Raw landing tables" eyebrow="Ingest" icon="storage" tone="cyan" %}
+Preserve source fields, ingestion metadata, and replay boundaries for correction.
+{% /system-node %}
+{% system-node title="Curated models" eyebrow="Transform" icon="layers" tone="violet" %}
+Deduplicate, apply business definitions, and partition tables around common access paths.
+{% /system-node %}
+{% system-node title="BI, ML, and exports" eyebrow="Consume" icon="activity" tone="green" %}
+Give each workload governed views, appropriate reservations, and freshness expectations.
+{% /system-node %}
+{% /system-flow %}
+
+### Good workload fits
+
+- Enterprise reporting over large historical datasets.
+- Product and customer analytics that aggregate many records.
+- Log, audit, and security analysis with bounded retention queries.
+- Batch feature engineering and SQL-accessible machine learning.
+- Streaming analytics when consumers can tolerate warehouse-style query latency.
+
+### Use another serving system when
+
+- A user request needs predictable single-row reads in a few milliseconds.
+- Many concurrent transactions must update related records atomically.
+- The application depends on frequent point writes and immediate key lookups.
+- A regional request path cannot tolerate the warehouse job and result lifecycle.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design for failures at the correct boundary
+
+BigQuery manages machines, storage replication within a location, and much of query
+execution. The application team still owns query admission, workload isolation, data
+recovery requirements, and regional continuity.
+
+- **Queries wait for slots.**
+  - Evidence: stage wait time rises, reservation demand approaches capacity, and queued
+    jobs grow during overlapping workloads.
+  - Response: isolate critical workloads, move batch schedules, reduce query work, or
+    add measured capacity.
+- **A scan regresses.**
+  - Evidence: processed bytes jump after a date predicate changes or upstream retention
+    grows.
+  - Response: use dry runs, require partition filters, and alert on bytes processed by
+    stable query fingerprints.
+- **Shuffle spills or becomes skewed.**
+  - Evidence: a join or aggregation emits far more intermediate data than expected,
+    with a small set of stages dominating slot time.
+  - Response: inspect key frequency, deduplicate or aggregate earlier, and avoid
+    many-to-many joins that multiply rows unintentionally.
+- **A query fails after submission.**
+  - Evidence: the job has an error while the client does not know whether a prior
+    submission was accepted.
+  - Response: use stable job IDs for safe retry behavior, classify retryable errors, and
+    make downstream writes idempotent.
+- **A region becomes unavailable.**
+  - Evidence: data and compute in the selected location cannot serve the workload.
+  - Response: meet a regional RTO only with a geographically separate data copy,
+    usable compute capacity, routing, and a tested failover procedure.
+
+{% callout variant="warn" %}
+A multi-region location is a placement choice, not proof that the workload has an
+independent cross-region replica and failover path. Define the recovery point and
+recovery time first, then verify the architecture satisfies both.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Operate from workload telemetry
+
+Track the system at table, query, reservation, and business boundaries. A useful review
+connects resource evidence to a user-visible promise instead of alerting on every large
+number.
+
+### A practical BigQuery optimization loop
+
+{% process-flow %}
+{% process-step number="1" title="Measure" label="Observe" %}
+Group recurring jobs by workload and record bytes, slot time, wait time, latency, and errors.
+{% /process-step %}
+{% process-step number="2" title="Locate" label="Diagnose" %}
+Open the execution graph and find the scan, join, aggregate, sort, or shuffle stage that dominates work.
+{% /process-step %}
+{% process-step number="3" title="Change" label="Experiment" %}
+Modify one boundary: SQL shape, table layout, schedule, reservation assignment, or capacity.
+{% /process-step %}
+{% process-step number="4" title="Verify" label="Compare" %}
+Compare the same workload window and preserve the change only when cost and service targets improve.
+{% /process-step %}
+{% /process-flow %}
+
+### Production review checklist
+
+- Query controls
+  - Use maximum-bytes limits or dry runs where a broad scan would be expensive.
+  - Label jobs so owners and workloads can be identified in telemetry.
+  - Set explicit timeouts and retry only errors documented as transient.
+- Data controls
+  - Monitor partition freshness, late-arriving data, schema drift, and retention.
+  - Test deletion recovery and any cross-region replication procedure.
+  - Keep sensitive columns behind least-privilege views and policy controls.
+- Capacity controls
+  - Review reservation assignments before assuming a project uses intended slots.
+  - Separate latency-sensitive BI from opportunistic transformations when contention is visible.
+  - Compare baseline, autoscaling, and on-demand economics with actual workload curves.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Choose the pricing and layout trade-offs deliberately
+
+{% concept-grid columns="4" %}
+{% concept-card title="On-demand analysis" eyebrow="Variable work" icon="activity" tone="blue" %}
+Useful when processed bytes are intermittent or hard to predict. Cost control depends on
+pruning, query limits, and ownership because every broad scan is visible.
+{% /concept-card %}
+{% concept-card title="Capacity reservations" eyebrow="Predictable compute" icon="server" tone="violet" %}
+Useful for steady or isolated workloads. Baseline slots improve planning, but idle
+capacity and poorly assigned projects can waste the commitment.
+{% /concept-card %}
+{% concept-card title="More partitions" eyebrow="Pruning" icon="storage" tone="green" %}
+Well-chosen partitions bound common queries and retention. A poor partition key or tiny
+partitions add management overhead without matching access patterns.
+{% /concept-card %}
+{% concept-card title="More clustering columns" eyebrow="Block locality" icon="layers" tone="amber" %}
+Clustering can reduce block reads for repeated selective predicates. It does not fix a
+missing partition filter, a row-multiplying join, or regional availability.
+{% /concept-card %}
+{% /concept-grid %}
+
+The best configuration is observable and reversible. Start from query history, make one
+change, and compare bytes, slot work, wait time, and user latency over the same workload
+window.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Put the decisions into SQL
+
+The first example creates a daily partitioned table, clusters it for a repeated customer
+access path, requires a partition predicate, and shows queries that do and do not prune.
+
+{% code-block file="/api/content/technology/bigquery/code/partitioning-and-clustering.sql" language="sql" title="Partition, cluster, and guard the query path" /%}
+
+The second example groups completed jobs by reservation. It reports processed data, slot
+work, runtime, and an approximate p95 so an operator can find expensive or pressured
+workloads before changing capacity.
+
+{% code-block file="/api/content/technology/bigquery/code/workload-observability.sql" language="sql" title="Review bytes, slot work, and latency by reservation" /%}
+
+{% callout variant="tip" %}
+Replace the region qualifier and time window with values for the deployment. Job metadata
+access requires the corresponding BigQuery permissions and should be granted only to the
+operators who need it.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/bigquery/quiz/bigquery-capacity-and-layout.json" lessonSlug="bigquery" title="BigQuery Capacity and Layout Review" /%}

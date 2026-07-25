@@ -1,0 +1,112 @@
+{
+  "title": "Find a boundary that can own a business fact",
+  "description": "Switch scenarios to compare a modular monolith, a useful fulfillment extraction, and the shared-database anti-pattern. Select a component to inspect its responsibility.",
+  "nodes": [
+    {
+      "id": "shopper",
+      "label": "Shopper",
+      "eyebrow": "Checkout request",
+      "detail": "Starts checkout and needs one clear answer about whether the order was accepted and when it can arrive.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 8,
+      "y": 22
+    },
+    {
+      "id": "checkout",
+      "label": "Checkout module",
+      "eyebrow": "Order owner",
+      "detail": "Validates the cart, creates the order record, and owns the customer-facing order state. It must not update inventory tables directly after extraction.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 30,
+      "y": 22
+    },
+    {
+      "id": "order-db",
+      "label": "Order store",
+      "eyebrow": "Authoritative writes",
+      "detail": "Stores accepted orders, their reservation reference, and the outbox record that makes later event delivery durable.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 51,
+      "y": 22
+    },
+    {
+      "id": "fulfillment",
+      "label": "Fulfillment service",
+      "eyebrow": "Stock owner",
+      "detail": "Owns availability and reservation decisions. Its public contract accepts an idempotent reservation command and returns a reservation result.",
+      "kind": "service",
+      "tone": "green",
+      "x": 73,
+      "y": 22
+    },
+    {
+      "id": "inventory-db",
+      "label": "Inventory store",
+      "eyebrow": "Private data",
+      "detail": "Contains stock and reservation state. Only fulfillment writes here; other services learn facts through contracts or published events.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 91,
+      "y": 22
+    },
+    {
+      "id": "outbox",
+      "label": "Order outbox",
+      "eyebrow": "Durable handoff",
+      "detail": "Commits an order event with the order write so a transient broker outage cannot erase the fact that another service needs to learn.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 51,
+      "y": 72
+    },
+    {
+      "id": "event-stream",
+      "label": "Domain events",
+      "eyebrow": "Asynchronous facts",
+      "detail": "Carries published order facts to consumers that can tolerate asynchronous delivery and independently replay or reconcile their local view.",
+      "kind": "stream",
+      "tone": "cyan",
+      "x": 75,
+      "y": 72
+    }
+  ],
+  "edges": [
+    { "id": "shopper-checkout", "from": "shopper", "to": "checkout", "label": "place order" },
+    { "id": "checkout-order-db", "from": "checkout", "to": "order-db", "label": "accept order" },
+    { "id": "checkout-fulfillment", "from": "checkout", "to": "fulfillment", "label": "reserve stock" },
+    { "id": "fulfillment-inventory-db", "from": "fulfillment", "to": "inventory-db", "label": "conditional reserve" },
+    { "id": "order-db-outbox", "from": "order-db", "to": "outbox", "label": "same commit", "mode": "async" },
+    { "id": "outbox-events", "from": "outbox", "to": "event-stream", "label": "publish fact", "mode": "async" },
+    { "id": "checkout-inventory-db", "from": "checkout", "to": "inventory-db", "label": "direct SQL", "via": { "x": 62, "y": 5 } }
+  ],
+  "scenarios": [
+    {
+      "id": "modular-monolith",
+      "label": "Modular monolith",
+      "summary": "Checkout and fulfillment are separate modules in one deployable. Their module APIs make ownership visible while a local transaction still protects the current invariant.",
+      "activeEdges": ["shopper-checkout", "checkout-order-db", "checkout-fulfillment", "fulfillment-inventory-db"],
+      "focusNode": "fulfillment",
+      "result": "This is a valid starting point: the boundary is tested without paying for network failure, distributed tracing, or data synchronization yet."
+    },
+    {
+      "id": "useful-extraction",
+      "label": "Useful extraction",
+      "summary": "Fulfillment becomes independently deployable and owns its inventory store. Checkout calls its reservation contract and records the resulting reference with the order.",
+      "activeEdges": ["shopper-checkout", "checkout-order-db", "checkout-fulfillment", "fulfillment-inventory-db", "order-db-outbox", "outbox-events"],
+      "focusNode": "inventory-db",
+      "result": "There is now one write owner for stock. The asynchronous order event supports other consumers without making them part of checkout's response path."
+    },
+    {
+      "id": "shared-database",
+      "label": "Shared database",
+      "summary": "Checkout calls a service but continues to write inventory rows directly. The apparent service boundary has not transferred authority or reduced coordination.",
+      "activeEdges": ["shopper-checkout", "checkout-order-db", "checkout-fulfillment", "checkout-inventory-db"],
+      "degradedNodes": ["checkout", "fulfillment", "inventory-db"],
+      "focusNode": "inventory-db",
+      "result": "This split adds a network dependency while preserving hidden coupling. Schema changes and correctness incidents still require joint coordination."
+    }
+  ]
+}

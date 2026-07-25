@@ -1,0 +1,122 @@
+{
+  "title": "Gate and contain a vLLM rollout",
+  "description": "Select a change, isolate or share the rollout pool, choose canary traffic, collect evidence, and inject a failure to see the expected blast radius and response.",
+  "defaults": {
+    "changeId": "engine-upgrade",
+    "topologyId": "isolated-canary",
+    "failureId": "none",
+    "canaryPercent": 5,
+    "completedGateIds": ["api-contract", "quality", "load"]
+  },
+  "bounds": {
+    "canaryPercent": { "min": 1, "max": 100, "step": 1 }
+  },
+  "changes": [
+    {
+      "id": "engine-upgrade",
+      "label": "Engine upgrade",
+      "detail": "Runtime, kernel, scheduler, dependency, and metric behavior may move together.",
+      "requiredGateIds": ["api-contract", "quality", "load", "observability", "rollback"]
+    },
+    {
+      "id": "parallelism-change",
+      "label": "Parallelism change",
+      "detail": "Process placement and collectives change replica latency and failure scope.",
+      "requiredGateIds": ["load", "observability", "failure-drill", "rollback"]
+    },
+    {
+      "id": "model-runtime-bundle",
+      "label": "Model and runtime bundle",
+      "detail": "Model outputs, tokenizer behavior, parsers, memory, and performance all need comparison.",
+      "requiredGateIds": ["api-contract", "quality", "load", "observability", "rollback"]
+    }
+  ],
+  "topologies": [
+    {
+      "id": "isolated-canary",
+      "label": "Separate canary pool",
+      "detail": "The candidate has independent workers, queue, KV state, and rollback routing.",
+      "isolatesFailure": true
+    },
+    {
+      "id": "shared-in-place",
+      "label": "In-place shared pool",
+      "detail": "Candidate and reference capacity share the same serving failure domain.",
+      "isolatesFailure": false
+    }
+  ],
+  "gates": [
+    {
+      "id": "api-contract",
+      "label": "API contract",
+      "detail": "Streaming, non-streaming, errors, tool calls, and structured outputs match the product contract."
+    },
+    {
+      "id": "quality",
+      "label": "Quality and safety",
+      "detail": "Task slices, refusals, safety checks, and parser outputs meet the reference floor."
+    },
+    {
+      "id": "load",
+      "label": "Representative load",
+      "detail": "Prompt, output, arrival, cancellation, and prefix distributions meet latency and goodput targets."
+    },
+    {
+      "id": "observability",
+      "label": "Observability mapping",
+      "detail": "Dashboards and alerts use metrics present in the candidate release."
+    },
+    {
+      "id": "failure-drill",
+      "label": "Failure drill",
+      "detail": "A worker or collective failure stays inside the intended replica and routing recovers."
+    },
+    {
+      "id": "rollback",
+      "label": "Warm rollback",
+      "detail": "The reference pool restores capacity before the error budget is exhausted."
+    }
+  ],
+  "failures": [
+    {
+      "id": "none",
+      "label": "No injected failure",
+      "detail": "Evaluate evidence and rollout shape before applying traffic.",
+      "signal": "No fault signal",
+      "containment": "Keep the candidate bounded until every required gate passes.",
+      "recoveryMinutes": 0
+    },
+    {
+      "id": "kv-exhaustion",
+      "label": "KV exhaustion",
+      "detail": "Long live sequences consume the candidate's stable KV envelope.",
+      "signal": "KV usage, preemption, queue time, and tail latency rise together.",
+      "containment": "Stop candidate admission, drain or terminate the pool, then lower context or concurrency before retrying.",
+      "recoveryMinutes": 6
+    },
+    {
+      "id": "api-regression",
+      "label": "API regression",
+      "detail": "The candidate changes a required response or streaming shape.",
+      "signal": "Contract checks and client parse errors fail only on the candidate route.",
+      "containment": "Set candidate traffic to zero and preserve failing payloads for versioned contract tests.",
+      "recoveryMinutes": 2
+    },
+    {
+      "id": "collective-stall",
+      "label": "Collective stall",
+      "detail": "One tensor or pipeline worker blocks the entire distributed replica.",
+      "signal": "Replica heartbeats fail while queue and collective latency increase.",
+      "containment": "Eject the complete replica group; never route around one missing rank inside that group.",
+      "recoveryMinutes": 8
+    },
+    {
+      "id": "metric-drift",
+      "label": "Metric contract drift",
+      "detail": "A release removes or renames a signal used by dashboards or alerts.",
+      "signal": "Release checks report missing metric families before user latency changes.",
+      "containment": "Block promotion and migrate recording rules against the candidate metrics endpoint.",
+      "recoveryMinutes": 3
+    }
+  ]
+}

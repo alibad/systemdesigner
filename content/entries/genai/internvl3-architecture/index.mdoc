@@ -1,0 +1,129 @@
+---
+registryId: internvl3-architecture
+---
+
+{% section-card tone="intro" %}
+## What is InternVL3?
+
+InternVL3 is a family of vision-language models: it turns images or video frames into visual tokens, places those tokens beside text, and lets a language model reason over the combined sequence. The published InternVL3 project describes dynamic image tiling and Variable Visual Position Encoding (V2PE) for handling flexible visual inputs.
+
+This matters because images are expensive context. A document page, a multi-image comparison, and a video clip can all ask the model to preserve more detail than the language model can afford to read at once. The engineering task is to decide which visual evidence earns tokens without exhausting latency, memory, or the context window.
+
+Invariant: every visual token must retain enough source identity and spatial order for the downstream model to relate it to the right image, tile, or frame, while the complete multimodal prompt stays inside an explicit serving budget.
+{% /section-card %}
+
+{% section-card %}
+## The multimodal request path
+
+A vision-language request is a pipeline, not a single model call. Each boundary has a different job and a different way to fail.
+
+{% system-flow title="A bounded multimodal request" caption="Dynamic resolution increases visual evidence; token packing and admission control keep the request inside a declared budget." %}
+{% system-node title="Decode and normalize" eyebrow="Input" icon="image" tone="blue" %}
+Validate media type, dimensions, frame sampling, and tenant limits before GPU work begins.
+{% /system-node %}
+{% system-node title="Tile and encode" eyebrow="Vision" icon="grid-3x3" tone="cyan" %}
+Choose a resolution and tile layout, then turn each region into visual features.
+{% /system-node %}
+{% system-node title="Pack positions and project" eyebrow="Align" icon="route" tone="violet" %}
+Keep image, tile, and frame order meaningful while mapping features into the language model input space.
+{% /system-node %}
+{% system-node title="Reason and verify" eyebrow="Language" icon="message-square" tone="amber" %}
+Generate an answer, preserve source references where needed, and apply task-specific output checks.
+{% /system-node %}
+{% /system-flow %}
+
+### What each stage must preserve
+
+- **Media boundary:** record original dimensions, orientation, image or frame index, and any crop decision. Reject malformed or oversized uploads before they consume accelerator time.
+- **Vision boundary:** keep a stable mapping from output features back to the tile that produced them. Fine text and small controls are often lost here first when resolution is reduced.
+- **Projection boundary:** align feature dimensions and token ordering with the language model contract. A shape-compatible projector can still be semantically misaligned.
+- **Language boundary:** reserve text and generation tokens before accepting visual tokens. A model that begins decoding after truncating evidence may return fluent but unsupported output.
+{% /section-card %}
+
+{% section-card %}
+## Budget visual evidence before serving it
+
+The official InternVL3 write-up describes 448 by 448 dynamic tiles and support for multi-image and video inputs. The lab below is an **illustrative capacity model**, not a published InternVL3 latency or memory benchmark. Use it to reason about the direction and interaction of the variables, then calibrate the constants with your own model, GPU, batcher, and request traces.
+
+{% interactive-block id="genai/internvl3-architecture-token-throughput-lab" dataFile="/api/content/genai/internvl3-architecture/data/token-throughput-model.json" /%}
+
+### Read the result as a budget, not a quality score
+
+1. Increase image size or the number of frames only when the task needs the additional spatial or temporal evidence.
+2. Allocate enough text and output reserve for the instruction, retrieval context, and answer; visual tokens cannot consume the entire window.
+3. Treat token compression as a trade-off. It can reduce serving pressure, but it may erase tiny text, dense tables, or precise pointer targets.
+4. Admit concurrent requests based on measured peak memory and tail latency, not the average request alone.
+{% /section-card %}
+
+{% section-card %}
+## How V2PE fits into flexible visual inputs
+
+Position encoding tells a transformer how tokens relate in a sequence. For multimodal input, the model also needs to distinguish which image, tile, and frame a token represents. The InternVL3 project describes V2PE as using smaller, flexible visual position increments; that is a position-management mechanism, not a guarantee that any particular visual detail survives compression.
+
+### A practical position contract
+
+For each visual region, carry metadata that makes reconstruction possible:
+
+- `media_index` identifies the image or sampled video frame.
+- `tile_row` and `tile_column` identify its location within that media item.
+- `token_offset` identifies the region's position in the packed multimodal sequence.
+- `resize_policy` and `compression_factor` record the transformation that changed the source evidence.
+
+When an application compares before-and-after screenshots, keep the two media groups distinct. When it answers a question about a video, preserve frame order and the sampling interval. These are application-level invariants even when the exact position encoding implementation changes.
+
+{% code-block file="/api/content/genai/internvl3-architecture/code/v2pe_implementation.py" language="python" title="Illustrative visual-token packing contract" /%}
+{% /section-card %}
+
+{% section-card %}
+## Route around the actual bottleneck
+
+An architecture diagram becomes useful when it can answer: what still works after a component changes or fails? Select an ablation, alternate component, or failure below. The selected state updates the active path, the limiting boundary, the capability that remains, and the recovery action.
+
+{% interactive-block id="genai/internvl3-architecture-architecture-routing-lab" dataFile="/api/content/genai/internvl3-architecture/data/architecture-routing-model.json" /%}
+
+### Interpret common ablations carefully
+
+- A smaller vision path may improve responsiveness while weakening OCR, small-object recognition, and GUI grounding.
+- A pooled or weakly aligned projector may lower token pressure while reducing the language model's ability to bind words to a specific visual region.
+- A smaller language model can be a good default for extraction or routing, but it does not replace visual evidence for tasks that require it.
+- A text-only fallback is honest only when the user can complete a safe subset of the task without the image. It must label the missing modality instead of implying visual verification occurred.
+{% /section-card %}
+
+{% section-card %}
+## Implement a defensible request contract
+
+The serving layer should make the visual budget and degraded modes explicit before model invocation.
+
+{% code-block file="/api/content/genai/internvl3-architecture/code/production_deployment.py" language="python" title="Admission and fallback policy for a multimodal request" /%}
+
+### Failure handling
+
+- **Decode or upload failure:** return a clear validation error with a retryable upload path. Do not forward unknown bytes to the vision worker.
+- **Budget overflow:** downsample or reduce frames only with a visible policy; otherwise ask the caller to choose fewer inputs. Never silently drop the image that holds the requested evidence.
+- **Vision or projector outage:** switch to a text-only route only when the product contract permits it. For inspection, accessibility, or verification tasks, the safe response may be to defer.
+- **Language-model timeout:** cancel the request with a deadline, record the selected route and visual-token count, and retry only when the request is idempotent.
+
+### Operations checklist
+
+- Track visual-token count, context utilization, queue wait, per-stage latency, peak memory, decode failures, and fallback rate by task type.
+- Store non-sensitive request metadata that explains how evidence was transformed; keep raw media retention and access controlled by policy.
+- Evaluate representative slices such as dense documents, tiny controls, multi-image comparisons, motion-heavy clips, and corrupted inputs before a model or preprocessing change.
+- Canary both the preprocessing policy and the model version. A model swap can look healthy in aggregate while breaking a small but critical visual slice.
+{% /section-card %}
+
+{% section-card %}
+## Evidence and evaluation boundaries
+
+Published benchmark results are useful evidence about a checkpoint under a named dataset and protocol. They are not proof that a product is reliable for GUI automation, industrial inspection, metric depth, or autonomous action. The InternVL project publishes model-specific evaluation material; read the task definition, prompt format, input policy, and checkpoint before comparing a result with another model.
+
+For a product evaluation, pair benchmark evidence with a task-owned suite:
+
+- **Grounding:** did the answer point to the correct page region, frame, or object?
+- **Faithfulness:** did the output abstain or identify missing evidence when the required modality was unavailable?
+- **Serving:** do p95 latency, peak memory, and fallback behavior remain inside the product SLO at the expected mix of images and frames?
+- **Safety:** are action proposals constrained, confirmed, and reversible when a visual interpretation is uncertain?
+
+Sources: [InternVL3 project overview](https://internvl.github.io/blog/2025-04-11-InternVL-3.0/), [InternVL3 evaluation documentation](https://internvl.readthedocs.io/en/latest/internvl3.0/evaluation.html), and [V2PE model documentation](https://huggingface.co/OpenGVLab/V2PE).
+{% /section-card %}
+
+{% quiz title="InternVL3 Architecture Review" questionsFile="/api/content/genai/internvl3-architecture/quiz/internvl3-architecture-review.json" lessonSlug="internvl3-architecture" /%}

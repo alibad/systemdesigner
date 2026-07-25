@@ -1,0 +1,134 @@
+---
+registryId: acid-properties
+---
+
+{% section-card tone="intro" %}
+## What are ACID properties?
+
+**ACID** is a set of guarantees a database can apply to a **transaction**: one unit of work containing related reads and writes. Atomicity, consistency, isolation, and durability keep a transaction from leaving behind a partial, invalid, conflicting, or forgotten business fact.
+
+ACID matters when a wrong result costs more than a retry. A payment must not remove money without adding it somewhere else; the last concert ticket must not be sold twice; and a confirmed order must survive a restart. The central invariant is simple: after a transaction finishes, the facts people rely on must still be true.
+{% /section-card %}
+
+{% concept-grid columns="4" %}
+{% concept-card title="Atomicity" eyebrow="All or nothing" icon="repeat" tone="blue" %}
+Every required write commits together, or the database rolls them all back. A failed transfer never exposes just the debit.
+{% /concept-card %}
+{% concept-card title="Consistency" eyebrow="Rules stay true" icon="check" tone="green" %}
+Constraints and application checks move data from one valid state to another. A balance rule or foreign key rejects an invalid state.
+{% /concept-card %}
+{% concept-card title="Isolation" eyebrow="Concurrent work" icon="layers" tone="violet" %}
+Concurrent transactions are controlled so their combined effect is valid, even when their individual steps overlap.
+{% /concept-card %}
+{% concept-card title="Durability" eyebrow="Commit survives" icon="storage" tone="amber" %}
+After a successful commit is acknowledged, recovery should retain the result through a process, host, or power failure.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% section-card %}
+## A transaction protects one business decision
+
+A transaction is not simply a bundle of SQL statements. It is the boundary around a business decision whose related facts must agree. For a transfer, the decision is not "subtract money" or "add money" independently; it is "move $80 from A to B."
+
+{% process-flow %}
+{% process-step number="1" title="Check the rules" %}
+Read the accounts and verify the transfer amount, account state, and authorization.
+{% /process-step %}
+{% process-step number="2" title="Apply related writes" %}
+Debit the source and credit the destination within the same transaction boundary.
+{% /process-step %}
+{% process-step number="3" title="Commit or roll back" %}
+Make all writes visible together, or restore the prior valid state if any required step fails.
+{% /process-step %}
+{% process-step number="4" title="Recover if needed" %}
+Persist the committed decision so database recovery can reproduce it after a crash.
+{% /process-step %}
+{% /process-flow %}
+
+The database can enforce some rules, such as `NOT NULL`, unique keys, foreign keys, and `CHECK` constraints. The application still owns cross-record business rules that are not encoded in the schema. Correctness comes from defining the invariant and putting every required check and write inside an appropriate boundary.
+{% /section-card %}
+
+{% section-card %}
+## Lab: inject a failed transfer
+
+Atomicity and consistency become easier to distinguish when a write fails. In this lab, change the transaction boundary, amount, and failure condition. Watch whether the two account balances still add up to the original $200 and whether the no-negative-balance rule remains true.
+
+{% interactive-block id="fundamentals/acid-properties-transfer-lab" /%}
+{% /section-card %}
+
+{% section-card %}
+## Each letter answers a different failure question
+
+### Atomicity: can part of the decision escape?
+
+Atomicity says a transaction has two visible outcomes: every required change commits, or none do. It is useful for transfers, order creation plus inventory reservation, and creating a user with required related records. Rollback logs or undo records let the database discard incomplete work.
+
+### Consistency: are the stored facts allowed?
+
+Consistency means the transaction preserves declared and business invariants. A database constraint can reject an order with no customer, while a transaction-level check can prevent an account from going below its allowed limit. Consistency is not a synonym for replication consistency; here it means valid state before and after the transaction.
+
+### Isolation: what happens when work overlaps?
+
+Isolation controls the observations and writes of transactions that run at the same time. It prevents one request from treating another request's unfinished or conflicting work as a safe basis for a decision. Locks, multiversion concurrency control (MVCC), conflict detection, and retry logic are common mechanisms.
+
+### Durability: can an acknowledged result disappear?
+
+Durability begins after commit. Write-ahead logs, flushing policy, replication, and recovery procedures must make a committed result recoverable. A replica can improve availability, but it does not by itself prove that the primary acknowledged the transaction durably.
+{% /section-card %}
+
+{% section-card %}
+## Isolation protects decisions, not every query
+
+Isolation levels choose which concurrent anomalies a database prevents and how much waiting, aborting, or retrying the application may face. Product behavior depends on the database engine and the exact query pattern, so use its documentation for the final contract.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Read committed" eyebrow="Common default" icon="database" tone="blue" %}
+Prevents reading another transaction's uncommitted data. A later statement can still observe a newer committed value, so a read-then-write decision may need a lock or conditional update.
+{% /concept-card %}
+{% concept-card title="Repeatable read" eyebrow="Stable row view" icon="repeat" tone="violet" %}
+Typically keeps rows read by a transaction stable. Exact phantom and write-conflict behavior differs by database, so test the invariant rather than relying on the label alone.
+{% /concept-card %}
+{% concept-card title="Serializable" eyebrow="Strongest ordering" icon="shield" tone="green" %}
+Produces an outcome equivalent to transactions running one at a time. It may block or abort a transaction; callers must be prepared to retry safely.
+{% /concept-card %}
+{% /concept-grid %}
+
+For a hot inventory row, a guarded write such as `UPDATE inventory SET available = available - 1 WHERE sku = ? AND available > 0` can encode the invariant directly. The affected-row count tells the application whether a reservation succeeded. `SELECT ... FOR UPDATE` is another approach when a decision needs to read and then update a locked row.
+{% /section-card %}
+
+{% section-card %}
+## Lab: race two buyers for one item
+
+Two shoppers both see one item. Choose the concurrency strategy to see how a read-check-write flow can oversell, while a guarded write or serializable transaction preserves the inventory invariant with different operational costs.
+
+{% interactive-block id="fundamentals/acid-properties-inventory-lab" /%}
+{% /section-card %}
+
+{% section-card %}
+## Implement the critical path deliberately
+
+The following example keeps the order record and inventory reservation in one transaction. It uses a conditional inventory update instead of trusting a stale value read by the application. The notification is placed in an outbox table so it is committed with the order and can be delivered later without holding the transaction open for a network call.
+
+{% code-block file="/api/content/fundamentals/acid-properties/code/reserve-inventory.sql" language="sql" title="Reserve inventory and record an order" /%}
+
+### Keep transaction boundaries small
+
+- Put only the reads, validations, and writes needed for one invariant inside the transaction.
+- Avoid remote HTTP calls, long user interactions, and slow reports while locks or snapshots are held.
+- Design an idempotency key for retried requests. Isolation can abort a transaction; a retry must not charge or create an order twice.
+- Record an outbox event in the same transaction, then deliver it asynchronously. This avoids claiming an external side effect occurred before the transaction commits.
+{% /section-card %}
+
+{% section-card %}
+## Choose guarantees by the cost of being wrong
+
+Use strong transactional protection for facts that must agree immediately: account balances, inventory reservations, entitlements, and audit-relevant state. Lower-stakes derived data can often be asynchronous: search indexes, analytics aggregates, caches, notifications, and recommendation feeds can be rebuilt or corrected from a durable source of truth.
+
+This is not a choice between "ACID" and "fast." A useful design places the strict transaction around the smallest critical decision, then uses asynchronous processing for work that can be retried or reconciled. Measure lock waits, deadlocks or serialization failures, rollback rate, commit latency, and recovery tests to verify the chosen boundary under load.
+
+{% callout variant="tip" %}
+Start with the invariant in one sentence: "available inventory never becomes negative" or "an accepted payment has exactly one order." Then choose constraints, conditional writes, isolation, idempotency, and recovery behavior that make that sentence true.
+{% /callout %}
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/fundamentals/acid-properties/quiz/acid-properties.json" lessonSlug="acid-properties" title="ACID Properties Review" /%}

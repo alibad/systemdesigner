@@ -1,0 +1,235 @@
+---
+registryId: apache-iceberg
+---
+
+{% section-card tone="intro" %}
+## What is Apache Iceberg?
+
+Apache Iceberg is an **open table format for large analytical datasets**. It defines
+how a logical table points to schemas, partition specifications, snapshots, manifest
+metadata, data files, and delete files so multiple compatible compute engines can
+coordinate through the same table state.
+
+Iceberg is not a storage engine, query engine, catalog, or columnar file format.
+Parquet, Avro, and ORC store file contents; a catalog locates the current table
+metadata; Iceberg connects those pieces into one versioned table.
+
+The core invariant is: **a reader resolves one committed snapshot, and a writer makes a
+new table state visible by atomically replacing the current metadata pointer.** A
+reader therefore sees the complete old snapshot or the complete new snapshot, never a
+partially published set of files.
+
+{% callout variant="info" %}
+**Use Iceberg when independent analytical engines need one durable table contract.**
+
+The format provides snapshot isolation, schema and partition evolution, time travel,
+and optimistic commits. It does not choose a good partition design, compact small
+files, expire history, or operate the catalog for you.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Read the table through its metadata hierarchy
+
+Iceberg tracks files explicitly instead of discovering table state by listing storage
+directories. Each layer answers a narrower planning question.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Table metadata" eyebrow="Current pointer target" icon="file-json" tone="blue" %}
+Records schemas, partition specs, properties, snapshot history, and the current
+snapshot ID. A catalog atomically replaces the pointer to this metadata file.
+{% /concept-card %}
+{% concept-card title="Snapshot" eyebrow="Committed table state" icon="camera" tone="violet" %}
+Identifies one table version and its manifest list. A reader pinned to this snapshot
+keeps a consistent view while newer commits become current.
+{% /concept-card %}
+{% concept-card title="Manifest list" eyebrow="Index over manifests" icon="list-tree" tone="amber" %}
+Lists the manifests in one snapshot plus partition summaries and file counts that can
+prune whole manifests before they are opened.
+{% /concept-card %}
+{% concept-card title="Manifest" eyebrow="Index over files" icon="files" tone="green" %}
+Lists data or delete files, each file's partition tuple, column statistics, and
+tracking metadata. One manifest belongs to one partition spec.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% process-flow %}
+{% process-step number="1" title="Load table metadata" label="Resolve" %}
+Ask the catalog for the current metadata location, or pin an explicit snapshot for a
+reproducible read.
+{% /process-step %}
+{% process-step number="2" title="Open the manifest list" label="Prune manifests" %}
+Transform query predicates through every relevant partition spec and discard manifests
+whose partition summaries cannot match.
+{% /process-step %}
+{% process-step number="3" title="Read candidate manifests" label="Prune files" %}
+Apply partition tuples and column-level bounds to remove data and delete files that
+cannot match.
+{% /process-step %}
+{% process-step number="4" title="Plan file tasks" label="Scan" %}
+Only the remaining files become scan work. The data engine still evaluates the query
+predicate on rows for correctness.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% interactive-block id="technology/apache-iceberg-performance" dataFile="/api/content/technology/apache-iceberg/data/snapshot-scan-model.json" /%}
+
+{% section-card accent="violet" %}
+## Evolve partitioning without rewriting old files
+
+**Partition evolution** changes the default partition spec used by future writers.
+Existing files remain described by their original spec, while new manifests use the
+new spec. Because queries filter source columns such as `event_time` and `region`,
+readers can derive the correct partition predicate for each historical spec.
+
+That separation has practical consequences:
+
+- Adding or dropping a partition field is a metadata change, not an automatic data
+  rewrite.
+- A snapshot may reference manifests written under several partition specs.
+- Old files do not gain values for fields added to a newer spec.
+- Query SQL should express business predicates on source columns, not depend on
+  storage directory names.
+- Rewriting old files into the new layout is a separate optimization decision with its
+  own cost, conflict, and recovery plan.
+
+The following example uses the Apache Iceberg Spark SQL adapter. Other engines expose
+different DDL even though the underlying partition-evolution semantics are the same.
+
+{% code-block file="/api/content/technology/apache-iceberg/code/evolve-partition-spec.sql" language="sql" title="Evolve an Iceberg partition spec with Spark SQL" /%}
+
+The deterministic planner below reads the same fixture as the metadata lab. It shows
+that one query can traverse manifests from both partition specs without fabricating
+latency or scan-throughput estimates.
+
+{% code-block file="/api/content/technology/apache-iceberg/code/plan-snapshot-read.py" language="python" title="Trace snapshot, manifest, and file pruning" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Publish writes with an optimistic metadata swap
+
+An **Iceberg commit** builds a new metadata tree and then asks the catalog to replace
+the current metadata pointer only if the expected base is still current. Data files and
+manifests may be written before this final swap; they are not table state until a
+successful commit references them.
+
+{% process-flow %}
+{% process-step number="1" title="Read a base snapshot" label="Plan" %}
+The writer loads current metadata and records the assumptions required by its
+operation.
+{% /process-step %}
+{% process-step number="2" title="Write immutable artifacts" label="Prepare" %}
+The job writes new data, delete, or manifest files without changing what current
+readers see.
+{% /process-step %}
+{% process-step number="3" title="Swap the metadata pointer" label="Commit" %}
+The catalog compares the expected base with its current pointer and publishes the new
+metadata atomically when they match.
+{% /process-step %}
+{% process-step number="4" title="Validate or retry" label="Resolve conflict" %}
+After a lost race, the writer refreshes current state and re-applies only an operation
+whose assumptions still hold.
+{% /process-step %}
+{% /process-flow %}
+
+An append can usually reuse its new files and manifest when rebasing onto a concurrent
+commit. A compaction is stricter: every source file it planned to replace must still be
+present. If a competing writer removed one of those files, committing the stale
+rewrite would be unsafe.
+{% /section-card %}
+
+{% interactive-block id="technology/apache-iceberg-commit-lab" dataFile="/api/content/technology/apache-iceberg/data/optimistic-commit-model.json" /%}
+
+{% section-card accent="amber" %}
+## Separate logical changes from physical maintenance
+
+Iceberg snapshot operations describe different changes to table state:
+
+{% concept-grid columns="4" %}
+{% concept-card title="Append" eyebrow="Add rows" icon="plus" tone="green" %}
+Adds data files without removing existing table data. Fast append can add a new
+manifest instead of rewriting stable manifests.
+{% /concept-card %}
+{% concept-card title="Overwrite or delete" eyebrow="Change visible rows" icon="eraser" tone="rose" %}
+Removes or supersedes files, or adds delete files, according to the operation and table
+format version. Conflict validation protects the chosen isolation contract.
+{% /concept-card %}
+{% concept-card title="Data compaction" eyebrow="Rewrite files" icon="combine" tone="amber" %}
+Replaces many small or poorly organized files with fewer files while preserving the
+logical rows. The replacement appears as one snapshot.
+{% /concept-card %}
+{% concept-card title="Manifest rewrite" eyebrow="Reorganize metadata" icon="list-restart" tone="blue" %}
+Regroups file entries into better manifests without rewriting data files. This can
+improve planning when manifest layout no longer matches query filters.
+{% /concept-card %}
+{% /concept-grid %}
+
+The commit validator mirrors the lab's set-based rule: a rewrite may retry only while
+all source files it intends to replace remain in the refreshed snapshot.
+
+{% code-block file="/api/content/technology/apache-iceberg/code/validate-commit-retry.py" language="python" title="Validate append and compaction retries" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate snapshots and files as one lifecycle
+
+Every write creates metadata that must be retained, optimized, and eventually cleaned.
+Treat maintenance as correctness-sensitive production work:
+
+- **Measure before compacting:** track file counts, file-size distribution, delete-file
+  accumulation, planning time, and query scan evidence by table and partition.
+- **Rewrite data files deliberately:** bound the partitions and snapshots affected,
+  expect optimistic conflicts, and verify the logical row result.
+- **Rewrite manifests when metadata layout is the problem:** data compaction and
+  manifest rewriting solve different sources of planning overhead.
+- **Expire snapshots according to recovery and audit policy:** a data file cannot be
+  deleted while any retained snapshot still references it.
+- **Remove orphan files conservatively:** use a retention interval longer than the
+  maximum expected write duration so cleanup does not delete files from an in-progress
+  commit.
+- **Protect references:** branches and tags can retain snapshots beyond the main
+  branch's normal history, so include them in storage and deletion planning.
+- **Test catalog recovery:** atomic pointer replacement is a critical availability and
+  correctness boundary even though table data lives in object storage.
+
+{% callout variant="warn" %}
+**Never mix Iceberg-aware and direct file mutations in the same table location.**
+
+Deleting or replacing files behind the table metadata breaks snapshot validity.
+Writing unreferenced files directly into the location does not make them part of the
+table.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Decide whether the format fits the workload
+
+Iceberg is a strong fit when:
+
+- large analytical tables need safe concurrent batch or streaming writes;
+- several compatible engines must share schema, snapshots, and partition semantics;
+- reproducible reads, rollback, or time travel are operational requirements;
+- partition layout and physical files must evolve without a table-wide migration.
+
+Choose a serving database or another storage contract when:
+
+- the primary workload is low-latency point mutation with per-row transactional
+  coordination;
+- the team cannot operate a catalog, compaction, snapshot retention, and orphan-file
+  cleanup;
+- participating engines do not support the required Iceberg format version and
+  features;
+- a small dataset does not justify the additional metadata and maintenance lifecycle.
+
+### Current primary references
+
+- [Apache Iceberg table specification](https://iceberg.apache.org/spec/)
+- [Apache Iceberg reliability and optimistic concurrency](https://iceberg.apache.org/docs/latest/reliability/)
+- [Apache Iceberg scan-planning performance](https://iceberg.apache.org/docs/latest/performance/)
+- [Apache Iceberg partitioning](https://iceberg.apache.org/docs/latest/partitioning/)
+- [Apache Iceberg maintenance](https://iceberg.apache.org/docs/latest/maintenance/)
+- [Apache Iceberg Spark DDL](https://iceberg.apache.org/docs/latest/spark-ddl/)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/apache-iceberg/quiz/apache-iceberg-production-decisions.json" lessonSlug="apache-iceberg" title="Apache Iceberg Production Decisions" /%}

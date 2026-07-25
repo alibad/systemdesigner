@@ -1,0 +1,234 @@
+---
+registryId: kubernetes
+---
+
+{% section-card tone="intro" %}
+## What is Kubernetes?
+
+**Kubernetes** is a control system for running containerized workloads across a cluster of machines. You declare an intended state through API objects: six application replicas, a stable service endpoint, a storage claim, or a rollout policy. Controllers continuously observe the cluster and take actions that move reality toward that declaration.
+
+Kubernetes matters when teams need repeatable scheduling, service discovery, rollout, recovery, policy, and capacity management across many workloads. It does not make an application reliable automatically. Teams still own truthful health signals, resource contracts, data durability, security, upgrades, and the behavior users see during failure.
+
+### The invariant to remember
+
+**The cluster may replace any individual Pod, but the workload contract must preserve service and data while desired and observed state converge.** A restarted container is not proof that a request succeeded, data recovered, or the release is safe.
+
+Start with [Docker](/technology/docker) if images, containers, and process isolation are unfamiliar.
+{% /section-card %}
+
+{% section-card %}
+## Understand the reconciliation loop first
+
+Kubernetes is declarative. Clients write desired objects through the API; controllers and node agents repeatedly compare those objects with what is actually running.
+
+{% process-flow %}
+{% process-step number="1" title="Declare desired state" label="API object" %}
+Submit a versioned manifest with identity, replicas, image digest, requests, probes, placement, configuration, and rollout policy.
+{% /process-step %}
+{% process-step number="2" title="Persist and validate" label="API server" %}
+Authenticate, authorize, apply admission policy, validate the object, and persist cluster state through the control plane.
+{% /process-step %}
+{% process-step number="3" title="Schedule work" label="Scheduler" %}
+Choose nodes that satisfy resource requests, affinity, taints, storage, topology, and policy constraints.
+{% /process-step %}
+{% process-step number="4" title="Run and observe" label="Kubelet" %}
+Pull images, start containers, mount configuration and volumes, execute probes, and report Pod status from each node.
+{% /process-step %}
+{% process-step number="5" title="Reconcile again" label="Controllers" %}
+Replace missing replicas, progress rollouts, update endpoints, and retry until observed state matches the declaration or progress stops.
+{% /process-step %}
+{% /process-flow %}
+
+Reconciliation is asynchronous. A successful API write means the declaration was accepted; it does not mean every dependent resource is ready.
+{% /section-card %}
+
+{% section-card %}
+## See how control plane and workers cooperate
+
+{% system-flow title="One declarative API, many cooperating loops" caption="The API is the coordination boundary. Workloads should never depend on a particular Pod identity unless a stateful contract explicitly provides it." %}
+{% system-node title="API server" eyebrow="Front door" icon="server" tone="blue" %}
+Exposes the cluster API, runs authentication and admission, validates objects, and coordinates state changes.
+{% /system-node %}
+{% system-node title="etcd" eyebrow="Cluster state" icon="database" tone="violet" %}
+Stores control-plane state. Backups, encryption, quorum health, and recovery procedures are cluster-owner responsibilities.
+{% /system-node %}
+{% system-node title="Scheduler and controllers" eyebrow="Decide and reconcile" icon="workflow" tone="cyan" %}
+Assign Pods to nodes and drive Deployments, Jobs, Nodes, endpoints, and other resources toward desired state.
+{% /system-node %}
+{% system-node title="Kubelet and runtime" eyebrow="Execute on nodes" icon="boxes" tone="green" %}
+Reconcile assigned Pods, start containers, attach volumes, run probes, and report status.
+{% /system-node %}
+{% system-node title="Service data plane" eyebrow="Route traffic" icon="network" tone="amber" %}
+Maps stable service identity to changing ready endpoints through the cluster's network implementation.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Learn the workload building blocks
+
+{% concept-grid columns="2" %}
+{% concept-card title="Pod" eyebrow="Execution unit" icon="box" tone="blue" %}
+One or more tightly coupled containers share a network namespace and volumes. Pods are replaceable; their local filesystem and IP are normally ephemeral.
+{% /concept-card %}
+{% concept-card title="Deployment" eyebrow="Stateless rollout" icon="repeat" tone="cyan" %}
+Owns ReplicaSets and progresses a versioned set of interchangeable Pods through rolling replacement.
+{% /concept-card %}
+{% concept-card title="Service" eyebrow="Stable discovery" icon="network" tone="green" %}
+Selects ready endpoints behind a stable virtual address or name. It does not retry application operations or make them idempotent.
+{% /concept-card %}
+{% concept-card title="Job and CronJob" eyebrow="Finite work" icon="clock" tone="amber" %}
+Run work to completion under restart, retry, parallelism, deadline, and history policies. The job itself must tolerate repeated execution.
+{% /concept-card %}
+{% concept-card title="StatefulSet" eyebrow="Stable identity" icon="database" tone="violet" %}
+Provides ordered identities and per-replica storage claims, while the application still owns replication, quorum, backup, and recovery semantics.
+{% /concept-card %}
+{% concept-card title="DaemonSet" eyebrow="Node-local agent" icon="server" tone="rose" %}
+Runs a Pod on matching nodes for networking, storage, security, or telemetry functions and consumes capacity on every selected node.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/technology/kubernetes/code/core-resources.yaml" language="yaml" title="Declare requests, probes, spread, immutable image identity, and a Service" /%}
+{% /section-card %}
+
+{% section-card %}
+## Plan allocatable capacity and disruption together
+
+Node capacity is not fully schedulable. The operating system, kubelet, networking, storage agents, DaemonSets, image pulls, and failure recovery need headroom. Resource requests tell the scheduler what a Pod reserves; limits control runtime behavior and can cause throttling or termination.
+
+{% interactive-block id="technology/kubernetes-cluster" /%}
+
+{% code-block file="/api/content/technology/kubernetes/code/plan-capacity.py" language="python" title="Assert that requested CPU fits after one node failure" /%}
+
+{% callout variant="warn" %}
+High average utilization is not efficient when one node or zone loss makes Pods permanently Pending. Size for the failure and rollout overlap you promise to survive.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Give each health signal one job
+
+{% tabs %}
+{% tab title="Startup" %}
+Protect a slow-starting process from premature liveness checks. Once startup succeeds, normal liveness and readiness behavior begins.
+{% /tab %}
+{% tab title="Readiness" %}
+Answer whether this Pod should receive new traffic now. Include dependencies required to serve safely, but avoid making one optional dependency remove every replica.
+{% /tab %}
+{% tab title="Liveness" %}
+Detect a process that cannot recover without restart. Do not restart healthy instances because a shared downstream is unavailable.
+{% /tab %}
+{% tab title="Application SLO" %}
+Measure what users experience: success, latency, freshness, queue age, or business outcomes. Probe health alone cannot approve a release.
+{% /tab %}
+{% /tabs %}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Drill a failed rollout before production
+
+Deployment strategy, traffic control, probes, topology, and rollback signals work as one release contract. A rolling update is simple and efficient, a canary limits exposure, and blue-green creates a clean environment boundary at the cost of duplicate capacity.
+
+{% interactive-block id="technology/kubernetes-rollout-lab" dataFile="/api/content/technology/kubernetes/data/rollout-incidents.json" /%}
+
+{% code-block file="/api/content/technology/kubernetes/code/rolling-update.yaml" language="yaml" title="Bound rollout disruption and keep a rollback window" /%}
+{% /section-card %}
+
+{% section-card %}
+## Treat placement as a reliability decision
+
+{% metric-strip %}
+{% metric value="request" label="Scheduling contract" detail="CPU, memory, accelerators, storage, affinity, and policy determine where a Pod can fit." tone="blue" /%}
+{% metric value="maxSkew" label="Failure spread" detail="Topology constraints limit how unevenly replicas land across nodes and zones." tone="violet" /%}
+{% metric value="PDB" label="Voluntary disruption" detail="A disruption budget constrains drains and evictions; it cannot stop an involuntary machine failure." tone="amber" /%}
+{% metric value="surge" label="Rollout overlap" detail="New and old replicas coexist during rollout, so capacity must include the selected surge policy." tone="green" /%}
+{% /metric-strip %}
+
+### Test the placement policy against real events
+
+- Drain one node while a rollout is active and verify enough ready replicas remain.
+- Remove a zone and confirm topology spread, storage attachment, and autoscaling behavior.
+- Saturate one resource dimension and inspect why Pods stay Pending.
+- Verify priority and preemption do not evict a more important workload unexpectedly.
+- Measure image-pull and node-provisioning time inside the recovery objective.
+{% /section-card %}
+
+{% section-card %}
+## Separate configuration, secrets, and durable data
+
+ConfigMaps distribute non-secret configuration. Secret objects distribute sensitive bytes through the Kubernetes API, but a complete design still needs encryption, least-privilege access, external source-of-truth integration, rotation, audit, and safe delivery into the process.
+
+PersistentVolumeClaims request storage from a storage class. They do not create application replication, point-in-time recovery, cross-zone availability, or tested restore procedures.
+
+{% code-block file="/api/content/technology/kubernetes/code/configuration-and-storage.yaml" language="yaml" title="Version configuration and give stateful replicas explicit storage identity" /%}
+
+### Preserve configuration identity through releases
+
+- Use immutable names or checksums so a Pod revision identifies the exact configuration it loaded.
+- Avoid mutable image tags; deploy image digests and retain the previous revision.
+- Rotate secrets without exposing them in manifests, logs, environment dumps, or debugging output.
+- Back up application data and control-plane state independently, then rehearse restores.
+{% /section-card %}
+
+{% section-card %}
+## Secure the workload and cluster boundaries
+
+{% concept-grid columns="2" %}
+{% concept-card title="Identity and admission" eyebrow="Before scheduling" icon="shield" tone="blue" %}
+Use least-privilege RBAC and service accounts. Enforce image provenance, allowed registries, Pod security, required labels, and resource policy at admission.
+{% /concept-card %}
+{% concept-card title="Runtime isolation" eyebrow="Inside the Pod" icon="lock" tone="violet" %}
+Run as a non-root user, drop capabilities, use read-only filesystems where practical, constrain syscalls, and isolate untrusted workloads strongly.
+{% /concept-card %}
+{% concept-card title="Network policy" eyebrow="Between workloads" icon="network" tone="green" %}
+Default-deny ingress and egress, then allow identity- and purpose-specific paths. Verify the selected network implementation enforces the policy.
+{% /concept-card %}
+{% concept-card title="Supply chain" eyebrow="Artifact trust" icon="package" tone="amber" %}
+Pin digests, generate provenance and inventories, scan continuously, sign trusted artifacts, and make exception ownership explicit.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card %}
+## Operate the cluster as a dependency
+
+### Watch the control plane and node fleet
+
+- API availability and latency, admission failures, controller queue depth, and etcd health
+- Scheduling latency, Pending reasons, allocatable headroom, node readiness, pressure, and evictions
+- Deployment progress, unavailable replicas, probe transitions, restarts, and crash loops
+- Service endpoint counts, network errors, DNS latency, and policy denials
+- Storage attachment, capacity, latency, snapshot age, and restore success
+
+### Watch each workload through user outcomes
+
+- Request success, tail latency, queue age, saturation, freshness, and business SLOs
+- Candidate-versus-baseline release metrics with automated halt and rollback thresholds
+- Resource request accuracy, throttling, out-of-memory termination, and autoscaler lag
+- Certificate, secret, image, configuration, and dependency version age
+
+Cluster upgrades, API deprecations, node-image changes, and add-on compatibility need staged rollout and rollback just like application releases.
+{% /section-card %}
+
+{% section-card %}
+## Review the production checklist
+
+### Build these controls
+
+- Measure requests and leave capacity for rollout, node loss, and autoscaler delay.
+- Use startup, readiness, and liveness probes for their distinct contracts.
+- Spread replicas across failure domains and test node and zone loss.
+- Pin images and configuration, define disruption budgets, and automate release rollback.
+- Apply least privilege, admission policy, network policy, and supply-chain verification.
+- Prove backups, restores, cluster upgrades, and stateful failover under realistic conditions.
+
+### Avoid these traps
+
+- Treating a restarted Pod as proof that a user operation recovered.
+- Packing steady state so tightly that reconciliation has nowhere to schedule replacements.
+- Giving every probe the same dependency check or restarting on shared dependency failure.
+- Assuming a PersistentVolumeClaim is a backup or a StatefulSet is database replication.
+- Using privileged containers, mutable tags, broad cluster-admin access, or unrestricted egress.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/kubernetes/quiz/kubernetes-production.json" lessonSlug="kubernetes" /%}

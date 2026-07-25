@@ -1,0 +1,177 @@
+{
+  "title": "Separate request authorization from control-plane recovery",
+  "description": "Choose a condition. Active routes show authentication, policy, secret issuance, audit durability, storage quorum, seal dependencies, and restore paths.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Workload client",
+      "eyebrow": "Identity and renewal owner",
+      "detail": "Authenticates, requests only the required path, renews when allowed, reloads rotated material, and handles denial or unavailability.",
+      "kind": "client",
+      "tone": "cyan",
+      "x": 6,
+      "y": 34
+    },
+    {
+      "id": "auth",
+      "label": "Auth method",
+      "eyebrow": "External identity mapping",
+      "detail": "Validates workload or human evidence and maps it to token policies, TTL limits, aliases, and metadata.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 24,
+      "y": 34
+    },
+    {
+      "id": "core",
+      "label": "Vault active node",
+      "eyebrow": "Policy and lease authority",
+      "detail": "Evaluates capabilities, routes the request, records leases, and coordinates revocation through one active control-plane leader.",
+      "kind": "service",
+      "tone": "blue",
+      "x": 43,
+      "y": 34
+    },
+    {
+      "id": "engine",
+      "label": "Database secrets engine",
+      "eyebrow": "Dynamic credential broker",
+      "detail": "Uses a configured administrative connection to create, rotate, and revoke unique database credentials from approved roles.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 62,
+      "y": 34
+    },
+    {
+      "id": "database",
+      "label": "Application database",
+      "eyebrow": "External enforcement point",
+      "detail": "Accepts the generated credential until the database expires, disables, or deletes it. Vault availability is not the same as database revocation success.",
+      "kind": "database",
+      "tone": "green",
+      "x": 82,
+      "y": 34
+    },
+    {
+      "id": "audit-a",
+      "label": "Audit device A",
+      "eyebrow": "Local durable path",
+      "detail": "Receives request and response audit records. Vault must successfully write to at least one enabled audit device to service an audited request.",
+      "kind": "security",
+      "tone": "violet",
+      "x": 20,
+      "y": 79
+    },
+    {
+      "id": "audit-b",
+      "label": "Audit device B",
+      "eyebrow": "Independent remote path",
+      "detail": "Provides another write target and must be monitored and analyzed with other device logs for a complete record.",
+      "kind": "security",
+      "tone": "cyan",
+      "x": 40,
+      "y": 79
+    },
+    {
+      "id": "raft",
+      "label": "Integrated Raft storage",
+      "eyebrow": "Replicated durable state",
+      "detail": "Stores encrypted Vault state under consensus. Quorum loss stops writes; snapshots provide a separate recovery input.",
+      "kind": "database",
+      "tone": "blue",
+      "x": 62,
+      "y": 79
+    },
+    {
+      "id": "seal",
+      "label": "Seal mechanism",
+      "eyebrow": "KMS or HSM dependency",
+      "detail": "Protects the key material needed to decrypt Vault's barrier. Auto-unseal creates a lifecycle dependency on this external mechanism.",
+      "kind": "security",
+      "tone": "rose",
+      "x": 82,
+      "y": 79
+    },
+    {
+      "id": "snapshot",
+      "label": "Protected snapshot",
+      "eyebrow": "Tested restore input",
+      "detail": "Captures integrated-storage state for recovery. Restoring it still requires compatible seal access, cluster bootstrap, validation, and client cutover.",
+      "kind": "database",
+      "tone": "amber",
+      "x": 94,
+      "y": 79
+    }
+  ],
+  "edges": [
+    { "id": "client-auth", "from": "client", "to": "auth", "label": "identity evidence" },
+    { "id": "auth-core", "from": "auth", "to": "core", "label": "bounded token" },
+    { "id": "core-engine", "from": "core", "to": "engine", "label": "authorized role" },
+    { "id": "engine-db", "from": "engine", "to": "database", "label": "create or revoke" },
+    { "id": "core-audit-a", "from": "core", "to": "audit-a", "label": "audit write", "mode": "async", "via": { "x": 31, "y": 59 } },
+    { "id": "core-audit-b", "from": "core", "to": "audit-b", "label": "audit write", "mode": "async" },
+    { "id": "core-raft", "from": "core", "to": "raft", "label": "consensus state" },
+    { "id": "seal-core", "from": "seal", "to": "core", "label": "unseal", "via": { "x": 72, "y": 58 } },
+    { "id": "raft-snapshot", "from": "raft", "to": "snapshot", "label": "backup", "mode": "async" },
+    { "id": "snapshot-raft", "from": "snapshot", "to": "raft", "label": "restore", "mode": "async" },
+    { "id": "core-client", "from": "core", "to": "client", "label": "lease + secret", "via": { "x": 24, "y": 13 } }
+  ],
+  "scenarios": [
+    {
+      "id": "issue",
+      "label": "Issue a dynamic secret",
+      "summary": "The client authenticates, policy permits one database role, Vault creates an external credential, writes audit records, stores the lease, and returns the credential with its lease.",
+      "activeEdges": ["client-auth", "auth-core", "core-engine", "engine-db", "core-audit-a", "core-audit-b", "core-raft", "core-client"],
+      "focusNode": "engine",
+      "result": "The credential is unique and leased. The client must renew or replace it, while Vault must retain enough authority and connectivity to revoke it later."
+    },
+    {
+      "id": "revoke",
+      "label": "Revoke the token tree",
+      "summary": "An operator or identity lifecycle event revokes the client token. Vault walks child leases and asks each secrets engine to invalidate its external credentials.",
+      "activeEdges": ["auth-core", "core-engine", "engine-db", "core-audit-a", "core-audit-b", "core-raft"],
+      "degradedNodes": ["client", "engine"],
+      "focusNode": "engine",
+      "result": "New Vault requests are denied immediately. External credential invalidation still depends on the plugin and target system; monitor revocation failures and retry queues."
+    },
+    {
+      "id": "one-audit-down",
+      "label": "One audit device fails",
+      "summary": "The local audit sink cannot accept the record, but the independent remote device still writes successfully.",
+      "activeEdges": ["client-auth", "auth-core", "core-audit-a", "core-audit-b", "core-client"],
+      "failedNodes": ["audit-a"],
+      "degradedNodes": ["core"],
+      "focusNode": "audit-b",
+      "result": "The request can proceed because at least one enabled device succeeded. Alert immediately and combine device logs carefully because neither device alone is guaranteed complete."
+    },
+    {
+      "id": "all-audit-down",
+      "label": "All audit devices fail",
+      "summary": "No enabled audit device can persist the request and response record.",
+      "activeEdges": ["client-auth", "auth-core", "core-audit-a", "core-audit-b"],
+      "failedNodes": ["audit-a", "audit-b"],
+      "degradedNodes": ["core", "client"],
+      "focusNode": "core",
+      "result": "Vault refuses the audited request. Audit storage capacity, rotation, connectivity, and recovery are availability dependencies, not optional reporting."
+    },
+    {
+      "id": "seal-unavailable",
+      "label": "Auto-unseal dependency lost",
+      "summary": "A restarted node has encrypted Raft state but cannot reach or use the configured KMS or HSM key.",
+      "activeEdges": ["seal-core", "core-raft"],
+      "failedNodes": ["seal"],
+      "degradedNodes": ["core", "raft"],
+      "focusNode": "seal",
+      "result": "The node remains sealed. Recovery keys do not decrypt the root key when the auto-unseal mechanism is permanently lost; protect and rehearse the external seal lifecycle."
+    },
+    {
+      "id": "restore",
+      "label": "Restore from a snapshot",
+      "summary": "Operators bootstrap a controlled recovery path, provide compatible seal access, restore an integrated-storage snapshot, validate state, and redirect clients.",
+      "activeEdges": ["seal-core", "snapshot-raft", "core-raft", "core-audit-a", "core-audit-b"],
+      "degradedNodes": ["raft", "core"],
+      "focusNode": "snapshot",
+      "result": "A successful file restore is not completion. Verify cluster health, auth mounts, policies, leases, audit devices, secret-engine connectivity, and client re-authentication before cutover."
+    }
+  ]
+}

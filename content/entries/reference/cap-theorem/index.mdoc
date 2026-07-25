@@ -1,0 +1,187 @@
+---
+registryId: cap-theorem
+---
+
+{% section-card tone="intro" %}
+## What is CAP theorem?
+
+CAP theorem is an impossibility result about a replicated service during a network partition. If healthy replicas are split into groups that cannot exchange messages, the service cannot guarantee both **linearizable consistency** and **availability** for every request.
+
+In plain language: when two sides cannot coordinate, the service must either reject some operations to protect one current order of data, or let every side respond and accept that results may be stale or conflicting.
+
+The core invariant is: **during a partition, one operation cannot be guaranteed both a single current result and a successful response from every non-failing replica**.
+
+CAP is a boundary for design reasoning, not a database product label. The decision can differ by operation, key, region, or failure mode. If replicas and network failures are new concepts, review [Database Fundamentals](/fundamentals/database-fundamentals) first.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Define the three guarantees precisely
+
+CAP uses narrower definitions than everyday engineering language. Precision matters because "consistent" and "available" are often used for several unrelated properties.
+
+{% concept-grid columns="3" %}
+{% concept-card title="One legal order" eyebrow="Consistency" icon="list-ordered" tone="blue" %}
+A completed read returns the most recent completed write according to one global order, or the operation fails. This is commonly explained as linearizability.
+{% /concept-card %}
+{% concept-card title="Every request completes" eyebrow="Availability" icon="activity" tone="green" %}
+Every request sent to a non-failing node eventually receives a non-error response. The response is not required to contain the newest value.
+{% /concept-card %}
+{% concept-card title="Messages can be lost" eyebrow="Partition" icon="network" tone="amber" %}
+The network may drop or delay every message between groups of otherwise running nodes. A distributed design must define what each group does next.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep the scope visible
+
+- CAP constrains behavior **while communication is partitioned**.
+- A service may provide low-latency, consistent, available behavior when communication is healthy.
+- "Unavailable" can mean rejecting one unsafe operation, not necessarily taking the whole application offline.
+- Durability, transaction isolation, recovery time, normal-operation latency, and data-model fit need separate requirements.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Trace one operation across a partition
+
+The first lab turns the theorem into an observable request outcome. A three-replica record is split into a two-replica majority and one isolated replica. Change the client location, operation, and partition policy, then compare the response with the system-wide guarantee.
+
+{% interactive-block id="reference/cap-theorem-partition-operation-lab" dataFile="/api/content/reference/cap-theorem/data/partition-operation-model.json" /%}
+
+### Read the result as an operation contract
+
+- A **coordination-first** policy can serve the majority side while rejecting the isolated side. The service protects one order but gives up CAP availability.
+- A **response-first** policy lets both sides answer. A read may be stale, and independent writes may need deterministic conflict resolution after the partition heals.
+- A system can choose different policies for different operations. A product catalog may accept stale reads while an inventory reservation rejects writes that cannot reach authority.
+- Retrying a rejected operation is different from repairing an accepted conflict. Name which burden the caller and operator will carry.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose policy from the business invariant
+
+A useful CAP decision starts with the damage caused by a wrong answer, a delayed answer, and a conflict. "CP" and "AP" are shorthand for those consequences during a partition.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Protect one current decision" eyebrow="Coordinate or reject" icon="shield-check" tone="blue" %}
+Use an authoritative leader, lease, consensus group, or quorum protocol to prevent two sides from independently committing incompatible results. Requests without enough evidence fail, wait, or move to a degraded workflow.
+{% /concept-card %}
+{% concept-card title="Keep every side responsive" eyebrow="Accept and reconcile" icon="git-merge" tone="green" %}
+Serve a local value or accept a local mutation when coordination is unavailable. Carry versions, operation identities, or merge rules so stale and concurrent states can be detected and repaired.
+{% /concept-card %}
+{% concept-card title="Split policy by operation" eyebrow="Narrow the blast radius" icon="split" tone="violet" %}
+Strongly coordinate the operations whose invariants cross replicas, while allowing bounded staleness for reads or fields that have a safe merge. Document the boundary in the API contract.
+{% /concept-card %}
+{% concept-card title="Expose degraded behavior" eyebrow="Make failure usable" icon="triangle-alert" tone="amber" %}
+Return an explicit retryable error, read-only mode, pending reservation, stale-data marker, or conflict state. A partition policy is incomplete until callers know what they will observe.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="tip" %}
+Do not classify an entire database from one marketing label. Check the exact read and write operation, consistency setting, replica topology, failure detector, and client retry path you will use.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Use quorums to make coordination measurable
+
+A quorum is the number of replica responses an operation waits for. For a replica set of size `N`, a read quorum `R` and write quorum `W` can create overlap between operations.
+
+{% metric-strip %}
+{% metric label="Read/write overlap" value="R + W > N" detail="A read quorum intersects every completed write quorum." tone="blue" /%}
+{% metric label="Write/write overlap" value="2W > N" detail="Any two write quorums share at least one replica." tone="violet" /%}
+{% metric label="Read failure budget" value="N - R" detail="Maximum failed replicas before this read quorum is impossible." tone="green" /%}
+{% metric label="Write failure budget" value="N - W" detail="Maximum failed replicas before this write quorum is impossible." tone="amber" /%}
+{% /metric-strip %}
+
+Overlap is necessary evidence for common quorum protocols; it is not a complete consistency proof. The protocol must still identify versions, serialize competing writes, reject stale authorities, and handle retries correctly.
+
+{% system-flow title="One quorum operation" caption="The coordinator completes only after the required number of live replica acknowledgements arrive." %}
+{% system-node title="Client" eyebrow="Intent" icon="user" tone="blue" %}
+Send a read or write with a documented consistency level and deadline.
+{% /system-node %}
+{% system-node title="Coordinator" eyebrow="Collect" icon="route" tone="cyan" %}
+Contact replicas, validate authority and versions, and wait for `R` or `W` eligible replies.
+{% /system-node %}
+{% system-node title="Replica quorum" eyebrow="Evidence" icon="database" tone="violet" %}
+Return enough responses to satisfy the operation's overlap and failure policy.
+{% /system-node %}
+{% system-node title="Client result" eyebrow="Consequence" icon="check-circle" tone="green" %}
+Complete with an accepted value, or fail explicitly when the required evidence cannot be gathered.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Balance quorum safety, latency, and failure tolerance
+
+The second lab uses five replicas with different response times. Tune `R`, `W`, and injected replica failures. The acknowledgement frontier, modeled latency, overlap conditions, and remaining failure budget update together.
+
+{% interactive-block id="reference/cap-theorem-quorum-latency-lab" dataFile="/api/content/reference/cap-theorem/data/quorum-latency-model.json" /%}
+
+### Interpret quorum settings as a bundle
+
+- Increasing `R` waits for more read evidence and reduces the read failure budget.
+- Increasing `W` waits for more write acknowledgements and reduces the write failure budget.
+- `R + W > N` makes reads intersect completed writes; `2W > N` makes competing write quorums intersect.
+- A low quorum may be fast and available while failing the overlap conditions required by the intended protocol.
+- A high quorum may have strong overlap while becoming impossible after a small number of replica failures.
+
+{% callout variant="warn" %}
+The lab models acknowledgement latency, not end-to-end database latency. Queueing, disk persistence, leader routing, cross-region links, retries, read repair, and transaction work can dominate the real result.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Design the recovery path before the partition
+
+Partition handling is a lifecycle. The service needs evidence for entering degraded mode, rules for serving during the split, and proof that healed replicas converge without losing accepted intent.
+
+{% process-flow %}
+{% process-step number="1" title="Detect uncertain communication" label="Observe" %}
+Use bounded timeouts and failure evidence, but remember that a timeout cannot prove whether a peer is dead or merely unreachable.
+{% /process-step %}
+{% process-step number="2" title="Enforce operation policy" label="Decide" %}
+Route to authority, reject unsafe work, or accept local work with explicit versions and conflict semantics.
+{% /process-step %}
+{% process-step number="3" title="Heal and reconcile" label="Repair" %}
+Exchange missing versions, resolve concurrent mutations deterministically, and preserve an audit trail for discarded or compensated intent.
+{% /process-step %}
+{% process-step number="4" title="Verify restored invariants" label="Prove" %}
+Check replica convergence, stale-read age, conflict volume, retry outcomes, and the business invariant before leaving degraded mode.
+{% /process-step %}
+{% /process-flow %}
+
+### Evidence to collect in production
+
+- Partition and timeout rate by replica, zone, and region.
+- Quorum success, latency, and unavailable-operation rate by consistency level.
+- Stale-read age, sibling or conflict count, reconciliation lag, and repair failures.
+- Client retries, duplicate operation identities, pending workflows, and compensation outcomes.
+- Recovery drills that isolate a replica group and verify both request behavior and post-heal convergence.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Know where CAP stops
+
+CAP does not select a database for you. It establishes one impossibility boundary; the rest of the design still depends on workload and operating requirements.
+
+{% concept-grid columns="2" %}
+{% concept-card title="Healthy-network latency" eyebrow="Outside CAP" icon="timer" tone="cyan" %}
+When there is no partition, coordination can still add latency. Measure local and cross-region paths instead of inferring normal performance from a CAP label.
+{% /concept-card %}
+{% concept-card title="Durability and recovery" eyebrow="Outside CAP" icon="archive-restore" tone="green" %}
+A response can be available yet not durable, and replicated data can still be deleted or corrupted. Define backup, restore, and accepted-write recovery separately.
+{% /concept-card %}
+{% concept-card title="Transaction scope" eyebrow="Outside CAP" icon="boxes" tone="violet" %}
+CAP does not tell you which records form one atomic transaction or which isolation anomalies are allowed. State those invariants explicitly.
+{% /concept-card %}
+{% concept-card title="Conflict semantics" eyebrow="Design responsibility" icon="git-compare" tone="amber" %}
+An available partition policy needs an application rule for concurrent state: reject, select one version, merge commutative operations, or compensate later.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Primary references
+
+- [Gilbert and Lynch, Brewer's Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services](https://dl.acm.org/doi/10.1145/564585.564601)
+- [Brewer, CAP Twelve Years Later: How the Rules Have Changed](https://doi.org/10.1109/MC.2012.37)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/reference/cap-theorem/quiz/cap-theorem-decisions.json" title="CAP Theorem Decision Review" /%}

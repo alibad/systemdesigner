@@ -1,0 +1,194 @@
+---
+registryId: emr
+---
+
+{% section-card tone="intro" %}
+## What is Amazon EMR?
+
+**Amazon EMR** runs open-source analytics frameworks such as Apache Spark and Apache
+Hive on AWS-managed runtimes. A team can use EMR on EC2 clusters, submit Spark jobs to
+EMR on EKS, or let EMR Serverless acquire and release workers for Spark or Hive
+applications.
+
+EMR matters when data processing needs distributed compute but the team does not want
+to assemble every framework, connector, release, and operational integration itself.
+Its core invariant is: **compute may be replaceable only when authoritative data,
+checkpoints, configuration, logs, and committed outputs survive outside the replaceable
+boundary.**
+
+EMR manages parts of the runtime. It does not choose a correct data layout, make job
+side effects idempotent, guarantee Spot capacity, or prove that a workload meets its
+deadline.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Choose the execution boundary before sizing workers
+
+{% concept-grid columns="3" %}
+{% concept-card title="EMR Serverless" eyebrow="Managed workers" icon="cloud" tone="blue" %}
+Run Spark or Hive applications without operating a cluster. Define release, runtime
+role, application limits, job inputs, and observability.
+{% /concept-card %}
+{% concept-card title="EMR on EKS" eyebrow="Shared Kubernetes" icon="container" tone="violet" %}
+Submit EMR-managed Spark jobs through virtual clusters while the platform team operates
+the underlying EKS capacity, tenancy, networking, and access.
+{% /concept-card %}
+{% concept-card title="EMR on EC2" eyebrow="Controlled cluster" icon="server" tone="green" %}
+Choose instance fleets or groups, cluster applications, local storage, bootstrap
+actions, scaling bounds, and a persistent or transient lifecycle.
+{% /concept-card %}
+{% /concept-grid %}
+
+Do not start with a node count. First decide who owns capacity, which frameworks are
+required, whether Kubernetes is already the platform boundary, and whether any service
+or HDFS state must live for the lifetime of a cluster.
+{% /section-card %}
+
+{% interactive-block id="technology/emr-cost" dataFile="/api/content/technology/emr/data/deployment-options.json" /%}
+
+{% section-card accent="violet" %}
+## Trace one job from durable input to committed output
+
+{% system-flow title="A recoverable EMR Spark batch" caption="The runtime can be replaced because source data, logs, checkpoints, and committed output live outside its disposable workers." %}
+{% system-node title="Versioned input" eyebrow="Amazon S3" icon="database" tone="blue" %}
+Immutable objects and table metadata define what this run is allowed to read.
+{% /system-node %}
+{% system-node title="EMR control boundary" eyebrow="Submit and schedule" icon="workflow" tone="violet" %}
+The selected deployment option authenticates the job, acquires capacity, and starts the
+framework runtime.
+{% /system-node %}
+{% system-node title="Spark workers" eyebrow="Transform" icon="cpu" tone="cyan" %}
+Executors scan, shuffle, aggregate, and retry. Their local disks are cache and
+intermediate state, not the source of truth.
+{% /system-node %}
+{% system-node title="Run-scoped output" eyebrow="Commit" icon="check-circle" tone="green" %}
+Write to a unique destination, validate completeness, then publish the metadata or
+pointer that makes the result visible.
+{% /system-node %}
+{% /system-flow %}
+
+A driver retry can repeat output writes or external calls. Use stable run IDs,
+run-scoped destinations, conditional metadata commits, and idempotent sinks. A
+successful EMR step reports framework completion; it does not prove every downstream
+consumer observed one business effect.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Give each EC2 node role one responsibility
+
+- **Primary nodes coordinate the cluster.**
+  - They run services such as YARN ResourceManager and HDFS NameNode.
+  - A single-primary cluster ends when that primary terminates.
+  - Three-primary high availability can fail over supported services to a standby.
+- **Core nodes combine compute with HDFS storage.**
+  - They run workers such as Spark executors and HDFS DataNodes.
+  - Removing a core node risks local blocks and shuffle state.
+- **Task nodes add compute without HDFS storage.**
+  - They are the natural place for elastic, interruption-tolerant capacity.
+  - An interruption can still cause retry and recomputation, so application state must
+    remain recoverable.
+
+Use instance fleets when multiple instance types or purchasing options should satisfy a
+capacity target. For current EMR releases, AWS recommends the
+`price-capacity-optimized` Spot allocation strategy; diversified task capacity reduces
+dependence on one Spot pool. Keep primary and data-critical core capacity On-Demand
+unless sudden cluster termination or partial HDFS loss is explicitly acceptable.
+{% /section-card %}
+
+{% interactive-block id="technology/emr-resilience-lab" dataFile="/api/content/technology/emr/data/ec2-resilience-model.json" /%}
+
+{% section-card accent="amber" %}
+## Treat S3 and HDFS as different storage boundaries
+
+- **Amazon S3 is independent of one EMR cluster.** Use it for durable source data,
+  committed results, logs, checkpoints, and artifacts that must survive replacement.
+- **HDFS is cluster-local.** It can provide data locality and fast temporary storage,
+  but its availability depends on primary services, core nodes, block placement, and
+  replication.
+- **Local instance and EBS storage support execution.** Use them for shuffle, spill,
+  cache, and measured temporary needs. Do not assume those files survive termination.
+- **Replication consumes capacity.** AWS documents default HDFS replication factors of
+  1 for three or fewer core nodes, 2 for four through nine, and 3 for ten or more.
+
+Replication is not a backup. It can keep blocks available through some node failures,
+but it does not preserve data after cluster deletion, operator error, corrupt writes, or
+an untested recovery path.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Launch a bounded transient EC2 cluster
+
+The instance-fleet model keeps the primary and HDFS-bearing core capacity On-Demand,
+then adds diversified Spot task capacity. Weighted capacity represents a target, not a
+guaranteed instance count.
+
+{% code-block file="/api/content/technology/emr/code/instance-fleets.json" language="json" title="Separate durable core capacity from elastic task capacity" /%}
+
+The command pins a reviewed EMR release, submits one Spark step, writes logs to S3, and
+sets an idle timeout. Verify that the pinned release is available and compatible in the
+target Region before deployment.
+
+{% code-block file="/api/content/technology/emr/code/create-transient-spark-cluster.sh" language="bash" title="Create a transient cluster with a termination boundary" /%}
+
+Auto-termination is a cleanup control, not a completion protocol. Confirm how the
+selected EMR release detects idleness, and do not use it as the only guard for
+non-YARN services or primary-node scripts.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Make Spark output retry-safe
+
+This example declares a schema, reads one immutable input partition, and writes to a
+run-scoped destination with `errorifexists`. A production pipeline should validate the
+written files and then atomically publish table metadata or a catalog pointer.
+
+{% code-block file="/api/content/technology/emr/code/spark-s3-etl.py" language="python" title="Write one Spark run to a unique S3 destination" /%}
+
+Before increasing workers, inspect evidence:
+
+- input bytes, file count, partition pruning, and small-file pressure;
+- stage duration, task skew, shuffle read/write, spill, and executor loss;
+- driver and executor memory pressure, garbage collection, and failed task attempts;
+- queueing, worker startup, Spot interruptions, and capacity allocation;
+- output count, schema, completeness, duplicate run IDs, and commit status.
+
+More executors do not repair skew, an unselective scan, tiny files, or a non-idempotent
+sink. Change one constraint, rerun a representative workload, and compare the same
+metrics.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Operate the failure contract
+
+- Pin an EMR release and test upgrades with the real framework, connector, bootstrap,
+  and table-format matrix.
+- Put clusters in controlled subnets, use least-privilege service and runtime roles,
+  encrypt data and logs, and restrict administrative access.
+- Bound minimum, maximum, On-Demand, and core capacity independently when using managed
+  scaling.
+- Keep logs and Spark event history outside the cluster so a terminated runtime remains
+  diagnosable.
+- Test primary loss, core loss, task Spot interruption, missing capacity, corrupt input,
+  skew, output collision, and incomplete commit.
+- Reconcile accepted outputs before retrying an unknown result. A framework retry should
+  never create a second business publication.
+
+{% callout variant="warn" %}
+Managed scaling makes best-effort decisions around active work and shuffle data. It
+cannot guarantee that every scale-down avoids recomputation, and it does not replace
+application checkpoints or retry-safe output design.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Primary documentation
+
+- [Amazon EMR documentation](https://docs.aws.amazon.com/emr/)
+- [EMR Serverless concepts](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html)
+- [EMR on EKS](https://docs.aws.amazon.com/emr/latest/EMR-on-EKS-DevelopmentGuide/emr-eks.html)
+- [Primary, core, and task nodes](https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-master-core-task-nodes.html)
+- [Instance fleets and allocation strategies](https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-instance-fleet.html)
+- [Storage and file systems](https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-plan-file-systems.html)
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/emr/quiz/emr-production-decisions.json" lessonSlug="emr" title="Amazon EMR Production Decisions" /%}

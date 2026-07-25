@@ -1,0 +1,295 @@
+---
+registryId: practice-recommendation-system
+---
+
+{% section-card tone="intro" %}
+## What is a recommendation system?
+
+A recommendation system chooses a small, useful slate of items for one user from a much larger catalog. A production design normally retrieves a broad candidate set, ranks it with richer signals, applies eligibility and diversity policy, and records outcomes for future learning.
+
+The core invariant is simple: **an unavailable, blocked, or otherwise ineligible item must never reach the final slate**, even through a stale cache, fallback path, or experimental model.
+{% /section-card %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retrieve broadly" eyebrow="Recall" icon="search" tone="blue" %}
+Use several candidate sources so relevant, new, and long-tail products have a chance to enter the ranking pool.
+{% /concept-card %}
+{% concept-card title="Rank for value" eyebrow="Precision" icon="activity" tone="violet" %}
+Combine relevance, purchase intent, margin, novelty, and context without turning one proxy metric into the whole objective.
+{% /concept-card %}
+{% concept-card title="Constrain the slate" eyebrow="Policy" icon="shield" tone="green" %}
+Apply inventory, safety, seller, fairness, and diversity rules after scoring and again before release.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% accordion defaultOpen="clarifying" %}
+
+{% accordion-item id="clarifying" title="1. Clarify the ML Problem and Business Context" %}
+
+
+### Establish the product surface
+
+Design an e-commerce recommender for **50 million active users** and **100 million products**. The homepage needs personalized recommendations; product pages need related items; email campaigns may use precomputed slates.
+
+Ask enough questions to turn "increase engagement" into a testable system:
+
+- **Where will recommendations appear?** Homepage, product detail, cart, search, and email have different intent and deadlines.
+- **What is the primary outcome?** Optimize purchases, with revenue per session and long-term retention as secondary outcomes.
+- **Which events are available?** Impressions, clicks, dwell time, carts, purchases, ratings, searches, hides, and returns.
+- **How fresh must the result be?** Reflect user behavior within five minutes and inventory changes within one hour.
+- **What is the serving target?** Keep the recommendation API below **100 ms p99** at a **15,000 requests/s** peak.
+- **Which constraints cannot be traded away?** Eligibility, privacy, category diversity, seller policy, and auditable experimentation.
+
+### Define explicit scope
+
+The first version covers candidate generation, ranking, slate policy, event collection, training, deployment, and fallback behavior. Search ranking, ad auctions, checkout, catalog ingestion, and warehouse inventory reconciliation remain external systems with clear contracts.
+
+{% callout variant="info" %}
+An impression is part of the training contract. Without knowing what the user actually saw, clicks and purchases cannot distinguish a strong preference from missing exposure.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="envelope" title="2. Estimate Data, Compute, and the Online Budget" %}
+
+
+### Calculate the workload before choosing infrastructure
+
+Use 10 million daily active users, 50 recommendation requests per active user, and a 2.6x peak multiplier:
+
+1. Daily traffic is **10M x 50 = 500M requests/day**.
+2. Average traffic is **500M / 86,400 = about 5,800 requests/s**.
+3. Peak traffic rounds to **15,000 requests/s**.
+4. Ranking 100 candidates per request means **1.5 million candidate scores/s** at peak.
+5. One billion interaction events at 100 bytes each produce roughly **100 GB/day** before replication and storage overhead.
+
+{% metric-strip %}
+{% metric value="15K/s" label="Peak requests" detail="The measured capacity target for the online path." tone="blue" /%}
+{% metric value="1.5M/s" label="Candidate scores" detail="At 100 ranked candidates per request." tone="violet" /%}
+{% metric value="100 GB/day" label="Raw events" detail="Before schema, replication, compression, and indexes." tone="cyan" /%}
+{% metric value="<100 ms" label="Serving p99" detail="Retrieval, ranking, policy, and network share one deadline." tone="green" /%}
+{% /metric-strip %}
+
+### Separate catalog scale from ranking work
+
+The catalog may contain 100 million products, but the expensive model should not score every product. Approximate nearest-neighbor indexes, co-occurrence lists, popularity sets, and business sources retrieve hundreds or thousands of candidates. A richer ranker scores only the best 50-250. Policy then constructs a slate of about 20 items.
+
+{% interactive-block id="practice/recommendation-system-candidate-funnel-lab" /%}
+
+Instance counts must come from load tests with representative feature lookups, candidate counts, and model versions. The lab exposes why adding replicas cannot repair a design whose per-request work already violates the latency budget.
+
+{% /accordion-item %}
+
+{% accordion-item id="mlframing" title="3. Frame Labels, Objectives, and Baselines" %}
+
+
+### Predict a decision, not a vague preference
+
+For each eligible user-item-context tuple, estimate outcomes such as:
+
+- `P(click within the session)` for immediate interest;
+- `P(purchase within seven days)` for conversion;
+- expected contribution margin for business value;
+- expected return, hide, or complaint risk as negative outcomes;
+- long-term satisfaction or retention where delayed measurement is reliable.
+
+A practical ranker uses a calibrated multi-task objective rather than treating every event as equally valuable. It can optimize expected value while enforcing policy and monitoring long-term guardrails.
+
+### Prevent label and feature leakage
+
+- Build training examples from the state available **at impression time**.
+- Split evaluation data by time so future interactions cannot influence past predictions.
+- Version feature definitions and use the same transformations online and offline.
+- Correct for position and selection bias; observed clicks are not an unbiased sample of all products.
+- Keep experiment assignment stable at the user level and include it in event lineage.
+
+### Start with baselines that expose system value
+
+Compare the learned system against category popularity, recently viewed items, item-to-item co-occurrence, and a simple matrix factorization baseline. A complex model that cannot beat these on business and guardrail metrics should not be promoted.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Retrieval model" eyebrow="Candidate stage" icon="search" tone="blue" %}
+A two-tower model precomputes item embeddings and retrieves similar vectors quickly. It favors recall and serving efficiency.
+{% /concept-card %}
+{% concept-card title="Ranking model" eyebrow="Scoring stage" icon="layers" tone="violet" %}
+A wide-and-deep or tree-based ranker uses fresh cross-features on a much smaller pool. It favors precision and calibration.
+{% /concept-card %}
+{% concept-card title="Policy layer" eyebrow="Slate stage" icon="shield" tone="green" %}
+Deterministic rules enforce eligibility and shape diversity, exploration, deduplication, and contractual exposure.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% /accordion-item %}
+
+{% accordion-item id="design" title="4. Design the End-to-End ML Architecture" %}
+
+
+### Keep the online path narrow
+
+{% system-flow title="Personalized recommendation request" caption="Training and analytics consume the same governed events asynchronously; they do not block the user response." %}
+{% system-node title="Request context" eyebrow="Identify" icon="user" tone="blue" %}
+Resolve user, session, surface, experiment, region, device, and request deadline.
+{% /system-node %}
+{% system-node title="Candidate retrieval" eyebrow="Recall" icon="search" tone="cyan" %}
+Merge ANN, co-occurrence, recent, popular, sponsored, and exploration sources with stable item IDs.
+{% /system-node %}
+{% system-node title="Feature hydration" eyebrow="Enrich" icon="database" tone="amber" %}
+Fetch fresh user, item, context, and interaction features from versioned online stores.
+{% /system-node %}
+{% system-node title="Ranking service" eyebrow="Score" icon="activity" tone="violet" %}
+Predict calibrated outcomes for the bounded candidate set under one model and feature contract.
+{% /system-node %}
+{% system-node title="Slate policy" eyebrow="Constrain" icon="shield" tone="green" %}
+Remove ineligible items, deduplicate, diversify, allocate exploration, and return a traceable slate.
+{% /system-node %}
+{% /system-flow %}
+
+### Build the asynchronous learning loop
+
+{% process-flow %}
+{% process-step number="1" title="Log exposure" label="Events" %}
+Record request, candidates, scores, positions, policy decisions, model versions, and final impressions.
+{% /process-step %}
+{% process-step number="2" title="Join outcomes" label="Labels" %}
+Attach clicks, carts, purchases, returns, and hides using event time and a defined attribution window.
+{% /process-step %}
+{% process-step number="3" title="Train and evaluate" label="Offline" %}
+Create time-correct datasets, train retrieval and ranking models, and evaluate slices and guardrails.
+{% /process-step %}
+{% process-step number="4" title="Release gradually" label="Online" %}
+Shadow, canary, experiment, monitor, and promote only with an independent rollback path.
+{% /process-step %}
+{% /process-flow %}
+
+Keep item eligibility in an authoritative, rapidly invalidated store. Cached candidates may be stale, so final policy must recheck inventory and restrictions immediately before release.
+
+{% /accordion-item %}
+
+{% accordion-item id="deepdive" title="5. Deep Dive on Retrieval, Ranking, and Slate Policy" %}
+
+
+### Give each stage a different optimization target
+
+- **Retrieval maximizes recall:** combine collaborative, semantic, behavioral, contextual, and popularity sources, then deduplicate by canonical item ID.
+- **Ranking estimates value:** use user history, item attributes, session intent, price, inventory, recency, and interaction crosses.
+- **Slate policy protects experience:** enforce hard constraints first, then apply category caps, novelty, exploration, and contractual placement.
+
+### Treat cold start as a routing decision
+
+- New users receive contextual and regional popularity, session signals, and explicit onboarding preferences.
+- New products rely on content embeddings and a bounded exploration allocation.
+- Sparse users use broader cohort signals with conservative personalization.
+- Unavailable personalized features fall back to popular **eligible** items, never to unchecked cached output.
+
+### Compose a slate under competing goals
+
+{% interactive-block id="practice/recommendation-system-slate-policy-lab" /%}
+
+The lesson is not to find one universal weight vector. It is to separate hard policy from soft optimization, expose the consequences of each objective, and measure long-term outcomes instead of hiding them behind click-through rate.
+
+{% callout variant="warn" %}
+Never train directly on the model's own recommendations without preserving exposure and exploration data. Otherwise the system amplifies what it already showed and mistakes missing exposure for user dislike.
+{% /callout %}
+
+{% /accordion-item %}
+
+{% accordion-item id="evaluation" title="6. Define Evaluation and QA Gates" %}
+
+
+### Diagnose each stage independently
+
+- **Retrieval:** Recall@K by surface, cohort, category, language, and item age.
+- **Ranking:** NDCG@K, calibration error, expected purchase value, and pairwise accuracy.
+- **Slate:** catalog coverage, intra-list diversity, novelty, duplicate rate, and policy violations.
+- **System:** p50/p95/p99 latency, feature freshness, cache age, fallback rate, and empty-slate rate.
+
+### Require online evidence
+
+Run user-level experiments for enough time to include weekly purchase patterns. Define one primary metric, secondary metrics, and non-negotiable guardrails before exposure begins:
+
+- Primary: purchases or contribution margin per eligible session.
+- Secondary: click-through rate, add-to-cart rate, and average order value.
+- Guardrails: retention, returns, hides, category coverage, seller exposure, latency, and policy violations.
+- Diagnostics: source mix, score distribution, feature freshness, exploration share, and fallback rate.
+
+### Release only when the evidence is coherent
+
+A candidate must beat the current model on time-split offline data, pass critical slices, remain within latency and policy budgets in shadow traffic, and survive a small canary. An offline NDCG gain does not override worse conversion, retention, or safety outcomes online.
+
+{% /accordion-item %}
+
+{% accordion-item id="operations" title="7. Operate, Retrain, and Degrade Deliberately" %}
+
+
+### Monitor the contracts, not just the model
+
+- Compare online and offline feature values to detect training-serving skew.
+- Alert on event loss, late labels, feature age, candidate-source collapse, and experiment imbalance.
+- Slice conversion and exposure by region, device, category, user activity, seller cohort, and item age.
+- Track policy rejects and the reason each item left the slate.
+- Monitor retrieval, feature, ranking, and policy latency separately.
+
+### Retrain from evidence
+
+Run a daily full candidate by default and more frequent embedding or popularity updates when event freshness warrants them. Trigger retraining for validated drift or business change, not every noisy metric movement. Version data windows, labels, features, code, model artifacts, policy, and evaluation reports together.
+
+### Define bounded fallbacks
+
+{% process-flow %}
+{% process-step number="1" title="Drop slow sources" label="Retrieve" %}
+Use the healthy candidate sources that meet the deadline; record which source degraded.
+{% /process-step %}
+{% process-step number="2" title="Use simpler scoring" label="Rank" %}
+Fall back to cached or lightweight scores only when feature and policy versions remain compatible.
+{% /process-step %}
+{% process-step number="3" title="Serve eligible popularity" label="Fallback" %}
+Return regional or category-popular items after fresh eligibility and deduplication checks.
+{% /process-step %}
+{% process-step number="4" title="Protect the system" label="Shed" %}
+Reduce slate size or return no personalization rather than bypass policy or create an overload cascade.
+{% /process-step %}
+{% /process-flow %}
+
+Rollback the model and policy independently. A model can be healthy while a policy configuration is wrong, and coupling their rollback paths increases recovery time.
+
+{% /accordion-item %}
+
+{% accordion-item id="mlconsiderations" title="8. Compare Trade-offs and Extend the Design" %}
+
+
+### Make the main trade-offs explicit
+
+- **Recall vs latency:** more candidate sources improve coverage but consume retrieval, feature, and deduplication budget.
+- **Freshness vs stability:** frequent updates capture intent quickly but increase skew, churn, and operational risk.
+- **Exploitation vs exploration:** proven items improve short-term conversion; controlled exploration discovers new interests and reduces feedback lock-in.
+- **Personalization vs privacy:** richer histories improve ranking but require stricter minimization, retention, deletion, and access controls.
+- **Revenue vs user value:** margin-aware ranking can improve near-term economics while hurting trust, returns, or retention.
+
+### State the recommended design
+
+Use multi-source candidate generation, a two-tower retrieval model, a bounded rich ranker, and a deterministic slate-policy service. Stream governed impressions and outcomes into time-correct training data. Protect the 100 ms online budget with precomputed embeddings, fresh online features, deadline propagation, independent scaling, and eligible-popularity fallback.
+
+### Name the remaining risks
+
+1. Position and exposure bias corrupt labels and reinforce the current model.
+2. Stale inventory or policy data leaks ineligible products into a fallback slate.
+3. A popular item or candidate source dominates exposure and reduces catalog health.
+4. Offline gains fail to transfer because evaluation does not match the live population.
+5. Model and feature versions drift across regions during rollout or rollback.
+
+### Extend only after the core loop is measurable
+
+- Session transformers for short-term intent alongside durable user embeddings.
+- Contextual bandits with explicit safety, exposure, and regret budgets.
+- Multi-region serving with region-local features and consistent policy invalidation.
+- Counterfactual evaluation using logged propensities from controlled exploration.
+- Seller and category exposure constraints with transparent governance ownership.
+
+{% /accordion-item %}
+
+{% /accordion %}
+
+{% quiz
+   questionsFile="/api/content/practice/recommendation-system/quiz/recommendation-system-design-review.json"
+   lessonSlug="practice-recommendation-system"
+   title="Recommendation System Design Review" /%}

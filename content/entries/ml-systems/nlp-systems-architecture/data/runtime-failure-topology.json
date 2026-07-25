@@ -1,0 +1,137 @@
+{
+  "title": "Trace correctness and recovery through an NLP runtime",
+  "description": "Switch scenarios to see how representation compatibility, bounded queues, fallbacks, and outcome monitoring protect different parts of the product contract.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Product client",
+      "eyebrow": "Caller deadline",
+      "detail": "Sends text with identity, task, locale, priority, and a deadline. It needs an explicit answer, abstention, rejection, or job identity.",
+      "kind": "client",
+      "tone": "blue",
+      "x": 7,
+      "y": 48
+    },
+    {
+      "id": "gateway",
+      "label": "Admission gateway",
+      "eyebrow": "Bound work",
+      "detail": "Authenticates, validates format, estimates tokens, applies tenant and priority limits, and rejects work that cannot meet the contract.",
+      "kind": "edge",
+      "tone": "cyan",
+      "x": 23,
+      "y": 48
+    },
+    {
+      "id": "representation",
+      "label": "Representation service",
+      "eyebrow": "Versioned tokenizer",
+      "detail": "Applies normalization, language routing, tokenization, truncation or chunking, and emits the representation version with every request.",
+      "kind": "service",
+      "tone": "amber",
+      "x": 41,
+      "y": 20
+    },
+    {
+      "id": "scheduler",
+      "label": "Token scheduler",
+      "eyebrow": "Deadline-aware queue",
+      "detail": "Groups compatible requests under token and sequence limits while bounding queue age and honoring cancellation.",
+      "kind": "allocator",
+      "tone": "violet",
+      "x": 41,
+      "y": 72
+    },
+    {
+      "id": "runtime",
+      "label": "Model runtime",
+      "eyebrow": "Pinned bundle",
+      "detail": "Executes the compatible model, precision, and runtime profile. It returns scores or tokens with timing, stop reason, and artifact version.",
+      "kind": "service",
+      "tone": "violet",
+      "x": 61,
+      "y": 47
+    },
+    {
+      "id": "fallback",
+      "label": "Validated fallback",
+      "eyebrow": "Degraded mode",
+      "detail": "A smaller model or deterministic policy preserves a narrower, pre-evaluated contract when the primary path cannot finish.",
+      "kind": "service",
+      "tone": "green",
+      "x": 61,
+      "y": 82
+    },
+    {
+      "id": "policy",
+      "label": "Decision policy",
+      "eyebrow": "Return or abstain",
+      "detail": "Validates schema, calibrates or aggregates model output, applies safety and business rules, and chooses return, abstain, or escalation.",
+      "kind": "security",
+      "tone": "green",
+      "x": 80,
+      "y": 47
+    },
+    {
+      "id": "telemetry",
+      "label": "Quality telemetry",
+      "eyebrow": "Delayed evidence",
+      "detail": "Joins privacy-safe request cohorts, bundle versions, system signals, decisions, and delayed outcomes to detect slice-specific regressions.",
+      "kind": "analytics",
+      "tone": "rose",
+      "x": 93,
+      "y": 18
+    }
+  ],
+  "edges": [
+    { "id": "client-gateway", "from": "client", "to": "gateway", "label": "text + deadline" },
+    { "id": "gateway-representation", "from": "gateway", "to": "representation", "label": "admitted input" },
+    { "id": "representation-scheduler", "from": "representation", "to": "scheduler", "label": "tokens + version" },
+    { "id": "scheduler-runtime", "from": "scheduler", "to": "runtime", "label": "bounded batch" },
+    { "id": "runtime-policy", "from": "runtime", "to": "policy", "label": "scores or tokens" },
+    { "id": "policy-client", "from": "policy", "to": "client", "label": "decision", "via": { "x": 48, "y": 95 } },
+    { "id": "scheduler-fallback", "from": "scheduler", "to": "fallback", "label": "deadline risk" },
+    { "id": "fallback-policy", "from": "fallback", "to": "policy", "label": "degraded result" },
+    { "id": "policy-telemetry", "from": "policy", "to": "telemetry", "label": "decision event", "mode": "async" },
+    { "id": "runtime-telemetry", "from": "runtime", "to": "telemetry", "label": "runtime signals", "mode": "async" }
+  ],
+  "scenarios": [
+    {
+      "id": "healthy",
+      "label": "Healthy request",
+      "summary": "A bounded request carries one compatible representation and model bundle through a token-aware queue, then records both system and decision evidence.",
+      "activeEdges": ["client-gateway", "gateway-representation", "representation-scheduler", "scheduler-runtime", "runtime-policy", "policy-client", "policy-telemetry", "runtime-telemetry"],
+      "focusNode": "representation",
+      "result": "The caller receives a decision before its deadline, and operators can join that result to the exact tokenizer, model, policy, latency, and later outcome."
+    },
+    {
+      "id": "tokenizer-mismatch",
+      "label": "Tokenizer mismatch",
+      "summary": "A model rollout expects a new vocabulary, but one representation replica still emits the previous token IDs. The process is healthy while the semantic contract is broken.",
+      "activeEdges": ["client-gateway", "gateway-representation", "representation-scheduler", "scheduler-runtime", "runtime-telemetry"],
+      "failedNodes": ["representation"],
+      "degradedNodes": ["runtime", "policy"],
+      "focusNode": "representation",
+      "result": "Fail compatibility checks and stop the bundle rollout. Retrying the same mismatched path cannot restore correctness; the tokenizer and model must deploy as one compatible unit."
+    },
+    {
+      "id": "queue-overload",
+      "label": "Queue overload",
+      "summary": "A burst of long inputs consumes the scheduled-token budget. Waiting for the primary runtime would exceed the caller deadline.",
+      "activeEdges": ["client-gateway", "gateway-representation", "representation-scheduler", "scheduler-fallback", "fallback-policy", "policy-client", "policy-telemetry"],
+      "degradedNodes": ["scheduler", "runtime"],
+      "focusNode": "scheduler",
+      "result": "The scheduler caps queue age and routes eligible work to a pre-evaluated smaller model. Other work is rejected or deferred explicitly instead of timing out after consuming more capacity."
+    },
+    {
+      "id": "slice-drift",
+      "label": "Slice quality drift",
+      "summary": "Latency and error rates remain healthy, but delayed outcomes show a quality drop for long Arabic documents after a representation change.",
+      "activeEdges": ["runtime-policy", "policy-client", "policy-telemetry", "runtime-telemetry"],
+      "failedNodes": ["representation"],
+      "degradedNodes": ["policy"],
+      "focusNode": "telemetry",
+      "result": "System health alone would miss the regression. Slice-aware outcome monitoring blocks further promotion and triggers rollback of the representation-model-policy bundle."
+    }
+  ]
+}

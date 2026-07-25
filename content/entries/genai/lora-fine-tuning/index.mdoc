@@ -1,0 +1,249 @@
+---
+registryId: lora-fine-tuning
+---
+
+{% section-card tone="intro" %}
+## What is LoRA fine-tuning?
+
+**Low-Rank Adaptation (LoRA)** is a parameter-efficient way to specialize a pretrained model. The base model stays frozen. Training learns two much smaller matrices inside selected linear layers, and their product becomes a task-specific weight update.
+
+In plain language: a team keeps one large foundation model and trains compact **adapters** for stable behaviors such as a response format, classification policy, or domain style. This reduces the parameters that need gradients, optimizer state, and separate checkpoint storage.
+
+The core invariant is: **an adapter is a versioned delta against one exact base-model and input-format contract, not a portable model by itself**.
+{% /section-card %}
+
+{% section-card %}
+## Four ideas explain the mechanism
+
+{% concept-grid columns="4" %}
+{% concept-card title="Frozen base" eyebrow="Shared capability" icon="lock" tone="blue" %}
+The pretrained matrix `W0` still participates in every forward pass, but its parameters do not receive optimizer updates.
+{% /concept-card %}
+{% concept-card title="Low-rank path" eyebrow="Trainable delta" icon="workflow" tone="violet" %}
+Two matrices, `A` and `B`, learn a constrained update `delta W = B A` through a bottleneck of rank `r`.
+{% /concept-card %}
+{% concept-card title="Target modules" eyebrow="Adaptation surface" icon="layers" tone="amber" %}
+The recipe chooses which projections receive adapters: selected attention projections, every attention projection, or a broader set of linear layers.
+{% /concept-card %}
+{% concept-card title="Scaling" eyebrow="Update strength" icon="gauge" tone="green" %}
+Original LoRA applies the update as `(alpha / r) B A x`. Rank and alpha are separate choices even when recipes keep their ratio constant.
+{% /concept-card %}
+{% /concept-grid %}
+
+At initialization, a common setup makes one factor random and the other zero. The adapter therefore begins as a no-op: `B A = 0`, so wrapping a model does not immediately change its output.
+{% /section-card %}
+
+{% section-card %}
+## Trace one adapted linear layer
+
+For a frozen matrix `W0` with shape `d_out x d_in`, the two trainable factors have shapes:
+
+- `A`: `r x d_in`
+- `B`: `d_out x r`
+- trainable parameters: `r(d_in + d_out)`
+- adapted output: `h = W0 x + (alpha / r) B A x`
+
+{% system-flow title="The base path and adapter path meet before the layer output" caption="Only A and B are optimized. W0 remains frozen, but it must still be loaded for the forward and backward passes." %}
+{% system-node title="Input activation x" eyebrow="Shared input" icon="route" tone="blue" %}
+The same activation enters the frozen transformation and the low-rank branch.
+{% /system-node %}
+{% system-node title="Frozen W0 x" eyebrow="Base path" icon="lock" tone="cyan" %}
+Preserves the pretrained transformation without gradients for the base weights.
+{% /system-node %}
+{% system-node title="A then B" eyebrow="Adapter path" icon="workflow" tone="violet" %}
+Compresses into `r` directions, expands back to the output width, and applies the scaling factor.
+{% /system-node %}
+{% system-node title="Add both paths" eyebrow="Layer output" icon="check" tone="green" %}
+The downstream layer receives the base result plus the learned task delta.
+{% /system-node %}
+{% /system-flow %}
+
+Low rank limits the dimension of the update; it does **not** prove that a chosen rank can represent every task. Rank, target modules, data, and optimization must be evaluated together.
+{% /section-card %}
+
+{% section-card %}
+## Size the adapter before allocating hardware
+
+The exact trainable count comes from matrix shapes, not from a fixed percentage of the model. Choose a Llama-like teaching fixture, adaptation surface, rank, base precision, sequence length, and GPU budget. The lab recomputes adapter parameters and a transparent memory floor.
+
+{% interactive-block id="genai/lora-fine-tuning-adapter-budget-lab" dataFile="/api/content/genai/lora-fine-tuning/data/adapter-budget-model.json" /%}
+
+The memory result is a planning floor, not a profiler. It includes frozen weights, a declared per-adapter-parameter training-state allowance, and an illustrative activation term. CUDA kernels, temporary buffers, fragmentation, attention implementation, checkpointing, and distributed strategy can move the real peak.
+{% /section-card %}
+
+{% section-card %}
+## Change one capacity decision at a time
+
+### Rank controls the bottleneck width
+
+- Begin with a modest rank and compare held-out task and slice metrics.
+- Increase rank only when the lower-rank run underfits and the data or target-module coverage is not the actual bottleneck.
+- Do not interpret a larger adapter as automatically better; extra capacity can memorize noise or make optimization less stable.
+
+### Target modules control where change is allowed
+
+- `q_proj` and `v_proj` form a narrow attention baseline with low storage and optimizer cost.
+- All attention projections broaden how token interactions can change.
+- All linear layers also adapt feed-forward transformations and can substantially increase the parameter budget.
+
+### Alpha controls update scale
+
+Original LoRA uses `alpha / r`. If rank changes while alpha stays fixed, the scale changes too. Treat rank, alpha, initialization, learning rate, and target modules as a jointly versioned recipe.
+
+{% code-block file="/api/content/genai/lora-fine-tuning/code/estimate-adapter-budget.py" language="python" title="Compute trainable parameters from real projection shapes" /%}
+{% /section-card %}
+
+{% section-card %}
+## Use QLoRA when frozen-base memory is the constraint
+
+**QLoRA** keeps the LoRA adapter trainable while storing the frozen base model in 4-bit quantized form. The original QLoRA recipe combines:
+
+- **NF4**, a 4-bit data type designed for normally distributed pretrained weights;
+- **double quantization**, which also quantizes quantization constants;
+- **paged optimizers**, which manage memory spikes with unified memory;
+- higher-precision computation for the operations that consume quantized weights.
+
+QLoRA mainly reduces the frozen-base storage burden. It does not make activation memory, long contexts, data loading, evaluation, or optimizer behavior disappear. A 4-bit checkpoint is also not evidence that the task quality matches a higher-precision baseline.
+
+{% concept-grid columns="3" %}
+{% concept-card title="LoRA on BF16/FP16" eyebrow="Simpler baseline" icon="server" tone="blue" %}
+Use when the frozen base fits comfortably and the team wants a straightforward numerical baseline.
+{% /concept-card %}
+{% concept-card title="QLoRA with NF4" eyebrow="Memory constrained" icon="storage" tone="violet" %}
+Use when base-weight storage blocks the run and the hardware and kernels support the intended quantized path.
+{% /concept-card %}
+{% concept-card title="Full fine-tuning" eyebrow="Largest update surface" icon="layers" tone="amber" %}
+Use only when controlled evidence shows that the constrained adapter cannot meet the capability or quality target.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% code-block file="/api/content/genai/lora-fine-tuning/code/train-qlora-adapter.py" language="python" title="Build an explicit QLoRA model and adapter configuration" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build a reproducible adapter artifact
+
+{% process-flow %}
+{% process-step number="1" title="Freeze the task contract" label="Measure" %}
+Version the prompt or chat template, output schema, evaluation rubric, holdout groups, critical slices, and baseline result.
+{% /process-step %}
+{% process-step number="2" title="Pin model lineage" label="Identify" %}
+Record the immutable base revision, architecture, tokenizer files, special tokens, and template identity.
+{% /process-step %}
+{% process-step number="3" title="Declare the recipe" label="Configure" %}
+Record target modules, rank, alpha, dropout, initialization, quantization, compute dtype, optimizer, seed, and data manifest.
+{% /process-step %}
+{% process-step number="4" title="Train and inspect" label="Learn" %}
+Track optimization, throughput, memory, task metrics, rare slices, safety, and regressions against the frozen base.
+{% /process-step %}
+{% process-step number="5" title="Package the delta" label="Release" %}
+Store adapter weights, configuration, evidence, dependency versions, compatibility contract, rollback target, and integrity digest together.
+{% /process-step %}
+{% /process-flow %}
+
+Training loss answers whether the optimizer fits the training records. It does not answer whether the adapter generalizes, preserves base behavior, remains safe, or can load on the production runtime.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recognize failure behavior before release
+
+### The run fails to learn
+
+- Confirm that adapter parameters have `requires_grad=True` and nonzero gradients.
+- Verify target-module names against the actual model architecture.
+- Check labels, loss masking, padding, truncation, special tokens, and chat-template boundaries.
+- Compare update norms and held-out metrics before simply raising rank or learning rate.
+
+### Training improves while validation degrades
+
+- Select an earlier checkpoint instead of assuming the final step is best.
+- Audit near-duplicate leakage and imbalance across rare or consequential slices.
+- Reduce optimization pressure, improve data coverage, and rerun multiple seeds.
+- Compare against the frozen base and prompt-only baseline on the same cases.
+
+### The adapter works offline but fails in serving
+
+- Reject a different base revision, tokenizer, template, or architecture even when dimensions appear similar.
+- Confirm the runtime supports the adapter format, target modules, dtype, and selected deployment mode.
+- Validate a merged artifact separately; merging changes packaging, not the need for lineage and release evidence.
+- Preserve the previous immutable base-plus-adapter manifest for rollback.
+{% /section-card %}
+
+{% section-card %}
+## Prove the artifact fits the serving runtime
+
+Choose an adapter, serving target, and deployment mode. The lab applies explicit compatibility, evidence, integrity, and rollback gates so a small checkpoint cannot bypass the controls used for a full model.
+
+{% interactive-block id="genai/lora-fine-tuning-release-compatibility-lab" dataFile="/api/content/genai/lora-fine-tuning/data/release-compatibility-model.json" /%}
+
+Dynamic loading and merged serving optimize different operational goals. Neither mode makes an adapter independent of its training lineage.
+{% /section-card %}
+
+{% section-card %}
+## Choose the deployment boundary deliberately
+
+{% tabs %}
+{% tab title="Dynamic adapters" %}
+Load one frozen base and activate a named adapter per request, tenant, or deployment.
+
+- Reduces duplicated base-model storage across tasks.
+- Makes adapter routing, cache residency, concurrency, and tenant isolation part of the serving design.
+- Requires the runtime to load the exact compatible base and adapter format.
+- Keeps adapter rollback and switching independent from the base artifact.
+{% /tab %}
+{% tab title="Merged checkpoint" %}
+Materialize `W0 + delta W` into a new full checkpoint during a controlled build.
+
+- Removes the runtime adapter branch and can simplify a single-purpose serving path.
+- Produces a larger artifact that must be evaluated, signed, distributed, and rolled back as a complete model.
+- Requires enough build memory and a verified merge against the exact base revision.
+- Loses cheap adapter swapping for that deployed artifact.
+{% /tab %}
+{% tab title="Multiple or combined adapters" %}
+Keep several adapters or create an explicitly combined artifact only when the serving stack supports the operation.
+
+- Define whether requests select one adapter, compose adapters, or use a separately evaluated merge.
+- Treat rank growth, conflicting updates, cache pressure, and cross-tenant isolation as measured risks.
+- Never assume two individually good adapters remain good after combination.
+{% /tab %}
+{% /tabs %}
+
+{% code-block file="/api/content/genai/lora-fine-tuning/code/verify-adapter-release.py" language="python" title="Reject incompatible adapter and runtime manifests" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate LoRA as a versioned learning system
+
+### Monitor the training system
+
+- peak allocated and reserved accelerator memory;
+- tokens per second, examples per second, and data-loader stalls;
+- gradient norms, update norms, loss curves, and numerical overflows;
+- task, slice, safety, calibration, and base-regression metrics by checkpoint.
+
+### Monitor the serving system
+
+- base, adapter, tokenizer, template, and runtime version on every release;
+- adapter load failures, cache hit rate, swap latency, and active-adapter cardinality;
+- p50, p95, and p99 latency plus memory pressure by adapter and sequence bucket;
+- quality, policy, refusal, and schema failures by protected slice.
+
+### Define recovery before exposure
+
+- Keep the previous immutable manifest and artifact digests.
+- Roll back the adapter, base, prompt/template, tokenizer, or serving runtime independently when the boundary permits it.
+- Canary on representative traffic and stop on critical slice or compatibility failures.
+- Re-run release evidence whenever data, base revision, tokenizer, template, merge recipe, quantization path, or runtime changes.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and scope
+
+- The [LoRA paper](https://arxiv.org/abs/2106.09685) defines the low-rank update, zero-effect initialization, original `alpha / r` scaling, target-matrix experiments, and mergeable linear design.
+- The [QLoRA paper](https://arxiv.org/abs/2305.14314) introduces NF4, double quantization, and paged optimizers for 4-bit base-model fine-tuning.
+- The [Hugging Face PEFT LoRA reference](https://huggingface.co/docs/peft/package_reference/lora) documents current configuration fields and adapter initialization behavior.
+
+The lab models use declared teaching fixtures and transparent arithmetic. They are not performance forecasts. Profile the exact architecture, kernels, context distribution, precision, optimizer, hardware, and distributed strategy that will run in production.
+{% /section-card %}
+
+{% quiz title="LoRA Production Decisions" questionsFile="/api/content/genai/lora-fine-tuning/quiz/lora-production-decisions.json" lessonSlug="lora-fine-tuning" /%}

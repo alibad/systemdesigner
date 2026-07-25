@@ -1,0 +1,270 @@
+---
+registryId: red-team-infrastructure
+---
+
+{% section-card tone="intro" %}
+## What is Red Team Infrastructure?
+
+**Red team infrastructure is the temporary, authorized platform used to coordinate a
+security exercise, enforce its boundaries, and preserve evidence.** It gives operators
+a controlled way to run approved simulations while security teams observe how people,
+processes, and technology respond.
+
+Its most important invariant is simple: **every action must be attributable to an
+approved engagement, constrained to approved targets, observable, and stoppable.** A
+platform that is reliable but cannot enforce scope or produce trustworthy evidence is
+not production-ready.
+
+This lesson focuses on architecture and operations for sanctioned exercises. It does
+not cover gaining access, hiding activity, or bypassing third-party controls. Review
+[red teaming fundamentals](/fundamentals/red-teaming-fundamentals) first if scope,
+rules of engagement, and exercise safety are unfamiliar.
+
+{% callout variant="info" %}
+Think of this platform as a short-lived internal service with unusually strict safety
+requirements: strong identity, explicit policy, isolated networks, complete audit
+records, an exercised stop path, and provable teardown.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Separate control, exercise, and evidence responsibilities
+
+A red team platform coordinates people, policy, temporary services, and records. The
+architecture is easier to reason about when control decisions, exercise traffic, and
+evidence storage have separate owners and failure behavior.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Control plane" eyebrow="Authorize" icon="shield" tone="blue" %}
+Authenticates operators, issues short-lived access, evaluates the current target
+allowlist, records approvals, and exposes the emergency stop control.
+{% /concept-card %}
+{% concept-card title="Exercise plane" eyebrow="Execute" icon="network" tone="violet" %}
+Hosts only the temporary coordination services required by the approved exercise. It
+has no implicit route to unrelated production networks.
+{% /concept-card %}
+{% concept-card title="Evidence plane" eyebrow="Observe" icon="activity" tone="green" %}
+Collects identity, policy decisions, service events, and timestamps into a protected
+store that operators cannot silently rewrite.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% system-flow title="An authorized action crosses explicit gates" caption="The same engagement ID and operator identity should be present at every boundary so responders can reconstruct intent and outcome." %}
+{% system-node title="Operator device" eyebrow="1. Identify" icon="users" tone="blue" %}
+Uses managed access and a named human identity.
+{% /system-node %}
+{% system-node title="Access gateway" eyebrow="2. Authenticate" icon="lock" tone="green" %}
+Issues short-lived, least-privilege credentials.
+{% /system-node %}
+{% system-node title="Scope policy" eyebrow="3. Authorize" icon="shield" tone="amber" %}
+Checks target, time window, technique class, and engagement status.
+{% /system-node %}
+{% system-node title="Exercise service" eyebrow="4. Coordinate" icon="route" tone="violet" %}
+Runs the approved simulation workflow without owning policy.
+{% /system-node %}
+{% system-node title="Approved target" eyebrow="5. Exercise" icon="server" tone="cyan" %}
+Receives only traffic allowed by the current engagement.
+{% /system-node %}
+{% system-node title="Evidence pipeline" eyebrow="6. Record" icon="storage" tone="green" %}
+Persists the actor, decision, action, result, and correlated timestamps.
+{% /system-node %}
+{% /system-flow %}
+
+The policy check belongs on the execution path, not only in a ticket or operator
+runbook. Human approval starts the engagement; machine-enforced policy keeps each
+action inside it.
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Size from observable work, not server count
+
+Capacity planning starts with the event stream the exercise must preserve. For a first
+estimate, multiply active targets by events per target per minute. Apply a measured
+peak factor, then compare that rate with healthy collector capacity after one expected
+failure.
+
+For example, 80 active targets at 8 events per minute produce about 10.7 events per
+second on average. A 3x burst is 32 events per second. Two collectors that each sustain
+45 events per second provide 90 events per second before a failure, but only 45 after
+one collector is lost.
+
+{% metric-strip %}
+{% metric value="80" label="Active targets" detail="Explicitly approved systems" tone="blue" /%}
+{% metric value="10.7/s" label="Average events" detail="80 x 8 / 60" tone="cyan" /%}
+{% metric value="32/s" label="Modeled peak" detail="Average x 3 burst factor" tone="amber" /%}
+{% metric value="45/s" label="Failure capacity" detail="One surviving collector" tone="green" /%}
+{% /metric-strip %}
+
+The estimate is a test plan, not a guarantee. Benchmark serialization, transport,
+validation, storage acknowledgements, and query load together. Preserve enough
+headroom for replay and incident investigation instead of sizing only for steady state.
+
+{% interactive-block id="technology/red-team-infrastructure-calculator" dataFile="/api/content/technology/red-team-infrastructure/data/engagement-envelope.json" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Make safety controls independent of operator memory
+
+Production depth comes from explicit contracts at each boundary. Convenience should
+not allow one credential, host, or service failure to remove both execution and safety
+controls.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Named, short-lived identity" icon="users" tone="blue" %}
+Use individual accounts, managed devices, just-in-time roles, and session expiry.
+Shared credentials prevent attribution and make revocation too broad.
+{% /concept-card %}
+{% concept-card title="Machine-enforced scope" icon="shield" tone="green" %}
+Compile the approved targets, time window, and action classes into policy. Default to
+deny when the request cannot be matched to a current engagement.
+{% /concept-card %}
+{% concept-card title="Network containment" icon="network" tone="violet" %}
+Give each engagement dedicated segments and egress rules. Management, exercise, and
+evidence paths should not share an unrestricted flat network.
+{% /concept-card %}
+{% concept-card title="Managed secrets" icon="lock" tone="amber" %}
+Keep credentials outside images and source files. Issue them for one role and
+engagement, rotate them during incidents, and revoke them at teardown.
+{% /concept-card %}
+{% concept-card title="Tamper-evident evidence" icon="storage" tone="cyan" %}
+Separate evidence writers from readers and retention administrators. Record clock
+health and immutable object versions so a timeline can be defended later.
+{% /concept-card %}
+{% concept-card title="Independent stop path" icon="warning" tone="rose" %}
+An authorized controller outside the exercise plane must be able to disable new work,
+revoke access, and isolate services even when the main console is unavailable.
+{% /concept-card %}
+{% /concept-grid %}
+
+At minimum, every event should carry an engagement ID, operator ID, target ID, policy
+decision, action category, event time, receipt time, and correlation ID. Sensitive
+payload content should be minimized or redacted; an audit trail does not justify
+collecting unrelated secrets or personal data.
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Design failure behavior before the exercise starts
+
+A failure is not only an availability problem. It can create unscoped activity,
+unattributed actions, missing evidence, or an inability to stop. Decide which paths
+fail closed, which may buffer safely, and who can authorize recovery.
+
+{% interactive-block id="technology/red-team-infrastructure-calculator" dataFile="/api/content/technology/red-team-infrastructure/data/control-plane-failures.json" /%}
+
+Use these default responses:
+
+- **Scope policy unavailable:** block new actions. Availability is less important than
+  preventing unvalidated work.
+- **Operator credential exposed:** revoke the affected identity, stop its sessions,
+  rotate dependent secrets, and preserve the evidence timeline.
+- **Collector unavailable:** continue only while a bounded, encrypted buffer can retain
+  all required evidence; otherwise pause before creating an audit gap.
+- **Evidence store unavailable:** buffer locally with a size and time limit. Reconcile
+  sequence numbers after recovery and treat any gap as an incident.
+- **Emergency stop invoked:** deny new work first, then isolate services, preserve
+  records, and verify target-side activity has ended.
+
+{% callout variant="warn" %}
+Redundancy does not replace a stop policy. Extra instances can keep an unsafe workflow
+running just as effectively as a safe one.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Operate the platform as a short-lived production system
+
+The platform lifecycle begins before deployment and ends only when access, resources,
+and evidence have been reconciled. Automate the repeatable controls, while retaining a
+named human owner for authorization and incident decisions.
+
+{% process-flow %}
+{% process-step number="1" title="Authorize the envelope" label="Approve" %}
+Record owner, targets, exclusions, time window, allowed activity, data handling, stop
+conditions, and responder contacts in a versioned manifest.
+{% /process-step %}
+{% process-step number="2" title="Provision isolation" label="Build" %}
+Create engagement-specific accounts, network segments, secrets, policy, collectors,
+and evidence storage from reviewed templates.
+{% /process-step %}
+{% process-step number="3" title="Prove controls" label="Validate" %}
+Test an allowed target, a denied target, credential expiry, clock synchronization,
+evidence delivery, alert routing, and the emergency stop path.
+{% /process-step %}
+{% process-step number="4" title="Run with telemetry" label="Operate" %}
+Watch policy denials, active identities, collector lag, buffer occupancy, target health,
+and changes to the approved manifest.
+{% /process-step %}
+{% process-step number="5" title="Contain deviations" label="Respond" %}
+Pause on scope ambiguity, revoke exposed credentials, preserve evidence, notify the
+agreed contacts, and resume only through documented authorization.
+{% /process-step %}
+{% process-step number="6" title="Reconcile and destroy" label="Close" %}
+Stop activity, export evidence, revoke access, remove routes and resources, verify the
+inventory is empty, and retain only approved records.
+{% /process-step %}
+{% /process-flow %}
+
+Useful service-level indicators include policy-decision latency, denied-action count,
+collector queue depth, oldest unshipped event age, evidence write errors, clock offset,
+credential age, emergency-stop completion time, and teardown exceptions. Every alert
+needs an owner and a specific response.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Encode authorization and evidence limits
+
+Small dependency-free tools make the operating contract reviewable in CI and during
+preflight. The first example validates that an engagement manifest has bounded time,
+named owners, valid network ranges, explicit exclusions, and a stop contact.
+
+{% code-block file="/api/content/technology/red-team-infrastructure/code/validate-engagement-manifest.py" language="python" title="Validate an engagement manifest" /%}
+
+The second example calculates how many events a degraded collector path must buffer.
+Run it with expected rates and outage duration, then test the same envelope against the
+real pipeline before relying on the result.
+
+{% code-block file="/api/content/technology/red-team-infrastructure/code/simulate-evidence-buffer.py" language="python" title="Model a bounded evidence buffer" /%}
+
+Both examples model controls; they do not initiate network activity. In production,
+sign manifests, store approvals separately from the exercise plane, and export metrics
+to the organization responsible for oversight.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Review trade-offs with the safety invariant intact
+
+Architecture choices can change cost and convenience, but not the requirement that
+work remains attributable, in scope, observable, and stoppable.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Shared platform vs. per engagement" icon="boxes" tone="blue" %}
+A shared control plane reduces operational duplication. Engagement-specific identities,
+policy, networks, and storage prefixes still limit cross-exercise blast radius.
+{% /concept-card %}
+{% concept-card title="Availability vs. fail closed" icon="scale" tone="amber" %}
+Control-plane unavailability may pause work. That is usually the correct trade when
+continuing would remove scope or identity guarantees.
+{% /concept-card %}
+{% concept-card title="Evidence depth vs. privacy" icon="storage" tone="violet" %}
+More data can improve reconstruction but increases exposure and review cost. Collect
+the minimum fields needed for safety, attribution, and agreed learning goals.
+{% /concept-card %}
+{% concept-card title="Automation vs. independent approval" icon="check" tone="green" %}
+Automate provisioning, validation, and teardown. Keep authorization changes and resume
+decisions under separate, named approval.
+{% /concept-card %}
+{% /concept-grid %}
+
+Before declaring the platform ready, require evidence that:
+
+- an out-of-scope target is denied at the execution boundary;
+- a disabled operator loses active and future access within the stated objective;
+- one collector or evidence-store outage does not silently lose required events;
+- the stop path works without the primary operator console;
+- clocks and correlation IDs produce one defensible timeline;
+- target owners can distinguish approved exercise activity from a real incident;
+- teardown finds no active identities, routes, compute, domains, secrets, or queues;
+- retained evidence has an owner, expiry policy, access log, and deletion proof.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/red-team-infrastructure/quiz/red-team-infrastructure-production.json" lessonSlug="red-team-infrastructure" title="Red Team Infrastructure Production Review" /%}

@@ -1,0 +1,400 @@
+---
+registryId: image-captioning
+---
+
+{% section-card tone="intro" %}
+## What is image captioning?
+
+**Image captioning** turns visual evidence into a natural-language description. A captioning system first represents image regions or patches, then a language decoder generates words that describe objects, attributes, actions, text, and relationships.
+
+In plain language: the system looks at an image and proposes what should be said about it. The proposal may support a screen reader, image search, catalog metadata, moderation review, or an editing workflow.
+
+The central invariant is stricter than "write a fluent sentence": **every factual claim in a released caption must be supported by permitted image or context evidence**. If the system cannot support a useful claim, omission, review, or no caption is safer than a confident invention.
+
+Five ideas follow from that invariant:
+
+- A caption is a product decision, not just model output.
+- Several different captions can be correct for the same image.
+- More detail increases both usefulness and hallucination risk.
+- Automatic metrics are evidence, not release authority.
+- Accessibility, safety, latency, and monitoring belong in the system design.
+
+Review [Multimodal AI](/genai/multimodal-ai) first if image and text representations are unfamiliar. [Transformer Architecture](/genai/transformers) explains attention and autoregressive decoding in more depth.
+{% /section-card %}
+
+{% section-card %}
+## Start with the caption contract
+
+The same pixels can require different text because a caption serves a user in context. Define the route before choosing a model, prompt, decoding strategy, or metric.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Accessibility" eyebrow="Understand" icon="users" tone="blue" %}
+Describe the information or function a person needs in the surrounding page. Decorative images may need empty alternative text; complex charts may need a longer structured description.
+{% /concept-card %}
+{% concept-card title="Search metadata" eyebrow="Retrieve" icon="search" tone="cyan" %}
+Prefer grounded objects, attributes, relationships, and OCR fields that improve retrieval. Structured claims may be more useful than one polished sentence.
+{% /concept-card %}
+{% concept-card title="Editorial draft" eyebrow="Assist" icon="workflow" tone="violet" %}
+Offer an editable proposal with explicit user control. Tone can vary, but invented names, identities, events, and sensitive traits remain disallowed.
+{% /concept-card %}
+{% concept-card title="Specialist workflow" eyebrow="Escalate" icon="shield" tone="amber" %}
+Route medical, legal, safety-critical, biometric, and other high-impact imagery to domain policy and qualified human review.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Write the boundary in observable terms
+
+- **Input contract:** accepted formats, image-size limits, orientation handling, locale, product route, permitted context, and retention.
+- **Output contract:** caption, claim-evidence links, model and policy versions, release status, and review reason.
+- **Non-goals:** no identity, profession, relationship, emotion, diagnosis, or protected-attribute inference unless a separately governed use case explicitly requires and validates it.
+- **Fallbacks:** conservative caption, structured tags, specialist queue, asynchronous job, or no caption.
+
+A style prompt cannot replace this contract. "Be accurate" is not a measurable grounding rule, and "be detailed" does not say which uncertain details to omit.
+{% /section-card %}
+
+{% section-card %}
+## Treat captions as labels with purpose and provenance
+
+Training pairs are not neutral facts. Human writers choose what to mention, what to omit, and which assumptions feel obvious. Web alt text can describe page function, marketing copy, filenames, or unrelated nearby text rather than visible content.
+
+### Define the label schema before collecting volume
+
+For each pair, keep:
+
+- the original image identifier, license, consent basis, source, collection time, and deletion path;
+- the intended caption route, locale, length, and annotator instructions;
+- object, attribute, relationship, action, and OCR claims with evidence regions where available;
+- uncertainty, disagreement, sensitive-content flags, and review outcome;
+- synthetic-caption, model, prompt, filter, and human-edit lineage.
+
+### Build quality into the data lifecycle
+
+{% process-flow %}
+{% process-step number="1" title="Specify" label="Contract" %}
+Write route-specific annotation rules and examples for valid omission, uncertainty, long descriptions, and prohibited inference.
+{% /process-step %}
+{% process-step number="2" title="Collect" label="Coverage" %}
+Sample supported languages, regions, image domains, lighting, occlusion, text density, disability contexts, and difficult negatives.
+{% /process-step %}
+{% process-step number="3" title="Audit" label="Quality" %}
+Measure inter-annotator disagreement, unsupported claims, missed salient content, duplicate images, OCR errors, and policy violations.
+{% /process-step %}
+{% process-step number="4" title="Split" label="Integrity" %}
+Separate train, tuning, and frozen release sets by image lineage so near duplicates and derived captions cannot leak across boundaries.
+{% /process-step %}
+{% /process-flow %}
+
+### Expect more than one valid caption
+
+Reference captions are samples, not exhaustive truth. A useful dataset therefore needs both positive and negative evidence:
+
+- multiple human descriptions expose valid wording and salience differences;
+- hard negatives change one object, count, color, relationship, or OCR value;
+- omission labels distinguish "not visible" from "visible but unnecessary for this route";
+- slice metadata reveals where aggregate quality hides weak languages or image types;
+- correction logs separate factual fixes from tone preferences.
+
+Do not let generated captions silently become trusted ground truth. Keep their lineage, sample them for human audit, and prevent one model's errors from being amplified by the next training cycle.
+{% /section-card %}
+
+{% system-flow title="Evidence becomes a caption, then a decision" caption="The generator proposes language. Independent claim and product checks decide whether that language may leave the system." %}
+{% system-node title="Decode and route image" eyebrow="Input" icon="boxes" tone="blue" %}
+Validate media, apply orientation, create a canonical image hash, and select an accessibility, search, editorial, or specialist policy.
+{% /system-node %}
+{% system-node title="Encode visual tokens" eyebrow="Perception" icon="layers" tone="cyan" %}
+Turn patches, regions, layout, and OCR into representations while preserving evidence identifiers needed after generation.
+{% /system-node %}
+{% system-node title="Generate candidates" eyebrow="Language" icon="workflow" tone="violet" %}
+Decode bounded caption hypotheses under a token, latency, repetition, and style budget.
+{% /system-node %}
+{% system-node title="Ground each claim" eyebrow="Verify" icon="shield" tone="amber" %}
+Link nouns, attributes, actions, relationships, and quoted text to visual, OCR, or approved context evidence.
+{% /system-node %}
+{% system-node title="Release or abstain" eyebrow="Product" icon="check" tone="green" %}
+Apply route policy, accessibility, safety, confidence, and serving gates; then return a caption, review state, or no caption.
+{% /system-node %}
+{% /system-flow %}
+
+{% section-card %}
+## Separate perception, language, and release authority
+
+Most captioners can be understood as three responsibilities even when one large model implements all of them.
+
+### 1. The vision path represents evidence
+
+A convolutional network or vision transformer encodes the image into spatial features. OCR and layout models may add text spans, reading order, chart structure, or document regions. Higher resolution can preserve small objects and text, but raises preprocessing, memory, and encoder cost.
+
+### 2. The language path proposes a sequence
+
+An autoregressive decoder predicts the next token from prior tokens and visual context. Cross-attention lets each generated token draw on image features. Architectures such as BLIP-2 add a learned bridge between a frozen image encoder and a frozen language model; the [BLIP-2 paper](https://arxiv.org/abs/2301.12597) is a primary description of that design.
+
+### 3. The release path verifies the proposal
+
+Attention is not proof. A decoder can use language priors to produce a likely object, job, emotion, or event that the image does not establish. Keep factual authority in explicit claim evidence and route policy, even if generation and verification share model components.
+
+### Choose architecture from the operating envelope
+
+- **Compact encoder-decoder:** lower latency and cost for common photographs, with narrower capability.
+- **Large vision-language model:** broader zero-shot behavior and instruction following, with higher serving and governance cost.
+- **Specialist ensemble:** stronger OCR, chart, document, or domain handling, with routing and versioning complexity.
+- **On-device path:** better privacy and offline behavior, with tighter memory, energy, and update constraints.
+
+The 2015 [Show, Attend and Tell paper](https://proceedings.mlr.press/v37/xuc15.html) is useful historical context for learned visual attention. It is not a claim that attention maps alone establish modern production grounding.
+{% /section-card %}
+
+{% section-card %}
+## Decoding searches language, not truth
+
+At each step the decoder assigns probabilities to possible next tokens. A decoding policy decides which partial sequences survive.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Greedy" eyebrow="One path" icon="route" tone="blue" %}
+Choose the highest-probability token at every step. It is fast and deterministic, but an early local choice can block a better complete caption.
+{% /concept-card %}
+{% concept-card title="Beam search" eyebrow="Several paths" icon="network" tone="violet" %}
+Keep multiple partial sequences and compare their accumulated scores. Wider search costs more decoder work and can favor generic, fluent language priors.
+{% /concept-card %}
+{% concept-card title="Sampling" eyebrow="Diverse paths" icon="repeat" tone="amber" %}
+Sample from a temperature- or probability-filtered distribution. It can improve variety for editorial drafts but needs stronger grounding and reproducibility controls.
+{% /concept-card %}
+{% /concept-grid %}
+
+Length penalties, repetition limits, forced prefixes, and token budgets shape wording. They do not prove visual support. Candidate generation should therefore be followed by reranking or filtering that can reject a high-language-score sentence.
+{% /section-card %}
+
+{% interactive-block id="genai/image-captioning-decoding-grounding-lab" dataFile="/api/content/genai/image-captioning/data/decoding-grounding-scenarios.json" /%}
+
+{% section-card %}
+## Ground captions at the claim level
+
+A sentence-level score can hide one critical error. Break a candidate into claims such as `person`, `yellow umbrella`, `three dogs`, `left of`, `smiling`, or `Q4 revenue is $3.8M`. For each claim, record evidence type, region or OCR span, confidence, and policy status.
+
+### Distinguish three failure classes
+
+1. **Unsupported object:** the caption names a bus, phone, or animal with no matching evidence.
+2. **Unsupported attribute or relationship:** the objects exist, but color, count, action, ownership, emotion, or spatial relation is wrong.
+3. **Unsupported context:** the caption invents a name, location, occupation, event, or intent from a plausible visual pattern.
+
+The [CHAIR paper](https://arxiv.org/abs/1809.02156) demonstrated that common sentence metrics can miss object hallucination and proposed object-level measurements for COCO-style captions. CHAIR's fixed object vocabulary is useful but limited; production evaluation also needs open-vocabulary entities, attributes, relationships, OCR, and route-specific harms.
+
+### Make abstention an ordinary outcome
+
+- Omit a low-confidence adjective while retaining a supported object.
+- Replace an inferred identity with a neutral description such as "a person."
+- Hedge only genuine uncertainty; do not use vague language to hide a known failure.
+- Route text-heavy charts and specialist images to a capable path.
+- Return no automatic caption when a required grounding or policy dependency is unavailable.
+
+The external example uses the same data as the decoding lab and checks evidence identifiers, confidence bounds, and grounded-selection behavior.
+
+{% code-block file="/api/content/genai/image-captioning/code/select-caption.py" language="python" title="Deterministic caption selection with claim evidence" /%}
+{% /section-card %}
+
+{% section-card %}
+## Evaluate a portfolio, not one leaderboard number
+
+No single metric measures wording, semantic content, visual support, accessibility value, safety, and production behavior.
+
+### Reference-based language evidence
+
+- **BLEU and ROUGE:** compare token overlap and sequence similarity; useful for regression signals but insensitive to many valid paraphrases.
+- **METEOR:** adds alignment and synonym handling, but still depends on incomplete references.
+- **CIDEr:** weights n-grams by how well they match human consensus. The original [CIDEr paper](https://openaccess.thecvf.com/content_cvpr_2015/html/Vedantam_CIDEr_Consensus-Based_Image_2015_CVPR_paper.html) defines the metric and its evaluation motivation.
+- **SPICE:** compares semantic scene-graph propositions. The [SPICE paper](https://arxiv.org/abs/1607.08822) also explains why n-gram overlap is neither necessary nor sufficient for human judgment.
+
+Do not copy universal target values from another model, dataset, tokenizer, or evaluation implementation. Freeze versions and compare candidates on the same governed sets.
+
+### Image-aware and grounding evidence
+
+- image-text compatibility such as CLIPScore;
+- supported-claim precision and salient-claim coverage;
+- object, attribute, count, relationship, action, and OCR hallucination rates;
+- calibrated confidence, abstention coverage, and error severity;
+- adversarial pairs that differ by one visually important fact.
+
+The [CLIPScore paper](https://aclanthology.org/2021.emnlp-main.595/) presents a reference-free image-text metric and explicitly describes it as complementary to reference-based evidence. Treat that score as a diagnostic, not an oracle for fine-grained factuality.
+
+### Human and product evidence
+
+- factuality, relevance, concision, fluency, and route-specific completeness;
+- usefulness to blind and low-vision participants in the actual surrounding context;
+- acceptance, correction, deletion, complaint, and review-escalation behavior;
+- slices by language, region, image type, text density, skin tone, disability context, device, and model route;
+- latency, timeout, fallback, cost, and energy per **released** caption.
+
+When human raters disagree, retain the reason. Salience disagreement is different from factual disagreement, and both are different from a policy violation.
+{% /section-card %}
+
+{% section-card %}
+## Accessibility depends on image purpose and context
+
+Automatic captions can assist accessibility, but a generic description is not automatically good alternative text. Current [W3C Images guidance](https://www.w3.org/WAI/tutorials/images/) distinguishes informative, decorative, functional, and complex images because each serves a different purpose.
+
+### Route by function
+
+- **Informative photograph:** concisely convey the essential information relevant to nearby content.
+- **Decorative image:** provide empty alternative text instead of adding noise to screen-reader navigation.
+- **Functional image:** describe the link or control action, not merely its visual appearance.
+- **Complex chart, map, or diagram:** identify the visual briefly and provide equivalent structured information or a long description. The maintained [W3C complex-images tutorial](https://www.w3.org/WAI/tutorials/images/complex/) documents this two-part pattern.
+
+### Preserve user control and honest uncertainty
+
+- Never publish generated alternative text as human-authored without provenance.
+- Let authors review, edit, reject, and request a longer description.
+- Do not repeat captions, nearby text, or filenames that a screen reader already announces.
+- Test punctuation, language tags, reading order, verbosity, and update announcements with assistive technology.
+- Keep the page usable when caption generation times out or returns no result.
+
+Accessibility quality must be evaluated with people and context, not inferred from image-text similarity alone. W3C guidance is maintained and may change; implementation reviews should use the linked current documents rather than a copied rule list.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Safety and privacy constrain what may be described
+
+Pixels can contain faces, homes, documents, screens, license plates, medical imagery, children, violence, and private text. A technically accurate extraction can still be harmful to repeat, retain, index, or expose.
+
+### Apply controls before and after generation
+
+- **Before inference:** authenticate, limit formats and decompression size, scan files, enforce tenant and region policy, and minimize retention.
+- **During routing:** detect specialist or high-impact domains without claiming a diagnosis or identity.
+- **During grounding:** block unsupported identity, relationship, emotion, intent, and protected-attribute claims.
+- **After generation:** apply route-specific moderation, OCR redaction, sensitive-data rules, and human escalation.
+- **After response:** protect logs, thumbnails, embeddings, corrections, and sampled evaluation data with purpose, access, and deletion controls.
+
+### Threat-model the complete system
+
+- adversarial text inside an image attempting to override instructions;
+- decompression bombs, malformed media, and excessive-resolution denial of service;
+- cross-tenant cache keys or debug samples leaking images and captions;
+- prompt, model, OCR, or policy version mismatch during rollback;
+- feedback poisoning through coordinated edits or synthetic-caption loops;
+- reviewers exposed to harmful imagery without suitable tooling and support.
+
+[NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) provides maintained lifecycle guidance for measuring, monitoring, incident response, and third-party generative-AI risk. It does not replace domain law, accessibility review, privacy analysis, or product-specific safety requirements.
+{% /section-card %}
+
+{% section-card %}
+## Serve the policy bundle, not only the model
+
+A production artifact includes image preprocessing, encoder, bridge, tokenizer, decoder, OCR, claim extractor, grounding thresholds, safety policy, and response schema. Version them together so a caption decision can be reproduced.
+
+### Budget the complete request path
+
+{% metric-strip %}
+{% metric value="Input" label="Decode and route" detail="Validation, orientation, hashing, and specialist routing." tone="blue" /%}
+{% metric value="Vision" label="Encode evidence" detail="Resolution, OCR, layout, and visual tokens." tone="cyan" /%}
+{% metric value="Language" label="Decode candidates" detail="Token budget, search width, stop rules, and reranking." tone="violet" /%}
+{% metric value="Release" label="Ground and govern" detail="Claims, accessibility, safety, logging, and response." tone="green" /%}
+{% /metric-strip %}
+
+Measure p50, p95, and p99 by route, resolution, model tier, region, and batch size. A fast average cannot protect an interactive accessibility request from queueing at the tail.
+
+### Design capacity from measured service throughput
+
+1. Benchmark the exact artifact, runtime, precision, hardware, image-size mix, output length, and grounding path.
+2. Separate interactive traffic from batch re-captioning so background work cannot consume the foreground deadline.
+3. Bound dynamic-batch wait and total tokens; dispatch partial batches before a request expires.
+4. Size replicas from measured released captions per second, then add deployment and regional-failure headroom.
+5. Load shed before queues become unbounded, preserving approved compact or asynchronous fallbacks.
+
+### Cache only when identity and policy match
+
+A safe key includes canonical image hash, route, locale, preprocessing, model bundle, prompt, policy, and output schema versions. Never reuse a caption across tenants or contexts when authorization, deletion, or product purpose differs.
+
+When OCR, grounding, or safety policy is required and unavailable, fail closed for automatic release. The image upload or surrounding product should remain usable, with an explicit pending, review, or unavailable state.
+{% /section-card %}
+
+{% section-card %}
+## Monitor evidence, decisions, and user consequences
+
+Operational metrics should reconstruct why a caption was released, held, edited, or rolled back without retaining unnecessary raw content.
+
+### Observe each boundary
+
+- **Input health**
+    - decode failure, image size, orientation, text density, domain mix, corruption, and policy rejection;
+    - drift from the training and frozen evaluation distributions.
+- **Serving health**
+    - queue age, batch size, accelerator saturation, stage latency, timeout, fallback, and regional headroom;
+    - model, OCR, tokenizer, grounding, and policy version skew.
+- **Output health**
+    - unsupported claims, weak evidence, omission, repetition, language mismatch, OCR disagreement, and sensitive-inference blocks;
+    - abstention and human-review volume by reason and governed slice.
+- **User consequence**
+    - acceptance, edits, deletion, complaint, accessibility feedback, reviewer override, and incident severity;
+    - cost and latency per released caption rather than per attempted inference.
+
+### Prevent feedback loops from corrupting labels
+
+An edit can mean factual correction, preferred wording, different salience, or house style. Store the correction category, original claim evidence, route, and artifact versions. Sample high-impact and low-frequency slices for trained review instead of treating every accepted caption as correct.
+
+Alert on rates and distributions, not isolated aggregate scores. A stable overall hallucination rate can hide a new language, OCR, or sensitive-attribute failure concentrated in one route.
+{% /section-card %}
+
+{% interactive-block id="genai/image-captioning-release-gate-lab" dataFile="/api/content/genai/image-captioning/data/release-gate-scenarios.json" /%}
+
+{% section-card %}
+## Release with reversible, pre-committed gates
+
+Set thresholds, slices, owners, and stop conditions before reading the candidate result. Otherwise teams can move a convenient metric until an unsafe build appears to pass.
+
+{% process-flow %}
+{% process-step number="1" title="Qualify offline" label="Frozen evidence" %}
+Pass data-lineage, deterministic, hallucination, accessibility, safety, privacy, slice, latency, and failover tests on the complete artifact bundle.
+{% /process-step %}
+{% process-step number="2" title="Observe in shadow" label="No release" %}
+Run production-shaped traffic without returning candidate captions. Verify routing, telemetry, capacity, and disagreement against the current system.
+{% /process-step %}
+{% process-step number="3" title="Canary by route" label="Limited impact" %}
+Assign stable cohorts and keep exposure within a pre-approved blast radius. Watch hard gates and the specific user consequence each route creates.
+{% /process-step %}
+{% process-step number="4" title="Expand or reverse" label="Decision" %}
+Increase exposure only while every required gate remains healthy. Roll back the model-policy bundle when evidence fails or becomes unavailable.
+{% /process-step %}
+{% /process-flow %}
+
+### Hard release gates
+
+- no critical unsupported object, identity, sensitive-attribute, or cross-tenant leakage regression;
+- complete frozen-set results for every supported language, domain, accessibility, and safety slice;
+- human usefulness and salient coverage above the route's approved floor;
+- p95 and p99 latency, timeout, queue headroom, and failover capacity inside the serving envelope;
+- required review, rollback, kill switch, and incident ownership exercised successfully;
+- decision telemetry complete enough to explain and reproduce release outcomes.
+
+The executable example evaluates every build against each route without averaging failed gates into a composite score.
+
+{% code-block file="/api/content/genai/image-captioning/code/release-decision.py" language="python" title="Route-specific image-captioning release controller" /%}
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Production readiness checklist
+
+- The product route defines what the caption must accomplish and what it must not infer.
+- Training and evaluation pairs have license, consent, source, deletion, synthetic, and edit lineage.
+- Near-duplicate images and derived captions cannot cross data splits.
+- The complete artifact bundle preserves model, preprocessing, OCR, tokenizer, prompt, grounding, policy, and schema versions.
+- Candidate decoding has bounded search, tokens, repetition, latency, and an explicit reject option.
+- Every released claim can be traced to visual, OCR, or approved context evidence.
+- Evaluation combines reference, image-aware, grounding, human, accessibility, safety, slice, and serving evidence.
+- Decorative, informative, functional, and complex images follow different accessibility paths.
+- Sensitive inference and raw-image retention have explicit controls, owners, and deletion behavior.
+- Interactive and batch traffic have separate queueing and fallback policies.
+- Monitoring connects input drift and serving pressure to output failures and user consequences.
+- Offline, shadow, canary, expansion, rollback, and incident gates are pre-committed and rehearsed.
+{% /section-card %}
+
+{% section-card %}
+## Primary sources and maintenance notes
+
+- [Show, Attend and Tell](https://proceedings.mlr.press/v37/xuc15.html) documents an early attention-based encoder-decoder for image captioning.
+- [BLIP-2](https://arxiv.org/abs/2301.12597) documents a modern bridge between frozen vision and language models.
+- [Microsoft COCO Captions](https://arxiv.org/abs/1504.00325), [CIDEr](https://openaccess.thecvf.com/content_cvpr_2015/html/Vedantam_CIDEr_Consensus-Based_Image_2015_CVPR_paper.html), [SPICE](https://arxiv.org/abs/1607.08822), and [CLIPScore](https://aclanthology.org/2021.emnlp-main.595/) define widely used caption data or evaluation methods.
+- [Object Hallucination in Image Captioning](https://arxiv.org/abs/1809.02156) provides primary evidence that fluent caption metrics can miss unsupported objects.
+- [W3C Images guidance](https://www.w3.org/WAI/tutorials/images/) and the [complex-images tutorial](https://www.w3.org/WAI/tutorials/images/complex/) provide maintained accessibility guidance.
+- [NIST AI 600-1](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) provides maintained generative-AI risk-management guidance across the lifecycle.
+
+The interactive thresholds and rates in this lesson are illustrative design data, not benchmark claims or universal launch targets. Accessibility standards, risk guidance, libraries, model interfaces, and vendor behavior can change; follow the linked primary sources and version every production dependency.
+{% /section-card %}
+
+{% quiz title="Image Captioning Production Review" questionsFile="/api/content/genai/image-captioning/quiz/image-captioning-production-review.json" lessonSlug="image-captioning" /%}

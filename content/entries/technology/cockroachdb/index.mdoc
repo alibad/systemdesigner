@@ -1,0 +1,300 @@
+---
+registryId: cockroachdb
+---
+
+{% section-card tone="intro" %}
+## What is CockroachDB?
+
+CockroachDB is a **distributed SQL database**: applications use relational
+tables, indexes, constraints, and transactions while a cluster spreads the
+underlying data across multiple machines. Every node can receive SQL traffic,
+and the cluster presents one logical database even when a query touches data
+stored elsewhere.
+
+It matters when one database must combine three requirements:
+
+- keep SQL constraints and multi-row transactions;
+- scale data and traffic beyond one machine;
+- continue serving through a node or failure-domain outage.
+
+The core invariant is stronger than "there are several copies." A write is
+committed only after the replicas responsible for every affected key agree
+through Raft. If the required quorum cannot form, CockroachDB stops that write
+instead of allowing independent histories to diverge.
+
+CockroachDB does not remove distributed-systems trade-offs. Key design,
+transaction contention, replica placement, network latency, backups, and
+client-side retry behavior still determine whether a production system is
+correct and fast.
+{% /section-card %}
+
+{% section-card %}
+## Follow one SQL request into the distributed keyspace
+
+CockroachDB stores tables and indexes in one ordered key-value space. It divides
+that space into contiguous **ranges**. Each range is replicated, and one
+replica holds the lease used to coordinate reads and propose writes for that
+range.
+
+{% system-flow title="From SQL to a replicated range" caption="Any node can be the SQL gateway; the key determines which range and leaseholder own the work." %}
+{% system-node title="Application" eyebrow="PostgreSQL wire protocol" icon="client" tone="neutral" %}
+Sends a SQL statement or transaction through a connection pool. A load
+balancer can route the connection to any healthy CockroachDB node.
+{% /system-node %}
+{% system-node title="Gateway node" eyebrow="Plan" icon="route" tone="blue" %}
+Parses and optimizes SQL, converts the plan into key-value operations, and
+routes each operation toward the range that owns its key.
+{% /system-node %}
+{% system-node title="Range leaseholder" eyebrow="Coordinate" icon="database" tone="violet" %}
+Serves the range's consistent reads and proposes writes to that range's Raft
+group.
+{% /system-node %}
+{% system-node title="Replica quorum" eyebrow="Commit" icon="copy" tone="green" %}
+Persists and agrees on the command. A majority acknowledgement makes the write
+durable for that range.
+{% /system-node %}
+{% /system-flow %}
+
+Four boundaries are easy to confuse:
+
+- A **node** is one running CockroachDB process with local storage.
+- A **range** is a contiguous ownership slice of the keyspace.
+- A **replica** is one copy of a range on a node.
+- A **leaseholder** is the replica currently coordinating requests for that
+  range; it is not a permanent primary for the whole database.
+
+Tables can span many ranges, and one transaction can span several tables and
+ranges. CockroachDB hides that distribution from SQL syntax, but network hops,
+contention, and quorum work still appear in latency and capacity.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Design keys for distribution, locality, and access paths
+
+The primary key orders each table's primary index. Secondary indexes create
+additional ordered keyspaces. A key therefore controls more than uniqueness:
+it influences where new writes land, which rows remain adjacent, and how many
+ranges a query must visit.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Sequential key" eyebrow="Local order, hot tail" icon="range" tone="amber" %}
+An increasing ID keeps nearby values together, but new inserts converge on the
+active end of the index. Splitting historical ranges does not divide that
+single incoming write frontier.
+{% /concept-card %}
+{% concept-card title="Random UUID" eyebrow="Spread point writes" icon="hash" tone="blue" %}
+Well-distributed UUID values send inserts across many key ranges. Point lookups
+remain direct, while scans by creation time need a separate ordered index.
+{% /concept-card %}
+{% concept-card title="Hash-sharded index" eyebrow="Bounded write buckets" icon="shard" tone="violet" %}
+A computed hash bucket spreads a sequential logical key across a fixed number
+of prefixes. It reduces the hot tail but makes ordered scans fan out across
+buckets.
+{% /concept-card %}
+{% /concept-grid %}
+
+Two common mistakes survive a quick architecture review:
+
+- A random primary key does not distribute a secondary index whose leading
+  column is an increasing timestamp.
+- More nodes do not fix a hot range when the write pattern still targets one
+  key interval.
+
+Measure range-level request rate, CPU, leaseholder load, contention, and
+replica health. Cluster averages can look comfortable while one range limits
+the entire write path.
+
+{% code-block file="/api/content/technology/cockroachdb/code/inspect-range-pressure.sql" language="sql" title="Inspect ranges, plans, and a hash-sharded access path" /%}
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 1: expose the hot range before adding nodes
+
+Choose a key strategy, range count, node count, and peak write rate. The model
+shows whether load spreads across ownership ranges or remains concentrated on
+one write frontier.
+
+Change at least two controls and compare:
+
+1. the average writes per node;
+2. the hottest range's request rate;
+3. the number of ranges doing active write work;
+4. the fan-out paid by an ordered scan.
+
+{% interactive-block id="technology/cockroachdb-range-distribution-lab" dataFile="/api/content/technology/cockroachdb/data/range-distribution-model.json" /%}
+
+This is a pressure model, not a CockroachDB benchmark. A real range's limit
+depends on row size, index maintenance, transaction shape, storage, replication
+latency, contention, and background work. Use production measurements to
+replace every illustrative capacity number.
+{% /section-card %}
+
+{% section-card %}
+## Treat serializable retries as part of the application contract
+
+CockroachDB supports distributed ACID transactions across arbitrary rows and
+tables. Its default `SERIALIZABLE` isolation level guarantees that committed
+transactions behave as if they ran in a valid serial order, even when their
+key-value operations span ranges.
+
+Concurrent transactions can still conflict. CockroachDB retries some work
+internally, but it can return SQLSTATE `40001` when it cannot safely retry
+without the client. The application must rerun the **entire transaction** from
+the beginning.
+
+{% process-flow %}
+{% process-step number="1" title="Begin one transaction" label="Bound the invariant" %}
+Read and write only the rows needed for one business decision. Keep remote API
+calls and user interaction outside the database transaction.
+{% /process-step %}
+{% process-step number="2" title="Apply guarded mutations" label="Preserve correctness" %}
+Use constraints, conditional updates, and deterministic values. Lock rows
+deliberately when the chosen access pattern benefits from it.
+{% /process-step %}
+{% process-step number="3" title="Commit or receive 40001" label="Serializable order" %}
+Commit succeeds only when the transaction can join a valid serial history. A
+retry error means the client has not completed the business operation.
+{% /process-step %}
+{% process-step number="4" title="Back off and replay" label="Whole transaction" %}
+Discard attempt-local results, add bounded jitter, then rerun every statement
+against fresh state. Keep an idempotency key outside the retry loop.
+{% /process-step %}
+{% /process-flow %}
+
+Reduce retries before increasing retry limits:
+
+- remove shared counters and other single-row write bottlenecks;
+- keep transactions small in rows, bytes, statements, and wall-clock time;
+- send related statements in one batch when practical;
+- acquire locks in a stable order;
+- keep side effects such as email or payment calls behind a durable outbox;
+- alert on retry rate, contention time, and exhausted attempts.
+
+{% code-block file="/api/content/technology/cockroachdb/code/retry-serializable-transfer.py" language="python" title="Retry a serializable transfer without repeating an external side effect" /%}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Place data by its home, read path, and failure goal
+
+A multi-region database separates two decisions:
+
+1. **Table locality** optimizes where a table or row is read and written.
+2. **Survival goal** defines the failure scope for which the database remains
+   available.
+
+{% concept-grid columns="3" %}
+{% concept-card title="REGIONAL BY TABLE" eyebrow="One table home" icon="database" tone="blue" %}
+Keep a table's leaseholders near one region. Reads and writes are fast from
+that home and pay network distance from other regions. This is the default
+multi-region table locality.
+{% /concept-card %}
+{% concept-card title="REGIONAL BY ROW" eyebrow="A home per row" icon="route" tone="green" %}
+Place each row near the region that owns or most often updates it. Include the
+region in related access paths so transactions and foreign keys do not
+accidentally scatter.
+{% /concept-card %}
+{% concept-card title="GLOBAL" eyebrow="Read locally everywhere" icon="globe" tone="violet" %}
+Serve a read-mostly reference table with low read latency from every region.
+Writes coordinate more broadly, so frequently updated data is usually a poor
+fit.
+{% /concept-card %}
+{% /concept-grid %}
+
+The default zone survival goal tolerates a zone failure. A region survival goal
+keeps reads and writes available through loss of an entire region, but uses
+more replicas and adds at least an inter-region round trip to writes. A table
+locality does not silently upgrade the database's failure guarantee.
+
+{% code-block file="/api/content/technology/cockroachdb/code/configure-multi-region.sql" language="sql" title="Declare regions, survival, and table localities" /%}
+{% /section-card %}
+
+{% section-card accent="rose" %}
+## Lab 2: trade locality latency for region survivability
+
+Choose the gateway region, workload, table locality, survival goal, and failure
+state. Watch the read path, write coordination path, transaction span, replica
+count, and stated availability guarantee change together.
+
+Use the lab to answer two different questions:
+
+- Is the data homed near the request that changes it?
+- Does the database promise progress through the failure being tested?
+
+{% interactive-block id="technology/cockroachdb-multi-region-locality-lab" dataFile="/api/content/technology/cockroachdb/data/multi-region-locality-model.json" /%}
+
+Latency values are illustrative network budgets. Validate a real design with
+measured round-trip times, a representative schema and transaction mix,
+regional failover exercises, and application behavior during retry storms.
+{% /section-card %}
+
+{% section-card %}
+## Operate the database by ranges and invariants
+
+Node health is necessary but not sufficient. Production reviews should connect
+user-facing objectives to the distributed boundary that can break them.
+
+### Observe the serving path
+
+- Track SQL latency and errors by statement fingerprint and application name.
+- Track transaction retries, contention duration, lock wait, and admission
+  queueing.
+- Inspect hot ranges, leaseholder imbalance, under-replicated ranges, and
+  unavailable ranges.
+- Watch storage capacity, compaction pressure, network saturation, clock
+  health, and certificate expiry.
+- Separate foreground demand from backup, restore, rebalancing, schema change,
+  and changefeed work.
+
+### Recover more than a replica
+
+- Test loss of one node, one zone, and one region against the configured
+  survival goal.
+- Keep backups independent from live replicas; replicated deletes and corrupt
+  application writes can reach every copy.
+- Restore into an isolated environment and verify row counts, constraints,
+  checksums, and application reads.
+- Define recovery time and recovery point objectives for accidental deletion
+  and corruption, not only infrastructure failure.
+- Rehearse client reconnect, transaction retry, and connection-pool behavior
+  during lease movement and failover.
+
+### Change safely
+
+- Apply schema changes with representative data volume and active traffic.
+- Cap connection pools per workload so every application instance cannot
+  overwhelm every SQL gateway.
+- Add indexes from observed access paths and include their write amplification
+  in capacity tests.
+- Roll versions according to CockroachDB's supported upgrade path and keep a
+  tested rollback boundary.
+- Validate locality and survival settings after adding or removing regions.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Choose CockroachDB for the contract it actually provides
+
+CockroachDB is a strong fit when the workload needs:
+
+- relational constraints and transactions across distributed data;
+- horizontal growth without application-managed shards;
+- one SQL endpoint across nodes or regions;
+- automatic replica placement and rebalancing;
+- an explicit zone or region survival goal.
+
+Evaluate another design when:
+
+- one machine comfortably handles the workload and operational simplicity is
+  the main objective;
+- most writes update one unavoidable hot key;
+- every transaction spans distant regions but the latency budget is local;
+- the application cannot safely retry serializable transactions;
+- the team cannot operate certificates, upgrades, backups, capacity, and
+  failure testing for a distributed database.
+
+Before production, write down the primary key strategy, hottest expected range,
+transaction retry boundary, table locality, survival goal, backup restore
+evidence, and client behavior during failover. Those decisions are the
+architecture; the node count is only one input.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/cockroachdb/quiz/cockroachdb-production-design.json" lessonSlug="cockroachdb" title="CockroachDB Production Design Review" /%}

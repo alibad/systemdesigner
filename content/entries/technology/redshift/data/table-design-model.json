@@ -1,0 +1,240 @@
+{
+  "title": "Place rows before the query has to move them",
+  "description": "Choose a dominant query, distribution style, and sort design. The fixed scenarios expose slice skew, join redistribution, block scanning, and replicated storage as separate costs.",
+  "sliceLabels": [
+    "Slice A",
+    "Slice B",
+    "Slice C",
+    "Slice D",
+    "Slice E",
+    "Slice F",
+    "Slice G",
+    "Slice H"
+  ],
+  "defaults": {
+    "workloadId": "account-dashboard",
+    "distributionId": "key-account",
+    "sortId": "compound-time"
+  },
+  "workloads": [
+    {
+      "id": "account-dashboard",
+      "label": "Account dashboard",
+      "detail": "Join a large sales fact table to accounts and filter recent time windows.",
+      "tableGb": 8000
+    },
+    {
+      "id": "fleet-rollup",
+      "label": "Fleet-wide rollup",
+      "detail": "Scan and aggregate broad date ranges without one stable join key.",
+      "tableGb": 8000
+    },
+    {
+      "id": "shared-dimension",
+      "label": "Shared product dimension",
+      "detail": "Join one slow-changing 12 GB dimension to several much larger fact tables.",
+      "tableGb": 12
+    }
+  ],
+  "distributions": [
+    {
+      "id": "auto",
+      "label": "DISTSTYLE AUTO",
+      "detail": "Start with automatic table optimization and verify its observed choice.",
+      "sliceShares": [13, 12, 13, 12, 13, 12, 13, 12],
+      "storageCopies": 1,
+      "redistributionPercent": {
+        "account-dashboard": 18,
+        "fleet-rollup": 8,
+        "shared-dimension": 12
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "tradeoff",
+          "title": "Automatic is a sound starting point",
+          "detail": "Observe whether AUTO converges on a key that collocates the dominant account join before pinning a design."
+        },
+        "fleet-rollup": {
+          "status": "recommended",
+          "title": "Even placement protects broad parallel scans",
+          "detail": "The scenario keeps work balanced when no durable collocation key dominates."
+        },
+        "shared-dimension": {
+          "status": "recommended",
+          "title": "Let size and workload evidence drive replication",
+          "detail": "AUTO can evolve a small table as it grows instead of fixing an ALL copy forever."
+        }
+      }
+    },
+    {
+      "id": "key-account",
+      "label": "DISTKEY account_id",
+      "detail": "Collocate rows with the matching account dimension, if the key distributes evenly.",
+      "sliceShares": [10, 11, 12, 13, 12, 11, 12, 19],
+      "storageCopies": 1,
+      "redistributionPercent": {
+        "account-dashboard": 2,
+        "fleet-rollup": 10,
+        "shared-dimension": 100
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "recommended",
+          "title": "The large join is collocated",
+          "detail": "The modeled fact and account rows meet on the same slices while the key remains acceptably distributed."
+        },
+        "fleet-rollup": {
+          "status": "tradeoff",
+          "title": "The key adds little to a broad aggregation",
+          "detail": "A fleet-wide scan still touches every slice, so monitor whether account skew creates a long-running slice."
+        },
+        "shared-dimension": {
+          "status": "avoid",
+          "title": "One table cannot collocate with every unrelated fact key",
+          "detail": "A shared dimension keyed to account_id still moves for joins on product or region."
+        }
+      }
+    },
+    {
+      "id": "key-tenant",
+      "label": "DISTKEY tenant_id",
+      "detail": "A low-cardinality or uneven tenant key can strand most work on a few slices.",
+      "sliceShares": [44, 18, 12, 8, 6, 5, 4, 3],
+      "storageCopies": 1,
+      "redistributionPercent": {
+        "account-dashboard": 55,
+        "fleet-rollup": 15,
+        "shared-dimension": 75
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "avoid",
+          "title": "The chosen key creates skew and misses the join",
+          "detail": "The hottest tenant controls the stage while account rows still move across the network."
+        },
+        "fleet-rollup": {
+          "status": "avoid",
+          "title": "Parallel work is no longer balanced",
+          "detail": "A broad rollup waits for the slice that owns the largest tenants."
+        },
+        "shared-dimension": {
+          "status": "avoid",
+          "title": "The small table pays both skew and redistribution",
+          "detail": "Replicating or leaving the automatic choice is a better hypothesis for this scenario."
+        }
+      }
+    },
+    {
+      "id": "all",
+      "label": "DISTSTYLE ALL",
+      "detail": "Copy the full table to every modeled compute node so local joins avoid redistribution.",
+      "sliceShares": [13, 12, 13, 12, 13, 12, 13, 12],
+      "storageCopies": 4,
+      "redistributionPercent": {
+        "account-dashboard": 0,
+        "fleet-rollup": 0,
+        "shared-dimension": 0
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "avoid",
+          "title": "Replicating an 8 TB fact table is the wrong exchange",
+          "detail": "The join saves movement by multiplying storage, load, and maintenance work across nodes."
+        },
+        "fleet-rollup": {
+          "status": "avoid",
+          "title": "A full fact-table copy does not improve a broad scan",
+          "detail": "Every node stores the entire table while parallel scan work still needs coordination."
+        },
+        "shared-dimension": {
+          "status": "recommended",
+          "title": "A small, slow-changing dimension can justify replication",
+          "detail": "Every fact-table join gets a local dimension copy, with a bounded storage and load multiplier."
+        }
+      }
+    }
+  ],
+  "sortDesigns": [
+    {
+      "id": "auto",
+      "label": "SORTKEY AUTO",
+      "detail": "Let automatic optimization learn from observed predicates, then inspect its actions.",
+      "scanPercent": {
+        "account-dashboard": 20,
+        "fleet-rollup": 72,
+        "shared-dimension": 100
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "tradeoff",
+          "title": "Automatic needs representative query history",
+          "detail": "Keep the dashboard workload visible long enough for observed predicate evidence to become useful."
+        },
+        "fleet-rollup": {
+          "status": "tradeoff",
+          "title": "Broad scans naturally skip fewer blocks",
+          "detail": "A sort key cannot remove the need to read data that the query genuinely requests."
+        },
+        "shared-dimension": {
+          "status": "recommended",
+          "title": "The small table is not scan-bound in this scenario",
+          "detail": "Keep the design simple until query evidence shows a repeated selective filter."
+        }
+      }
+    },
+    {
+      "id": "compound-time",
+      "label": "Compound event_time first",
+      "detail": "Order blocks by the timestamp used in bounded dashboard windows.",
+      "scanPercent": {
+        "account-dashboard": 5,
+        "fleet-rollup": 65,
+        "shared-dimension": 100
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "recommended",
+          "title": "Recent-window filters can prune most blocks",
+          "detail": "The leading sort column matches the selective predicate in the modeled dashboard query."
+        },
+        "fleet-rollup": {
+          "status": "tradeoff",
+          "title": "A year-wide rollup still reads most time ranges",
+          "detail": "The sort order helps less as the requested interval approaches the full table."
+        },
+        "shared-dimension": {
+          "status": "avoid",
+          "title": "The dimension has no event-time predicate",
+          "detail": "A timestamp-first layout adds maintenance without pruning this query shape."
+        }
+      }
+    },
+    {
+      "id": "compound-product",
+      "label": "Compound product_id first",
+      "detail": "Prioritize selective product filters before time in the modeled block order.",
+      "scanPercent": {
+        "account-dashboard": 45,
+        "fleet-rollup": 70,
+        "shared-dimension": 12
+      },
+      "fits": {
+        "account-dashboard": {
+          "status": "avoid",
+          "title": "The leading key does not match the dashboard predicate",
+          "detail": "Filtering only by recent time cannot use product-first block ranges effectively."
+        },
+        "fleet-rollup": {
+          "status": "tradeoff",
+          "title": "The broad rollup remains a broad scan",
+          "detail": "Product ordering helps only when the query narrows products."
+        },
+        "shared-dimension": {
+          "status": "recommended",
+          "title": "Product lookup predicates align with the leading sort column",
+          "detail": "The modeled lookup reads a small range of the dimension blocks."
+        }
+      }
+    }
+  ]
+}

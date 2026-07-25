@@ -1,0 +1,286 @@
+---
+registryId: duckdb
+---
+
+{% section-card tone="intro" %}
+## What is DuckDB?
+
+**DuckDB is an analytical SQL database that runs inside the application process.**
+Instead of sending every query to a separate database server, a notebook, command-line
+job, desktop application, or backend service loads DuckDB as a library and queries
+local tables or files directly.
+
+DuckDB is designed for **OLAP** work: scanning many rows, selecting a few columns,
+joining datasets, and computing aggregates. It uses columnar storage, vectorized
+execution, and parallel operators to keep that work close to the CPU. It is not a
+drop-in replacement for a client-server transactional database serving many
+independent writers.
+
+{% callout variant="info" %}
+The core boundary is **the process that embeds DuckDB owns connection lifetime,
+concurrency, memory pressure, temporary storage, credentials, and publication of the
+result**. Zero server administration does not mean zero operational responsibility.
+{% /callout %}
+
+{% concept-grid columns="3" %}
+{% concept-card title="Embedded engine" eyebrow="Boundary" icon="code" tone="blue" %}
+DuckDB executes in the same process as the caller. Data can stay in a `.duckdb` file,
+in memory, or in external files such as Parquet.
+{% /concept-card %}
+{% concept-card title="Analytical execution" eyebrow="Workload" icon="speed" tone="violet" %}
+Operators process vectors of values instead of interpreting one row at a time. One
+query can use multiple CPU cores.
+{% /concept-card %}
+{% concept-card title="Files as tables" eyebrow="Access" icon="storage" tone="green" %}
+SQL can scan Parquet, CSV, and other supported formats without importing them first.
+Projection and filter pushdown are especially valuable for Parquet.
+{% /concept-card %}
+{% /concept-grid %}
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace a query through the embedded engine
+
+The application opens a connection and submits SQL. DuckDB parses and plans the query,
+pushes eligible projections and filters toward the scan, runs operators over chunks of
+column values, and returns or writes the result.
+
+{% system-flow title="One analytical query path" caption="The process boundary removes a network hop, but the same process must budget CPU, memory, temporary disk, and result handling." %}
+{% system-node title="Application process" eyebrow="Owner" icon="code" tone="blue" %}
+A notebook, batch job, desktop application, or service owns the connection and invokes
+DuckDB through a client API.
+{% /system-node %}
+{% system-node title="Planner" eyebrow="SQL to operators" icon="workflow" tone="violet" %}
+The optimizer chooses scans, filters, joins, aggregates, and ordering. `EXPLAIN` shows
+the plan; `EXPLAIN ANALYZE` executes it and records operator evidence.
+{% /system-node %}
+{% system-node title="Vectorized engine" eyebrow="Execution" icon="speed" tone="cyan" %}
+Operators consume chunks of column values and can run in parallel when the plan and
+available row groups permit it.
+{% /system-node %}
+{% system-node title="Tables and files" eyebrow="Storage" icon="database" tone="green" %}
+Persistent tables, in-memory state, local files, and remote object storage provide the
+input. Blocking operators can spill intermediate state to temporary disk.
+{% /system-node %}
+{% /system-flow %}
+
+### Distinguish three quantities
+
+- **Logical data size** describes the uncompressed values represented by the dataset.
+- **Physical bytes read** depend on compression, selected columns, partition or row
+  group pruning, cache state, and the actual file layout.
+- **Intermediate state** depends on the query plan. A selective scan can still create
+  a large join, sort, window, or grouped aggregate.
+
+DuckDB can process data larger than memory, but that does not make memory irrelevant.
+`GROUP BY`, `JOIN`, `ORDER BY`, and ordered window functions are blocking operators.
+They may need substantial state and temporary-disk bandwidth before producing a
+complete result.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Shape the scan before adding hardware
+
+A good analytical query avoids reading data that cannot affect the answer. Columnar
+files make projection pushdown possible; ordered data and useful statistics can make
+filter pushdown skip row groups. CSV usually requires a much broader byte scan because
+its rows are encoded together.
+
+{% interactive-block id="technology/duckdb-scan-shape-lab" dataFile="/api/content/technology/duckdb/data/scan-shape-model.json" /%}
+
+### Treat the model as a budget, not a benchmark
+
+- The lab uses explicit teaching assumptions for compression and pruning. Actual
+  transfer depends on file metadata, row-group size, ordering, storage, and cache state.
+- A highly selective predicate does not guarantee a small scan. If matching values are
+  scattered across every row group, DuckDB may still inspect all projected column
+  chunks.
+- The configured `memory_limit` applies to the buffer manager, not every allocation in
+  the process. Leave headroom for the host application and validate under the real
+  container or machine limit.
+- Temporary disk is part of the execution path for larger-than-memory blocking
+  operators. Capacity, locality, and cleanup policy therefore affect reliability.
+
+{% callout variant="warn" %}
+Do not publish estimated queries per second or latency from dataset size alone. Capture
+the actual plan, bytes transferred, rows flowing through each operator, wall time,
+peak memory, and temporary-disk use on representative data.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Choose where the durable data should live
+
+DuckDB supports several useful storage boundaries. Choose one deliberately instead of
+assuming that loading everything into an in-memory database is always fastest.
+
+{% concept-grid columns="4" %}
+{% concept-card title="Direct Parquet scan" eyebrow="Interchange" icon="storage" tone="green" %}
+Keep portable columnar files as the source and query them in place. This works well
+when projection and filter pushdown remove most bytes.
+{% /concept-card %}
+{% concept-card title="Persistent DuckDB file" eyebrow="Local database" icon="database" tone="blue" %}
+Import repeatedly queried data into a `.duckdb` file for native types, compression,
+statistics, and a reusable catalog owned by one process boundary.
+{% /concept-card %}
+{% concept-card title="In-memory database" eyebrow="Ephemeral" icon="speed" tone="violet" %}
+Use transient tables for bounded intermediate work. The database disappears with the
+process, though larger-than-memory operations can still use temporary disk.
+{% /concept-card %}
+{% concept-card title="Curated output files" eyebrow="Publication" icon="cloud" tone="cyan" %}
+Write validated results to Parquet or another durable target. A query result held only
+in process memory is not a published data product.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Start with direct scans, then materialize for evidence
+
+1. Inspect schema, file count, row-group metadata, and partition layout before writing
+   the production query.
+2. Run `EXPLAIN` to confirm projection and filter placement without paying full query
+   cost.
+3. Run `EXPLAIN ANALYZE` on representative data and record transfer, cardinality, and
+   operator timing.
+4. Materialize a native table or curated Parquet output only when repeated work,
+   unstable source layout, or publication requirements justify another copy.
+
+{% code-block file="/api/content/technology/duckdb/code/inspect-parquet-query.sql" language="sql" title="Inspect and profile a selective Parquet query" /%}
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Put the concurrency boundary in the right place
+
+DuckDB supports concurrent work within one process. Appends do not conflict, and
+threads can update separate rows or tables, while conflicting edits use optimistic
+concurrency control. A native database file is not the same operational boundary as a
+general-purpose transactional server accepting many independent writer processes.
+
+{% interactive-block id="technology/duckdb-workload-fit-lab" dataFile="/api/content/technology/duckdb/data/workload-fit-model.json" /%}
+
+### Interpret the recommendation
+
+- **One process, analytical queries, batch-shaped writes:** DuckDB is usually a strong
+  fit, especially when the result can be regenerated or published atomically.
+- **Many readers, no writers:** separate read-only processes can open a persistent
+  database, but each process has its own memory and lifecycle cost.
+- **A small backend serving dashboards:** let one owned service embed DuckDB, bound
+  request concurrency, reuse connections, and keep long analytical work off the
+  latency-critical path.
+- **Many independent writers or row-level transactions:** use a client-server
+  transactional database or a table/catalog architecture designed for that ownership
+  model. DuckDB can remain a query engine over exported analytical data.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Build a bounded production job
+
+A reliable embedded analytics job makes resources and outputs explicit. It does not
+open a new connection for every statement, trust unbounded temporary storage, or
+replace a published dataset before validation completes.
+
+{% process-flow %}
+{% process-step number="1" title="Open one owned connection" label="Lifecycle" %}
+Choose an in-memory or persistent database path. Reuse the connection for related work
+and close it deterministically.
+{% /process-step %}
+{% process-step number="2" title="Set resource guardrails" label="Capacity" %}
+Set a tested thread count, memory limit, and temporary directory with monitored
+headroom. Container limits must exceed the complete process footprint.
+{% /process-step %}
+{% process-step number="3" title="Profile the real plan" label="Evidence" %}
+Verify pushed filters, selected columns, join cardinality, and blocking operators with
+representative data rather than synthetic QPS claims.
+{% /process-step %}
+{% process-step number="4" title="Publish after validation" label="Output" %}
+Write to a staging path, check row counts and invariants, then promote the completed
+artifact. Preserve the previous good output for rollback.
+{% /process-step %}
+{% /process-flow %}
+
+{% code-block file="/api/content/technology/duckdb/code/run-bounded-analytics.py" language="python" title="Run and publish a resource-bounded analytics job" /%}
+
+### Make retries safe
+
+- Give each run an immutable input snapshot or manifest.
+- Write results to a run-specific staging path rather than mutating the active output.
+- Validate schema, row count, uniqueness, null policy, and business totals.
+- Promote the staged artifact with the storage system's atomic or versioned mechanism.
+- Record DuckDB version, extension versions, query revision, input identity, settings,
+  and output checksum.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Design for failure, not only the happy query
+
+### Memory exhaustion or process termination
+
+The host application and DuckDB share one failure domain. A kernel out-of-memory kill
+can remove both. Lowering `memory_limit`, reducing threads, controlling join
+cardinality, and provisioning local temporary storage are operational controls, not
+afterthoughts.
+
+### Full or slow temporary storage
+
+Spilling protects larger-than-memory execution only while temporary storage is
+writable, sufficiently large, and fast enough. Alert on free bytes and spill volume.
+Clean abandoned run directories without deleting active work.
+
+### Partial publication
+
+A completed SQL statement does not prove that downstream readers can see a complete
+artifact. Publish versioned outputs, validate before promotion, and retain a rollback
+target.
+
+### Extension and remote-source drift
+
+Pin the DuckDB client and required extensions. Test file-format and storage credentials
+in the release environment. Remote object changes can make an otherwise unchanged SQL
+query produce different results.
+{% /section-card %}
+
+{% section-card %}
+## Operate DuckDB with measurable evidence
+
+### Monitor the whole embedded boundary
+
+- Query wall time, CPU time, rows scanned, rows emitted, and bytes transferred
+- Plan shape, join cardinality, pushed filters, selected columns, and repeated scans
+- Process resident memory, configured buffer limit, thread count, and OOM termination
+- Temporary-directory bytes, spill rate, free space, cleanup failures, and disk latency
+- Connection reuse, queued work, request cancellation, and conflicting transactions
+- Input manifest, output checksum, validation result, and publication or rollback state
+
+### Production readiness checklist
+
+- [ ] The owning process and write boundary are explicit.
+- [ ] Representative plans prove projection and filter pushdown where expected.
+- [ ] Memory, threads, temporary storage, and host-process headroom are tested together.
+- [ ] Blocking joins, sorts, windows, and aggregates are exercised at production scale.
+- [ ] Connections are reused and request concurrency is bounded.
+- [ ] Outputs are staged, validated, promoted, and recoverable.
+- [ ] Versions, extensions, settings, inputs, and query revisions are recorded.
+- [ ] Failure drills cover OOM termination, full temporary disk, source unavailability,
+  transaction conflict, and interrupted publication.
+{% /section-card %}
+
+{% section-card %}
+## Verify decisions against primary documentation
+
+- [DuckDB connection overview](https://duckdb.org/docs/stable/connect/overview)
+  explains persistent and in-memory connections.
+- [Concurrency](https://duckdb.org/docs/current/connect/concurrency) defines
+  single-process writes, read-only multi-process access, and optimistic conflicts.
+- [Parquet overview](https://duckdb.org/docs/stable/data/parquet/overview) documents
+  direct scans plus projection and filter pushdown.
+- [Tuning workloads](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads)
+  covers row-group parallelism, spilling, blocking operators, profiling, and connection
+  reuse.
+- [Out-of-memory guidance](https://duckdb.org/docs/current/guides/performance/oom)
+  explains why the buffer-manager limit is not a complete process-memory limit.
+{% /section-card %}
+
+{% quiz
+   questionsFile="/api/content/technology/duckdb/quiz/duckdb-production-decisions.json"
+   lessonSlug="duckdb"
+   title="DuckDB Architecture and Operations Review"
+/%}

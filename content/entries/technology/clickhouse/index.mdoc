@@ -1,0 +1,193 @@
+---
+registryId: clickhouse
+---
+
+{% section-card tone="intro" %}
+## What is ClickHouse?
+
+**ClickHouse is a column-oriented database for analytical queries over large, mostly append-oriented datasets.** It stores selected columns in compressed files, executes operators over batches of values, and uses the MergeTree family to write immutable parts that are consolidated in the background.
+
+It is a strong fit for event analytics, observability, product telemetry, time-series exploration, and user-facing dashboards when queries aggregate many rows but read relatively few columns.
+
+The core invariant is:
+
+**A ClickHouse design is healthy only when physical order matches dominant query boundaries, inserts create parts slowly enough for background work to keep up, and operators can prove read, write, replica, and recovery behavior from system evidence.**
+
+ClickHouse is not automatically the system of record for workflows that require frequent point updates, uniqueness enforcement, multi-row OLTP transactions, or row-at-a-time access.
+{% /section-card %}
+
+{% section-card %}
+## Build the right mental model
+
+{% concept-grid columns="4" %}
+{% concept-card title="Columns" eyebrow="Read only what is projected" icon="columns" tone="cyan" %}
+Each column is stored separately, so a narrow analytical projection can avoid reading unrelated values. Smaller types and compressible ordering reduce storage and I/O together.
+{% /concept-card %}
+{% concept-card title="Parts" eyebrow="Writes are immutable" icon="database" tone="violet" %}
+An insert produces one or more sorted parts. Background merges combine parts; they are not a synchronous compaction guarantee and compete for disk, CPU, and memory.
+{% /concept-card %}
+{% concept-card title="Granules" eyebrow="The primary index is sparse" icon="blocks" tone="amber" %}
+The primary index stores marks for granules rather than one entry per row. `ORDER BY` controls physical locality and determines which ranges can be skipped.
+{% /concept-card %}
+{% concept-card title="Pipelines" eyebrow="Execution is parallel" icon="activity" tone="green" %}
+Queries read blocks, filter early, aggregate in parallel, and may combine work across parts, replicas, and shards before returning a result.
+{% /concept-card %}
+{% /concept-grid %}
+
+In ClickHouse, `PRIMARY KEY` normally supports sparse indexing and does **not** enforce uniqueness. When `PRIMARY KEY` is omitted, the `ORDER BY` expression also supplies the primary key. A declared primary key must be a prefix of the sorting key.
+{% /section-card %}
+
+{% section-card %}
+## Follow data from insert to query
+
+{% process-flow %}
+{% process-step number="1" title="Buffer a bounded insert" label="Producer or server" %}
+Batch rows in a client with explicit retry identity and flush deadlines, or use asynchronous inserts with acknowledgement, durability, and deduplication behavior verified for the deployed version.
+{% /process-step %}
+{% process-step number="2" title="Sort and write parts" label="MergeTree" %}
+Transform each inserted block, sort by `ORDER BY`, encode columns, write indexes and checksums, and create at least one part for every partition touched by the flush.
+{% /process-step %}
+{% process-step number="3" title="Merge in the background" label="Storage work" %}
+Choose compatible parts and consolidate them while also serving reads, inserts, replication, TTL work, mutations, and materialized-view processing.
+{% /process-step %}
+{% process-step number="4" title="Prune and execute" label="Query path" %}
+Use partition metadata, sparse primary-index marks, projections, and measured skip indexes to exclude work, then read selected columns and execute the remaining pipeline.
+{% /process-step %}
+{% /process-flow %}
+
+{% callout variant="info" %}
+Partitioning and ordering solve different problems. `PARTITION BY` primarily creates lifecycle and bulk-management boundaries; `ORDER BY` is the main physical layout for query pruning. High-cardinality partitioning can multiply parts and merge pressure.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## Lab 1: design an order key from the query workload
+
+Select a dominant query, choose a physical order, and change the time window and projected row width. The fixture makes the cost of a mismatched leading key visible.
+
+{% interactive-block id="technology/clickhouse-performance" dataFile="/api/content/technology/clickhouse/data/query-pruning-model.json" /%}
+
+Use the lab to compare candidates, then measure the real table:
+
+- run `EXPLAIN indexes = 1` to inspect selected parts, granules, and index conditions;
+- compare `read_rows`, `read_bytes`, duration, memory, and cache state in `system.query_log`;
+- test representative values, including hot tenants, rare event types, and empty ranges;
+- measure insert, merge, compression, and storage effects before changing the physical order;
+- consider a projection or a separate purpose-built table when one sort order cannot serve incompatible query boundaries.
+{% /section-card %}
+
+{% section-card %}
+## Define schema around contracts, not source payloads
+
+Start from access patterns and data lifecycle:
+
+- choose the smallest data type that represents the real domain;
+- use `LowCardinality` where repeated strings and dictionary encoding are appropriate, after measuring;
+- avoid `Nullable` by default when a real sentinel or separate state is semantically correct;
+- keep the leading `ORDER BY` columns aligned with frequent selective filters;
+- keep partitions coarse enough to avoid fan-out while supporting retention and bulk operations;
+- version derived columns, dictionaries, codecs, TTLs, projections, and materialized views as production schema.
+
+{% code-block file="/api/content/technology/clickhouse/code/events-merge-tree.sql" language="sql" title="Event table with monthly lifecycle and tenant-first order" /%}
+
+The example favors tenant dashboards. An event-type trend or user-history product may require a projection, a second table, or a different primary workload. No single key is best independently of the queries.
+{% /section-card %}
+
+{% section-card accent="amber" %}
+## Lab 2: keep part creation below sustained merge capacity
+
+Change the insert boundary, row rate, batch size, partition fan-out, and modeled merge drain. The result exposes when write throughput is creating operational debt rather than sustainable analytics capacity.
+
+{% interactive-block id="technology/clickhouse-ingestion-merge-lab" dataFile="/api/content/technology/clickhouse/data/ingestion-merge-model.json" /%}
+
+The model is directional. Real merges are selected by size and age heuristics and are constrained by storage, codecs, replication, TTL work, mutations, materialized views, and background-pool settings.
+
+{% callout variant="warn" %}
+Do not treat a higher part-count threshold as a capacity fix. If parts are accumulating, first reduce flush frequency, increase effective batch size, reduce partition fan-out, smooth bursts, or add measured disk and background capacity.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Make insert acknowledgement explicit
+
+Client-side batching and server-side asynchronous inserts move the queue boundary:
+
+- **Client batch:** the producer owns buffering, memory limits, flush deadlines, retry identity, and backpressure.
+- **Asynchronous insert with flush acknowledgement:** ClickHouse buffers compatible inserts and acknowledges after a successful flush; verify exact defaults and deduplication behavior for the deployed release.
+- **Fire-and-forget acknowledgement:** a client may receive success before buffered data reaches durable storage and can miss flush failures; use only when that loss model is intentional.
+
+In all modes, define idempotency and duplicate handling across the base table, dependent materialized views, and downstream consumers. Ordering or retry behavior that is acceptable for telemetry may be unacceptable for billing or audit facts.
+{% /section-card %}
+
+{% section-card %}
+## Optimize repeated reads without hiding write cost
+
+Use the smallest mechanism that addresses measured work:
+
+- **Better `ORDER BY`:** first choice when dominant filters do not prune.
+- **Projection:** an alternative physical order or pre-aggregation that ClickHouse may select transparently; it adds storage and insert work.
+- **Incremental materialized view:** processes each inserted block and writes derived state to a target table; source updates or deletes do not automatically replay as a general dependency graph.
+- **Refreshable materialized view:** recomputes on a schedule and can express broader queries, with explicit freshness and rebuild cost.
+- **Data-skipping index:** useful only when its expression correlates with granules strongly enough to skip data; validate it after the primary layout.
+
+For derived data, write down the source-of-truth boundary, late-arrival behavior, replay procedure, deduplication key, rebuild time, and how readers switch between old and new versions.
+{% /section-card %}
+
+{% section-card %}
+## Diagnose with query and storage evidence
+
+{% code-block file="/api/content/technology/clickhouse/code/inspect-query-pruning.sql" language="sql" title="Inspect pruning and query-log evidence" /%}
+
+For a slow query, compare:
+
+- rows and bytes read against the expected useful slice;
+- selected parts and granules against the intended primary-index boundary;
+- CPU, memory, disk, network, concurrency, and cache state;
+- skew across tenants, shards, replicas, and time ranges;
+- whether a projection or materialized view was actually selected.
+
+{% code-block file="/api/content/technology/clickhouse/code/monitor-parts-and-merges.sql" language="sql" title="Inspect active parts and current merges" /%}
+
+On a cluster, a local system table describes the contacted replica. Query every relevant replica or use an intentional cluster-wide collection path before declaring the fleet healthy.
+{% /section-card %}
+
+{% section-card %}
+## Separate sharding, replication, and recovery
+
+- **Sharding** partitions data and work across independent shard tables.
+- **Replication** keeps redundant copies of each shard and coordinates part metadata.
+- **Distributed tables** provide a logical routing and query layer; they are not a substitute for choosing a stable sharding key.
+- **ClickHouse Keeper** can coordinate replicated tables, but coordination availability is separate from data capacity and backup recovery.
+- **Backups** protect against deletion, corruption, operator mistakes, and failures replicated copies also preserve.
+
+Test node loss, replica lag, Keeper loss, shard unavailability, distributed-query partial failure, restore, and client rerouting. A replica count is not a recovery plan.
+{% /section-card %}
+
+{% section-card %}
+## Production review checklist
+
+Before release, verify:
+
+- dominant queries prune the intended parts and granules with representative values;
+- insert batching and partition fan-out leave sustained merge headroom;
+- p95 and p99 read latency remain within budget under concurrent inserts and merges;
+- memory limits, spill behavior, and overload responses are observable;
+- schema changes, TTLs, projections, and materialized views have replay and rollback paths;
+- shard and replica topology match independent failure domains;
+- backups are restorable into a clean environment and validated by real queries;
+- retention, access control, encryption, and sensitive-column handling meet policy;
+- dashboards cover query failures, rows and bytes read, active parts, delayed inserts, merge queues, disk headroom, replica lag, and Keeper health.
+{% /section-card %}
+
+{% section-card %}
+## Primary references
+
+- [ClickHouse MergeTree documentation](https://clickhouse.com/docs/engines/table-engines/mergetree-family/mergetree) defines parts, partitioning, sorting keys, sparse primary indexes, granules, and background merges.
+- [ClickHouse primary-index guidance](https://clickhouse.com/docs/guides/best-practices/sparse-primary-indexes) explains sparse marks and how key order affects pruning.
+- [ClickHouse asynchronous insert guidance](https://clickhouse.com/docs/optimize/asynchronous-inserts) documents server-side buffering, flush triggers, acknowledgement modes, and operating trade-offs.
+- [ClickHouse incremental materialized view guide](https://clickhouse.com/docs/materialized-view/incremental-materialized-view) explains insert-block processing and target-table behavior.
+- [ClickHouse system table guidance](https://clickhouse.com/blog/10-best-practice-tips) covers `system.query_log`, `system.parts`, and cluster-wide observation concerns.
+- [ClickHouse release 26.3](https://clickhouse.com/blog/clickhouse-release-26-03) records the version-specific change that enabled asynchronous inserts by default; inspect the deployed release rather than assuming this default.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/clickhouse/quiz/clickhouse-production-design.json" lessonSlug="clickhouse" title="ClickHouse Production Design Review" /%}

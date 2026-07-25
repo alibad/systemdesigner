@@ -1,0 +1,215 @@
+---
+registryId: hadoop-hdfs
+---
+
+{% section-card tone="intro" %}
+## What is Hadoop HDFS?
+
+Hadoop Distributed File System (HDFS) is a **cluster filesystem for storing very large files across many machines**. It splits each file into large blocks, places replicated or erasure-coded fragments on DataNodes, and uses a NameNode to coordinate the namespace and block locations.
+
+HDFS matters when aggregate throughput, capacity, and failure recovery matter more than per-request latency or random updates. It fits write-once or append-oriented data that analytical engines scan in parallel. **Core invariant: the namespace must identify enough verified block copies or fragments to reconstruct every committed file, even while machines and disks fail.**
+
+HDFS is usually paired with distributed compute such as [MapReduce](/technology/mapreduce), Spark, Hive, or Trino. It is not a replacement for an online transactional database or a general-purpose low-latency object API.
+{% /section-card %}
+
+{% section-card %}
+## Separate metadata coordination from the data path
+
+HDFS uses a master-worker design, but file bytes do not flow through the NameNode. Clients ask for block locations and then stream data directly to or from DataNodes.
+
+{% concept-grid %}
+{% concept-card title="NameNode" icon="route" tone="blue" %}
+Owns the directory tree, permissions, file-to-block mapping, block locations, replication decisions, leases, and namespace journal.
+{% /concept-card %}
+{% concept-card title="DataNode" icon="database" tone="green" %}
+Stores block files, serves reads and writes, validates checksums, reports inventory, and participates in replication pipelines.
+{% /concept-card %}
+{% concept-card title="HDFS client" icon="workflow" tone="violet" %}
+Resolves metadata with the NameNode, then transfers block packets directly with DataNodes and retries alternate replicas when needed.
+{% /concept-card %}
+{% concept-card title="Standby NameNode" icon="shield" tone="amber" %}
+Tails shared edits and maintains a synchronized namespace so an HA controller can fence the old active and fail over safely.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Keep four responsibilities explicit
+
+- **Namespace durability:** persist edits, checkpoint the namespace, test restore, and keep active and standby identities unambiguous.
+- **Block durability:** maintain checksums, target copies or fragments, rack diversity, and enough repair bandwidth.
+- **Placement:** balance locality, rack failure domains, disk utilization, storage tiers, and current cluster health.
+- **Client correctness:** preserve write-pipeline acknowledgment, lease recovery, idempotent job output, and observable read failure.
+
+{% code-block file="/api/content/technology/hadoop-hdfs/code/inspect-hdfs-layout.sh" language="bash" title="Inspect HDFS files and block placement" /%}
+{% /section-card %}
+
+{% section-card %}
+## Size raw disk, protected capacity, and namespace pressure
+
+Raw disk is not usable data capacity. Replication consumes physical copies, operating reserve keeps recovery possible, and the file distribution determines how much metadata the NameNode must retain.
+
+{% interactive-block id="technology/hadoop-hdfs-capacity" /%}
+
+### Use a complete capacity equation
+
+1. **Start with raw disk:** DataNodes multiplied by installed storage per node.
+2. **Apply protection overhead:** divide by replication factor, or use the actual erasure-code data-to-parity ratio.
+3. **Hold operating reserve:** keep free space for failed-node repair, balancing, ingest bursts, and uneven placement.
+4. **Model the file distribution:** count logical blocks and files, not only total bytes, to estimate namespace memory.
+5. **Validate the bottlenecks:** measure drive throughput, rack bandwidth, NameNode heap, checkpoint time, and re-replication duration.
+
+{% callout variant="warn" %}
+The small-files problem is primarily a namespace and scheduling problem. Combining many tiny objects into larger container files can reduce NameNode pressure, but the container format must still support the required read and retention patterns.
+{% /callout %}
+{% /section-card %}
+
+{% section-card %}
+## Follow the read and write paths
+
+The client interacts with metadata and storage components differently. Understanding the path explains locality, throughput, retries, and why the NameNode does not need network capacity for every file byte.
+
+{% system-flow title="A client streams a block through a replica pipeline" caption="The NameNode chooses targets; packets flow through DataNodes and acknowledgments return in reverse order." %}
+{% system-node title="Client" eyebrow="Packet source" icon="client" tone="blue" %}
+Requests a block allocation, divides data into packets, tracks checksums, and retains unacknowledged packets for retry.
+{% /system-node %}
+{% system-node title="NameNode" eyebrow="Placement" icon="route" tone="violet" %}
+Checks the lease and namespace, selects healthy rack-aware targets, and records the block identity without carrying file bytes.
+{% /system-node %}
+{% system-node title="DataNode pipeline" eyebrow="Replication" icon="database" tone="amber" %}
+Each target stores and verifies the packet, forwards it to the next replica, and returns an acknowledgment upstream.
+{% /system-node %}
+{% system-node title="Committed block" eyebrow="Visible state" icon="check" tone="green" %}
+The client closes the block and file only after the pipeline and namespace satisfy the configured durability contract.
+{% /system-node %}
+{% /system-flow %}
+
+### Read path
+
+- The client requests block locations and receives ordered replicas, usually preferring local or nearby storage.
+- It streams from a DataNode, validates checksums, and switches replicas if the node or block is unhealthy.
+- Compute schedulers can place work near input blocks to reduce cross-rack transfer.
+
+### Write path
+
+- The NameNode grants a lease and chooses targets according to health, rack, capacity, and placement policy.
+- The client streams packets through the selected pipeline; acknowledgments travel back only after downstream acceptance.
+- A failed target causes pipeline reconstruction and continued writing when the durability policy can still be met.
+
+HDFS supports append-oriented workflows but not arbitrary in-place file updates. Jobs commonly write a new immutable output and atomically rename it into place.
+{% /section-card %}
+
+{% section-card %}
+## Choose replication or erasure coding deliberately
+
+Both mechanisms make data recoverable, but they spend different combinations of storage, network, compute, and operational complexity.
+
+{% concept-grid %}
+{% concept-card title="Triple replication" icon="copy" tone="blue" %}
+Keeps three complete copies. Reads and repairs are straightforward, and hot data has multiple full replicas, but storage overhead is about 3x.
+{% /concept-card %}
+{% concept-card title="Erasure coding" icon="grid" tone="green" %}
+Stores data and parity fragments. It reduces overhead for large colder datasets while increasing reconstruction, network, and compute work.
+{% /concept-card %}
+{% concept-card title="Rack-aware placement" icon="network" tone="violet" %}
+Spreads protection across failure domains. Replica count alone is insufficient when every copy shares one rack, controller, or power source.
+{% /concept-card %}
+{% concept-card title="Storage policies" icon="layers" tone="amber" %}
+Assign hot, warm, cold, SSD, archive, replication, or erasure-code policies according to access and recovery objectives.
+{% /concept-card %}
+{% /concept-grid %}
+
+### Prefer replication when
+
+- Data is hot, latency-sensitive, frequently read, or operational simplicity matters most.
+- Fast replica switching and uncomplicated repair justify the extra disk.
+- Files are still being appended or do not fit the cluster's erasure-coding workflow.
+
+### Prefer erasure coding when
+
+- Files are large, closed, colder, and expensive storage overhead dominates.
+- The cluster has enough network and compute headroom for reconstruction.
+- Operators have tested degraded reads, repair duration, and failure-domain placement.
+{% /section-card %}
+
+{% section-card tone="warn" %}
+## Recover the broken invariant before optimizing the cluster
+
+A lost DataNode, unavailable NameNode, corrupt replica, and disk imbalance require different first actions. Inject each failure, choose the response, and see how bandwidth changes the exposure window.
+
+{% interactive-block id="technology/hadoop-hdfs-recovery-lab" dataFile="/api/content/technology/hadoop-hdfs/data/recovery-scenarios.json" /%}
+
+### Diagnose failures in a fixed order
+
+1. **Protect namespace correctness.** Fence uncertain NameNode ownership and stop writes if split brain or journal divergence is possible.
+2. **Identify endangered data.** Prioritize blocks with the fewest verified copies or insufficient failure-domain diversity.
+3. **Bound repair pressure.** Restore redundancy without saturating disks and rack links needed by foreground jobs.
+4. **Verify reconstructed state.** Check checksums, block counts, rack placement, namespace health, and representative client reads.
+5. **Restore balance last.** Rebalance healthy data after durability and availability are stable.
+
+{% code-block file="/api/content/technology/hadoop-hdfs/code/recover-replication.sh" language="bash" title="Restore and verify replication" /%}
+{% /section-card %}
+
+{% section-card %}
+## Build high availability for metadata
+
+The NameNode is logically central, so its memory, journal, checkpoints, failover controls, and recovery procedures deserve the same rigor as the block fleet.
+
+### NameNode durability
+
+- Persist namespace changes in the EditLog and periodically create FSImage checkpoints.
+- Replicate or journal edits through a supported HA design and protect the journal from split brain.
+- Back up metadata outside the active cluster and rehearse restore into an isolated environment.
+- Monitor heap, garbage collection, edit growth, checkpoint duration, RPC queues, and block-report processing.
+
+### High-availability controls
+
+- Run active and synchronized standby NameNodes with automatic health monitoring.
+- Fence the old active before promotion so only one NameNode can issue authoritative namespace changes.
+- Test failover with real clients, leases, writes, and dependent schedulers.
+- Remember that the SecondaryNameNode creates checkpoints; it is not a production hot standby.
+
+### Federation
+
+Federation splits independent namespace volumes across multiple NameNodes so metadata scale and organizational ownership do not depend on one namespace. DataNodes can serve blocks for several namespaces, but each namespace keeps its own metadata and failure boundary.
+{% /section-card %}
+
+{% section-card %}
+## Secure every identity and data path
+
+Filesystem permissions alone do not authenticate cluster services. A production HDFS design needs strong identity, transport protection, encryption boundaries, and auditable administration.
+
+- Use Kerberos or the platform's supported strong authentication for users and services.
+- Apply owner/group permissions and ACLs with least privilege; separate service identities by workload.
+- Encrypt RPC and block-transfer traffic when the network is not a trusted boundary.
+- Use transparent encryption zones and a protected key-management service for sensitive datasets.
+- Restrict NameNode, journal, key, and administrative endpoints from general workload networks.
+- Retain access and administration audit events with identities, dataset paths, policy results, and time bounds.
+
+{% code-block file="/api/content/technology/hadoop-hdfs/code/audit-hdfs-security.sh" language="bash" title="Audit HDFS identity, transport, and access controls" /%}
+{% /section-card %}
+
+{% section-card %}
+## Operate HDFS around leading failure signals
+
+Capacity percentage alone is a late signal. Monitor whether the cluster can still place, repair, verify, and serve blocks within its recovery objectives.
+
+### Watch continuously
+
+- Live, dead, stale, decommissioning, and maintenance DataNodes by rack and storage type
+- Missing, corrupt, under-replicated, pending-replication, and excess blocks
+- NameNode heap, RPC latency, edit rate, checkpoint age, safe mode, and failover health
+- Disk fullness and skew, failed volumes, checksum errors, read/write throughput, and queue time
+- Cross-rack bandwidth, re-replication rate, balancer progress, and foreground-job impact
+
+### Rehearse periodically
+
+- Active NameNode loss, journal interruption, metadata restore, and client failover
+- DataNode and rack loss while the cluster is under representative read and ingest load
+- Corrupt replicas, failed disks, decommissioning, storage-policy movement, and key rotation
+- Capacity expansion and removal without violating reserve or failure-domain placement
+
+{% callout variant="tip" %}
+A healthy HDFS cluster is not merely available now. It has enough verified copies, free disk, bandwidth, metadata headroom, and tested control-plane recovery to remain available through the next credible failure.
+{% /callout %}
+{% /section-card %}
+
+{% quiz title="Hadoop HDFS Design Review" quizId="hadoop-hdfs" lessonSlug="hadoop-hdfs" questionsFile="/api/content/technology/hadoop-hdfs/quiz/hadoop-hdfs-review.json" /%}

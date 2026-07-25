@@ -1,0 +1,204 @@
+---
+registryId: langid-py
+---
+
+{% section-card tone="intro" %}
+## What is langid.py?
+
+**langid.py is a pre-trained language identification library: give it text and it
+returns the most likely language label plus a score.** Language identification is the
+classification step that answers “what language is this document written in?” before
+a system chooses a tokenizer, search index, moderation model, translation path, or
+human-review queue.
+
+The bundled model covers 97 ISO 639-1 language labels and was designed to work across
+multiple domains without application-specific training. Its original implementation
+uses byte n-gram features, a multinomial Naive Bayes classifier, and a compiled scanner
+to score text efficiently.
+
+The core invariant is **langid.py can choose only from its active candidate set**. A
+high normalized score means one candidate outranked the others under that model; it
+does not prove that the true language was eligible, that the input contains one
+language, or that the prediction is safe to automate.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Trace one document through the classifier
+
+The model turns byte patterns into one score per eligible language, then returns the
+highest-scoring label. Your application still owns the policy that decides whether to
+accept, defer, or reject that result.
+
+{% system-flow title="From text to an operational decision" caption="Candidate selection changes the competition before the application applies its own release gates." %}
+{% system-node title="Input text" eyebrow="Document boundary" icon="file" tone="blue" %}
+Pass a meaningful document or message. Empty, tiny, mixed-language, template-heavy,
+and machine-generated strings need an explicit handling policy.
+{% /system-node %}
+{% system-node title="Byte n-gram scanner" eyebrow="Features" icon="scan" tone="cyan" %}
+The original model counts selected byte sequences. Byte features let one model process
+many scripts without first choosing a language-specific tokenizer.
+{% /system-node %}
+{% system-node title="Naive Bayes scores" eyebrow="Candidate ranking" icon="chart" tone="violet" %}
+The classifier scores each active language. Restricting the candidate set can improve
+the decision boundary only when the true language remains eligible.
+{% /system-node %}
+{% system-node title="Application gate" eyebrow="Accept or defer" icon="shield" tone="green" %}
+Use labeled evaluation, input checks, score thresholds, product scope, and a fallback
+path to decide whether the prediction may affect users or downstream data.
+{% /system-node %}
+{% /system-flow %}
+{% /section-card %}
+
+{% section-card accent="cyan" %}
+## See how the candidate set changes the answer
+
+The official project documentation classifies the same English sentence under three
+candidate-language configurations. Select each configuration and watch both the top
+label and normalized score change. One narrow set excludes English completely and
+therefore produces a confident but impossible-to-correct answer.
+
+{% interactive-block id="technology/langid-py-performance" dataFile="/api/content/technology/langid-py/data/candidate-scope-lab.json" /%}
+
+### Scope languages from product truth
+
+- Restrict candidates when a product, tenant, corpus, or route has a trustworthy set
+  of supported languages.
+- Keep an `unknown` or review path when evidence conflicts with that scope. Do not add
+  an unsupported language merely to force every record into a known label.
+- Avoid changing the module-level candidate set per request in a concurrent service.
+  Build a dedicated `LanguageIdentifier` for each stable policy boundary instead.
+- Re-evaluate candidate scope when a product enters a new market or starts accepting
+  content from a broader source.
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Interpret the score without pretending it is certainty
+
+The classifier works in log-probability space. Normalization converts its output to a
+0-to-1 value that is easier to compare within the active candidate set. That number is
+useful evidence, but an application threshold must be learned from representative,
+labeled data rather than copied from a generic tutorial.
+
+{% concept-grid columns="3" %}
+{% concept-card title="Relative evidence" eyebrow="What the score can say" icon="chart" tone="violet" %}
+A normalized score summarizes competition among the active candidates for this input.
+Changing the candidates can change the score even when the text is identical.
+{% /concept-card %}
+{% concept-card title="Missing truth" eyebrow="What the score cannot repair" icon="warning" tone="rose" %}
+If the true language is unsupported or excluded, normalization still distributes
+belief across the remaining labels and can make a wrong winner look decisive.
+{% /concept-card %}
+{% concept-card title="Decision policy" eyebrow="What production must add" icon="shield" tone="green" %}
+Combine the score with minimum evidence, product scope, mixed-language handling,
+labeled slice metrics, and a fallback that does not silently corrupt routing.
+{% /concept-card %}
+{% /concept-grid %}
+
+{% callout variant="warn" %}
+### Do not publish a universal confidence threshold
+
+Text length, language pair, script, domain, markup, and candidate set all affect the
+score distribution. Calibrate thresholds per decision and measure false accepts and
+false deferrals on data shaped like production traffic.
+{% /callout %}
+{% /section-card %}
+
+{% section-card accent="violet" %}
+## Design the acceptance policy, not just the classifier call
+
+Use the illustrative labeled fixture below to compare three release policies. Change
+the score floor and inspect which records auto-route, which defer, and which wrong
+labels leak downstream. The fixture is for policy reasoning, not a langid.py benchmark.
+
+{% interactive-block id="technology/langid-py-performance" dataFile="/api/content/technology/langid-py/data/decision-policy-lab.json" /%}
+
+### Choose the cost of each error
+
+- A false accept sends a record to the wrong language-specific workflow. It may poison
+  analytics, choose the wrong model, or hide content from the correct reviewers.
+- A false deferral spends fallback capacity on a prediction that could have been used.
+  That cost can be acceptable when the downstream action is difficult to reverse.
+- An abstention is a valid product result. Route it to another detector, a broader
+  model, a multilingual path, or human review instead of inventing certainty.
+- Mixed-language content needs a declared unit of classification: whole document,
+  paragraph, sentence, or segment. A document-level top label does not describe every
+  span.
+{% /section-card %}
+
+{% section-card accent="blue" %}
+## Keep classifier state inside a stable boundary
+
+The official API exposes `set_languages()` on the module-level classifier, but that
+mutates shared state. A service with concurrent tenants or routes should create an
+identifier for each stable candidate policy instead of changing one global classifier
+around individual requests.
+
+{% code-block file="/api/content/technology/langid-py/code/classify-with-candidate-set.py" language="python" title="Create a scoped classifier without mutating module-level state" /%}
+
+### Make the API contract explicit
+
+- Return the predicted ISO code, normalized score, model or package version, candidate
+  policy version, and final routing decision.
+- Bound input bytes and characters before classification. Reject empty input and avoid
+  storing raw user text in logs when aggregate diagnostics are enough.
+- Initialize classifier objects when a worker starts; do not rebuild the embedded
+  model for every request.
+- Treat package and model upgrades as behavior changes. Replay a labeled evaluation
+  set before release and retain a rollback path.
+{% /section-card %}
+
+{% section-card accent="green" %}
+## Separate model output from the routing gate
+
+This executable standard-library example applies a decision policy to fixed detection
+records. Keeping this layer independent makes threshold behavior testable without
+loading the model, and it lets a second detector or human review reuse the same
+downstream contract.
+
+{% code-block file="/api/content/technology/langid-py/code/apply-language-policy.py" language="python" title="Apply an explicit accept-or-defer policy" /%}
+
+{% process-flow %}
+{% process-step number="1" title="Collect labeled slices" label="Representative evidence" %}
+Include supported, unsupported, short, mixed, noisy, and high-impact inputs from each
+real source rather than relying only on clean example sentences.
+{% /process-step %}
+{% process-step number="2" title="Measure the decision" label="Not only top-line accuracy" %}
+Track confusion by language pair and source, false accepts, deferrals, coverage, input
+length, score distribution, and downstream correction rate.
+{% /process-step %}
+{% process-step number="3" title="Release with a fallback" label="Versioned policy" %}
+Version the candidate set and threshold policy, canary changes, preserve an abstention
+path, and compare labeled outcomes before widening traffic.
+{% /process-step %}
+{% process-step number="4" title="Watch for drift" label="Traffic and product change" %}
+Alert when language mix, unsupported-language rate, score distribution, or manual
+correction rate moves beyond the reviewed envelope.
+{% /process-step %}
+{% /process-flow %}
+{% /section-card %}
+
+{% section-card %}
+## Review the production contract
+
+Before placing langid.py on a routing path, answer these questions:
+
+- What exact text unit is classified: document, message, paragraph, or sentence?
+- Which languages are eligible, and what happens when the truth is outside that set?
+- How were score gates calibrated for each source, language pair, and error cost?
+- Which inputs are deferred because they are empty, short, mixed, unsupported, or
+  outside the evaluated envelope?
+- Which labeled metrics detect wrong automatic routes rather than only low scores?
+- How are model, package, candidate policy, and threshold versions recorded together?
+- What fallback handles abstentions, and how is a bad release rolled back?
+
+The [official langid.py project documentation](https://github.com/saffsd/langid.py)
+is the primary API reference for classification, candidate restriction, normalization,
+batch mode, and model training. The authors' [ACL 2012 system paper](https://aclanthology.org/P12-3005/)
+describes the byte n-gram, feature-selection, scanner, Naive Bayes, training-data, and
+evaluation design.
+
+The original `langid` package is mature but old. Verify runtime compatibility and
+maintenance requirements against the exact artifact you deploy.
+{% /section-card %}
+
+{% quiz questionsFile="/api/content/technology/langid-py/quiz/langid-production-routing.json" lessonSlug="langid-py" title="langid.py Production Routing Review" /%}
