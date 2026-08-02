@@ -50,8 +50,8 @@ content PR is merged when it:
 2. Opens with a beginner-friendly *"What is [Concept]?"* introduction before any
    trade-offs (the golden rule in [CONTENT_GUIDE.md](./docs/CONTENT_GUIDE.md)).
 3. Is technically accurate, ideally with a cited source for non-obvious claims.
-4. Follows the layout/component conventions in
-   [CLAUDE.md](./CLAUDE.md) and [AGENTS.md](./AGENTS.md).
+4. Follows the layout/component conventions in [AGENTS.md](./AGENTS.md) and
+   [CONTENT_GUIDE.md](./docs/CONTENT_GUIDE.md).
 
 ## Becoming a maintainer
 

@@ -737,6 +737,19 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [perQuestionSeconds, setPerQuestionSeconds] = useState<number[]>([]);
   const [questionStartMs, setQuestionStartMs] = useState<number>(Date.now());
+  const questionHeadingRef = useRef<HTMLHeadingElement>(null);
+
+  const focusQuestionHeading = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      questionHeadingRef.current?.focus();
+    });
+  }, []);
+
+  const navigateToQuestion = useCallback((questionIndex: number) => {
+    setCurrentQuestion(questionIndex);
+    setQuestionStartMs(Date.now());
+    focusQuestionHeading();
+  }, [focusQuestionHeading]);
 
   // Gamification tracking
   const { trackQuizCompletion } = useGamification();
@@ -932,10 +945,9 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
     const nextIndex = updatedCompleted.findIndex(completed => !completed);
     const targetIndex = nextIndex >= 0 ? nextIndex : 0;
 
-    setCurrentQuestion(targetIndex);
+    navigateToQuestion(targetIndex);
     setSelectedAnswer(null);
     setShowAnswer(false);
-    setQuestionStartMs(Date.now());
     setStartTime(Date.now());
     setElapsedSeconds(0);
   };
@@ -1103,7 +1115,8 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
     setElapsedSeconds(0);
     // Reset hasLoadedPreviousAnswers to start fresh - no more previous answers should show
     setHasLoadedPreviousAnswers(true); // Keep true to prevent reloading from storage, but answers array is now clean
-  }, [loadedQuestions]);
+    focusQuestionHeading();
+  }, [focusQuestionHeading, loadedQuestions]);
 
   // Keyboard shortcuts: 1-4 select options, Enter next, Left/Right navigate
   useEffect(() => {
@@ -1119,10 +1132,11 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
       // Enter advances when an answer is shown
       if (e.key === 'Enter') {
         if (showAnswer) {
+          e.preventDefault();
           if (currentQuestion === loadedQuestions.length - 1) {
             restartQuiz();
           } else {
-            setCurrentQuestion(q => Math.min(q + 1, loadedQuestions.length - 1));
+            navigateToQuestion(Math.min(currentQuestion + 1, loadedQuestions.length - 1));
             setSelectedAnswer(null);
             setShowAnswer(false);
           }
@@ -1130,14 +1144,16 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
       }
       if (e.key === 'ArrowLeft') {
         if (currentQuestion > 0) {
-          setCurrentQuestion(q => Math.max(q - 1, 0));
+          e.preventDefault();
+          navigateToQuestion(Math.max(currentQuestion - 1, 0));
           setSelectedAnswer(null);
           setShowAnswer(false);
         }
       }
       if (e.key === 'ArrowRight') {
         if (currentQuestion < loadedQuestions.length - 1 && showAnswer) {
-          setCurrentQuestion(q => Math.min(q + 1, loadedQuestions.length - 1));
+          e.preventDefault();
+          navigateToQuestion(Math.min(currentQuestion + 1, loadedQuestions.length - 1));
           setSelectedAnswer(null);
           setShowAnswer(false);
         }
@@ -1145,7 +1161,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [currentQuestion, handleAnswerSelect, loadedQuestions, restartQuiz, showAnswer, showCompletionMessage]);
+  }, [currentQuestion, handleAnswerSelect, loadedQuestions, navigateToQuestion, restartQuiz, showAnswer, showCompletionMessage]);
 
   const nextQuestion = () => {
     if (currentQuestion === loadedQuestions.length - 1) {
@@ -1153,16 +1169,15 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
       restartQuiz();
     } else {
       // reset timer for next question
-      setQuestionStartMs(Date.now());
       const nextQ = Math.min(currentQuestion + 1, loadedQuestions.length - 1);
-      setCurrentQuestion(nextQ);
+      navigateToQuestion(nextQ);
       // Let useEffect handle setting selectedAnswer and showAnswer based on whether this question was answered
     }
   };
 
   const prevQuestion = () => {
     const prevQ = Math.max(currentQuestion - 1, 0);
-    setCurrentQuestion(prevQ);
+    navigateToQuestion(prevQ);
     // Let useEffect handle setting selectedAnswer and showAnswer based on whether this question was answered
   };
 
@@ -1289,9 +1304,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
               <button
                 key={idx}
                 onClick={() => {
-                  setCurrentQuestion(idx);
-                  setSelectedAnswer(null);
-                  setShowAnswer(answers[idx] !== -1);
+                  navigateToQuestion(idx);
                 }}
                 className={`w-8 h-8 rounded-full text-xs font-medium flex items-center justify-center border transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
                   isCurrent ? 'border-indigo-500 text-indigo-600' : 'border-neutral-300 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800'
@@ -1309,13 +1322,20 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
       {!showCompletionMessage && (
         <>
           <div className="mb-4">
-            <h4 className="text-base font-medium text-neutral-900 dark:text-neutral-100 mb-3">
+            <h4
+              ref={questionHeadingRef}
+              tabIndex={-1}
+              className="text-base font-medium text-neutral-900 dark:text-neutral-100 mb-3 focus:outline-none"
+            >
               {loadedQuestions[currentQuestion]?.question}
             </h4>
 
             <div className="space-y-2">
               {selectedAnswer === null && !showAnswer && (
-                <div className="text-sm text-neutral-500 dark:text-neutral-400 mb-3 p-3 bg-neutral-50 dark:bg-neutral-800/30 rounded border-l-4 border-indigo-300 dark:border-indigo-600">
+                <div
+                  id="question-hint"
+                  className="text-sm text-neutral-500 dark:text-neutral-400 mb-3 p-3 bg-neutral-50 dark:bg-neutral-800/30 rounded border-l-4 border-indigo-300 dark:border-indigo-600"
+                >
                   <div className="flex items-center gap-2">
                     <span>💡</span>
                     <span>Select an answer or press <kbd className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">1-4</kbd> • Enter to continue • <kbd className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">←/→</kbd> to navigate</span>
@@ -1337,7 +1357,8 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
                       ? 'bg-blue-100 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 text-blue-800 dark:text-blue-300'
                       : 'bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 cursor-pointer'
                   }`}
-                  aria-pressed={selectedAnswer === index ? "true" : "false"}
+                  aria-label={`Answer ${index + 1}: ${option}`}
+                  aria-pressed={selectedAnswer === index}
                   aria-describedby={selectedAnswer === null ? "question-hint" : undefined}
                 >
                   <div className="flex items-center justify-between">

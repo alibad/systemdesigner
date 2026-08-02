@@ -41,7 +41,28 @@ pnpm dev
 
 Open **http://localhost:3000** — that's it. 🎉
 
-You're now running the full platform: 300+ lessons, 413 interactive quizzes, calculators, and the tldraw diagramming sandbox.
+You're now running the full platform: 425 content entries, interactive quizzes across the curriculum, calculators, and the tldraw diagramming sandbox.
+
+### Windows and PowerShell
+
+Run the same setup from PowerShell:
+
+```powershell
+git clone https://github.com/alibad/systemdesigner.git
+Set-Location systemdesigner
+corepack enable
+corepack prepare pnpm@10.4.1 --activate
+pnpm install
+pnpm dev
+```
+
+Normal development still needs no environment file. If you are working on an optional cloud-backed feature, create the ignored local file with:
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+If PowerShell reports that `corepack` is not recognized, install the current Corepack shim with `npm install --global corepack@latest`, open a new terminal, and rerun `corepack enable`. If it blocks `pnpm.ps1` because script execution is disabled, use `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` for that terminal session, or follow your organization's managed PowerShell policy. These steps still install project dependencies only with pnpm.
 
 ### What works with no env vars?
 

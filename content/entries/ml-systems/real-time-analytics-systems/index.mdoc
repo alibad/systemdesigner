@@ -42,6 +42,24 @@ Use stable event and result keys so retries or replay do not double-charge, doub
 {% /section-card %}
 
 {% section-card %}
+## Follow one late event through correction and recovery
+
+Consider a ten-second order-count window from `10:00:00` through `10:00:10`, with 30 seconds of allowed lateness:
+
+1. **Event time:** order `order-4821` is created at `10:00:04`, so it belongs to the `10:00:00` window even though a network retry delays it.
+2. **Processing delay:** the event reaches the processor at `10:00:20`. The current watermark is `10:00:15`, so the window has already emitted a count of `126`.
+3. **Allowed lateness:** the event is late because the watermark passed the window end, but it is still accepted because the watermark has not passed `10:00:40` (window end plus 30 seconds).
+4. **State and correction:** keyed window state adds `order-4821` and changes the count from `126` to `127`. This is a correction to the existing output, not a change that affects only future windows. The analytical sink upserts key `orders:10:00:00` with value `127`.
+5. **Failure:** the sink accepts the upsert, but the processor crashes before the next checkpoint completes. The last completed checkpoint, `841`, contains source offset `2048` and the earlier count of `126`.
+6. **Recovery and replay:** the replacement processor restores checkpoint `841`, resumes from offset `2048`, and reads `order-4821` again. Restored state moves from `126` to `127`, while the sink overwrites the same `orders:10:00:00` key with the same result.
+7. **Business-effect deduplication:** if the correction also opens an alert, the alert write uses the unique effect key `late-correction:10:00:00:order-4821`. Replay finds that key already committed and does not page an operator twice.
+
+Once the watermark passes `10:00:40`, the system removes this window's correction state. An event for the same window arriving after that point follows the declared too-late policy: this design sends it to a reviewable side output and does not alter the published count.
+
+The mechanics match Apache Flink's primary documentation: [window lifecycle and allowed lateness](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/operators/windows/#allowed-lateness) explain late firings as updated results, while [fault tolerance via state snapshots](https://nightlies.apache.org/flink/flink-docs-stable/docs/learn-flink/fault_tolerance/#exactly-once-end-to-end) explains checkpoint replay and why end-to-end exactly-once behavior requires a transactional or idempotent sink.
+{% /section-card %}
+
+{% section-card %}
 ## Build features and decisions from one event contract
 
 {% code-block file="/api/content/ml-systems/real-time-analytics-systems/code/streaming-features-py.py" language="python" title="Event-time feature pipeline" /%}
