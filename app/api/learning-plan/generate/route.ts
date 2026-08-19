@@ -128,7 +128,7 @@ Respond with well-structured JSON:
 }`;
 
     // Call OpenAI API
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-5.6-terra';
     
     console.log('🤖 Making OpenAI API call with model:', model);
     console.log('📏 Prompt size:', prompt.length, 'characters');
@@ -138,72 +138,35 @@ Respond with well-structured JSON:
     
     let aiResponse: string | undefined;
     
-    if (model === 'gpt-5-nano') {
-      // Use the new responses API for gpt-5-nano
-      const response = await openai.responses.create({
-        model: "gpt-5-nano",
-        input: [
-          {
-            role: 'system',
-            content: 'You are an expert system design educator. Respond only with valid JSON, no markdown formatting.',
+    // Chat completions handles 5.6 directly; the gpt-5-nano responses-API
+    // branch is gone along with the model it existed for.
+    // Use standard chat completions for other models
+    const completion = await openai.chat.completions.create({
+      model: model,
+      reasoning_effort: 'low',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are an expert system design educator. Respond only with valid JSON, no markdown formatting.',
 
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        text: {
-          "format": {
-            "type": "text"
-          },
-          "verbosity": "medium"
         },
-        reasoning: {
-          "effort": "low"
+        {
+          role: 'user',
+          content: prompt,
         },
-        tools: [],
-        store: true,
-        include: [
-          "reasoning.encrypted_content"
-        ]
-      });
-      
-      const duration = Date.now() - startTime;
-      console.log('✅ OpenAI responses API response received in', duration, 'ms');
-      console.log('🔍 Response structure:', {
-        hasOutputText: !!response.output_text,
-        outputText: response.output_text?.substring(0, 100) + '...',
-        allKeys: Object.keys(response)
-      });
-      aiResponse = response.output_text;
-    } else {
-      // Use standard chat completions for other models
-      const completion = await openai.chat.completions.create({
-        model: model,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert system design educator. Respond only with valid JSON, no markdown formatting.',
+      ],
+      max_completion_tokens: 2000,
+    });
 
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        max_completion_tokens: 2000,
-      });
+    const duration = Date.now() - startTime;
+    console.log('✅ OpenAI chat API response received in', duration, 'ms:', {
+      choices: completion.choices?.length,
+      usage: completion.usage,
+      firstChoice: completion.choices[0]?.message?.content?.substring(0, 100) + '...'
+    });
 
-      const duration = Date.now() - startTime;
-      console.log('✅ OpenAI chat API response received in', duration, 'ms:', {
-        choices: completion.choices?.length,
-        usage: completion.usage,
-        firstChoice: completion.choices[0]?.message?.content?.substring(0, 100) + '...'
-      });
+    aiResponse = completion.choices[0]?.message?.content || undefined;
 
-      aiResponse = completion.choices[0]?.message?.content || undefined;
-    }
     if (!aiResponse) {
       throw new Error('No response from AI');
     }

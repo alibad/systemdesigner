@@ -75,7 +75,8 @@ Use the lesson as the primary source of context. Answer the learner's actual que
     console.log(`💬 Processing chat message for: ${pageTitle}`);
 
     const stream = await openai.chat.completions.create({
-      model: process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini',
+      model: process.env.OPENAI_CHAT_MODEL || 'gpt-5.6-terra',
+      reasoning_effort: 'low',
       messages: [
         {
           role: 'system',
@@ -83,10 +84,7 @@ Use the lesson as the primary source of context. Answer the learner's actual que
         },
         ...messages
       ],
-      temperature: 0.7,
-      max_tokens: 500,
-      presence_penalty: 0.3,
-      frequency_penalty: 0.3,
+      max_completion_tokens: 500,
       stream: true,
     });
 

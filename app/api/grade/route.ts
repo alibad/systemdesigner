@@ -69,7 +69,7 @@ async function coach(
   perCriterion: GradeResult['perCriterion']
 ): Promise<string> {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const model = process.env.OPENAI_GRADER_MODEL || 'gpt-4o';
+  const model = process.env.OPENAI_GRADER_MODEL || 'gpt-5.6-sol';
 
   const met = perCriterion.filter((c) => c.met).map((c) => c.label);
   const missing = perCriterion.filter((c) => !c.met).map((c) => `${c.label} — ${c.why}`);
@@ -89,12 +89,13 @@ async function coach(
 
   const completion = await openai.chat.completions.create({
     model,
+    // Coaching quality is the product here, so reasoning stays on.
+    reasoning_effort: 'high',
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    temperature: 0.4,
-    max_tokens: 180,
+    max_completion_tokens: 180,
   });
 
   return completion.choices[0]?.message?.content?.trim() || '';

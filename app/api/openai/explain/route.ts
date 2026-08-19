@@ -75,7 +75,8 @@ Explain "${selectedText}" briefly: what it means, why it matters, and a simple e
 
     // Generate streaming explanation using GPT-4
     const stream = await openai.chat.completions.create({
-      model: 'gpt-4o-mini', // Using the faster, cheaper model for quick explanations
+      model: 'gpt-5.6-luna',
+      reasoning_effort: 'low', // Using the faster, cheaper model for quick explanations
       messages: [
         {
           role: 'system',
@@ -86,10 +87,7 @@ Explain "${selectedText}" briefly: what it means, why it matters, and a simple e
           content: userPrompt
         }
       ],
-      temperature: 0.7,
-      max_tokens: 300, // Keep explanations concise
-      presence_penalty: 0.3,
-      frequency_penalty: 0.3,
+      max_completion_tokens: 300, // Keep explanations concise
       stream: true,
     });
 

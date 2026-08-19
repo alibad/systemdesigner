@@ -117,13 +117,13 @@ Available section types: text-editor, rich-document, qa-pairs, checklist, bullet
 Return ONLY the JSON array, no additional text.`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: 'gpt-5.6-terra',
+      reasoning_effort: 'low',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
-      temperature: 0.7,
-      max_tokens: 1500,
+      max_completion_tokens: 1500,
     });
 
     const generatedContent = response.choices[0].message.content;
