@@ -11,6 +11,12 @@
 
 ### 👉 [Start learning at systemdesigner.net](https://systemdesigner.net)
 
+### Continue the daily-learning project
+
+The Duolingo-style starter is implemented at `/learn`: six short system-design and JavaScript steps, coding tests, XP, goals, streaks, and spaced reviews. Its progress currently saves in the browser.
+
+**Resuming on another machine or in a new coding session? Start with [Continue development](./docs/CONTINUE_DEVELOPMENT.md).** It contains setup commands, the implementation map, current limits, the next milestone, and a ready-to-use continuation prompt. The [product roadmap](./ROADMAP.md) is also available in the app at `/roadmap`.
+
 ---
 
 ## What is SystemDesigner?
@@ -164,6 +170,8 @@ pnpm check               # full local pre-PR check
 
 | Doc | What's inside |
 | --- | --- |
+| [docs/CONTINUE_DEVELOPMENT.md](./docs/CONTINUE_DEVELOPMENT.md) | New-machine handoff, current daily-learning state, next task, and verification |
+| [docs/daily-learning-path.md](./docs/daily-learning-path.md) | Daily path implementation, progression rules, coding runner, and content |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | How to contribute — fixes, new content, PRs |
 | [docs/CONTENT_GUIDE.md](./docs/CONTENT_GUIDE.md) | Authoring lessons, quizzes & calculators (the content system) |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | How the app & content registry fit together |

@@ -706,6 +706,8 @@ export function ScenarioAnalysis({ title, description, category = 'fundamentals'
 }
 
 interface QuizProps {
+  sessionMode?: boolean;
+  onComplete?: (result: { score: number; total: number }) => void;
   title?: string;
   lessonSlug?: string;
   // Support three ways to load quiz content:
@@ -719,10 +721,11 @@ interface QuizProps {
   quizId?: string;         // Quiz bank ID for centralized quizzes
 }
 
-export function InteractiveQuiz({ title = "Test Your Understanding", questions, questionsFile, quizId, lessonSlug }: QuizProps) {
+export function InteractiveQuiz({ title = "Test Your Understanding", questions, questionsFile, quizId, lessonSlug, sessionMode = false, onComplete }: QuizProps) {
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
   const [loadedQuestions, setLoadedQuestions] = useState<any[]>([]);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [loading, setLoading] = useState(false);
   const [showAnswer, setShowAnswer] = useState(false);
   const [score, setScore] = useState(0);
@@ -738,6 +741,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   const [perQuestionSeconds, setPerQuestionSeconds] = useState<number[]>([]);
   const [questionStartMs, setQuestionStartMs] = useState<number>(Date.now());
   const questionHeadingRef = useRef<HTMLHeadingElement>(null);
+  const quizContainerRef = useRef<HTMLDivElement>(null);
 
   const focusQuestionHeading = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -801,6 +805,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
 
   // Load quiz questions from different sources
   useEffect(() => {
+    const controller = new AbortController();
     const loadQuestions = async () => {
       if (questions) {
         // Direct questions prop
@@ -812,41 +817,48 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
         // Co-located quiz file
         setLoading(true);
         try {
-          const response = await fetch(questionsFile);
+          const response = await fetch(questionsFile, { signal: controller.signal });
+          if (!response.ok) throw new Error('Quiz request failed');
           const data = await response.json();
+          if (controller.signal.aborted) return;
           const questionsList = data.questions || data;
           setLoadedQuestions(questionsList);
           setCompletedQuestions(new Array(questionsList.length).fill(false));
           setAnswers(new Array(questionsList.length).fill(-1));
           setPerQuestionSeconds(new Array(questionsList.length).fill(0));
         } catch (error) {
+          if (controller.signal.aborted) return;
           console.error('Failed to load quiz from file:', error);
           setLoadedQuestions([]);
         } finally {
-          setLoading(false);
+          if (!controller.signal.aborted) setLoading(false);
         }
       } else if (quizId) {
         // Quiz bank ID
         setLoading(true);
         try {
-          const response = await fetch(`/api/quiz-bank/${quizId}`);
+          const response = await fetch(`/api/quiz-bank/${quizId}`, { signal: controller.signal });
+          if (!response.ok) throw new Error('Quiz request failed');
           const data = await response.json();
+          if (controller.signal.aborted) return;
           const questionsList = data.questions || data;
           setLoadedQuestions(questionsList);
           setCompletedQuestions(new Array(questionsList.length).fill(false));
           setAnswers(new Array(questionsList.length).fill(-1));
           setPerQuestionSeconds(new Array(questionsList.length).fill(0));
         } catch (error) {
+          if (controller.signal.aborted) return;
           console.error('Failed to load quiz from bank:', error);
           setLoadedQuestions([]);
         } finally {
-          setLoading(false);
+          if (!controller.signal.aborted) setLoading(false);
         }
       }
     };
 
     loadQuestions();
-  }, [questions, questionsFile, quizId]);
+    return () => controller.abort();
+  }, [questions, questionsFile, quizId, loadAttempt]);
 
   // Always call hook to respect hooks rules; if no lessonSlug, use a neutral slug
   const { getBestScore, saveQuizScore, getAttemptCount, quizAttempts, loading: quizLoading } = useQuizProgress(lessonSlug || 'standalone-quiz');
@@ -1061,6 +1073,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   }, [currentQuestion, showCompletionMessage, answers]); // Re-added 'answers' dependency
 
   const handleAnswerSelect = useCallback((answerIndex: number) => {
+    if (sessionMode && completedQuestions[currentQuestion]) return;
     // Mark that user is actively taking the quiz
     setIsActivelyTaking(true);
 
@@ -1096,7 +1109,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
     const newCompleted = [...completedQuestions];
     newCompleted[currentQuestion] = true;
     setCompletedQuestions(newCompleted);
-  }, [answers, completedQuestions, currentQuestion, loadedQuestions, questionStartMs, score]);
+  }, [answers, completedQuestions, currentQuestion, loadedQuestions, questionStartMs, score, sessionMode]);
 
   const restartQuiz = useCallback(() => {
     setCurrentQuestion(0);
@@ -1122,6 +1135,12 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (showCompletionMessage) return;
+      if (sessionMode) {
+        if (!quizContainerRef.current?.contains(document.activeElement)) return;
+        if ((e.target as HTMLElement)?.matches('input, textarea, select, [contenteditable="true"]')) return;
+        // Native buttons keep their normal Enter/Space behavior inside a session.
+        if (e.key === 'Enter' || e.key.startsWith('Arrow')) return;
+      }
       // 1..4
       if (e.key >= '1' && e.key <= '4') {
         const idx = parseInt(e.key, 10) - 1;
@@ -1161,10 +1180,11 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [currentQuestion, handleAnswerSelect, loadedQuestions, navigateToQuestion, restartQuiz, showAnswer, showCompletionMessage]);
+  }, [currentQuestion, handleAnswerSelect, loadedQuestions, navigateToQuestion, restartQuiz, showAnswer, showCompletionMessage, sessionMode]);
 
   const nextQuestion = () => {
     if (currentQuestion === loadedQuestions.length - 1) {
+      if (sessionMode) { onComplete?.({ score, total: loadedQuestions.length }); return; }
       // On last question, restart quiz instead of going to next
       restartQuiz();
     } else {
@@ -1229,7 +1249,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   // Show loading state
   if (loading) {
     return (
-      <div id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
+      <div ref={quizContainerRef} id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
         <div className="flex justify-center items-center py-8">
           <div className="text-neutral-600 dark:text-neutral-400">Loading quiz...</div>
         </div>
@@ -1240,12 +1260,13 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   // Show error state if no questions loaded
   if (!Array.isArray(loadedQuestions) || loadedQuestions.length === 0) {
     return (
-      <div id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
+      <div ref={quizContainerRef} id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
         <div className="text-center py-8">
           <div className="text-neutral-600 dark:text-neutral-400 mb-2">No quiz questions available</div>
           <div className="text-sm text-neutral-500 dark:text-neutral-500">
             {questions ? 'Questions prop is empty' : questionsFile ? 'Could not load questions file' : quizId ? `Quiz ID "${quizId}" not found` : 'No quiz source provided'}
           </div>
+          {(questionsFile || quizId) && <button className="mt-4 rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white" onClick={() => setLoadAttempt(value => value + 1)}>Retry loading quiz</button>}
         </div>
       </div>
     );
@@ -1255,7 +1276,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   const currentQuestionData = loadedQuestions[currentQuestion];
   if (!currentQuestionData || !currentQuestionData.question || !Array.isArray(currentQuestionData.options)) {
     return (
-      <div id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
+      <div ref={quizContainerRef} id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
         <div className="text-center py-8">
           <div className="text-neutral-600 dark:text-neutral-400 mb-2">Invalid quiz question data</div>
           <div className="text-sm text-neutral-500 dark:text-neutral-500">
@@ -1267,13 +1288,13 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
   }
 
   return (
-    <div id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
-      <div className="flex justify-between items-center mb-4">
+    <div ref={quizContainerRef} id="quiz-section" className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card p-6 mb-6">
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
         <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
           📝 {title}
         </h3>
         <div className="flex flex-wrap justify-end gap-2 text-xs sm:text-sm print:hidden">
-          {progressBadges.map(badge => (
+          {(sessionMode ? progressBadges.filter(badge => badge.key === 'question') : progressBadges).map(badge => (
             <span
               key={badge.key}
               className={`inline-flex items-center gap-1 rounded-full px-3 py-1 font-medium ${badgeStyles[badge.variant]}`}
@@ -1295,7 +1316,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
       <div className="print:hidden">
 
       {/* Question index */}
-      {!showCompletionMessage && (
+      {!showCompletionMessage && !sessionMode && (
         <div className="flex flex-wrap gap-2 mb-4" aria-label="Question index">
           {Array.isArray(loadedQuestions) && loadedQuestions.map((_, idx) => {
             const isCurrent = idx === currentQuestion;
@@ -1338,7 +1359,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
                 >
                   <div className="flex items-center gap-2">
                     <span>💡</span>
-                    <span>Select an answer or press <kbd className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">1-4</kbd> • Enter to continue • <kbd className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">←/→</kbd> to navigate</span>
+                    <span>{sessionMode ? 'Select an answer or press 1–4. Then choose Next.' : <>Select an answer or press <kbd className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">1-4</kbd> • Enter to continue • <kbd className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">←/→</kbd> to navigate</>}</span>
                   </div>
                 </div>
               )}
@@ -1346,6 +1367,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
                 <button
                   key={`${currentQuestion}-${index}`}
                   onClick={() => handleAnswerSelect(index)}
+                  disabled={sessionMode && showAnswer}
                   className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${
                     showAnswer
                       ? index === loadedQuestions[currentQuestion]?.correctAnswer
@@ -1405,6 +1427,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
         <div className="flex justify-between">
           <button
             onClick={prevQuestion}
+            hidden={sessionMode}
             disabled={currentQuestion === 0}
             className="px-4 py-2 border border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-400 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -1416,7 +1439,7 @@ export function InteractiveQuiz({ title = "Test Your Understanding", questions, 
             disabled={!showAnswer}
             className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {currentQuestion === loadedQuestions.length - 1 ? 'Retake Quiz' : 'Next'}
+            {currentQuestion === loadedQuestions.length - 1 ? sessionMode ? 'Finish practice' : 'Retake Quiz' : 'Next'}
           </button>
         </div>
       ) : (

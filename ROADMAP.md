@@ -1,76 +1,96 @@
-# Roadmap
+# Product roadmap
 
-A living view of where SystemDesigner is headed. This isn't a promise of dates —
-it's a shared sense of priorities so contributors know where help is most
-valuable. The roadmap is shaped in the open: propose and debate items in
-[Discussions](https://github.com/alibad/systemdesigner/discussions) and
-[Issues](https://github.com/alibad/systemdesigner/issues).
+SystemDesigner is becoming a daily learning app for system design and coding: short lessons, meaningful practice, immediate feedback, and a clear next step. The goal is a Duolingo-style learning habit, with engineering decisions and working code at its center.
 
-## Vision
+Last reviewed: September 2, 2026. These are priorities, not promised release dates.
 
-Make world-class system design education **free, hands-on, and open** — covering
-classic distributed systems, modern GenAI systems, and ML systems engineering,
-with every concept explained from first principles before the trade-offs.
+## Available now: the daily learning starter
 
-## Where we are today
+The daily learning path at `/learn` has two beginner units:
 
-- **425 content entries** across 8 sections: technology (136), genai (76),
-  ml-systems (61), fundamentals (50), practice (29), reference (27), tools (26),
-  case-studies (20).
-- **413 interactive quizzes** in a centralized quiz bank.
-- Interactive calculators, a tldraw diagramming sandbox, learning paths, and
-  progress tracking.
+- **System design:** follow a request, scale a service, and read through a cache.
+- **JavaScript coding:** calculate server capacity, route requests round-robin, and implement a cache lookup.
 
-## Near-term priorities
+Each step introduces the concept before practice. Design steps use the shared quiz system; coding steps run a function against test cases and show the result. Learners can use hints and retry without a penalty.
 
-These are the areas where contributions move the needle most right now:
+Successful practice earns 20 path XP per new step, unlocks the next step, and counts toward a daily goal. Streaks use local calendar days. Completed skills return for spaced review after 1, 3, 7, and then 14 days. Repeating a completed step does not inflate XP.
 
-1. **Strengthen the editorial bar.** Review lessons for technical accuracy,
-   beginner-friendly context, useful examples, explicit trade-offs, and
-   production guidance.
-2. **Deepen quizzes and interactive labs.** Improve questions, calculators, and
-   decision exercises so they test reasoning rather than recall.
-3. **Polish accessibility and responsive behavior.** Improve keyboard
-   navigation, focus management, screen-reader output, dark-mode consistency,
-   and mobile layouts.
-4. **Improve contributor tooling.** Make authoring, validation, testing, and
-   first-time setup easier to understand and harder to get wrong.
+The starter saves progress and coding drafts in the current browser. Account syncing for this new daily path is still to come. The existing library of 425 registry-backed entries, architecture tools, quizzes, and design practice remains available for deeper study.
 
-## Great first contributions
+## Next: make progress portable
 
-Looking for somewhere to start? Any of these is a self-contained, high-value PR:
+Learning should survive a new browser or a new device.
 
-- **Improve an existing lesson** via the in-app "Edit this page on GitHub" /
-  "Suggest an improvement" links at the bottom of any lesson. Focus on one
-  concrete accuracy, clarity, example, or production-readiness improvement.
-- **Improve a quiz or interactive lab** whose questions or scenarios do not yet
-  test the lesson's important decisions and trade-offs.
-- **Improve contributor documentation or tests** where a setup step, authoring
-  rule, or validation failure is unclear.
-- **Fix a `good first issue`** —
-  [browse them here](https://github.com/alibad/systemdesigner/labels/good%20first%20issue).
+- Connect daily-path progress, goals, review history, and coding drafts to the existing optional account system.
+- Keep anonymous learning usable, including when offline.
+- Let learners export and import a progress backup.
+- Merge existing local progress safely when a learner signs in. Prevent duplicate rewards and recover interrupted syncs.
+- Make saved, syncing, and offline states understandable.
 
-## Later / exploratory
+This milestone is complete when a learner can finish a step on one device, resume on another, and keep their work through offline use and sign-in changes.
 
-Bigger bets we'd like to explore (discussion welcome before code):
+## Then: build a curriculum that grows
 
-- **Internationalization (i18n).** A sanctioned path for translated content so
-  the platform reaches a global audience.
-- **Richer practice mode.** More guided, interview-style walkthroughs with
-  feedback.
-- **Visual learning-path explorer.** Navigate prerequisite chains as a graph.
-- **Community content review tooling** to scale the editorial bar as the project
-  grows.
+Expand the two starter units into a sequence of small, connected skills.
 
-## Non-goals
+- **System design:** databases and indexes; caches and invalidation; load balancing and capacity; queues and retries; replication and consistency; then complete service designs.
+- **Coding:** functions and collections; maps and sets; input validation; deduplication and idempotency; rate limits; queue processing; then small service components.
+- Pair concepts across tracks so a learner can understand a design decision and implement the relevant behavior.
+- Make units, prerequisites, completion requirements, and content versions explicit in the curriculum model.
+- Give each unit a checkpoint and a small project that combines earlier skills.
 
-- Becoming a closed/paywalled product — SystemDesigner stays free and open
-  (MIT code, CC BY-SA 4.0 content).
-- Vendor lock-in or required paid services to run it locally — the app must keep
-  running with zero configuration.
+The next small content milestone is one additional unit in each track, using the shared components and the existing registry-backed lessons.
 
----
+## Then: teach through more kinds of practice
 
-Want to influence the roadmap? Open a
-[Discussion](https://github.com/alibad/systemdesigner/discussions) — the best
-ideas here come from people learning and teaching with the platform.
+Multiple-choice questions are a starting point. Engineering learning also needs decisions, debugging, and construction.
+
+- Predict an output or failure before running a model.
+- Estimate capacity, identify a bottleneck, or choose a trade-off under stated constraints.
+- Trace a request or arrange the parts of a small architecture.
+- Debug a short program and test edge cases.
+- Return to missed concepts with fresh question variants and explanations tied to the learner's mistake.
+
+A richer exercise should reuse an existing content primitive when it fits and show a visible consequence of the learner's decision.
+
+## Then: make mastery and coding assessment stronger
+
+A completed starter step is an introductory checkpoint. Deeper mastery should depend on recall, transfer, and work the learner can reproduce later.
+
+- Record attempts and concepts, then use delayed recall to choose useful reviews.
+- Add placement and optional checkpoint-based skipping for experienced learners.
+- Introduce authoritative grading before using results for competitive rankings or trusted account rewards.
+- Evaluate an isolated execution service before adding Python, other languages, or larger programs.
+- Use deterministic tests where possible. If AI feedback is added, explain its role and evaluate its accuracy and cost.
+
+The current JavaScript runner is browser-based self-assessment with visible tests. It is not a trusted grading service.
+
+## Later: motivation and broader access
+
+- Weekly goals, milestones, and encouraging completion feedback.
+- Optional reminders and social features, with learner control over notifications and visibility.
+- Accessible mobile interactions, screen-reader support, and reduced motion throughout.
+- Translated content and stronger community review tools.
+- GenAI and ML systems tracks built on the same learning loop once the core experience is established.
+
+Leagues and leaderboards come after portable progress and trustworthy assessment. Learning quality comes first.
+
+## Ongoing work
+
+Keep improving the existing lessons for beginner-friendly context, technical accuracy, useful examples, explicit trade-offs, and production behavior. Improve quizzes, calculators, contributor tooling, and the prerequisite graph as the curriculum grows.
+
+Good first contributions are a focused lesson improvement, a stronger assessment, an accessibility fix, or clearer setup documentation. See the repository's [good first issues](https://github.com/alibad/systemdesigner/labels/good%20first%20issue).
+
+## Principles to preserve
+
+- SystemDesigner stays free and open: MIT code and CC BY-SA 4.0 content.
+- Start every concept from first principles and link to deeper lessons.
+- Reward demonstrated practice; keep retries available.
+- Keep anonymous local learning available without required paid services.
+- Show real progress and be clear about the limits of an assessment.
+
+## Continuing development
+
+For the implementation map, current limitations, verification commands, and an exact starting prompt for another coding session, read [Continue development](docs/CONTINUE_DEVELOPMENT.md). The [daily learning technical notes](docs/daily-learning-path.md) describe the current behavior.
+
+The roadmap is maintained in this repository and also shown in the app. Propose changes through [Discussions](https://github.com/alibad/systemdesigner/discussions) or [Issues](https://github.com/alibad/systemdesigner/issues).

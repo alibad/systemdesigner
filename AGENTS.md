@@ -1,5 +1,10 @@
 # Agents Content Development Guidelines
 
+## Continuing the Daily Learning Experience
+- When continuing the gamified system-design or coding experience, read `ROADMAP.md`, `docs/CONTINUE_DEVELOPMENT.md`, and `docs/daily-learning-path.md` before changing its architecture or curriculum.
+- `/learn` contains the working six-step starter. The next milestone is portable progress; the handoff records its current limitations and acceptance criteria.
+- Keep `ROADMAP.md` and the handoff current when milestones change. The app's `/roadmap` page renders the root roadmap directly.
+
 ## Git Delivery Workflow
 - `main` is the official and default development branch for this repository.
 - Work directly on `main` unless the user explicitly requests a separate branch.

@@ -18,22 +18,9 @@ export type NavGroup = {
   items: ReadonlyArray<NavItem>;
 };
 
-// Debug flag to show in-progress sections when running locally
-// We treat any non-production host (localhost or 127.0.0.1) as debug.
-// This runs client and server side safely.
-const isLocalHost = () => {
-  if (typeof window !== 'undefined') {
-    try {
-      const h = window.location.hostname;
-      return h === 'localhost' || h === '127.0.0.1';
-    } catch {}
-  }
-  // On server, check common env markers
-  const nodeEnv = process.env.NODE_ENV;
-  const vercelEnv = process.env.VERCEL_ENV;
-  return nodeEnv !== 'production' && vercelEnv !== 'production';
-};
-const DEBUG_UI = isLocalHost();
+// Keep the navigation identical during server rendering and browser hydration.
+// NODE_ENV is replaced consistently in both bundles; hostname checks are not.
+const DEBUG_UI = process.env.NODE_ENV !== 'production';
 
 // Dynamic whiteboard navigation - returns sub-items for SideNav
 export const getWhiteboardNavItems = (whiteboards: any[]): NavSubItem[] => {
@@ -75,6 +62,7 @@ export const NAV_GROUPS: ReadonlyArray<NavGroup> = [
   {
     label: 'Learn',
     items: [
+      { label: 'Daily Learning Path', href: '/learn', icon: Target },
       { label: 'Fundamentals', href: '/fundamentals', icon: BookOpen },
       { label: 'GenAI Systems', href: '/genai', icon: Bot },
       { label: 'ML Systems', href: '/ml-systems', icon: BarChart3 },

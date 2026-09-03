@@ -2,6 +2,10 @@
 
 Follow the workspace-wide instructions in `C:\Users\Admin\Code\CLAUDE.md` and the repository documentation in `docs/`.
 
+## Daily learning continuation
+
+For the gamified system-design and coding experience, start with `ROADMAP.md`, `docs/CONTINUE_DEVELOPMENT.md`, and `docs/daily-learning-path.md`. They preserve the current implementation, decisions, next milestone, and new-machine setup independently of the original chat. Follow `AGENTS.md` for the repository's content and engineering rules.
+
 ## Vercel cost safety
 
 - Keep this project and the `alibads-projects` team on the `standard` build machine. `enhanced` or `turbo` requires explicit user approval after stating the price difference.

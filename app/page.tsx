@@ -19,8 +19,9 @@ export default function HomePage() {
             </div>
           </div>
           <div className="flex-1">
-            <h1 className="text-4xl md:text-5xl font-semibold tracking-tight">Design systems with confidence</h1>
-            <p className="text-neutral-600 dark:text-neutral-300 mt-2 max-w-2xl">Learn the essentials, then design and validate architectures with real latency and capacity numbers.</p>
+            <h1 className="text-4xl md:text-5xl font-semibold tracking-tight">A little practice. A better engineer.</h1>
+            <p className="text-neutral-600 dark:text-neutral-300 mt-2 max-w-2xl">Build a daily habit with bite-sized system design lessons and hands-on coding. Learn a concept, put it into practice, and take the next step.</p>
+            <Link href="/learn" className="mt-5 inline-flex items-center gap-2 rounded-xl border-b-4 border-emerald-800 bg-emerald-600 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-700">Start your daily learning path <span aria-hidden="true">→</span></Link>
           </div>
         </div>
         <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-gradient-to-tr from-indigo-400/30 to-violet-400/30 blur-3xl" />
@@ -159,5 +160,4 @@ export default function HomePage() {
     </main>
   );
 }
-
 

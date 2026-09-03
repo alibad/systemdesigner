@@ -6,6 +6,7 @@ const nextConfig = {
     typedRoutes: true,
     mdxRs: true,
     outputFileTracingIncludes: {
+      '/roadmap': ['./ROADMAP.md'],
       '/api/content/**': [
         './content/entries/**/code/**/*',
         './content/entries/**/quiz/**/*',
