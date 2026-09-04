@@ -177,3 +177,30 @@ Logs and captures: `.artifacts/practice-depth/` and `.artifacts/learning-journey
 ### Limits
 
 Days 50–57 and 61–72 are verified through the per-lesson curriculum sweep, not a browser walk of each study day. The first-month and offline suites were not rerun; the trail change is a text branch inside the recall banner and the journey suite renders the same component. Not pushed or deployed in this round.
+
+## Authored practice for the whole design course
+
+Date: September 4, 2026, second round, after release `3089d150`. Scope: finish hand-authored practice for every system-design lesson on the guided journey.
+
+| Severity | Finding | Resolution |
+| --- | --- | --- |
+| P2 | Twenty-six design lessons on journey days 73–130 (resilient services, production, security, the design lab, and the case studies) still used derived matching plus three source questions each. | Twenty-six authored packs (130 groups, 390 variants): socket and connection math, token-bucket envelopes, breaker trip math, blast-radius sizing, extraction capacity, Docker rebuild counts, Kubernetes headroom, etcd quorum, Prometheus series budgets, Grafana query pressure, JWT time windows, Keycloak SSO counts, Vault lease math, interview estimates, and the capacity models from the URL-shortener, chat, cache, payment, notification, WhatsApp, Netflix, GitHub, and Uber walkthroughs; ordered protocols for the proxied request, trusted hops, the distributed limiter, resilience controls, chaos experiments, the strangler migration, the Docker delivery path, the reconciliation loop, list-and-watch, PKCE, JWT validation, the Keycloak login, the Vault lifecycle, the authority path, the interview framework, the redirect path, the chat send and reconnect paths, the notification pipeline, private message delivery, video ingest, the protected merge, and the regional ride request; scenario decisions with option-specific feedback. Answers were checked against the lesson text, including the RFC 9218 urgency scale, the Chrome 106 push default, etcd majority arithmetic, the Prometheus 1–2 bytes-per-sample estimate, and the lesson’s own capacity envelopes. |
+
+### Intentional adaptations
+
+- The case-study packs use the lessons’ illustrative planning envelopes (450M WhatsApp users, 18K GitHub events per second, 900 Uber requests per minute) and say so in their context; they are not claims about production fleets.
+- Authored practice is now complete for the design course only. The GenAI and ML courses keep derived packs and are counted separately: 72 authored, 130 derived.
+
+### Evidence
+
+- `pnpm test`: 377 passed; pack validation covers 72 authored packs with unique variant IDs and rotating review variants.
+- Repository gates: content/block/catalog/journey validation, secret scan, and the production build passed (493 pages, 2,229 traced assets).
+- `pnpm qa:learning-curriculum`: all 202 lesson sessions completed through real grading, including the 26 new authored packs, with representative wrong-answer retries and persisted completion state; no uncaught errors.
+- `pnpm qa:learning-journey`, `pnpm qa:adaptive-learning`, and `pnpm qa:learning-path` passed unchanged against the rebuilt app.
+- A production smoke check and the journey suite against the live domain are recorded in `docs/CLAUDE_HANDOFF.md` after deployment.
+
+Logs: `.artifacts/design-course-practice/`.
+
+### Limits
+
+Days 39–130 are verified through the per-lesson curriculum sweep and unit tests over the real prerequisite gates, not a browser walk of each study day. Authored practice is complete for the design course; the GenAI and ML courses keep derived packs.

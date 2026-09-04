@@ -1,0 +1,387 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "practice-url-shortener-contract",
+      "variants": [
+        {
+          "id": "practice-url-shortener-contract-1",
+          "kind": "choice",
+          "title": "Decide the contract",
+          "context": "A URL shortener stores a mapping from a compact code to a destination and returns an HTTP redirect. Redirects vastly outnumber creations: the read path must be fast and available; the write path must keep code ownership unique and block harmful destinations.",
+          "prompt": "Should the redirect be a 301 or a 302?",
+          "options": [
+            "302, so links can be disabled or changed, with caching controlled explicitly by response headers.",
+            "301, because it is faster.",
+            "Either; it does not matter."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A permanent redirect can be cached indefinitely by clients, freezing the destination.",
+            "Speed differences are negligible; control matters.",
+            "The choice changes what you can later do with the link."
+          ],
+          "hint": "What happens if a browser caches the redirect forever?",
+          "explanation": "Start with 302 Found."
+        },
+        {
+          "id": "practice-url-shortener-contract-2",
+          "kind": "choice",
+          "title": "Decide the contract",
+          "context": "A URL shortener stores a mapping from a compact code to a destination and returns an HTTP redirect. Redirects vastly outnumber creations: the read path must be fast and available; the write path must keep code ownership unique and block harmful destinations.",
+          "prompt": "A link expires. What should the service return, and may the code be reused immediately?",
+          "options": [
+            "410 Gone, and the code is not immediately recycled.",
+            "404, and reuse it at once.",
+            "302 to the homepage."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Recycling codes quickly lets old references point at new destinations.",
+            "404 hides the intent; immediate reuse is unsafe.",
+            "Silent redirection misleads users."
+          ],
+          "hint": "What could a cached or shared old link do if the code were reused?",
+          "explanation": "Do not promise that deleted codes can be immediately reused."
+        },
+        {
+          "id": "practice-url-shortener-contract-3",
+          "kind": "choice",
+          "title": "Decide the contract",
+          "context": "A URL shortener stores a mapping from a compact code to a destination and returns an HTTP redirect. Redirects vastly outnumber creations: the read path must be fast and available; the write path must keep code ownership unique and block harmful destinations.",
+          "prompt": "Which invariant is the hardest to protect?",
+          "options": [
+            "At most one active mapping for a short code.",
+            "Analytics are exact.",
+            "Every redirect is under 10 ms."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Code ownership is the correctness invariant; keep it separate from the high-volume read path.",
+            "Analytics may be delayed and lossy.",
+            "Latency is a target, not an invariant."
+          ],
+          "hint": "Which promise, if broken, sends users to the wrong place?",
+          "explanation": "Keep code ownership and redirect lookup as separate concerns."
+        }
+      ]
+    },
+    {
+      "id": "practice-url-shortener-capacity",
+      "variants": [
+        {
+          "id": "practice-url-shortener-capacity-1",
+          "kind": "number",
+          "title": "Size the read path",
+          "context": "The target is 100 million creations and 10 billion redirects per day with a 3× peak factor. Peak redirects are about 350K per second; at a 90% cache hit rate about 35K reads per second reach the mapping store.",
+          "prompt": "Peak redirects are 350,000 per second and the cache hit rate is 90%. How many reads per second reach the mapping store?",
+          "answer": 35000,
+          "unit": "reads per second",
+          "hint": "Multiply peak by the miss rate.",
+          "explanation": "350,000 × 0.10 = 35,000 reads per second. The store must still survive lower hit rates during cache loss.",
+          "mistakes": [
+            {
+              "value": 315000,
+              "feedback": "That is the hit count."
+            },
+            {
+              "value": 3500,
+              "feedback": "10% of 350,000 is 35,000."
+            }
+          ]
+        },
+        {
+          "id": "practice-url-shortener-capacity-2",
+          "kind": "number",
+          "title": "Size the read path",
+          "context": "The target is 100 million creations and 10 billion redirects per day with a 3× peak factor. Peak redirects are about 350K per second; at a 90% cache hit rate about 35K reads per second reach the mapping store.",
+          "prompt": "The cache degrades to a 70% hit rate at the same 350,000 peak. How many reads per second reach the store?",
+          "answer": 105000,
+          "unit": "reads per second",
+          "hint": "Miss rate is now 30%.",
+          "explanation": "350,000 × 0.30 = 105,000 reads per second, three times the healthy load.",
+          "mistakes": [
+            {
+              "value": 35000,
+              "feedback": "That is the 90% case."
+            },
+            {
+              "value": 245000,
+              "feedback": "That is the hit count."
+            }
+          ]
+        },
+        {
+          "id": "practice-url-shortener-capacity-3",
+          "kind": "number",
+          "title": "Size the read path",
+          "context": "The target is 100 million creations and 10 billion redirects per day with a 3× peak factor. Peak redirects are about 350K per second; at a 90% cache hit rate about 35K reads per second reach the mapping store.",
+          "prompt": "100 million creations per day at 500 bytes each. How many GB of raw mapping data per day?",
+          "answer": 50,
+          "unit": "GB",
+          "hint": "Multiply creations by record size.",
+          "explanation": "100,000,000 × 500 bytes = 50 GB per day, about 18.25 TB per year before indexes and replication.",
+          "mistakes": [
+            {
+              "value": 500,
+              "feedback": "Answer in gigabytes."
+            },
+            {
+              "value": 5,
+              "feedback": "One hundred million times 500 bytes is 50 billion bytes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "practice-url-shortener-read-path",
+      "variants": [
+        {
+          "id": "practice-url-shortener-read-path-1",
+          "kind": "sequence",
+          "title": "Trace the redirect",
+          "context": "The redirect path: receive the code, look it up in the cache, on a miss read the mapping store, return a 302 with explicit cache headers, and emit the click event asynchronously. Redirect correctness never depends on the analytics pipeline.",
+          "prompt": "A user opens a short link. Put the read path in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Receive the short code and validate its shape."
+            },
+            {
+              "id": "s2",
+              "text": "Look up the code in the cache."
+            },
+            {
+              "id": "s3",
+              "text": "On a miss, read the mapping from the authoritative store and repopulate the cache."
+            },
+            {
+              "id": "s4",
+              "text": "Return a 302 with explicit cache headers."
+            },
+            {
+              "id": "s5",
+              "text": "Emit the click event asynchronously; never block the redirect on analytics."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Analytics come last and cannot fail the redirect.",
+          "explanation": "Cache hit, miss, storage fallback, and asynchronous click event must all be obvious in the design."
+        },
+        {
+          "id": "practice-url-shortener-read-path-2",
+          "kind": "sequence",
+          "title": "Trace the redirect",
+          "context": "The redirect path: receive the code, look it up in the cache, on a miss read the mapping store, return a 302 with explicit cache headers, and emit the click event asynchronously. Redirect correctness never depends on the analytics pipeline.",
+          "prompt": "The analytics pipeline is down. Put the read path in order and note what still works.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Receive the code."
+            },
+            {
+              "id": "s2",
+              "text": "Cache lookup."
+            },
+            {
+              "id": "s3",
+              "text": "Store fallback on a miss."
+            },
+            {
+              "id": "s4",
+              "text": "Return the 302 as normal."
+            },
+            {
+              "id": "s5",
+              "text": "The click event is dropped or buffered; redirect correctness is unaffected."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Redirect correctness must never depend on the analytics pipeline accepting an event.",
+          "explanation": "Analytics may lose events by contract."
+        },
+        {
+          "id": "practice-url-shortener-read-path-3",
+          "kind": "sequence",
+          "title": "Trace the redirect",
+          "context": "The redirect path: receive the code, look it up in the cache, on a miss read the mapping store, return a 302 with explicit cache headers, and emit the click event asynchronously. Redirect correctness never depends on the analytics pipeline.",
+          "prompt": "The cache cluster restarts cold. Put the path in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Receive the code."
+            },
+            {
+              "id": "s2",
+              "text": "Cache lookup misses."
+            },
+            {
+              "id": "s3",
+              "text": "The store serves the read under admission limits and the cache is refilled."
+            },
+            {
+              "id": "s4",
+              "text": "Return the 302."
+            },
+            {
+              "id": "s5",
+              "text": "Emit the click event asynchronously."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Cold cache means the store takes the full miss load.",
+          "explanation": "The database must survive lower hit rates during cache loss."
+        }
+      ]
+    },
+    {
+      "id": "practice-url-shortener-consistency",
+      "variants": [
+        {
+          "id": "practice-url-shortener-consistency-1",
+          "kind": "choice",
+          "title": "Draw the consistency boundary",
+          "context": "Creation and custom-alias reservation are strongly consistent; analytics and most read replicas may be eventually consistent and may lose events. Expired links return 410 Gone and codes are not immediately recycled.",
+          "prompt": "Two users request the same custom alias at the same instant. Which consistency does reservation need?",
+          "options": [
+            "Strong consistency; only one reservation may win.",
+            "Eventual consistency.",
+            "None; last writer wins."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Alias reservation protects the ownership invariant.",
+            "Eventual consistency would let both succeed.",
+            "Last-writer-wins breaks the invariant."
+          ],
+          "hint": "Which invariant is at stake?",
+          "explanation": "Creation and custom-alias reservation are strongly consistent."
+        },
+        {
+          "id": "practice-url-shortener-consistency-2",
+          "kind": "choice",
+          "title": "Draw the consistency boundary",
+          "context": "Creation and custom-alias reservation are strongly consistent; analytics and most read replicas may be eventually consistent and may lose events. Expired links return 410 Gone and codes are not immediately recycled.",
+          "prompt": "A dashboard shows click counts a few minutes behind. Acceptable?",
+          "options": [
+            "Yes. Analytics may be delayed and may occasionally lose events.",
+            "No. Counts must be exact.",
+            "Only if delay is under one second."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "The contract deliberately excludes real-time strongly consistent analytics.",
+            "Exactness is not promised.",
+            "Seconds versus minutes is a product choice inside the contract."
+          ],
+          "hint": "What did the first-version boundary exclude?",
+          "explanation": "No strongly consistent real-time analytics dashboard."
+        },
+        {
+          "id": "practice-url-shortener-consistency-3",
+          "kind": "choice",
+          "title": "Draw the consistency boundary",
+          "context": "Creation and custom-alias reservation are strongly consistent; analytics and most read replicas may be eventually consistent and may lose events. Expired links return 410 Gone and codes are not immediately recycled.",
+          "prompt": "Read replicas serve redirects and one lags by two seconds after a link is disabled. What is true?",
+          "options": [
+            "That is within the eventual-consistency contract for reads; disabling propagates shortly.",
+            "The design is broken.",
+            "Replicas must be strongly consistent."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Most read replicas may be eventually consistent.",
+            "Brief staleness after disable is a stated trade-off.",
+            "Strong reads everywhere would cost the read path its scale."
+          ],
+          "hint": "Which reads may converge later?",
+          "explanation": "State the consistency boundary explicitly."
+        }
+      ]
+    },
+    {
+      "id": "practice-url-shortener-hot-set",
+      "variants": [
+        {
+          "id": "practice-url-shortener-hot-set-1",
+          "kind": "choice",
+          "title": "Size the hot set",
+          "context": "Cache the frequently requested fraction, not all history. Instance count is peak load divided by tested capacity with headroom. Prevent enumeration of sequential IDs.",
+          "prompt": "Should the cache hold all 91 TB of historical mappings?",
+          "options": [
+            "No. Cache the frequently requested fraction based on measured popularity.",
+            "Yes; memory is cheap.",
+            "Yes; misses are unacceptable."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Popularity is skewed; the working set is far smaller.",
+            "91 TB of RAM is not a design.",
+            "Misses are normal and bounded by the store’s capacity."
+          ],
+          "hint": "How is popularity distributed?",
+          "explanation": "Measure popularity and object overhead before sizing."
+        },
+        {
+          "id": "practice-url-shortener-hot-set-2",
+          "kind": "choice",
+          "title": "Size the hot set",
+          "context": "Cache the frequently requested fraction, not all history. Instance count is peak load divided by tested capacity with headroom. Prevent enumeration of sequential IDs.",
+          "prompt": "How should the number of redirect instances be decided?",
+          "options": [
+            "Benchmark a representative handler, cache client, and query; instances = peak load ÷ tested capacity, with headroom.",
+            "Guess ten.",
+            "Match the number of cache nodes."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Do not invent server counts.",
+            "Guesses are not capacity plans.",
+            "Cache nodes and handlers scale on different signals."
+          ],
+          "hint": "What is the tested capacity of one instance?",
+          "explanation": "Instance count follows measured capacity."
+        },
+        {
+          "id": "practice-url-shortener-hot-set-3",
+          "kind": "choice",
+          "title": "Size the hot set",
+          "context": "Cache the frequently requested fraction, not all history. Instance count is peak load divided by tested capacity with headroom. Prevent enumeration of sequential IDs.",
+          "prompt": "Codes are generated from a sequential counter. What is the risk?",
+          "options": [
+            "Easy enumeration of every link; obscure the mapping from internal IDs.",
+            "None.",
+            "Collisions."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Sequential codes expose neighbours.",
+            "Enumeration is a stated guardrail.",
+            "Counters do not collide; they leak."
+          ],
+          "hint": "What can someone learn from code N+1?",
+          "explanation": "Prevent easy enumeration of sequential internal IDs."
+        }
+      ]
+    }
+  ]
+}
