@@ -2,7 +2,7 @@
 
 SystemDesigner is becoming a substantial learning platform for engineering: connected courses, daily practice, immediate feedback, and progression toward building complete systems. The goal is a Duolingo-style learning habit across a large curriculum.
 
-Last reviewed: September 3, 2026. These are priorities, not promised release dates. The milestones through “practice throughout the curriculum” were deployed to SystemDesigner.net in release `d67a2ec0`; the guided journey beyond the first month and the second-month authored practice are implemented and verified locally in the development checkout. The remaining product and validation work is described below.
+Last reviewed: September 3, 2026. These are priorities, not promised release dates. Every implemented milestone below, including the guided journey beyond the first month and the second-month authored practice, is deployed to SystemDesigner.net (release `041b246b`); live guest checks passed. The remaining product and validation work is described below.
 
 ## Implemented: four connected courses
 

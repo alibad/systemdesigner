@@ -15,13 +15,14 @@ The latest user request is to prepare a new Claude session to complete the remai
 - Repository: `https://github.com/alibad/systemdesigner`
 - Local checkout: `/Users/alibadereddin/Code/GitHub/systemdesigner`
 - Branch: `main` — repository instructions require direct work on this branch unless the user explicitly asks otherwise.
-- Released commit: `d67a2ec0357768f43636d0788cc6a24c11473bce` (`feat: complete adaptive daily learning across four courses`). It is pushed to `origin/main`.
+- Released commit: `041b246bfe4ba4b36ded58e6b737d04beb22e3d6` (`docs: record the journey-continuation push in the handoff`), which sits on `9cd7feab` (`feat: extend the guided journey to 130 days and author second-month practice`). Both are pushed to `origin/main`. The earlier release `d67a2ec0` remains the rollback candidate before it.
 - Live app: `https://www.systemdesigner.net/learn`
-- Vercel deployment: `dpl_WEwitRbFix4S1anvzZQgG9G29JZq`
-- Immutable deployment URL: `https://systemdesigner-bqw0qay6y-alibads-projects.vercel.app`
-- Vercel reported `READY`; the apex and www production domains were verified as aliases of this deployment. Deployment completed September 4 at 00:57 UTC, September 3 in Los Angeles.
+- Vercel deployment: `dpl_DRT6oQduQth6ppk5LLQya9Jj9x9n`
+- Immutable deployment URL: `https://systemdesigner-5ihxzxjsd-alibads-projects.vercel.app`
+- Vercel reported `READY` with `www.systemdesigner.net` and `systemdesigner.net` among its aliases. Deployment completed September 4 at 06:49 UTC, September 3 at 23:49 in Los Angeles. The build used pnpm 10.4.1 from the `packageManager` pin and Node 24.x, the same as the previous release.
+- Previous release: `dpl_WEwitRbFix4S1anvzZQgG9G29JZq` for `d67a2ec0` (`https://systemdesigner-bqw0qay6y-alibads-projects.vercel.app`).
 - Project: `systemdesigner`, team `alibads-projects`; project ID `prj_zPPUzQrD2kSVZWCOAoPmmrddOHG5`. Production branch is `main`; pushing it automatically deploys.
-- After the release, a second local session extended the guided journey to 130 days, authored ten second-month practice packs, improved derived practice and generated lesson copy, and made unit placement survive practice changes. That work is committed on `main` (`9cd7feab` plus the changelog commit) and was pushed to `origin/main` on September 3 with the user's go-ahead, which deploys through the Vercel Git integration. Check the Vercel deployment for the latest `main` commit for release status; live verification is recorded below once it ran. Inspect `git status` before editing or pulling.
+- After the release, a second local session extended the guided journey to 130 days, authored ten second-month practice packs, improved derived practice and generated lesson copy, and made unit placement survive practice changes. That work is committed on `main` (`9cd7feab` and `041b246b`), was pushed to `origin/main` on September 3 with the user's go-ahead, and deployed through the Vercel Git integration as recorded above. Live verification is recorded below. Inspect `git status` before editing or pulling.
 
 The earlier previous-machine checkpoint `a5d66b2d` was only a six-step starter. Do not resume from it or overwrite the released implementation.
 
@@ -94,6 +95,7 @@ Treat completion as a coherent, usable learning journey with reviewed content, r
 - Repository gates and production build passed (493 pages, 2,229 traced assets).
 - Browser, against the rebuilt local production server: the new `qa:learning-journey` suite (seeded first month, days 31–38 through authored practice, coding, a review day, and a checkpoint milestone), the full 202-lesson curriculum sweep, course/coding, adaptive/placement, continuity, and offline model suites passed. `LEARNING_QA_OFFLINE=1 pnpm qa:first-month` (corrected to expect the trail to continue into part two): all 30 days, 26 unique completions, eight review tasks, four milestones, partial-day restore, capstone failure and draft recovery, small-screen dark mode, offline reload, visited-exercise execution, uncached-lesson recovery, public-only cache, and stale-revision rejection passed; after day 30 the trail shows “Study day 31 of 130” and the part-two heading.
 - Hands-on: fresh learner, seeded end-of-journey state and course hand-off, and an iOS 26 Safari simulator rendering check of the live site and the local build (rendering only; no taps).
+- On the live production domain after deployment: `/learn`, `/roadmap`, manifest, service worker, and illustrations returned 200; an unknown session returned 404 and a stale revision 409; the replication-and-sharding session served the new revision, its authored pack, its prerequisite link, and a complete key idea; a derived pack served the section-named prompt and non-revealing hint; the `code-cache-ttl` project served its five tests; the roadmap page rendered the journey milestone. `pnpm qa:learning-journey` then passed against `https://www.systemdesigner.net` as a guest: days 31–38 through the live UI with the isolated coding runner, the review day, and the checkpoint milestone. Log: `.artifacts/journey-continuation/qa-learning-journey-production.log`.
 - Not done: the Firebase emulator suite (sync contract unchanged), physical devices, screen readers, and a live signed-in two-device session.
 
 ## Verification actually performed for the `d67a2ec0` release
