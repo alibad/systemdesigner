@@ -15,10 +15,9 @@ The latest user request is to prepare a new Claude session to complete the remai
 - Repository: `https://github.com/alibad/systemdesigner`
 - Local checkout: `/Users/alibadereddin/Code/GitHub/systemdesigner`
 - Branch: `main` — repository instructions require direct work on this branch unless the user explicitly asks otherwise.
-- Released commit: `041b246bfe4ba4b36ded58e6b737d04beb22e3d6` (`docs: record the journey-continuation push in the handoff`), which sits on `9cd7feab` (`feat: extend the guided journey to 130 days and author second-month practice`). Both are pushed to `origin/main`. The earlier release `d67a2ec0` remains the rollback candidate before it.
+- Released commit: `cc175c2d3b6ddada0c4163ab095a6dadd8cbd13c` (`feat: author practice for every remaining system-design lesson`), on top of `3089d150` (service-interface and async packs, bounded review set) and `340dbbf0`/`041b246b`/`9cd7feab` (the 130-day journey). All are pushed to `origin/main`. Earlier production deployments remain rollback candidates in Vercel.
 - Live app: `https://www.systemdesigner.net/learn`
-- Vercel deployment: `dpl_DRT6oQduQth6ppk5LLQya9Jj9x9n`
-- Immutable deployment URL: `https://systemdesigner-5ihxzxjsd-alibads-projects.vercel.app`
+- Vercel deployment: `dpl_3QBrsQY54pRHFsoMTo7ids1ZE1m3` for `cc175c2d` (immutable URL `https://systemdesigner-cuoct2a03-alibads-projects.vercel.app`), preceded the same day by `dpl_q99sRX7hz1zT3cT4NCEw6k8f6zmU` for `3089d150` and `dpl_DRT6oQduQth6ppk5LLQya9Jj9x9n` for `041b246b` (immutable URL `https://systemdesigner-5ihxzxjsd-alibads-projects.vercel.app`).
 - Vercel reported `READY` with `www.systemdesigner.net` and `systemdesigner.net` among its aliases. Deployment completed September 4 at 06:49 UTC, September 3 at 23:49 in Los Angeles. The build used pnpm 10.4.1 from the `packageManager` pin and Node 24.x, the same as the previous release.
 - Previous release: `dpl_WEwitRbFix4S1anvzZQgG9G29JZq` for `d67a2ec0` (`https://systemdesigner-bqw0qay6y-alibads-projects.vercel.app`).
 - Project: `systemdesigner`, team `alibads-projects`; project ID `prj_zPPUzQrD2kSVZWCOAoPmmrddOHG5`. Production branch is `main`; pushing it automatically deploys.
@@ -93,7 +92,7 @@ Treat completion as a coherent, usable learning journey with reviewed content, r
 
 - Twenty-six more authored packs complete hand-authored practice for all 65 system-design lessons (72 packs, 933 variants overall). Unit tests 377 passed; content validation, secret scan, and the production build passed.
 - Browser, against the rebuilt local production server: the full 202-lesson curriculum sweep with every new pack, the journey suite, adaptive/placement, and course/coding suites passed.
-- Pushed to `origin/main` with the user's go-ahead (“get it all done”); the deployment and live checks are recorded in the checkpoint section above once verified.
+- Pushed to `origin/main` with the user's go-ahead (“get it all done”). Deployment `dpl_3QBrsQY54pRHFsoMTo7ids1ZE1m3` reached READY with the production domains aliased. Live checks: `/learn`, `/roadmap`, and the service worker returned 200; a stale revision returned 409; the Vault, payment-system, and Uber packs and the Uber session served from the live API; the roadmap rendered the new milestone; `pnpm qa:learning-journey` passed against `https://www.systemdesigner.net` as a guest (days 31–38 through the live UI). Log: `.artifacts/design-course-practice/qa-learning-journey-production.log`.
 
 ## Verification of the September 4 practice-depth round
 
