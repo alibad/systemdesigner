@@ -21,7 +21,7 @@ The latest user request is to prepare a new Claude session to complete the remai
 - Immutable deployment URL: `https://systemdesigner-bqw0qay6y-alibads-projects.vercel.app`
 - Vercel reported `READY`; the apex and www production domains were verified as aliases of this deployment. Deployment completed September 4 at 00:57 UTC, September 3 in Los Angeles.
 - Project: `systemdesigner`, team `alibads-projects`; project ID `prj_zPPUzQrD2kSVZWCOAoPmmrddOHG5`. Production branch is `main`; pushing it automatically deploys.
-- After the release, a second local session extended the guided journey to 130 days, authored ten second-month practice packs, improved derived practice and generated lesson copy, and made unit placement survive practice changes. That work is committed on `main` locally (see `git log`) and was **not** pushed or deployed; pushing `main` deploys through the Vercel Git integration and needs the user's authorization. Inspect `git status` and `git log origin/main..main` before editing, pulling, or pushing.
+- After the release, a second local session extended the guided journey to 130 days, authored ten second-month practice packs, improved derived practice and generated lesson copy, and made unit placement survive practice changes. That work is committed on `main` (`9cd7feab` plus the changelog commit) and was pushed to `origin/main` on September 3 with the user's go-ahead, which deploys through the Vercel Git integration. Check the Vercel deployment for the latest `main` commit for release status; live verification is recorded below once it ran. Inspect `git status` before editing or pulling.
 
 The earlier previous-machine checkpoint `a5d66b2d` was only a six-step starter. Do not resume from it or overwrite the released implementation.
 
@@ -94,7 +94,7 @@ Treat completion as a coherent, usable learning journey with reviewed content, r
 - Repository gates and production build passed (493 pages, 2,229 traced assets).
 - Browser, against the rebuilt local production server: the new `qa:learning-journey` suite (seeded first month, days 31–38 through authored practice, coding, a review day, and a checkpoint milestone), the full 202-lesson curriculum sweep, course/coding, adaptive/placement, continuity, and offline model suites passed. `LEARNING_QA_OFFLINE=1 pnpm qa:first-month` (corrected to expect the trail to continue into part two): all 30 days, 26 unique completions, eight review tasks, four milestones, partial-day restore, capstone failure and draft recovery, small-screen dark mode, offline reload, visited-exercise execution, uncached-lesson recovery, public-only cache, and stale-revision rejection passed; after day 30 the trail shows “Study day 31 of 130” and the part-two heading.
 - Hands-on: fresh learner, seeded end-of-journey state and course hand-off, and an iOS 26 Safari simulator rendering check of the live site and the local build (rendering only; no taps).
-- Not done: push/deploy (not authorized this session), the Firebase emulator suite (sync contract unchanged), physical devices, screen readers, and a live signed-in two-device session.
+- Not done: the Firebase emulator suite (sync contract unchanged), physical devices, screen readers, and a live signed-in two-device session.
 
 ## Verification actually performed for the `d67a2ec0` release
 
