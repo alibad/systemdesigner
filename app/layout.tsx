@@ -95,7 +95,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={isDark ? 'dark' : undefined} suppressHydrationWarning>
       <head>
         <meta name="color-scheme" content="dark light" />
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover" />
         <link rel="icon" href="/icons/icon-192x192.png" />
         <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
         <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180x180.png" />

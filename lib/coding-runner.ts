@@ -11,18 +11,53 @@ export interface CodeRunResult {
   error?: string;
 }
 
+/** JSON-shaped values compare by content; object property order is irrelevant. */
+export function codeValuesEqual(actual: unknown, expected: unknown): boolean {
+  if (Object.is(actual, expected)) return true;
+  if (
+    !actual ||
+    !expected ||
+    typeof actual !== "object" ||
+    typeof expected !== "object"
+  )
+    return false;
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+  if (
+    Array.isArray(actual) &&
+    Array.isArray(expected) &&
+    actual.length !== expected.length
+  )
+    return false;
+  const left = Object.keys(actual),
+    right = Object.keys(expected);
+  return (
+    left.length === right.length &&
+    left.every(
+      (key) =>
+        Object.hasOwn(expected, key) &&
+        codeValuesEqual(
+          (actual as Record<string, unknown>)[key],
+          (expected as Record<string, unknown>)[key],
+        ),
+    )
+  );
+}
+
 // The worker runs inside an opaque-origin iframe. User code never runs in the app's
 // window, cannot reach its storage, and inherits a CSP that blocks network access.
 // A worker (rather than eval in the iframe) lets us terminate infinite loops.
 const WORKER_SOURCE = `
+const codeValuesEqual = ${codeValuesEqual.toString()};
 self.onmessage = async ({ data }) => {
   try {
     const solve = new Function('"use strict";\\n' + data.code + '\\nreturn ' + data.functionName + ';')();
     if (typeof solve !== 'function') throw new Error('Define the requested function before running tests.');
     const results = [];
     for (const test of data.tests) {
-      const actual = await solve(...test.args);
-      results.push({ label: test.label, passed: JSON.stringify(actual) === JSON.stringify(test.expected), actual: String(JSON.stringify(actual)), expected: String(JSON.stringify(test.expected)) });
+      const input = structuredClone(test.args);
+      const actual = await solve(...input);
+      const unchanged = !data.preserveInputs || codeValuesEqual(input, test.args);
+      results.push({ label: test.label, passed: unchanged && codeValuesEqual(actual, test.expected), actual: unchanged ? String(JSON.stringify(actual)) : 'Input arguments were changed.', expected: String(JSON.stringify(test.expected)) });
     }
     self.postMessage({ results });
   } catch (error) { self.postMessage({ results: [], error: String(error.message || error).slice(0, 500) }); }
@@ -102,6 +137,7 @@ export function runCode(
           code,
           functionName: step.functionName,
           tests: step.tests,
+          preserveInputs: step.preserveInputs,
         },
         "*",
       );

@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { CONTENT_REGISTRY } from './content-registry';
 
 const ROOT = process.cwd();
+const learningSessions = JSON.parse(fs.readFileSync(path.join(ROOT, 'content/learning/sessions.json'), 'utf8')) as Record<string, { isCheckpoint?: boolean; questionsFile?: string }>;
+const checkpointFiles = new Set(Object.values(learningSessions).filter(step => step.isCheckpoint && step.questionsFile).map(step => step.questionsFile!));
 const SECTIONS = [
   'fundamentals',
   'genai',
@@ -121,11 +123,11 @@ describe('final content structure invariants', () => {
     expect(shadowingPages).toEqual([]);
   });
 
-  it('keeps exactly one co-located and referenced quiz for every lesson', () => {
+  it('keeps one canonical lesson quiz, allowing separately referenced course checkpoints', () => {
     for (const entry of authoredEntries) {
       expect(entry.hasQuiz, entry.id).toBe(true);
 
-      const quizFiles = quizFilesFor(entry);
+      const quizFiles = quizFilesFor(entry).filter(file => !checkpointFiles.has(`/api/content${entry.path}/quiz/${file}`));
       expect(quizFiles, entry.id).toHaveLength(1);
 
       const source = fs.readFileSync(bodyPathFor(entry), 'utf8');

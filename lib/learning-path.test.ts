@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ALL_STEPS, completePathStep, duePathSteps, emptyPathProgress, LEARNING_TRACKS, localDay, pathStreak, readPathProgress, shiftDay, stepIsUnlocked } from './learning-path';
+import { ALL_STEPS, ALL_UNITS, PracticeStepSchema, completePathStep, duePathSteps, emptyPathProgress, LEARNING_TRACKS, localDay, pathStreak, readPathProgress, shiftDay, stepIsUnlocked, unitIsComplete, unitIsUnlocked } from './learning-path';
 import { getContentByPath } from './content-registry';
 import { QuizSchema } from './quiz-bank/quiz-schema';
 import bank from './quiz-bank/all-quizzes.json';
+import sessions from '../content/learning/sessions.json';
+import { QuizQuestionSchema } from './quiz-bank/quiz-schema';
 
 describe('daily learning progress', () => {
   it('unlocks only the next step and keeps the two tracks independent', () => {
@@ -64,15 +66,49 @@ describe('daily learning curriculum', () => {
   it('has unique steps backed by active lessons and valid assessment assets', () => {
     expect(new Set(ALL_STEPS.map(step => step.id)).size).toBe(ALL_STEPS.length);
     expect(LEARNING_TRACKS.every(track => track.steps.length > 0)).toBe(true);
-    for (const step of ALL_STEPS) {
+    expect(Object.keys(sessions)).toHaveLength(ALL_STEPS.length);
+    for (const metadata of ALL_STEPS) {
+      const step = PracticeStepSchema.parse((sessions as Record<string, unknown>)[metadata.id]);
+      expect(step.id).toBe(metadata.id);
+      expect(step.lessonPath).toBe(metadata.lessonPath);
       expect(getContentByPath(step.lessonPath)?.status).toBe('active');
       if (step.kind === 'quiz') {
-        expect(QuizSchema.safeParse((bank as Record<string, unknown>)[step.quizId]).success).toBe(true);
+        const data = step.quizId ? (bank as Record<string, unknown>)[step.quizId] : JSON.parse(fs.readFileSync(path.join(process.cwd(), 'content/entries', step.questionsFile!.replace('/api/content/', '')), 'utf8'));
+        if (Array.isArray(data)) expect(data.every(question => QuizQuestionSchema.safeParse(question).success)).toBe(true);
+        else expect(QuizSchema.safeParse(data).success).toBe(true);
       } else {
         const file = path.join(process.cwd(), 'content/entries', step.starterFile.replace('/api/content/', ''));
         expect(fs.existsSync(file)).toBe(true);
         expect(fs.readFileSync(file, 'utf8')).toContain(`function ${step.functionName}(`);
       }
     }
+  });
+
+  it('can complete every course sequentially, requiring each checkpoint before the next unit', () => {
+    expect(new Set(ALL_UNITS.map(unit => unit.id)).size).toBe(ALL_UNITS.length);
+    for (const course of LEARNING_TRACKS) {
+      let progress = emptyPathProgress();
+      for (const [index, unit] of course.units.entries()) {
+        expect(unitIsUnlocked(progress, unit)).toBe(true);
+        expect(unit.steps.at(-1)?.isCheckpoint).toBe(true);
+        for (const step of unit.steps) {
+          const following = course.units[index + 1];
+          if (following) expect(unitIsUnlocked(progress, following)).toBe(false);
+          expect(stepIsUnlocked(progress, step.id)).toBe(true);
+          progress = completePathStep(progress, step.id, '2026-09-02');
+        }
+        expect(unitIsComplete(progress, unit)).toBe(true);
+      }
+      expect(Object.keys(progress.completed)).toHaveLength(course.steps.length);
+      expect(LEARNING_TRACKS.filter(other => other.id !== course.id).every(other => stepIsUnlocked(progress, other.steps[0].id))).toBe(true);
+    }
+  });
+
+  it('keeps old completions reviewable if newly added prerequisites are incomplete', () => {
+    const progress = completePathStep(emptyPathProgress(), 'request-journey', '2026-09-01');
+    const later = LEARNING_TRACKS[0].units[1].steps[0].id;
+    progress.completed[later] = progress.completed['request-journey'];
+    expect(stepIsUnlocked(progress, later)).toBe(true);
+    expect(completePathStep(progress, later, '2026-09-02').completed[later].reviews).toBe(1);
   });
 });

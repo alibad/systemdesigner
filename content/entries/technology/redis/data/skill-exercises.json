@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "redis-source-load",
+      "variants": [
+        {
+          "id": "redis-source-load-1",
+          "kind": "number",
+          "title": "Budget the cache misses",
+          "context": "In cache-aside, a hit uses a Redis copy and a miss reads the authoritative source. Assume each miss performs exactly one source read, with no retries, duplicate refills, or other source traffic.",
+          "prompt": "The application receives 80,000 reads/second and Redis serves 94% as hits. The source can sustain 6,000 reads/second. How many source reads/second does this steady workload require?",
+          "answer": 4800,
+          "unit": "reads/second",
+          "explanation": "The miss rate is 100% − 94% = 6%. 80,000 × 0.06 = 4,800 source reads/second, leaving 1,200 of the stated capacity. A cold cache could send all 80,000 reads/second to the source, so steady-state headroom does not make a full restart safe.",
+          "mistakes": [
+            { "value": 75200, "feedback": "75,200 is the hit traffic served by Redis. Only the remaining 6% reaches the source in this model." },
+            { "value": 80000, "feedback": "That is the potential cold-cache load. The stated steady workload has a 94% hit rate." },
+            { "value": 1200, "feedback": "1,200 is the unused source capacity after misses. The question asks for source demand." }
+          ],
+          "hint": "Multiply the full read rate by the miss fraction, 1 − 0.94.",
+          "scene": { "kind": "cache", "traffic": 80000, "hitRate": 94 }
+        },
+        {
+          "id": "redis-source-load-2",
+          "kind": "number",
+          "title": "Check a compact hot set",
+          "context": "A cache protects its source only for the requests it serves as hits. For this calculation, each miss causes one source read and each hit causes none; ignore retries and additional background work.",
+          "prompt": "A profile service receives 50,000 reads/second. Redis has a 98% measured hit rate, and the source budget is 1,500 reads/second. What is the steady source demand in reads/second?",
+          "answer": 1000,
+          "unit": "reads/second",
+          "explanation": "2% of 50,000 is 1,000 source reads/second. The stated source budget leaves 500 reads/second of headroom. Losing the whole cache raises potential demand to 50,000, requiring controlled admission and refill.",
+          "mistakes": [
+            { "value": 49000, "feedback": "49,000 requests hit Redis. The source handles the 2% that miss." },
+            { "value": 500, "feedback": "500 is remaining source headroom, not the 1,000 reads/second already consumed by misses." },
+            { "value": 1500, "feedback": "1,500 is available capacity. Compute demand from traffic and the miss rate." }
+          ],
+          "hint": "The miss rate is 2%. Find 2% of 50,000.",
+          "scene": { "kind": "cache", "traffic": 50000, "hitRate": 98 }
+        },
+        {
+          "id": "redis-source-load-3",
+          "kind": "number",
+          "title": "Measure pressure on the source",
+          "context": "Source capacity must cover cache misses as well as recovery. Here every request is a read, each miss causes one source read, and no retry or concurrent duplicate refill adds work.",
+          "prompt": "A rendered-page cache receives 45,000 reads/second with a 90% hit rate. The source supports 6,000 reads/second. How many source reads/second are required while that hit rate holds?",
+          "answer": 4500,
+          "unit": "reads/second",
+          "explanation": "The 10% miss rate produces 45,000 × 0.10 = 4,500 source reads/second. That leaves 1,500 reads/second of steady headroom. A cold start can demand 45,000 and must be bounded separately.",
+          "mistakes": [
+            { "value": 40500, "feedback": "40,500 reads hit Redis. The remaining 4,500 reach the source." },
+            { "value": 1500, "feedback": "1,500 is the source's remaining capacity after serving the misses." },
+            { "value": 45000, "feedback": "45,000 would reach the source at a 0% hit rate, not the stated 90%." }
+          ],
+          "hint": "Ten percent of the total read traffic reaches the source.",
+          "scene": { "kind": "cache", "traffic": 45000, "hitRate": 90 }
+        }
+      ]
+    },
+    {
+      "id": "redis-invalidation-order",
+      "variants": [
+        {
+          "id": "redis-invalidation-order-1",
+          "kind": "sequence",
+          "title": "Replace a cached price",
+          "context": "Cache invalidation deletes a temporary copy so later reads fetch the source. This exercise has one writer, no overlapping reads or refills, successful operations, and source reads that see the latest commit. It models commit-then-delete cache-aside, not a general coherence guarantee.",
+          "prompt": "Redis holds product 42 at $10. The source price must change to $12. Arrange the update and the first later cache miss.",
+          "items": [
+            { "id": "refill", "text": "Store the fetched $12 value in Redis with its TTL in one atomic set command." },
+            { "id": "delete", "text": "Delete product 42's cached copy after the source commit succeeds." },
+            { "id": "commit", "text": "Commit product 42's $12 price to the authoritative source." },
+            { "id": "read", "text": "On the first later cache miss, read the committed $12 price from the source." }
+          ],
+          "answer": ["commit", "delete", "read", "refill"],
+          "explanation": "Persist the truth first, invalidate the old copy, then refill from the committed source on a miss. Setting value and TTL together avoids a value accidentally surviving without expiry. In production, failed invalidation and racing refills still need explicit repair or version controls.",
+          "hint": "The durable update precedes deletion; the later miss fetches the value before that value can be cached."
+        },
+        {
+          "id": "redis-invalidation-order-2",
+          "kind": "sequence",
+          "title": "Publish an updated page",
+          "context": "In cache-aside, the database owns page content and Redis stores a disposable rendering. For this trace, writes and reads do not overlap, every operation succeeds, and the source returns the latest committed version.",
+          "prompt": "The cached help page is version 6. An editor publishes version 7 using commit-then-delete invalidation. Arrange the publication and next cache-miss refill.",
+          "items": [
+            { "id": "read", "text": "After the deletion, fetch source version 7 when the next request misses Redis." },
+            { "id": "commit", "text": "Commit the editor's version 7 page in the source database." },
+            { "id": "refill", "text": "Render the fetched version 7 and cache it with an atomic value-and-TTL write." },
+            { "id": "delete", "text": "Delete the old page's Redis key after confirming the database commit." }
+          ],
+          "answer": ["commit", "delete", "read", "refill"],
+          "explanation": "The source commit makes version 7 authoritative; deletion prevents later hits on version 6 in this serialized trace. The next miss fetches version 7 and stores a bounded copy. TTL alone would allow version 6 to remain usable until expiry.",
+          "hint": "Publish to the source, remove the old copy, fetch on a miss, then cache the fetched version."
+        },
+        {
+          "id": "redis-invalidation-order-3",
+          "kind": "sequence",
+          "title": "Repair a failed invalidation",
+          "context": "A failed cache delete does not undo a committed source update. In this recovery trace, a short per-key maintenance gate has already stopped reads and refills. No other writers act, and source reads see the latest commit.",
+          "prompt": "The source profile is already version 3, but a failed delete left version 2 in Redis. The runbook keeps the gate closed until repair succeeds. Arrange the remaining steps.",
+          "items": [
+            { "id": "fetch", "text": "With the old key confirmed absent, fetch source profile version 3." },
+            { "id": "resume", "text": "Open the per-key gate after the bounded version 3 cache write succeeds." },
+            { "id": "retry", "text": "Retry the failed delete and confirm that version 2's cache key is absent." },
+            { "id": "refill", "text": "Atomically cache the fetched version 3 value and its TTL while the gate stays closed." }
+          ],
+          "answer": ["retry", "fetch", "refill", "resume"],
+          "explanation": "The source is already correct, so recovery repairs only the stale copy. Under the stated gate, deletion, source fetch, and bounded refill complete before reads resume. Without the gate or another concurrency control, a racing refill could reintroduce an old value.",
+          "hint": "Remove the stale copy, fetch the committed state, cache it with expiry, and only then reopen this runbook's gate."
+        }
+      ]
+    },
+    {
+      "id": "redis-failover-evidence",
+      "variants": [
+        {
+          "id": "redis-failover-evidence-1",
+          "kind": "choice",
+          "title": "Account for a missing write",
+          "context": "Redis replication is asynchronous by default: a primary can reply before a replica receives the write. Sentinel can promote a replica to restore availability, but promotion cannot reconstruct bytes that replica never received.",
+          "prompt": "A primary acknowledges SET cart:42 new-value, then fails before replica A receives it. Sentinel promotes A, which still has old-value. What should the application expect from the promoted primary?",
+          "options": [
+            "It must return new-value because the old primary acknowledged the command.",
+            "It can return old-value; the acknowledged write was not retained on the promoted replica.",
+            "Sentinel will reconstruct new-value from the fact that the client saw an acknowledgment.",
+            "Adding more client retries to GET guarantees that new-value eventually appears."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "The old primary's acknowledgment does not establish that A received the write.",
+            "A's actual replicated state becomes the available state after promotion; this write is missing there.",
+            "Sentinel coordinates failover. It does not retain the data needed to reconstruct each write.",
+            "Repeating a read cannot reconstruct data absent from the surviving state."
+          ],
+          "explanation": "The scenario exposes the asynchronous loss window. If Redis is a disposable copy, reconcile against its authoritative source; if it owns the only current state, the design must explicitly accept or address this loss risk.",
+          "hint": "What value did the promoted replica actually receive before the failure?"
+        },
+        {
+          "id": "redis-failover-evidence-2",
+          "kind": "choice",
+          "title": "Interpret WAIT's result",
+          "context": "WAIT asks Redis to wait for replica acknowledgments of preceding writes on the connection. Its return value is the number of replicas that acknowledged; a timeout can return fewer than requested. It reduces loss risk without creating a strong-consistency guarantee.",
+          "prompt": "After a write, the client requests two replica acknowledgments with WAIT. The command times out and returns 1. What does this result establish?",
+          "options": [
+            "The write was automatically rolled back on the primary and every replica.",
+            "Both replicas received the write because two acknowledgments were requested.",
+            "One replica acknowledged; the requested two-copy condition was not met and future retention is not guaranteed.",
+            "Sentinel must promote that one acknowledged replica and preserve every write."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "WAIT does not undo the preceding write when its acknowledgment target is missed.",
+            "The returned count is 1. The requested count is a target, not evidence that it was reached.",
+            "The returned count is evidence of one acknowledgment, with the remaining failover limitations still present.",
+            "WAIT does not determine which replica a later failover promotes or guarantee retention."
+          ],
+          "explanation": "Inspect the return value and follow the application's policy for an unmet acknowledgment target. Do not assume the write failed or blindly repeat a non-idempotent operation; the primary may already have applied it.",
+          "hint": "Separate the requested acknowledgment count from the count actually returned."
+        },
+        {
+          "id": "redis-failover-evidence-3",
+          "kind": "choice",
+          "title": "Replication is not recovery history",
+          "context": "A replica follows the primary's changes, including mistaken deletions. An independent backup preserves an earlier state for recovery; a live replica is not a historical snapshot.",
+          "prompt": "An operator accidentally deletes an authoritative key family. The delete has reached both healthy replicas. Would promoting one of those replicas restore the deleted values?",
+          "options": [
+            "No. The replicas contain the delete too; recover from an appropriate independent backup or retained source history.",
+            "Yes. Replicas always preserve values from before the last destructive command.",
+            "Yes. Sentinel detects operator mistakes and reverses them during promotion.",
+            "No restoration is needed because successful replication proves the deletion was intended."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Replication copied the mistake. Recovery needs a suitable earlier state and an application-level recovery procedure.",
+            "A replica applies deletions; it is not automatically a version archive.",
+            "Sentinel handles availability and topology, not semantic undo of application commands.",
+            "Replication success says nothing about whether an operator intended the data change."
+          ],
+          "explanation": "Promotion changes the write owner but does not reverse replicated commands. Restore and validate an independent recovery source according to the application's loss and consistency requirements; replication alone cannot supply the old values.",
+          "hint": "If both replicas applied the same delete, where would the previous values come from?"
+        }
+      ]
+    }
+  ]
+}

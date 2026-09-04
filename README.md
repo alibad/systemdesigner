@@ -13,9 +13,9 @@
 
 ### Continue the daily-learning project
 
-The Duolingo-style starter is implemented at `/learn`: six short system-design and JavaScript steps, coding tests, XP, goals, streaks, and spaced reviews. Its progress currently saves in the browser.
+The development version of `/learn` has four courses—System Design, Coding, Generative AI, and Machine Learning—with 43 units, 264 sessions, and 227 skills. It includes unit placement, reviews that respond to practice evidence, 25 runnable JavaScript exercises, XP, goals, and streaks. All 202 lesson sessions have mixed practice: 23 hand-authored packs and 179 packs derived from existing lesson content, totaling 785 groups and 2,009 variants. A guided first month connects 30 study days, four review days, and a tested link-service model. The phone layout has full-screen practice and persistent actions; home-screen installation and previously visited exercises work offline after preparation. Interrupted quizzes and exercises resume, and recent code versions can be recovered. Progress saves locally and optionally syncs to an account; backup utilities live in learning settings. Production release is a separate delivery step.
 
-**Resuming on another machine or in a new coding session? Start with [Continue development](./docs/CONTINUE_DEVELOPMENT.md).** It contains setup commands, the implementation map, current limits, the next milestone, and a ready-to-use continuation prompt. The [product roadmap](./ROADMAP.md) is also available in the app at `/roadmap`.
+**Resuming on another machine or in a new coding session? Start with [Continue development](./docs/CONTINUE_DEVELOPMENT.md).** It contains setup commands, the implementation map, current limits, and the next milestone. The [product roadmap](./ROADMAP.md) is also available in the app at `/roadmap`.
 
 ---
 

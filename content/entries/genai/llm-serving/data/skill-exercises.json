@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "reserve-kv-capacity",
+      "variants": [
+        {
+          "id": "compact-context-reservation",
+          "kind": "number",
+          "title": "Reserve memory for tokens not generated yet",
+          "context": "The KV cache holds attention state for each active request. For this exercise, reserve space for prompt tokens plus the maximum output tokens before admitting a request. These are illustrative planning values; ignore fragmentation and treat cache memory as the only limit.",
+          "prompt": "After weights and other overhead, 6 GiB is allocated to KV cache. Each request has 2,000 prompt tokens and reserves 1,000 output tokens. Cache use is 0.00012 GiB per token per request. What is the maximum whole number of simultaneous requests?",
+          "answer": 16,
+          "unit": "requests",
+          "mistakes": [
+            { "value": 17, "feedback": "17 requests need 17 × 0.36 = 6.12 GiB, beyond the 6 GiB allocation. Round down when fitting requests into memory." },
+            { "value": 25, "feedback": "25 counts only the prompt. Output generation also grows the KV cache and must be reserved." },
+            { "value": 50, "feedback": "50 counts only the output reserve. The 2,000 prompt tokens remain in the attention state too." }
+          ],
+          "explanation": "Each request reserves (2,000 + 1,000) × 0.00012 = 0.36 GiB. 6 ÷ 0.36 = 16.67, so at most 16 whole requests fit: 5.76 GiB. This is a memory ceiling, not a promise that latency or compute capacity supports 16 requests.",
+          "hint": "Add prompt and output tokens, multiply by memory per token, then divide the cache allocation and round down."
+        },
+        {
+          "id": "balanced-context-reservation",
+          "kind": "number",
+          "title": "Count every active sequence's cache",
+          "context": "Loading the model weights does not reserve attention memory for its users. Each active sequence needs KV cache for its prompt and possible output. Use the stated planning coefficient, ignore fragmentation, and assume no other admission limit binds.",
+          "prompt": "The KV-cache allocation is 8.8 GiB, separate from weights and runtime memory. Each request reserves 1,500 prompt tokens plus 500 output tokens at 0.00022 GiB per token. How many requests fit simultaneously?",
+          "answer": 20,
+          "unit": "requests",
+          "mistakes": [
+            { "value": 26, "feedback": "That uses only 1,500 prompt tokens per request. The 500-token output reserve must fit as well." },
+            { "value": 80, "feedback": "That counts only output tokens. Prompt attention state also occupies KV memory." },
+            { "value": 21, "feedback": "21 requests need 9.24 GiB. The configured allocation is only 8.8 GiB." }
+          ],
+          "explanation": "(1,500 + 500) × 0.00022 = 0.44 GiB per request. 8.8 ÷ 0.44 = 20 requests. The exact fit applies only to this simplified reservation model; real admission also accounts for allocator behavior, scheduling, and latency targets.",
+          "hint": "The allocation already excludes weights and runtime. Divide it by the total cache reservation for one request."
+        },
+        {
+          "id": "large-context-reservation",
+          "kind": "number",
+          "title": "Fit longer requests without overcommitting memory",
+          "context": "Longer contexts reserve more attention state even when arrival rate is low. A cache-aware scheduler admits only whole requests whose prompt and maximum output fit the available allocation. Use these illustrative constants and ignore fragmentation or other limits.",
+          "prompt": "A worker has 17 GiB allocated to KV cache after other reservations. Each request needs 3,000 prompt tokens and up to 1,000 output tokens. At 0.00034 GiB per token per request, what is the maximum simultaneous request count?",
+          "answer": 12,
+          "unit": "requests",
+          "mistakes": [
+            { "value": 13, "feedback": "13 requests require 17.68 GiB, exceeding the allocation. A fractional request cannot be admitted by rounding up." },
+            { "value": 16, "feedback": "16 fits only if you forget the output reserve. The cache grows as output tokens are generated." },
+            { "value": 50, "feedback": "50 counts only the 1,000 output tokens and omits the 3,000-token prompt." }
+          ],
+          "explanation": "(3,000 + 1,000) × 0.00034 = 1.36 GiB per request. 17 ÷ 1.36 = 12.5, so admit at most 12: they reserve 16.32 GiB. Lower arrival rate alone does not reduce this per-request memory requirement.",
+          "hint": "Find memory per complete reserved context, then round the quotient down."
+        }
+      ]
+    },
+    {
+      "id": "bounded-request-lifecycle",
+      "variants": [
+        {
+          "id": "admission-to-decode",
+          "kind": "sequence",
+          "title": "Build attention state before generating",
+          "context": "Prefill processes the prompt and creates attention state. Decode then generates tokens while reusing that state. One request ID and deadline must follow the work from admission until its resources are released.",
+          "prompt": "Arrange a successful request on a healthy worker. The model is already loaded, output policy allows incremental text, and each step requires the preceding step's result.",
+          "items": [
+            { "id": "decode", "text": "Decode and stream allowed tokens within the output cap and remaining deadline." },
+            { "id": "admit", "text": "Validate the caller and request limits; attach one request ID and deadline." },
+            { "id": "release", "text": "On completion, release this request's KV reservation and record the outcome." },
+            { "id": "prefill", "text": "Prefill the admitted prompt to build its attention state." },
+            { "id": "reserve", "text": "Choose a permitted healthy route and reserve space for the prompt plus output." }
+          ],
+          "answer": ["admit", "reserve", "prefill", "decode", "release"],
+          "explanation": "Admission → permitted route and memory reservation → prefill → bounded decode → release. Starting model work before admission can consume scarce memory for a request that should have been rejected. Keeping the same identity and deadline makes all work attributable and cancellable.",
+          "hint": "Establish the contract and capacity first, read the prompt next, generate after that, and free memory when finished."
+        },
+        {
+          "id": "disconnect-cancellation",
+          "kind": "sequence",
+          "title": "Release capacity after the client leaves",
+          "context": "A live stream normally exists only while its caller wants the result. Cancellation must reach the worker, not just close the connection. For this runtime, cache memory may be reused only after the worker acknowledges that the sequence has stopped.",
+          "prompt": "The caller disconnects during generation. This is not a durable background job. Order the shutdown so no stopped request keeps consuming decode capacity and no live sequence loses its cache prematurely.",
+          "items": [
+            { "id": "release", "text": "After the stop acknowledgement, release the request's KV-cache reservation." },
+            { "id": "detect", "text": "Detect the disconnect and identify the active request to cancel." },
+            { "id": "stop", "text": "The worker stops the sequence and acknowledges cancellation." },
+            { "id": "record", "text": "After resource cleanup, record the cancellation reason and consumed work." },
+            { "id": "propagate", "text": "Send cancellation through the scheduler to the owning worker using the same request ID." }
+          ],
+          "answer": ["detect", "propagate", "stop", "release", "record"],
+          "explanation": "Detect → propagate → stop and acknowledge → release → record. Closing a browser connection alone does not stop accelerator work. Waiting for the runtime's stop acknowledgement prevents cache reuse while the old sequence could still access it.",
+          "hint": "Identify the work, tell its owner to stop, wait for that stop to be acknowledged, then reuse its resources."
+        },
+        {
+          "id": "validated-tool-result",
+          "kind": "sequence",
+          "title": "Treat generated instructions as proposals",
+          "context": "A model's JSON output is a proposed instruction, not authority to execute it. This service buffers tool proposals, checks their schema, then obtains action authorization. Every stage uses the original request ID and remaining deadline.",
+          "prompt": "A permitted tool request is already admitted. Order the remaining steps for one successful action. The authorization check needs a valid parsed proposal, and no tool may execute before approval.",
+          "items": [
+            { "id": "execute", "text": "Execute only the approved action with its idempotency key and remaining deadline." },
+            { "id": "validate", "text": "Validate and parse the completed proposal against the required tool schema." },
+            { "id": "record", "text": "Return the tool result and record the proposal, approval, and execution outcome." },
+            { "id": "generate", "text": "Generate a bounded tool proposal without executing its content." },
+            { "id": "authorize", "text": "Check the valid proposal against the caller's permissions and tool policy." }
+          ],
+          "answer": ["generate", "validate", "authorize", "execute", "record"],
+          "explanation": "Generate → schema validation → authorization → bounded execution → result and trace. A valid schema proves shape, not permission. If validation or authorization fails, return a typed failure or defer; do not execute and attempt to validate afterward.",
+          "hint": "First obtain a proposal, then prove its shape, then its permission, and only then act."
+        }
+      ]
+    },
+    {
+      "id": "preserve-serving-contract",
+      "variants": [
+        {
+          "id": "fallback-data-boundary",
+          "kind": "choice",
+          "title": "Do not let fallback cross a data boundary",
+          "context": "A serving route must satisfy the task contract, including where data may be processed. A faster or healthier fallback is usable only when it also preserves required safety, output, and data-boundary guarantees.",
+          "prompt": "A tenant's prompt must remain inside its private region. That region's model pool is down. The only healthy external route has not been approved for this data, and the task has no safe local fallback. What should the service do?",
+          "options": [
+            "Route externally and label the answer as degraded.",
+            "Return an explicit unavailable result or offer an allowed deferred retry without sending the prompt externally.",
+            "Send only a shortened version of the private prompt to the external route without approval."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "A degradation label does not authorize moving protected data outside the allowed boundary.",
+            "This preserves the stated data contract when no permitted live route remains.",
+            "Shortening a prompt does not establish that the remaining content may cross the boundary."
+          ],
+          "explanation": "Routing is constrained by the request contract. When no healthy route meets it, explicit failure or permitted deferral is better than silently weakening the boundary. A future retry must still use a defined budget and approved route.",
+          "hint": "Availability does not override the tenant's explicit processing boundary."
+        },
+        {
+          "id": "single-request-cache-pressure",
+          "kind": "choice",
+          "title": "Fix request shape when one context cannot fit",
+          "context": "KV-cache demand depends on prompt length and output reserve, not just requests per second. Admission must consider whether even one complete reserved context fits the worker's cache allocation.",
+          "prompt": "A single request needs 9 GiB of KV cache, but the worker allocates only 8 GiB. No other requests are running. A larger worker is available within the same approved model and data boundary. Which action addresses the actual constraint?",
+          "options": [
+            "Lower the arrival rate while sending this unchanged request to the same worker.",
+            "Ignore the output-token reserve because those tokens do not exist yet.",
+            "Route the request to the permitted larger worker after checking its capacity and remaining deadline."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Even with zero competing requests, 9 GiB cannot fit in an 8 GiB allocation.",
+            "Generation will grow the cache. Ignoring its reserved growth risks failing after admission.",
+            "A compatible larger allocation can fit the request shape; routing still has to satisfy the remaining contract."
+          ],
+          "explanation": "This is per-request memory pressure. A larger allowed worker addresses it directly. Reducing context or output could also work if the product accepts that changed request; slowing arrivals alone cannot make an unchanged 9 GiB reservation fit into 8 GiB.",
+          "hint": "There is no competing traffic. Compare the one request's reservation with the one worker's allocation."
+        },
+        {
+          "id": "tool-policy-timeout",
+          "kind": "choice",
+          "title": "A policy timeout is not action approval",
+          "context": "Tool authorization is a control on the request path. A generated action must pass both schema validation and the required policy decision before execution; timeout handling must preserve that contract.",
+          "prompt": "The model proposes a schema-valid action that changes a user's project. The mandatory authorization service times out, and the request deadline is exhausted. No independently approved fallback can perform the action. What happens next?",
+          "options": [
+            "Do not execute; return a typed authorization-unavailable result or a separately agreed deferral.",
+            "Execute because schema validation already proved the action was safe.",
+            "Keep retrying authorization and silently reset the request deadline each time."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Without authorization and time remaining, this request has no permitted execution path.",
+            "Schema validity proves structure. It does not prove permission to modify the user's project.",
+            "Resetting deadlines defeats the shared budget and can keep abandoned work consuming capacity."
+          ],
+          "explanation": "Fail closed for the action. Any later durable job needs explicit product agreement, its own bounded deadline and result handling, and the same authorization requirement. Neither a valid model response nor a service timeout grants permission.",
+          "hint": "Separate valid structure from approved action, and preserve the exhausted deadline."
+        }
+      ]
+    }
+  ]
+}

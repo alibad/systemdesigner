@@ -1,109 +1,109 @@
 # Continue development on another machine
 
-This is the durable handoff for the daily-learning work. It is intended to be enough context to resume from a fresh clone without the original chat or computer.
+Last updated: September 3, 2026.
 
-Last updated: September 2, 2026.
+The product direction is a substantial Duolingo-style engineering learning platform. `/learn` has four courses, 43 units, 264 sessions, and 227 skills. Every one of its 202 noncoding lesson sessions now has mixed practice: 23 hand-authored packs (69 groups, 207 variants) plus 179 packs derived from existing authored role/process descriptions and assessments. Across both sources: 785 groups, 2,009 variants. The catalog links 400 source-model references; later lessons open their models on demand, while the opening three use their compact models. The opening trail and its request/capacity/cache models remain the approved visual direction. Version 5 adds revision-aware quiz/exercise resume and recoverable recent coding drafts. Placement, adaptive review, the 30-study-day journey, and offline visited content remain available.
 
-## Start here
+Read `AGENTS.md`, `ROADMAP.md`, and `docs/daily-learning-path.md` before changing architecture or curriculum. The public `/roadmap` page renders `ROADMAP.md` directly.
 
-The product direction is **a Duolingo-style app for learning system design and coding**. The first working version is implemented at `/learn`. Continue from that implementation; the next priority is portable progress, followed by more curriculum.
+## Checkpoint and delivery
 
-Read these files in order:
-
-1. [`AGENTS.md`](../AGENTS.md) — repository engineering and content rules.
-2. [`ROADMAP.md`](../ROADMAP.md) — product priorities and milestone sequence; also rendered at `/roadmap`.
-3. This handoff — current state, next task, and machine setup.
-4. [`daily-learning-path.md`](./daily-learning-path.md) — the current learning loop, data, and runner behavior.
-
-The development branch is `main`, and the remote is `https://github.com/alibad/systemdesigner.git`. The checkpoint containing this handoff also contains the six-step daily-learning implementation. Use `git log -5 --oneline` to locate it; the feature began from `e53c4c6e`.
+- Work directly on `main`, remote `https://github.com/alibad/systemdesigner.git`.
+- The previous-machine checkpoint is `a5d66b2d` (`feat: add daily learning starter and continuation roadmap`). It contained six steps.
+- Portable progress, the four-course expansion, richer practice/placement/adaptive review, and the mobile first month were continued locally from that checkpoint. Check `git status` and recent commits for the latest delivery state. This document is not authorization to push or deploy.
+- Production deployment was authorized after the September 3 local verification. Releases use `main` and the existing Vercel project `systemdesigner` in `alibads-projects`, with `www.systemdesigner.net` as the production domain. Check the deployment associated with the latest commit for its actual release status. Account integration uses isolated Firebase emulators locally; a live signed-in two-device smoke check remains device validation.
 
 ## Get running
 
-Use Node.js 20+ and pnpm 10.4.1. The checkpoint was verified using Node.js 22.22.0.
+Use Node.js 20+ (verified with 22.22.0) and pnpm 10.4.1:
 
 ```sh
-git clone https://github.com/alibad/systemdesigner.git
-cd systemdesigner
-git switch main
-git pull --ff-only origin main
-corepack enable
-corepack prepare pnpm@10.4.1 --activate
 pnpm install --frozen-lockfile
 pnpm dev --port 3100
 ```
 
-If Corepack is unavailable, install pnpm 10.4.1 using the instructions in [`DEVELOPMENT.md`](./DEVELOPMENT.md). The same Git and pnpm commands work from PowerShell once those tools are installed.
+Open `http://localhost:3100/learn` and `http://localhost:3100/roadmap`. Inspect local changes before pulling. See `docs/DEVELOPMENT.md` for cloning, Corepack, and PowerShell setup. Run the production build only after stopping the dev server so they do not share `.next` writes.
 
-Open `http://localhost:3100/learn` to try the starter and `http://localhost:3100/roadmap` to view the roadmap. The port is a convenience, not a requirement.
+On the current machine, another project occupies port 3100. SystemDesigner uses port 3101. Verify the process and its working directory before stopping a server; do not stop the other project.
 
-Normal local development and the daily starter need no environment variables. Configure optional services only when working on the features that need them. `.env.example` documents variable names; real values belong in an ignored local environment file or the hosting provider's secret manager.
+Anonymous learning needs no environment variables. Optional account sync uses the existing Firebase configuration and sign-in UI. Secrets and authentication do not travel through Git.
 
-## What is implemented
+## Implemented behavior
 
-- A new daily-learning hub at `/learn`, with homepage and navigation entry points.
-- Independent system-design and JavaScript tracks, each with three sequential steps.
-- A definition, concrete example, and takeaway before practice.
-- The existing `InteractiveQuiz` in a sequential session mode with immediate explanation, retries, download recovery, and an explicit completion callback.
-- A JavaScript editor with starter programs, hints, real test results, local drafts, and timeout handling.
-- Completion only after all quiz answers are correct or all code tests pass.
-- 20 path XP once per new step, sequential unlocking, daily goals of 1–3 steps, local-calendar streaks, and review scheduling.
-- Browser-local persistence, schema validation, storage-failure handling, and cross-tab refreshes.
-- A public `/roadmap` page that renders `ROADMAP.md`, with links back to the source and this handoff.
-- A navigation hydration fix: experimental navigation uses the same build flag on the server and browser, including production previews on localhost.
+| Course | Units | Sessions |
+| --- | ---: | ---: |
+| System design | 12 | 77 |
+| Coding | 6 | 25 |
+| Generative AI | 14 | 90 |
+| Machine learning | 11 | 72 |
 
-Existing registry-backed lessons and account gamification remain available. A daily-path completion does not mark an entire in-depth lesson complete.
+- 202 sessions adapted from registry-backed lessons, 37 mixed unit checkpoints, and 25 coding exercises. The broader library still has 425 entries.
+- Definition → example/key idea → practice → feedback/retry → completion. Most adapted lesson assessments select four source questions.
+- Unit prerequisites and checkpoint gating; courses progress independently. Placement can satisfy a unit without adding lesson completions, XP, or daily activity. Locked sessions still link to their full lessons. Stable original completion IDs are preserved.
+- Twenty-three lessons have 69 hand-authored groups and 207 variants. Additional authored packs cover concurrency, Redis, RAG, LLM serving, tokenization, multimodal budgets, ML framing, serving, and monitoring. Every other lesson uses matching and source decision tasks through the same schema.
+- A 30-study-day guided path blends the first three design units with the first two coding units: 26 distinct sessions, eight review tasks across four review days, four milestones, and a final in-memory link-service model with eight behavioral fixtures.
+- Onboarding offers foundations or placement. Ordinary days accept valid placement; review days still require practice. Study days follow progress rather than the calendar.
+- A chapter path with completed/current/locked nodes, direct next-day continuation, and an optional placement entry. Three introductory models and 27 authored exercise scenes make request flow, capacity/failure, and caching visible. Scene metadata is validated against the exercise schema; numeric model parameters are checked against the authored answers.
+- A compact learning shell, full-screen lesson/placement dialogs, fixed action footers, phone bottom navigation, safe-area spacing, and dark mode.
+- Home-screen installation support and a public-resource service worker for the prepared shell and previously visited practice. Account data never enters the page cache; new content and sync need a connection.
+- Placement assesses each unit in sequence. Noncoding checkpoints represent every skill; coding requires all tasks to pass their first test run, without hints. Failed or abandoned assessments never grant a unit. Passing an earlier unit remains valid if the learner stops later.
+- Custom Radix course and goal menus, keyboard-operable Learn/Courses/Practice tabs, weekly activity, course progress, and a Continue action.
+- The last coding exercise in each unit combines previous skills. The 22 additional exercises have external starter/reference files and edge-case fixtures. Every exercise runs in an isolated browser worker.
+- Structural result comparison and input-mutation checks, hints, timeout protection, and saved drafts.
+- All answers/tests must pass. Each new session earns 20 path XP once, separately from account gamification.
+- Local-day goals (1–3 sessions), streaks, rotating review variants, and adaptive scheduling across all 227 skills. Full passes earn a delay; mistakes/hints return sooner. Partial answers do not increase recall strength.
+- Version 5 learning data, deterministic merging, v1/v2/v3/v4 migration, revision-aware placement, bounded daily evidence, optional account sync, and explicit backup preview/import inside settings.
+- Separate guest/account caches, safe account switching, durable pending changes, retries, and realtime reconciliation. Guest work is copied to an account only after explicit review.
 
 ## Implementation map
 
 | Area | Files |
 | --- | --- |
-| Entry route | `app/learn/page.tsx` |
-| Path, stats, goals, review list | `components/learning/DailyLearningPath.tsx` |
-| Learn → practice → retry/complete flow | `components/learning/LearningSession.tsx` |
-| JavaScript editor and test output | `components/learning/CodingExercise.tsx` |
-| Curriculum schemas, unlocking, streaks, reviews | `lib/learning-path.ts` |
-| Browser storage integration | `hooks/useDailyLearning.ts` |
-| Isolated browser code runner | `lib/coding-runner.ts` |
-| Shared quiz component | `components/fundamentals/InteractiveLearning.tsx` |
-| Daily system-design steps | `content/entries/fundamentals/what-is-system-design/data/daily-design-path.json` |
-| Daily coding steps and test fixtures | `content/entries/fundamentals/scalability-basics/data/daily-coding-path.json` |
-| Quiz data | `lib/quiz-bank/all-quizzes.json` — `daily-request-journey`, `daily-scaling-decision`, `daily-cache-decision` |
-| Starter code | Co-located `code/daily-server-capacity.js`, `code/daily-round-robin.js`, and `code/daily-cache-lookup.js` under the referenced lessons |
-| Unit coverage | `lib/learning-path.test.ts` |
-| End-to-end browser checks | `scripts/verify-daily-learning.mjs`, run with `pnpm qa:learning-path` |
-| Product roadmap source and renderer | `ROADMAP.md`, `app/roadmap/page.tsx` |
+| Course map and menus | `app/learn/page.tsx`, `components/learning/DailyLearningPath.tsx` |
+| Session loading and UI | `app/api/learning/sessions/[id]/route.ts`, `LearningSessionLoader.tsx`, `LearningSession.tsx`, `CodingExercise.tsx` under `components/learning/` |
+| Curriculum source | `content/learning/course-outline.json`, `content/learning/first-month.json` |
+| Interactive systems | `components/learning/LearningLab.tsx`, `SystemScene.tsx`, `ExerciseScene.tsx`, `lib/learning-lab.ts`, `public/learning/` |
+| Guided month and milestones | `lib/learning-journey.ts`, `components/learning/FirstMonth.tsx` |
+| Phone installation and offline caching | `components/learning/LearningInstall.tsx`, `public/learning-sw.js`, `public/manifest.json`, `lib/learning-assets.ts` |
+| Generated catalog and sessions | `content/learning/catalog.json`, `content/learning/sessions.json`, `scripts/generate-learning-catalog.mjs` |
+| Checkpoints and coding sources | Co-located lesson `quiz/path-*-checkpoint.json`, `data/learning-code-challenges.json`, and `code/code-*.js` files |
+| Rich exercise sources and renderer | Co-located `data/skill-exercises.json` and `daily-practice.generated.json`, `scripts/learning-source-practice.mjs`, `lib/skill-exercise-schema.ts`, `components/learning/SkillPractice.tsx` |
+| Existing lesson models in practice | `components/learning/SourceExploration.tsx`, generated session `models` references |
+| Placement and adaptive review UI | `components/learning/PlacementTest.tsx`, `components/learning/AdaptiveReviewPanel.tsx` |
+| Progression, evidence, and scheduling | `lib/learning-path.ts`, `lib/learning-evidence.ts`, `lib/learning-quiz.ts` |
+| Versioned data, migration, merge, backups | `lib/daily-learning-data.ts`, `lib/learning-resume.ts` |
+| Local persistence and sync lifecycle | `lib/daily-learning-store.ts`, `lib/daily-learning-cloud.ts`, `hooks/useDailyLearning.ts` |
+| Settings utilities | `components/learning/LearningProgressControls.tsx` |
+| JavaScript isolation and comparison | `lib/coding-runner.ts` |
+| Shared quizzes | `components/fundamentals/InteractiveLearning.tsx` |
+| Core tests | `lib/learning-path.test.ts`, `lib/learning-exercises.test.ts`, `lib/learning-evidence.test.ts`, `lib/daily-learning-*.test.ts` |
+| Browser verification | `scripts/verify-daily-learning.mjs`, `scripts/verify-adaptive-learning.mjs`, `scripts/verify-first-month.mjs`, `scripts/verify-learning-continuity.mjs`, `scripts/verify-learning-curriculum.mjs`, `scripts/verify-learning-models.mjs`, shared `scripts/learning-browser-helpers.mjs` |
+| Account integration | `firebase.learning-emulators.json`, `scripts/verify-daily-learning-sync.mjs` |
 
-## Current limits and decisions
+Author the course outline and co-located sources, then run `pnpm generate:learning`. Do not hand-edit generated outputs. `pnpm validate:learning` checks for drift and is included in `pnpm validate:content`. A new full lesson still requires the registry-first authoring workflow. Adding a course session around an existing lesson does not require a duplicate registry entry or body.
 
-- The starter is six steps, not a complete system-design or coding curriculum. Python and other languages are not implemented.
-- Daily-path progress uses `sd:daily-learning:v1`; code drafts use `sd:code-draft:<step-id>` in `localStorage`. Keep these keys compatible when adding migration.
-- Daily-path XP is separate from account XP. The existing gamification and challenge services do not yet own these completions. Never add the same award to both stores without an idempotency plan.
-- Practice counts once per distinct step per local calendar day. Any successful step or review maintains a streak; meeting the chosen daily goal is a separate measure.
-- Quiz retries repeat a small fixed set. Review timing is a simple success-based schedule, not adaptive mastery or a placement system.
-- Incomplete quiz sessions are not persisted. Coding drafts and completed steps are persisted.
-- The code runner uses an opaque-origin iframe and Blob worker with network-blocking CSP. It has a two-second execution timeout and a five-second startup/result timeout. Results and tests are client-visible and not authoritative.
-- No leaderboard, heart/life system, new notification automation, paid service, or standalone remote execution service was added.
-- Instructional bodies remain in the canonical Markdoc system. The path is a practice hub, not a new set of concrete lesson pages. Reuse the shared quiz component and co-located content assets.
-- Some local Codex skills used during development may not exist on a new machine. All required application source and verification scripts are in this repository; follow `AGENTS.md` and repository docs.
+## Limits and next milestone
 
-## Recommended next task: portable daily-path progress
+All lesson sessions now have mixed practice and model access. `scripts/learning-source-practice.mjs` derives role-matching tasks and preserves source questions without pretending visual processes imply strict execution order. Generated packs live beside their source as `data/daily-practice.generated.json`. Do not edit them by hand. `exerciseSources` in the outline overrides derived practice with authored `skill-exercises.json` packs.
 
-Start with the first milestone in `ROADMAP.md`. Keep this work bounded: prove continuity for the six existing steps before expanding the curriculum.
+`lib/learning-resume.ts` validates learner inputs and rechecks restored quizzes and completed exercise groups. `DailyLearningData.sessions` retains a per-session current value or null reset marker; revisions invalidate obsolete attempts. `draftHistory` keeps up to four displaced values per coding session, with a shared 64 KB retention budget. It is a recovery convenience, not an unlimited history. Importing progress does not award completion for unfinished work.
 
-1. Inspect `lib/unified-storage.ts`, `contexts/StorageContext.tsx`, `hooks/useAuth.ts`, `lib/gamification.ts`, `contexts/GamificationContext.tsx`, and the existing Firestore rules. Reuse the established account infrastructure where appropriate.
-2. Define a versioned progress contract that can represent step completion, successful practice events, daily goals, review state, selected track, and coding drafts. Decide whether the next increment includes persisted in-progress quiz sessions.
-3. Add an export/import backup for anonymous learners, with schema validation and a preview of what will be imported. Do not include auth data or unrelated browser storage.
-4. Migrate `sd:daily-learning:v1` without losing completed steps, activity dates, or drafts. Do not silently merge one person's local data into another person's account on a shared device.
-5. Add optional account sync with explicit local-to-account migration, retryable offline writes, conflict handling, and visible save status. Ensure events and XP awards are idempotent.
-6. Verify reload, a fresh browser/device, offline → online, sign-in/out, account switching, duplicate submissions, corrupt import data, and day-boundary behavior.
+Continue in this repository and keep SystemDesigner.net as the product. Physical-phone installation and a live signed-in smoke test remain external checks. The September 3 release was explicitly requested; future releases still require authorization. Validate learning outcomes before making proficiency claims.
+Preserve these boundaries:
 
-Acceptance: the same learner completes a step on device A, resumes the correct next step on device B, and retains one completion/award after retries and offline sync. An anonymous learner can export and restore progress without an account. Account boundaries prevent another user seeing those drafts or progress.
-
-After portable progress, author one additional unit per track and evolve the curriculum schema to support multiple units. Follow the roadmap sequence for richer exercise types and authoritative grading.
+- Schema version is 5, while browser keys intentionally remain `sd:daily-learning:v2:guest` and `sd:daily-learning:v2:user:<uid>` for in-place migration. V1 progress and old draft keys remain as recovery copies.
+- Evidence retains the four most recent practice dates per skill. Same-day mistakes and hints survive retries and merges. Current content revisions invalidate old evidence and placement grants, while preserving historical completions.
+- Guest data is shared within a browser profile. Copying it into an account does not erase the original guest work. Account-only work must never leak back into guest mode or another account.
+- Successful practice, completed review-day parts, and unfinished attempts are portable. Coding drafts retain bounded recent alternatives inside the editor.
+- The production service worker caches the anonymous learning shell, hashed application assets, and explicitly allowed public practice assets. First-time downloads require a connection. Content revisions separate cached practice versions, and session details must match the catalog. This is not a predownload of the whole curriculum.
+- Coding uses an opaque iframe and worker with network-blocking CSP, a two-second execution timeout, and a five-second outer timeout. Visible client-side tests are self-assessment, not trusted competitive grading.
+- Authoritative rewards, a Python service, reminders, and a leaderboard have not been added.
 
 ## Verification
 
-The starter passed all of these gates before the checkpoint, including the browser suite against a production-mode server:
+The completion work passes 376 unit tests and six real Firebase emulator tests, including v5 attempt restoration and concurrent draft recovery. The browser curriculum sweep completed all 202 noncoding lessons with actual grading and no uncaught page errors. Six source models were exercised at 390×844 and 1440×1000, including an offline model reload. The final production continuity, all-25-coding, adaptive/placement, and 30-day/offline suites pass; evidence and limits are recorded in `design-qa.md`. A startup hydration/navigation race found during the browser walk-through was corrected. The production build passes type/lint gates and traces 2,229 canonical content assets. Physical-device installation and production signed-in checks remain external release checks.
+
+Run all local gates before delivery:
 
 ```sh
 pnpm scan:secrets
@@ -116,41 +116,22 @@ pnpm lint
 pnpm build
 ```
 
-The unit suite contains 102 passing tests at this checkpoint. The build renders the existing content library and checks that co-located content assets are included in the production trace. Counts will change as the project grows.
+After building, run `pnpm start --port 3101`, then `pnpm qa:learning-path`, `pnpm qa:adaptive-learning`, `pnpm qa:learning-continuity`, `pnpm qa:learning-curriculum`, `pnpm qa:learning-models`, and `LEARNING_QA_OFFLINE=1 pnpm qa:first-month` in another terminal with `LEARNING_QA_BASE_URL=http://localhost:3101`. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chrome executable or install Chromium with `pnpm exec playwright install chromium`. Screenshots go under ignored `.artifacts/daily-learning/`, `.artifacts/adaptive-learning/`, `.artifacts/first-month/`, `.artifacts/learning-continuity/`, `.artifacts/learning-curriculum/`, and `.artifacts/learning-models/`.
 
-To run browser verification on a new machine:
+Browser checks cover all 25 coding sessions through the actual worker; design-unit/checkpoint completion; representative GenAI/ML sessions; load failures; wrong answers; unit unlocking; rotating reviews; keyboard/menu behavior; mobile dark mode; draft/backup restore; offline settings; storage failure; and navigation.
 
-```sh
-pnpm exec playwright install chromium
-pnpm build
-pnpm start --port 3100
-```
+The adaptive suite adds exercise variants, retained hints and mistakes, priority and recovery, placement pass/fail/cancel/load retry across all four courses, all four first-unit coding tasks, no invented placement XP, next-unit navigation, v5 backup restore, v2 migration, and mobile placement. Unit tests validate every practice pack and assessment coverage for all 43 units.
 
-In a second terminal:
+For actual Firebase Auth, transactions, realtime updates, and ownership rules, use Firebase CLI with Java 21+:
 
 ```sh
-pnpm qa:learning-path
+firebase emulators:start --only auth,firestore --project demo-systemdesigner-learning --config firebase.learning-emulators.json
 ```
 
-Alternatively set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chrome executable. Set `LEARNING_QA_BASE_URL` to change the port. Screenshots are generated under `.artifacts/daily-learning/` and are intentionally ignored by Git.
+Then run `pnpm qa:learning-sync`. Ports are 9099 (Auth) and 8080 (Firestore). The six integration tests are skipped during regular unit runs and never use production account data. Repeat them after changing the sync contract or adapter.
 
-The browser suite covers every starter step, retry behavior, code results and infinite loops, browser isolation, draft/progress persistence, duplicate rewards, due reviews, daily goals, storage failures, keyboard interactions, mobile overflow, homepage entry, and roadmap navigation. Run it in production mode too: development mode did not expose the previous localhost navigation hydration mismatch.
+Before a machine reset, preserve intended source changes in Git. Separately preserve ignored environment files, credentials, Content Studio drafts, and anonymous learner progress (learning settings → Export backup). No GitHub Actions changes are required or authorized by this handoff.
 
-Verification remains local. Do not create, enable, or modify GitHub Actions workflows to continue this work unless explicitly requested. Follow current repository instructions for commits, pushes, and deployments; this handoff is not standing deployment authorization.
+## Completion verification added
 
-## What Git preserves before a machine reset
-
-Pushing `main` preserves committed source, curriculum data, test scripts, this handoff, and the roadmap. Confirm the checkpoint exists on `origin/main` before discarding the old working directory.
-
-These are separate from Git and need separate handling if you want to keep them:
-
-- `.env`, `.env.local`, ignored secret files, and local tool authentication. Recover needed values from your secret manager or hosting settings on the new machine. Do not commit them to this public repository.
-- Browser-local daily-path progress and drafts, plus other local-only learner data. The export/import feature is planned, not implemented at this checkpoint. A new clone does not restore browser storage.
-- Ignored `.content-cms/` drafts or other local work, if you have any. Commit intended source changes or preserve private working data separately before erasing the machine.
-- The original chat and local screenshots. This document contains the decisions needed to continue; the app does not depend on that chat or those images.
-
-Dependencies, `.next/`, and local preview servers can be recreated with the commands above.
-
-## Starting prompt for the next coding session
-
-> Continue SystemDesigner's Duolingo-style system-design and coding experience. Read AGENTS.md, ROADMAP.md, docs/CONTINUE_DEVELOPMENT.md, and docs/daily-learning-path.md first. The six-step starter at /learn is implemented and tested. Start with the portable-progress milestone: preserve existing local progress and coding drafts, add a validated backup export/import path, and integrate optional account sync using the existing account infrastructure with safe migration and idempotent events. Keep anonymous/offline learning usable, test account boundaries, and use local verification. Work on main following the repository rules. Update the roadmap and handoff as work lands.
+`pnpm qa:learning-continuity` exercises partial ordering and matching, retained hints and feedback, completed-group regrading, mixed-quiz cursor restoration, single completion, and code-history recovery through reloads. `pnpm qa:learning-curriculum` completes all 202 noncoding lessons through the real learner UI using isolated prerequisite fixtures. It does not skip grading or inject assessment answers into state. Check the latest logs under `.artifacts/learning-redesign/` and the completion section of `design-qa.md` for actual run results.

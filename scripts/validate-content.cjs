@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Content integrity gate (runs in CI alongside validate-content-registry.cjs).
+ * Local content integrity gate, paired with validate-content-registry.cjs.
  *
  * Catches the silent-failure classes the audit flagged:
  *   1. Quiz JSON with no validation — correctAnswer out of range, missing explanation, etc.
@@ -8,7 +8,7 @@
  *   3. A .mdoc body that references a missing rubric, quiz, content asset, or interactive block.
  *   4. Registry-backed Markdoc entries with missing, duplicate, or mismatched bodies.
  *   5. Content bodies that drift from the shared instructional or tool opening structure.
- *   6. Quiz parity drift: every lesson needs exactly one co-located, referenced quiz file.
+ *   6. Quiz parity drift: one canonical quiz per lesson, plus explicitly referenced course checkpoints.
  *
  * Plain Node with the repository's TypeScript dependency for loading the content registry.
  */
@@ -519,6 +519,27 @@ function validateQuestionList(where, questions) {
 }
 
 const mdocBodies = discoverMdocBodies();
+// Course checkpoints are supplemental assessments, never replacements for lesson quizzes.
+const checkpointFiles = new Set();
+const learningSessionsPath = path.join(ROOT, 'content/learning/sessions.json');
+if (fs.existsSync(learningSessionsPath)) {
+  try {
+    const sessions = JSON.parse(fs.readFileSync(learningSessionsPath, 'utf8'));
+    for (const step of Object.values(sessions)) {
+      if (!step.isCheckpoint || step.kind !== 'quiz') continue;
+      const reference = step.questionsFile;
+      if (typeof reference !== 'string' || !/^\/api\/content\/[\w-]+\/[\w-]+\/quiz\/[\w-]+\.json$/.test(reference)) {
+        err(`learning checkpoint ${step.id}: invalid quiz asset reference`); continue;
+      }
+      if (checkpointFiles.has(reference)) err(`learning checkpoint ${step.id}: reused checkpoint asset`);
+      checkpointFiles.add(reference);
+      try {
+        const asset = JSON.parse(fs.readFileSync(path.join(ROOT, 'content/entries', reference.slice('/api/content/'.length)), 'utf8'));
+        validateQuestionList(`learning checkpoint ${step.id}`, asset.questions || asset);
+      } catch (error) { err(`learning checkpoint ${step.id}: ${error.message}`); }
+    }
+  } catch (error) { err(`learning sessions: ${error.message}`); }
+}
 const contentRegistry = loadContentRegistry();
 const contentRegistryById = new Map(
   contentRegistry
@@ -544,13 +565,13 @@ for (const file of mdocBodies) {
   const [lessonSection, lessonSlug] = lessonSegments;
   const quizDirectory = path.join(path.dirname(file), 'quiz');
   const quizFiles = fs.existsSync(quizDirectory)
-    ? fs.readdirSync(quizDirectory).filter((name) => name.endsWith('.json')).sort()
+    ? fs.readdirSync(quizDirectory).filter((name) => name.endsWith('.json') && !checkpointFiles.has(`/api/content/${lessonSection}/${lessonSlug}/quiz/${name}`)).sort()
     : [];
   const lessonQuizTags = [...src.matchAll(/\{%\s*quiz\b([\s\S]*?)\/%\}/g)];
   const registryEntry = contentRegistryById.get(frontmatter.data.registryId);
 
   if (quizFiles.length !== 1) {
-    err(`${where}: needs exactly one co-located quiz JSON file; found ${quizFiles.length}`);
+    err(`${where}: needs exactly one canonical lesson quiz JSON file; found ${quizFiles.length}`);
   }
   if (lessonQuizTags.length !== 1) {
     err(`${where}: needs exactly one quiz tag; found ${lessonQuizTags.length}`);

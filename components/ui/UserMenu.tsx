@@ -13,7 +13,7 @@ import { useKeyboardNavigation } from '@/hooks/useKeyboardNavigation';
 import { useFocusManagement } from '@/hooks/useFocusManagement';
 import { trackAuthAction } from '@/lib/firebase';
 
-export default function UserMenu() {
+export default function UserMenu({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState<boolean>(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showSignInModal, setShowSignInModal] = useState(false);
@@ -134,8 +134,8 @@ export default function UserMenu() {
 
   return (
     <div ref={ref} className="relative flex items-center gap-3">
-      {!isAdminPage && !isWhiteboard && <GlobalSearch />}
-      {!isAdminPage && !isWhiteboard && <StreakIndicator />}
+      {!compact && !isAdminPage && !isWhiteboard && <GlobalSearch />}
+      {!compact && !isAdminPage && !isWhiteboard && <StreakIndicator />}
       <button
         type="button"
         aria-haspopup="menu"

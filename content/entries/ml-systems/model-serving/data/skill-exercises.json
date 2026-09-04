@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "bound-batch-wait",
+      "variants": [
+        {
+          "id": "search-batch-wait",
+          "kind": "number",
+          "title": "Leave time for the whole prediction",
+          "context": "A request deadline is the total time available to return an answer. Batching can improve model throughput, but waiting for a batch consumes that same deadline. These numbers are allocated time budgets, not independently measured percentiles.",
+          "prompt": "A search prediction has a 100 ms budget. Reserve 20 ms for features, 35 ms for model execution, 15 ms for policy and network, and 10 ms for jitter. What is the largest batch-wait budget that fits?",
+          "answer": 20,
+          "unit": "ms",
+          "mistakes": [
+            { "value": 30, "feedback": "30 ms uses the 10 ms reserved for jitter. The stated plan must keep that reserve." },
+            { "value": 35, "feedback": "35 ms leaves out policy and network. Returning the decision is part of the request deadline." },
+            { "value": 65, "feedback": "Subtracting only model execution leaves no allocation for features, policy, network, or jitter." }
+          ],
+          "explanation": "100 − 20 − 35 − 15 − 10 = 20 ms. A larger wait exceeds the allocated end-to-end budget even if the model itself runs in 35 ms. Validate the actual request latency distribution with load tests; adding stage percentiles would not prove the product P95.",
+          "hint": "Subtract every other allocation from 100 ms, including the jitter reserve."
+        },
+        {
+          "id": "recommendation-batch-wait",
+          "kind": "number",
+          "title": "Bound the recommendation queue",
+          "context": "Dynamic batching collects compatible requests before running a model. Its maximum wait must fit beside feature lookup, execution, response work, and a safety reserve. The allocations below are budget values, not stage P95 measurements.",
+          "prompt": "A recommendation request has 160 ms in total. Features receive 35 ms, execution 55 ms, policy and network 25 ms, and jitter 15 ms. What maximum batch wait can you allocate?",
+          "answer": 30,
+          "unit": "ms",
+          "mistakes": [
+            { "value": 45, "feedback": "45 ms spends the 15 ms reserved for jitter. Keep that reserve when calculating the batch wait." },
+            { "value": 55, "feedback": "55 ms omits the 25 ms needed to apply policy and return the response." },
+            { "value": 105, "feedback": "The deadline covers much more than the 55 ms execution step. Features and the response still need time." }
+          ],
+          "explanation": "160 − 35 − 55 − 25 − 15 = 30 ms for waiting. Batching beyond 30 ms would break this plan. The real end-to-end percentile must still be measured under representative traffic and dependency delays.",
+          "hint": "The batch wait is the remainder after all four named allocations."
+        },
+        {
+          "id": "image-batch-wait",
+          "kind": "number",
+          "title": "Reject a batch wait that consumes the deadline",
+          "context": "The caller experiences preparation, queueing, inference, and the response together. A throughput optimization is acceptable only when its waiting time fits the complete request budget. Use the explicit allocations here rather than adding measured percentiles.",
+          "prompt": "An image classifier has a 90 ms budget: 18 ms for input preparation, 30 ms for model execution, 12 ms for policy and network, and 15 ms reserved for variance. How many milliseconds remain for batch waiting?",
+          "answer": 15,
+          "unit": "ms",
+          "mistakes": [
+            { "value": 30, "feedback": "That spends the 15 ms variance reserve. The requested allocation must preserve it." },
+            { "value": 27, "feedback": "That omits the 12 ms policy and network allocation; those stages occur before the caller receives the result." },
+            { "value": 60, "feedback": "Execution is only one stage. Preparation, response work, and the reserve also consume the budget." }
+          ],
+          "explanation": "90 − 18 − 30 − 12 − 15 = 15 ms. For example, a 20 ms batch wait would exceed the allocation by 5 ms. A faster kernel alone does not establish that the complete service meets its latency target.",
+          "hint": "Subtract preparation, execution, response, and reserve from the total."
+        }
+      ]
+    },
+    {
+      "id": "reversible-serving-release",
+      "variants": [
+        {
+          "id": "ranker-safe-rollout",
+          "kind": "sequence",
+          "title": "Release the complete serving contract",
+          "context": "A serving contract bundles the request schema, feature definitions, preprocessing, model, and decision policy that were tested together. A shadow compares candidate outputs without affecting users; a canary exposes a small share of real decisions.",
+          "prompt": "A new ranking model changes preprocessing. Arrange this release from an untested candidate to broad traffic. Each stage must pass before the next; keep the previous compatible bundle available throughout.",
+          "items": [
+            { "id": "promote", "text": "After the canary passes, increase traffic gradually and keep rollback ready." },
+            { "id": "shadow", "text": "After benchmarks pass, shadow real inputs without changing user decisions." },
+            { "id": "package", "text": "Package the model with its preprocessing, feature schema, runtime, and policy." },
+            { "id": "canary", "text": "After shadow checks pass, canary a small traffic share with rollback guardrails." },
+            { "id": "benchmark", "text": "Benchmark the packaged contract for quality, latency, memory, and failure behavior." }
+          ],
+          "answer": ["package", "benchmark", "shadow", "canary", "promote"],
+          "explanation": "Package → benchmark → shadow → canary → gradual promotion. The unit of release is the complete compatible contract. Shadowing observes without changing decisions; a canary tests actual product effects while limiting exposure.",
+          "hint": "You need a reproducible bundle before testing, observations before exposure, and limited exposure before broad rollout."
+        },
+        {
+          "id": "serving-canary-rollback",
+          "kind": "sequence",
+          "title": "Recover after a canary breaches its guardrail",
+          "context": "Rollback restores the last known-good serving contract, not just its weights. Features and preprocessing must remain compatible. This runbook freezes expansion first, validates the retained bundle next, switches traffic, then confirms recovery before retrying a release.",
+          "prompt": "A canary is producing invalid output on an important input slice. Order the recovery runbook. The previous bundle is retained, and no traffic switch may happen before its readiness check passes.",
+          "items": [
+            { "id": "confirm", "text": "After the traffic switch, confirm the affected slice and service metrics have recovered." },
+            { "id": "restore", "text": "After readiness passes, route candidate traffic back to the previous bundle." },
+            { "id": "freeze", "text": "Stop further canary expansion when the guardrail triggers." },
+            { "id": "retest", "text": "After recovery, investigate the candidate and restart validation before another canary." },
+            { "id": "readiness", "text": "Verify the retained model, feature contract, and preprocessing are healthy together." }
+          ],
+          "answer": ["freeze", "readiness", "restore", "confirm", "retest"],
+          "explanation": "Freeze expansion → verify the previous complete bundle → restore traffic → confirm recovery → diagnose and revalidate. Swapping only model weights can leave incompatible preprocessing in place and preserve the failure.",
+          "hint": "Contain exposure, establish a healthy destination, move traffic, verify the result, then prepare any new release."
+        },
+        {
+          "id": "feature-contract-canary",
+          "kind": "sequence",
+          "title": "Keep the old model usable during a feature change",
+          "context": "A model rollback can fail if a deployment deletes the feature definitions the old model requires. During a reversible migration, serve both tested feature contracts until the new release has passed its rollout and the rollback window has ended.",
+          "prompt": "Version 2 needs different feature normalization from version 1. Both contracts can run side by side. Order this migration; do not retire version 1 until version 2 has completed observation and rollback is no longer required by the release plan.",
+          "items": [
+            { "id": "canary", "text": "After validation and shadow checks, route bounded canary traffic to the version 2 bundle." },
+            { "id": "retire", "text": "After observation and the rollback window end, retire the version 1 contract." },
+            { "id": "dual", "text": "Make version 2 features available while keeping the version 1 contract usable." },
+            { "id": "promote", "text": "After canary guardrails pass, promote version 2 and observe outcomes with version 1 retained." },
+            { "id": "validate", "text": "Benchmark and shadow the complete version 2 bundle against its new features." }
+          ],
+          "answer": ["dual", "validate", "canary", "promote", "retire"],
+          "explanation": "Support both contracts → validate the candidate → canary → promote and observe → retire the old contract after the planned rollback window. Keeping old weights without their required features would not provide a working rollback.",
+          "hint": "Make the candidate testable first. Remove the recovery path last."
+        }
+      ]
+    },
+    {
+      "id": "contain-serving-failure",
+      "variants": [
+        {
+          "id": "stale-feature-contract",
+          "kind": "choice",
+          "title": "Preserve correctness when features expire",
+          "context": "Feature freshness is part of the model's tested contract. A fallback is a deliberately approved alternative that can work without the failing dependency; it must be identified as such rather than presented as a normal model prediction.",
+          "prompt": "A recommendation model requires features no more than 60 seconds old. The feature service can return only 8-minute-old data. A local generic ranking is approved for this condition and meets the remaining deadline. What should this request do?",
+          "options": [
+            "Run the normal model and hide the feature age because stale data is better than an error.",
+            "Use the approved local ranking, mark the result as a fallback, and record the freshness failure asynchronously.",
+            "Retry the feature service without a limit until it returns fresh data."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "The inputs violate the tested 60-second contract. Hiding age makes a degraded prediction look trustworthy.",
+            "The approved local path avoids invalid inputs and the failing dependency while returning within the deadline.",
+            "Unlimited retries spend the caller's deadline and can amplify the dependency failure."
+          ],
+          "explanation": "Use the declared fallback when its safety and freshness rules hold. If no acceptable fallback exists, abstain or return an explicit unavailable result. Apparent model availability does not justify silently violating its feature contract.",
+          "hint": "Choose the path that is approved, meets the remaining deadline, and does not need fresh features from the failing service."
+        },
+        {
+          "id": "runtime-independent-fallback",
+          "kind": "choice",
+          "title": "Do not send the fallback into the same outage",
+          "context": "Failure independence means the backup path does not need the component that just failed. A smaller model is useful as a fallback only if its runtime and input requirements remain available during that failure.",
+          "prompt": "The shared GPU serving cluster is unavailable. A smaller model runs on that same cluster. A separate local heuristic is approved for temporary recommendation fallback and can respond within the deadline. What is the useful recovery action?",
+          "options": [
+            "Switch to the smaller model on the unavailable GPU cluster.",
+            "Keep all requests in an unbounded queue until the GPU cluster recovers.",
+            "Use the independent approved heuristic, identify degraded responses, and stop repeated GPU calls."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "The model is smaller, but it shares the failed runtime. It is not an independent recovery path.",
+            "Unbounded waiting cannot meet current deadlines and consumes capacity for abandoned requests.",
+            "This path survives the stated outage, respects the approved decision policy, and avoids retry amplification."
+          ],
+          "explanation": "The fallback must be operational during the actual failure. Protect the healthy path with bounded admission and cancel expired work. If a heuristic is unsuitable for a decision class, that class should abstain or fail explicitly instead.",
+          "hint": "Draw the dependency needed by each option. Which one avoids the unavailable GPU cluster?"
+        },
+        {
+          "id": "outcome-stream-outage",
+          "kind": "choice",
+          "title": "Keep analytics loss from stopping inference",
+          "context": "Outcome logging links predictions to later results for evaluation. In this serving design it is asynchronous, with bounded buffering and a declared loss policy, so an analytics outage does not become an inference outage.",
+          "prompt": "Features, model execution, and decision policy are healthy, but the outcome stream is down. This product permits bounded telemetry loss with an alert. What should the request path do?",
+          "options": [
+            "Return the healthy prediction; buffer telemetry within its limit, surface any permitted loss, and alert on the logging outage.",
+            "Block the prediction response until the outcome stream acknowledges the event.",
+            "Accumulate every event in memory without a limit so logging never loses data."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "This preserves the declared separation: inference continues while analytics degradation is bounded and visible.",
+            "A synchronous acknowledgement turns the noncritical stream into a required serving dependency.",
+            "An unbounded buffer can exhaust memory and take down the otherwise healthy serving process."
+          ],
+          "explanation": "Continue healthy inference and contain telemetry failure according to the stated policy. Bounded buffering, observable loss, and recovery preserve service capacity; silently discarding all events would also violate the required alerting and loss visibility.",
+          "hint": "The problem permits bounded, visible telemetry loss. Do not convert that analytics dependency into an unlimited wait or memory allocation."
+        }
+      ]
+    }
+  ]
+}

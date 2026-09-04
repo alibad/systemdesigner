@@ -101,7 +101,10 @@ describe('admin-managed registry metadata and lesson resources', () => {
     };
     walk(path.join(projectRoot, 'content', 'entries'));
 
-    expect(quizFiles).toHaveLength(425);
+    const sessions = JSON.parse(fs.readFileSync(path.join(projectRoot, 'content/learning/sessions.json'), 'utf8')) as Record<string, { isCheckpoint?: boolean; questionsFile?: string }>;
+    const checkpoints = Object.values(sessions).filter(step => step.isCheckpoint && step.questionsFile);
+    const registry = JSON.parse(fs.readFileSync(path.join(projectRoot, 'content/registry.json'), 'utf8'));
+    expect(quizFiles).toHaveLength(registry.length + checkpoints.length);
     for (const file of quizFiles) {
       expect(() => validateAdminQuizAsset(JSON.parse(fs.readFileSync(file, 'utf8'))), file).not
         .toThrow();

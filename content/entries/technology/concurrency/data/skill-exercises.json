@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "protect-the-transition",
+      "variants": [
+        {
+          "id": "protect-the-transition-1",
+          "kind": "sequence",
+          "title": "Keep both increments",
+          "context": "A mutex lets only one worker execute a critical section at a time. An increment contains a read, a calculation, and a write; locking only the write still allows stale reads. Assume every reader and writer uses the same mutex and this increment succeeds without an exception.",
+          "prompt": "Arrange one worker's protected increment. The shared counter starts at 7, and this worker adds 1.",
+          "items": [
+            { "id": "write", "text": "Write the calculated value 8 to the shared counter." },
+            { "id": "lock", "text": "Acquire the counter mutex before touching shared state." },
+            { "id": "unlock", "text": "Release the mutex so another worker can enter." },
+            { "id": "compute", "text": "Calculate 7 + 1 = 8 from the value just read." },
+            { "id": "read", "text": "Read the shared counter value 7 while holding the mutex." }
+          ],
+          "answer": ["lock", "read", "compute", "write", "unlock"],
+          "explanation": "Keep the entire read-modify-write inside one lock boundary. The next worker then reads the committed value 8 and can advance it to 9. In implementation, release the mutex on every exit path, including exceptions, using a finally block or the language's equivalent.",
+          "hint": "The read must already be protected, and the write must finish before the protection ends."
+        },
+        {
+          "id": "protect-the-transition-2",
+          "kind": "sequence",
+          "title": "Reserve from current stock",
+          "context": "A mutex protects an invariant only when the whole decision and update use it. For inventory, checking stock outside the lock lets two workers act on the same old count. All access to this in-memory stock uses one mutex; assume the reservation succeeds without an exception.",
+          "prompt": "Arrange one successful reservation of 1 item from stock of 3. Keep the availability check and stock update in the same critical section.",
+          "items": [
+            { "id": "compute", "text": "Confirm 3 is enough for the reservation and calculate 3 − 1 = 2." },
+            { "id": "unlock", "text": "Release the inventory mutex." },
+            { "id": "read", "text": "Read the current stock of 3 while holding the mutex." },
+            { "id": "lock", "text": "Acquire the inventory mutex." },
+            { "id": "write", "text": "Commit the remaining stock as 2 while still holding the mutex." }
+          ],
+          "answer": ["lock", "read", "compute", "write", "unlock"],
+          "explanation": "The stock check and decrement form one shared-state transition. Protecting them together prevents another cooperating worker from reserving against the same stale stock value. This local mutex covers this process's state; it does not coordinate independent processes.",
+          "hint": "Checking availability belongs after acquiring the same protection used for the update."
+        },
+        {
+          "id": "protect-the-transition-3",
+          "kind": "sequence",
+          "title": "Admit only the remaining capacity",
+          "context": "A check-then-update operation must be protected as one critical section. Otherwise two workers can both observe an available slot and exceed the limit. Every access to this local active-job count uses the same mutex; assume no exception occurs.",
+          "prompt": "The active-job count is 4 and the limit is 5. Arrange one successful admission so checking the limit and incrementing the count are protected together.",
+          "items": [
+            { "id": "read", "text": "Read active jobs = 4 while holding the mutex." },
+            { "id": "write", "text": "Commit active jobs = 5 while still holding the mutex." },
+            { "id": "compute", "text": "Check that 4 is below the limit of 5 and calculate the new count 5." },
+            { "id": "unlock", "text": "Release the mutex before running the admitted job's long task." },
+            { "id": "lock", "text": "Acquire the admission mutex." }
+          ],
+          "answer": ["lock", "read", "compute", "write", "unlock"],
+          "explanation": "The protected check and increment reserve one slot. A later caller sees 5 and cannot also admit itself. Release the short state lock before doing the long job; a complete implementation must also return the slot safely when the job finishes or is cancelled.",
+          "hint": "Reserve the slot atomically with the check; the long job does not need to hold the state lock."
+        }
+      ]
+    },
+    {
+      "id": "bounded-queue-overflow",
+      "variants": [
+        {
+          "id": "bounded-queue-overflow-1",
+          "kind": "number",
+          "title": "Account for every arriving task",
+          "context": "Backpressure makes excess work wait or rejects it instead of allowing unlimited queue growth. Use the lesson's simplified one-second window: workers complete their exact capacity first, unfinished tasks fill the stated free queue slots, and any remainder is rejected. Each worker runs one task at a time.",
+          "prompt": "There are 18 available tasks. Three workers each take 250 ms per task, and 4 queue slots are free after service. How many tasks are rejected in this window?",
+          "answer": 2,
+          "unit": "tasks rejected",
+          "mistakes": [
+            { "value": 6, "feedback": "Six tasks remain after service, but four can enter the queue. Only the remainder is rejected." },
+            { "value": 12, "feedback": "Twelve is the number completed: 3 × (1000 ÷ 250). Rejection applies to work left after service and queueing." },
+            { "value": 0, "feedback": "The workers complete 12 and the queue holds 4, accounting for only 16 of the 18 tasks." }
+          ],
+          "explanation": "Each worker completes 1000 ÷ 250 = 4 tasks, so three complete 12. Of the 6 remaining tasks, 4 queue and 2 are rejected: 18 = 12 completed + 4 queued + 2 rejected.",
+          "hint": "Calculate worker capacity, subtract it from available work, and then use the free queue slots."
+        },
+        {
+          "id": "bounded-queue-overflow-2",
+          "kind": "number",
+          "title": "Separate service from storage",
+          "context": "A bounded queue stores unfinished tasks but does not increase worker throughput. In this simplified one-second window, workers complete exact capacity first, remaining work uses free queue slots, and overflow is rejected. Every worker runs one task at a time.",
+          "prompt": "There are 34 available tasks. Four workers each take 200 ms per task, and 5 queue slots are free after service. How many tasks are rejected?",
+          "answer": 9,
+          "unit": "tasks rejected",
+          "mistakes": [
+            { "value": 14, "feedback": "Fourteen tasks remain after the workers complete 20. Five of those tasks can still be queued." },
+            { "value": 20, "feedback": "Twenty tasks are completed by the four workers; that is service capacity, not rejected work." },
+            { "value": 0, "feedback": "Workers and queue together account for 20 + 5 = 25 tasks, fewer than the 34 available." }
+          ],
+          "explanation": "Four workers complete 4 × (1000 ÷ 200) = 20 tasks. The 14 unfinished tasks fill 5 slots and leave 9 rejected: 34 = 20 completed + 5 queued + 9 rejected.",
+          "hint": "A 200 ms task means five completions per worker in one second."
+        },
+        {
+          "id": "bounded-queue-overflow-3",
+          "kind": "number",
+          "title": "Find the overload boundary",
+          "context": "Rejection is an explicit admission outcome for work that cannot be served or queued. Use a simplified one-second model: complete worker capacity first, fill available queue slots second, reject the rest. Each worker handles one task at a time with no overhead.",
+          "prompt": "There are 29 available tasks. Three workers each take 200 ms per task, and 8 queue slots are free after service. How many tasks are rejected?",
+          "answer": 6,
+          "unit": "tasks rejected",
+          "mistakes": [
+            { "value": 14, "feedback": "Fourteen tasks remain after service, but eight can be queued before any rejection." },
+            { "value": 15, "feedback": "Fifteen is the service capacity of 3 workers at 5 tasks per second each." },
+            { "value": 0, "feedback": "Only 15 tasks complete and 8 queue. Six of the 29 tasks still need an explicit rejection outcome." }
+          ],
+          "explanation": "Three workers complete 3 × (1000 ÷ 200) = 15 tasks. Of the 14 left, 8 queue and 6 are rejected: 29 = 15 completed + 8 queued + 6 rejected. A larger queue could absorb a burst, but cannot fix sustained arrivals above capacity.",
+          "hint": "Account for each task exactly once: completed, queued, or rejected."
+        }
+      ]
+    },
+    {
+      "id": "break-the-lock-cycle",
+      "variants": [
+        {
+          "id": "break-the-lock-cycle-1",
+          "kind": "choice",
+          "title": "Remove a circular wait",
+          "context": "Deadlock occurs when tasks wait on a cycle of resources held by one another. For operations needing two locks, requiring every caller to acquire them in one global order prevents that lock-order cycle. Assume these are the only locks involved.",
+          "prompt": "A transfer from account 17 to 42 locks 17 then 42. A reverse transfer locks 42 then 17. Both can run together. Which rule removes this two-lock deadlock risk while protecting both account updates?",
+          "options": [
+            "All transfers acquire the lower account ID first, then the higher ID, regardless of transfer direction.",
+            "Keep locking the source account first, but give every transfer a longer timeout.",
+            "Lock only the destination account and leave the source update unprotected."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Both directions now request 17 before 42, so one cannot hold 42 while waiting for 17 as the other does the reverse.",
+            "Waiting longer does not remove the cycle. Timeout handling may detect waiting, but it also needs a safe rollback and release contract.",
+            "Removing protection from one shared account can create races and broken balances; it does not preserve the stated invariant."
+          ],
+          "explanation": "Order locks by a stable resource property, not by request direction. Every path needing the pair must follow the same rule. The operation still needs correct updates and guaranteed lock release; lock ordering specifically removes this wait cycle.",
+          "hint": "The two request directions need to agree on which lock comes first."
+        },
+        {
+          "id": "break-the-lock-cycle-2",
+          "kind": "choice",
+          "title": "Keep opposing moves safe",
+          "context": "A global lock order prevents two workers from each holding the resource the other needs. The order must apply to every operation using the shared pair. Assume these folder locks are the only locks involved and a move must protect both folders.",
+          "prompt": "Moving a file from folder 3 to 9 locks source 3 then destination 9. Moving another file from 9 to 3 locks source 9 then destination 3. Which change prevents this opposite-order deadlock?",
+          "options": [
+            "Keep the existing order and increase the worker pool so more moves can run.",
+            "Give every move the same rule: acquire folder 3 before folder 9, independent of source and destination.",
+            "Use atomic counters for folder sizes but leave the two folder locks in opposite orders."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "More workers do not release the two held locks; they can add more tasks waiting behind the deadlock.",
+            "Both move directions now compete for folder 3 first, eliminating the cycle between these two locks.",
+            "Atomic counters do not change which folder locks each worker holds and waits for. The cycle remains."
+          ],
+          "explanation": "Destination and source describe the operation, not a safe global lock order. Ordering by folder ID gives all callers the same acquisition sequence while retaining protection for both affected folders.",
+          "hint": "Change the acquisition order itself; neither more workers nor a different counter type changes the wait cycle."
+        },
+        {
+          "id": "break-the-lock-cycle-3",
+          "kind": "choice",
+          "title": "Apply one order to every caller",
+          "context": "Two locks can deadlock when different code paths acquire them in opposite orders. An agreed global order only works if every path that needs both follows it. Assume the cache and index locks below are the only locks involved.",
+          "prompt": "The update path locks the cache and then the index. The rebuild path locks the index and then the cache. Both need to change the two protected structures together. Which repair prevents this lock-order cycle?",
+          "options": [
+            "Leave both orders unchanged, but add a sleep after acquiring the first lock.",
+            "Change only the update path to release all locking permanently.",
+            "Require both update and rebuild to acquire the cache lock before the index lock."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Sleeping while holding the first lock does not break the cycle and can make overlap easier to trigger.",
+            "Unprotected updates can violate the relationship between cache and index while the other path still assumes locking.",
+            "Both paths now request the same first lock, so they cannot each hold a different first lock and wait for the other."
+          ],
+          "explanation": "The particular chosen order is less important than consistent adoption across every path using this pair. Test both paths together and audit any new caller for the same ordering and release contract.",
+          "hint": "A lock-order rule must cover both paths that acquire the pair."
+        }
+      ]
+    }
+  ]
+}

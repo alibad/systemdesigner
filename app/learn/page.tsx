@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import DailyLearningPath from "@/components/learning/DailyLearningPath";
 
 export const metadata: Metadata = {
-  title: "Daily Learning Path",
+  title: "Learn System Design, Coding, GenAI & ML",
   description:
-    "Build a daily habit with short system design lessons, JavaScript coding exercises, skill reviews, and a clear path forward.",
+    "Build engineering skills across four courses with 43 units, lesson checkpoints, runnable JavaScript exercises, and spaced reviews.",
   alternates: { canonical: "/learn" },
 };
 

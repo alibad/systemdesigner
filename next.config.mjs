@@ -1,5 +1,3 @@
-import withPWA from 'next-pwa';
-
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
@@ -40,25 +38,5 @@ const nextConfig = {
   }
 };
 
-// Temporarily disable PWA to debug build issues
-// export default withPWA({
-//   dest: 'public',
-//   register: true,
-//   skipWaiting: true,
-//   disable: process.env.NODE_ENV === 'development',
-//   runtimeCaching: [
-//     {
-//       urlPattern: /^https?.*/,
-//       handler: 'NetworkFirst',
-//       options: {
-//         cacheName: 'offlineCache',
-//         expiration: {
-//           maxEntries: 200,
-//           maxAgeSeconds: 24 * 60 * 60 * 30, // 30 days
-//         },
-//       },
-//     },
-//   ],
-// })(nextConfig);
-
+// /learn registers public/learning-sw.js for explicitly allowed learning assets.
 export default nextConfig;

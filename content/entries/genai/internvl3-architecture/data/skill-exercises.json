@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "multimodal-budget",
+      "variants": [
+        {
+          "id": "multimodal-budget-1",
+          "kind": "number",
+          "title": "Leave room for the answer",
+          "context": "Visual tokens share a context window with the instruction and generated answer. Admission must satisfy both the complete context limit and any separate visual-token limit. These are hypothetical serving-policy numbers, not an InternVL3 benchmark. Assume all metadata and special-token overhead is included in the stated reserves.",
+          "prompt": "The context limit is 8,192 tokens. Reserve 1,400 for text and 900 for the answer; allow at most 4,000 visual tokens. Each complete image uses 4 tiles of 256 tokens, with no compression. What is the maximum whole number of images this fixed policy admits?",
+          "answer": 3,
+          "unit": "whole images",
+          "mistakes": [
+            { "value": 4, "feedback": "Four images need 4,096 visual tokens, exceeding the separate 4,000-token visual limit." },
+            { "value": 5, "feedback": "Five images fit the 5,892 tokens left in the context, but their 5,120 visual tokens exceed the stricter 4,000-token visual limit." },
+            { "value": 7, "feedback": "Seven images need 7,168 visual tokens. This ignores both the text/output reserve and the separate visual limit." }
+          ],
+          "explanation": "The context leaves 8,192 − 1,400 − 900 = 5,892 tokens. The visual limit reduces that allowance to 4,000. Each image uses 4 × 256 = 1,024 tokens, so floor(4,000 ÷ 1,024) = 3 images. A fourth image exceeds the policy even though it would fit the total context.",
+          "hint": "Use the smaller of the remaining context and the visual-token limit, then divide by tokens per complete image."
+        },
+        {
+          "id": "multimodal-budget-2",
+          "kind": "number",
+          "title": "Budget sampled video frames",
+          "context": "A video request spends visual tokens on every sampled frame. Text and output reserves must remain available even when the vision path has its own larger allowance. The numbers here are a hypothetical admission exercise, with all formatting overhead already included.",
+          "prompt": "A request has a 4,096-token context, an 800-token text reserve, a 600-token answer reserve, and a 3,600-token visual limit. Each complete sampled frame uses 2 tiles of 256 tokens, without compression. How many whole frames fit?",
+          "answer": 5,
+          "unit": "whole frames",
+          "mistakes": [
+            { "value": 6, "feedback": "Six frames need 3,072 visual tokens. Adding the 1,400 reserved tokens reaches 4,472, above the context limit." },
+            { "value": 7, "feedback": "Seven frames fit the separate visual limit, but their 3,584 tokens plus the 1,400-token reserve exceed the total context." },
+            { "value": 8, "feedback": "Eight frames alone consume all 4,096 context tokens and exceed the visual limit, leaving no room for the instruction or answer." }
+          ],
+          "explanation": "Available visual space is min(4,096 − 800 − 600, 3,600) = 2,696 tokens. Each frame needs 512, so five frames use 2,560 and six would need 3,072. Choosing which five frames preserve the needed motion is a separate, explicit sampling decision.",
+          "hint": "The tighter limit here is the context space remaining after both reserves."
+        },
+        {
+          "id": "multimodal-budget-3",
+          "kind": "number",
+          "title": "Count complete pages",
+          "context": "Dense document pages may need several tiles each. A fixed tiling policy must fit complete pages without silently dropping the last tiles. This exercise uses hypothetical token limits, not measured model capacity; all nonvisual overhead is included in the reserves.",
+          "prompt": "The context limit is 6,144 tokens. Text needs 1,500 tokens and the answer reserves 1,200. The visual limit is 5,000 tokens. Each page uses 6 tiles of 256 tokens, with no compression. What is the maximum whole number of complete pages that fit?",
+          "answer": 2,
+          "unit": "whole pages",
+          "mistakes": [
+            { "value": 3, "feedback": "Three pages use 4,608 visual tokens. They fit the visual limit but total 7,308 with the reserves, exceeding the context limit." },
+            { "value": 4, "feedback": "Four pages use all 6,144 context tokens before any text or answer is included, and also exceed the visual limit." }
+          ],
+          "explanation": "The usable allowance is min(6,144 − 1,500 − 1,200, 5,000) = 3,444 tokens. A complete page costs 6 × 256 = 1,536 tokens. Two pages use 3,072; three need 4,608. A request with more pages needs an explicit selection or transformation policy.",
+          "hint": "Subtract both reserves first; round the final page count down because partial pages do not satisfy this policy."
+        }
+      ]
+    },
+    {
+      "id": "preserve-visual-evidence",
+      "variants": [
+        {
+          "id": "preserve-visual-evidence-1",
+          "kind": "sequence",
+          "title": "Trace a document into the model",
+          "context": "A vision-language pipeline turns regions of an image into features and then into language-model input. Its metadata must preserve which page and region produced each feature. This serving policy validates media and approves a token plan before spending encoder work.",
+          "prompt": "Order the document request path. The budget plan uses validated page dimensions, encoding uses that approved plan, and generation consumes the packed features.",
+          "items": [
+            { "id": "pack", "text": "Project the encoded features and pack them with page IDs, tile coordinates, token offsets, and the text." },
+            { "id": "validate", "text": "Validate and decode the pages; record dimensions, orientation, and stable page IDs." },
+            { "id": "answer", "text": "Generate within the answer reserve, then check that extracted claims reference the correct page regions." },
+            { "id": "budget", "text": "Use the validated dimensions to approve a tile plan that preserves the text and answer reserves." },
+            { "id": "encode", "text": "Create the approved page tiles and encode each one while keeping its source mapping." }
+          ],
+          "answer": ["validate", "budget", "encode", "pack", "answer"],
+          "explanation": "Validation establishes trustworthy media metadata. The approved plan bounds encoder work; encoding preserves tile identity; projection and packing carry that identity into the language input. Output checks then connect claims back to the original pages.",
+          "hint": "The plan needs valid dimensions, the packer needs encoded features, and the answer needs the completed packed request."
+        },
+        {
+          "id": "preserve-visual-evidence-2",
+          "kind": "sequence",
+          "title": "Keep before and after distinct",
+          "context": "A screenshot comparison must retain which regions belong to the before image and which belong to the after image. Equal feature dimensions alone do not preserve that meaning. This policy approves the complete input budget before encoding either image.",
+          "prompt": "Arrange this comparison pipeline so every later stage receives both the evidence and the source identity it needs.",
+          "items": [
+            { "id": "encode", "text": "Encode the selected tiles, keeping each attached to its before/after media ID and coordinates." },
+            { "id": "budget", "text": "Approve a tiling plan for both validated images, leaving room for the comparison prompt and answer." },
+            { "id": "answer", "text": "Generate the comparison and verify that each claimed change points to the correct before/after regions." },
+            { "id": "validate", "text": "Decode and validate both screenshots; assign stable before and after media IDs." },
+            { "id": "pack", "text": "Project and pack the resulting features without mixing the two media groups; retain tile offsets." }
+          ],
+          "answer": ["validate", "budget", "encode", "pack", "answer"],
+          "explanation": "A budget-compliant request can still be wrong if the images are swapped or their tiles are mixed. Retain before/after identity from validation through encoding and packing, then use that mapping when checking the comparison.",
+          "hint": "Assign source identity before creating features, and preserve it until the comparison is checked."
+        },
+        {
+          "id": "preserve-visual-evidence-3",
+          "kind": "sequence",
+          "title": "Keep the clip in time order",
+          "context": "Video understanding depends on which sampled frame came first and how far apart samples were taken. A token sequence without frame identity can lose that temporal meaning. This request policy chooses a bounded sampling plan before encoding frames.",
+          "prompt": "Order the clip-processing path. The sampling plan depends on validated clip metadata, and output verification depends on the retained frame timestamps.",
+          "items": [
+            { "id": "answer", "text": "Generate the event description and check its claimed ordering against the retained frame timestamps." },
+            { "id": "pack", "text": "Project and pack the encoded features in the approved frame order, preserving timestamps and tile offsets." },
+            { "id": "validate", "text": "Validate and decode the clip metadata, including duration, frame timing, and orientation." },
+            { "id": "encode", "text": "Sample and encode the approved frames and tiles, carrying frame IDs and timestamps with each feature group." },
+            { "id": "budget", "text": "Approve a frame-sampling and tiling plan using that metadata and the remaining visual-token budget." }
+          ],
+          "answer": ["validate", "budget", "encode", "pack", "answer"],
+          "explanation": "Validate the timeline, choose what evidence fits, encode that selection, and preserve frame order through packing. Verification must respect the sampling gaps: a model cannot establish events that occurred only in unsampled frames.",
+          "hint": "Sampling needs the clip metadata; temporal verification needs the frame identities that the middle stages preserve."
+        }
+      ]
+    },
+    {
+      "id": "honest-degraded-route",
+      "variants": [
+        {
+          "id": "honest-degraded-route-1",
+          "kind": "choice",
+          "title": "Do not invent visual inspection",
+          "context": "A text-only fallback has no visual evidence. It is appropriate only when the product can complete a clearly labeled subset of the task without the image. A fluent answer does not establish that the image was inspected.",
+          "prompt": "A user asks for the serial number printed in a photograph. No transcription is supplied, and the vision encoder is unavailable. Which response respects the evidence boundary?",
+          "options": [
+            "Ask the language model to infer a plausible serial number from the product name.",
+            "Run text-only inference and label its guessed serial number as visually verified.",
+            "Explain that visual reading is unavailable and defer extraction or ask the user for a transcription."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "The product name does not establish the characters printed on this specific item.",
+            "Changing the route does not supply the missing image evidence, and the verification claim would be false.",
+            "The requested value depends on unavailable pixels. Deferral or an explicit user transcription provides an honest next step."
+          ],
+          "explanation": "This task has no useful visual-extraction result without the image. A transcription could support a later text task, but it would be user-supplied evidence rather than an independently verified reading of the photo.",
+          "hint": "Which option avoids claiming knowledge of characters that the system could not read?"
+        },
+        {
+          "id": "honest-degraded-route-2",
+          "kind": "choice",
+          "title": "Handle a missing comparison input",
+          "context": "Comparing two images requires evidence from both. Validation failure must remain visible; dropping a failed input can turn a comparison into an unsupported story about change.",
+          "prompt": "The before screenshot decodes correctly, but the after screenshot is corrupt. The user asks which button moved. What should the service do?",
+          "options": [
+            "Report the failed after image and request a replacement before identifying a moved button.",
+            "Use the before screenshot twice so that the request still contains two images.",
+            "Silently omit the after screenshot and infer the move from the interface's usual layout."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "The comparison needs the missing after evidence. A replacement upload can restore the task's required inputs.",
+            "Duplicating an input fabricates a before/after pair and can wrongly imply that nothing changed.",
+            "A typical layout is not evidence of what happened in this user's after screenshot."
+          ],
+          "explanation": "Reject or retry the invalid media boundary before making the comparison. The service could describe the valid before image if the user requests that narrower task, but it cannot identify a change without after evidence.",
+          "hint": "One valid image can support a description, but it cannot establish a difference between two states."
+        },
+        {
+          "id": "honest-degraded-route-3",
+          "kind": "choice",
+          "title": "Offer the useful text subset",
+          "context": "Some requests contain all necessary information in text and only an optional image. When visual processing fails, a product may still answer the text question if it states the missing modality and avoids visual claims.",
+          "prompt": "A user pastes a complete error message and asks what its code means; a screenshot is optional supporting context. The vision worker is unavailable, but the text model is healthy. Which route fits?",
+          "options": [
+            "Claim to have checked the screenshot because the pasted error text is readable.",
+            "Explain the pasted error text and clearly state that the screenshot was not inspected.",
+            "Keep retrying the vision worker without a deadline even though the text question can be answered."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "Reading pasted text does not verify the screenshot or any additional context it might contain.",
+            "The requested explanation can use the supplied text while keeping the unavailable visual evidence explicit.",
+            "An unbounded retry adds delay without being required for this text-only subset of the task."
+          ],
+          "explanation": "The safe subset here is explaining the supplied message. Label the response as based on that text and avoid assertions about screen state, button location, or anything else that requires visual inspection.",
+          "hint": "The error code is already supplied as text; separate that evidence from the optional screenshot."
+        }
+      ]
+    }
+  ]
+}

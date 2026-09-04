@@ -2,7 +2,8 @@
 
 ## Continuing the Daily Learning Experience
 - When continuing the gamified system-design or coding experience, read `ROADMAP.md`, `docs/CONTINUE_DEVELOPMENT.md`, and `docs/daily-learning-path.md` before changing its architecture or curriculum.
-- `/learn` contains the working six-step starter. The next milestone is portable progress; the handoff records its current limitations and acceptance criteria.
+- `/learn` has four courses, 43 units, 264 sessions, and 227 explicit skills. Placement and adaptive review span every course; a 30-study-day guided journey connects design and coding with four review days and a final build. All 202 lesson sessions have mixed practice: 23 hand-authored packs and 179 packs derived from existing lesson content, totaling 785 groups and 2,009 variants. Use the shared exercise schema; authored packs override generated practice through the course outline. Version 5 progress restores interrupted attempts and retains bounded coding draft history. Keep learning and progression primary; account sync and backups belong in settings.
+- Author course organization in `content/learning/course-outline.json`, preserve existing step IDs, and run `pnpm generate:learning` after changing course sources or assessments. `pnpm validate:learning` checks generated catalog/session/checkpoint drift.
 - Keep `ROADMAP.md` and the handoff current when milestones change. The app's `/roadmap` page renders the root roadmap directly.
 
 ## Git Delivery Workflow
