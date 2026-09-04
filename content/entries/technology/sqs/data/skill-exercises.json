@@ -1,0 +1,387 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "sqs-lease-flow",
+      "variants": [
+        {
+          "id": "sqs-lease-flow-1",
+          "kind": "sequence",
+          "title": "Treat visibility as a lease",
+          "context": "Receive does not mean complete. A receive leases the message through a visibility timeout; the message is complete only after the consumer’s durable work succeeds and DeleteMessage succeeds with the current receipt handle.",
+          "prompt": "A worker processes messages from a queue. Put the lease protocol in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Long-poll a bounded batch that can finish within the lease."
+            },
+            {
+              "id": "s2",
+              "text": "Validate the contract before any side effect."
+            },
+            {
+              "id": "s3",
+              "text": "Apply the work with an idempotency key written atomically with the effect."
+            },
+            {
+              "id": "s4",
+              "text": "Extend visibility only while the worker can prove live progress."
+            },
+            {
+              "id": "s5",
+              "text": "Delete with the current receipt handle after success, checking each batch entry."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Deletion is the completion event, and it comes last.",
+          "explanation": "Receive → validate → apply with key → heartbeat live work → delete the receipt. Batch deletes can fail per entry."
+        },
+        {
+          "id": "sqs-lease-flow-2",
+          "kind": "sequence",
+          "title": "Treat visibility as a lease",
+          "context": "Receive does not mean complete. A receive leases the message through a visibility timeout; the message is complete only after the consumer’s durable work succeeds and DeleteMessage succeeds with the current receipt handle.",
+          "prompt": "A message needs a long-running job. Put the steps in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Receive a small batch under long polling."
+            },
+            {
+              "id": "s2",
+              "text": "Reject unsupported versions deliberately rather than burning transient retries."
+            },
+            {
+              "id": "s3",
+              "text": "Write the operation key and effect together at the destination."
+            },
+            {
+              "id": "s4",
+              "text": "Call ChangeMessageVisibility while the job is genuinely progressing."
+            },
+            {
+              "id": "s5",
+              "text": "Delete the current receipt once the job’s result is durable."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Heartbeats extend only live work.",
+          "explanation": "Stop extending when the worker loses ownership or cannot prove progress."
+        },
+        {
+          "id": "sqs-lease-flow-3",
+          "kind": "sequence",
+          "title": "Treat visibility as a lease",
+          "context": "Receive does not mean complete. A receive leases the message through a visibility timeout; the message is complete only after the consumer’s durable work succeeds and DeleteMessage succeeds with the current receipt handle.",
+          "prompt": "A worker crashes mid-batch. Put what happens next in order, from the surviving flow’s view.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Messages were received and made invisible for the lease period."
+            },
+            {
+              "id": "s2",
+              "text": "Validation had passed for the ones in flight."
+            },
+            {
+              "id": "s3",
+              "text": "Any effect already applied is keyed, so a repeat becomes a no-op."
+            },
+            {
+              "id": "s4",
+              "text": "Nobody extends the lease, so visibility expires."
+            },
+            {
+              "id": "s5",
+              "text": "Another worker receives the same messages and completes with delete."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "An expired lease is how the queue recovers from a dead worker.",
+          "explanation": "Idempotency at the effect boundary makes the redelivery safe."
+        }
+      ]
+    },
+    {
+      "id": "sqs-queue-type",
+      "variants": [
+        {
+          "id": "sqs-queue-type-1",
+          "kind": "choice",
+          "title": "Choose the queue type",
+          "context": "Standard queues give at-least-once delivery and best-effort ordering for independent work. FIFO queues preserve order within a MessageGroupId and suppress duplicate sends by deduplication ID; one hot or blocked group stays serial. Neither makes an external side effect exactly once.",
+          "prompt": "Thumbnail jobs are independent, duplicates are harmless, and throughput matters most. Which queue?",
+          "options": [
+            "Standard.",
+            "FIFO with one message group.",
+            "FIFO with a group per job."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Standard queues fit independent, duplicate-safe work at scale.",
+            "One group makes everything serial.",
+            "Per-job groups add ordering machinery for nothing."
+          ],
+          "hint": "Does anything need order?",
+          "explanation": "Choose Standard when messages can run independently and effects are idempotent."
+        },
+        {
+          "id": "sqs-queue-type-2",
+          "kind": "choice",
+          "title": "Choose the queue type",
+          "context": "Standard queues give at-least-once delivery and best-effort ordering for independent work. FIFO queues preserve order within a MessageGroupId and suppress duplicate sends by deduplication ID; one hot or blocked group stays serial. Neither makes an external side effect exactly once.",
+          "prompt": "Events for one account must be processed in order, but accounts are independent. Which queue?",
+          "options": [
+            "FIFO with MessageGroupId per account.",
+            "Standard.",
+            "FIFO with a single group for all accounts."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Order within a group; different groups run concurrently.",
+            "Standard gives best-effort ordering only.",
+            "A single group serializes every account."
+          ],
+          "hint": "What is the smallest entity that needs order?",
+          "explanation": "Group by the smallest entity that needs order."
+        },
+        {
+          "id": "sqs-queue-type-3",
+          "kind": "choice",
+          "title": "Choose the queue type",
+          "context": "Standard queues give at-least-once delivery and best-effort ordering for independent work. FIFO queues preserve order within a MessageGroupId and suppress duplicate sends by deduplication ID; one hot or blocked group stays serial. Neither makes an external side effect exactly once.",
+          "prompt": "A FIFO queue deduplicates sends. Does the consumer’s card charge now happen exactly once?",
+          "options": [
+            "No. Deduplication covers sends; a crash before delete can still repeat processing.",
+            "Yes.",
+            "Yes, if the deduplication ID is the charge ID."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "SQS cannot atomically combine DeleteMessage with an external system.",
+            "Send dedup is not processing dedup.",
+            "The ID stops duplicate sends, not duplicate processing."
+          ],
+          "hint": "Which boundary does deduplication cover?",
+          "explanation": "Put the idempotency record and business mutation in one destination transaction when possible."
+        }
+      ]
+    },
+    {
+      "id": "sqs-recovery-math",
+      "variants": [
+        {
+          "id": "sqs-recovery-math-1",
+          "kind": "number",
+          "title": "Size for recovery",
+          "context": "Outage backlog = arrival rate × outage seconds. Catch-up rate = consumer capacity − ongoing arrival rate. Recovery time = outage backlog ÷ catch-up rate. FIFO active workers cannot exceed the number of available message groups.",
+          "prompt": "Messages arrive at 200 per second and consumers are paused for 600 seconds during a deploy. How large is the outage backlog?",
+          "answer": 120000,
+          "unit": "messages",
+          "hint": "Arrival rate × outage seconds.",
+          "explanation": "200 × 600 = 120,000 messages waiting when consumers return.",
+          "mistakes": [
+            {
+              "value": 200,
+              "feedback": "Multiply by the outage duration."
+            },
+            {
+              "value": 12000,
+              "feedback": "600 seconds, not 60."
+            }
+          ]
+        },
+        {
+          "id": "sqs-recovery-math-2",
+          "kind": "number",
+          "title": "Size for recovery",
+          "context": "Outage backlog = arrival rate × outage seconds. Catch-up rate = consumer capacity − ongoing arrival rate. Recovery time = outage backlog ÷ catch-up rate. FIFO active workers cannot exceed the number of available message groups.",
+          "prompt": "Consumers sustain 350 per second while arrivals continue at 200 per second. What is the catch-up rate?",
+          "answer": 150,
+          "unit": "messages per second",
+          "hint": "Capacity minus ongoing arrivals.",
+          "explanation": "350 − 200 = 150 messages per second of backlog drained.",
+          "mistakes": [
+            {
+              "value": 350,
+              "feedback": "Ongoing arrivals consume part of the capacity."
+            },
+            {
+              "value": 550,
+              "feedback": "Subtract, do not add."
+            }
+          ]
+        },
+        {
+          "id": "sqs-recovery-math-3",
+          "kind": "number",
+          "title": "Size for recovery",
+          "context": "Outage backlog = arrival rate × outage seconds. Catch-up rate = consumer capacity − ongoing arrival rate. Recovery time = outage backlog ÷ catch-up rate. FIFO active workers cannot exceed the number of available message groups.",
+          "prompt": "A 120,000-message backlog drains at 150 per second. How many seconds until it is gone?",
+          "answer": 800,
+          "unit": "seconds",
+          "hint": "Backlog ÷ catch-up rate.",
+          "explanation": "120,000 ÷ 150 = 800 seconds. Check that against the business deadline before approving the deploy window.",
+          "mistakes": [
+            {
+              "value": 343,
+              "feedback": "Divide by the catch-up rate of 150, not the full capacity of 350."
+            },
+            {
+              "value": 600,
+              "feedback": "Recovery takes longer than the outage when spare capacity is small."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sqs-receive-vs-complete",
+      "variants": [
+        {
+          "id": "sqs-receive-vs-complete-1",
+          "kind": "choice",
+          "title": "Read the failure",
+          "context": "The most important SQS failure happens after the business operation succeeds but before the receipt is deleted; SQS sees that as unfinished work and redelivers. Visibility must cover processing time, or extend it only for live work.",
+          "prompt": "The order was written, then DeleteMessage failed. What does SQS do?",
+          "options": [
+            "Redeliver the message after visibility expires; the consumer must treat it as a duplicate.",
+            "Nothing; the work succeeded.",
+            "Move it to the DLQ immediately."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "SQS cannot distinguish a failed delete from a crashed worker.",
+            "SQS never saw the completion.",
+            "DLQ only after maxReceiveCount."
+          ],
+          "hint": "What did SQS observe?",
+          "explanation": "Idempotency at the business-effect boundary is what makes this failure harmless."
+        },
+        {
+          "id": "sqs-receive-vs-complete-2",
+          "kind": "choice",
+          "title": "Read the failure",
+          "context": "The most important SQS failure happens after the business operation succeeds but before the receipt is deleted; SQS sees that as unfinished work and redelivers. Visibility must cover processing time, or extend it only for live work.",
+          "prompt": "Processing takes 90 seconds but visibility is the 30-second default. What happens?",
+          "options": [
+            "Another consumer receives the same message while the first is still working.",
+            "The first consumer is cancelled.",
+            "SQS extends visibility automatically."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Extend visibility for live work or shorten the batch.",
+            "SQS does not cancel workers.",
+            "Extension is the consumer’s job via ChangeMessageVisibility."
+          ],
+          "hint": "Who owns the lease length?",
+          "explanation": "Keep each batch small enough that every message can finish before its lease expires."
+        },
+        {
+          "id": "sqs-receive-vs-complete-3",
+          "kind": "choice",
+          "title": "Read the failure",
+          "context": "The most important SQS failure happens after the business operation succeeds but before the receipt is deleted; SQS sees that as unfinished work and redelivers. Visibility must cover processing time, or extend it only for live work.",
+          "prompt": "A message has been received more times than maxReceiveCount. Where does it go?",
+          "options": [
+            "To the dead-letter queue configured by the redrive policy.",
+            "Back to the front of the queue.",
+            "It is deleted."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A DLQ isolates poison messages from healthy work.",
+            "Redrive policy moves it out.",
+            "It is preserved for diagnosis, not deleted."
+          ],
+          "hint": "What protects healthy work from an endlessly failing message?",
+          "explanation": "The DLQ preserves context; someone still has to diagnose and replay."
+        }
+      ]
+    },
+    {
+      "id": "sqs-dlq-policy",
+      "variants": [
+        {
+          "id": "sqs-dlq-policy-1",
+          "kind": "choice",
+          "title": "Classify the failure",
+          "context": "A dead-letter queue isolates messages that exceed maxReceiveCount. Retry timeouts, throttling, and brief outages with backoff and jitter; quarantine invalid schemas and deterministic business-rule failures. The DLQ does not diagnose, repair, or replay by itself.",
+          "prompt": "A message fails because its schema version is unsupported. Retry with backoff?",
+          "options": [
+            "No. Quarantine it; a deterministic contract error should not consume transient retries.",
+            "Yes, up to maxReceiveCount.",
+            "Yes, forever."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Permanent failures go to quarantine unless a code or data change can repair them.",
+            "Retrying a deterministic failure just burns the budget.",
+            "Infinite retries hide incidents."
+          ],
+          "hint": "Can this failure recover on its own?",
+          "explanation": "Classify before retrying: transient versus deterministic."
+        },
+        {
+          "id": "sqs-dlq-policy-2",
+          "kind": "choice",
+          "title": "Classify the failure",
+          "context": "A dead-letter queue isolates messages that exceed maxReceiveCount. Retry timeouts, throttling, and brief outages with backoff and jitter; quarantine invalid schemas and deterministic business-rule failures. The DLQ does not diagnose, repair, or replay by itself.",
+          "prompt": "A downstream API throttles the consumer. Retry?",
+          "options": [
+            "Yes, with backoff and jitter within the receive budget.",
+            "No; quarantine immediately.",
+            "Yes, immediately and repeatedly."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Throttling is transient.",
+            "Quarantining transient failures hides capacity problems.",
+            "Immediate retries worsen throttling."
+          ],
+          "hint": "Is throttling permanent?",
+          "explanation": "Retry timeouts, throttling, and brief outages with backoff and jitter."
+        },
+        {
+          "id": "sqs-dlq-policy-3",
+          "kind": "choice",
+          "title": "Classify the failure",
+          "context": "A dead-letter queue isolates messages that exceed maxReceiveCount. Retry timeouts, throttling, and brief outages with backoff and jitter; quarantine invalid schemas and deterministic business-rule failures. The DLQ does not diagnose, repair, or replay by itself.",
+          "prompt": "Does a DLQ repair and replay poison messages by itself?",
+          "options": [
+            "No. It isolates them; diagnosis, repair, and replay are operator workflows.",
+            "Yes.",
+            "Yes, after a delay."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Preserve context so someone can repair and replay safely.",
+            "Isolation is not repair.",
+            "Time does not fix data."
+          ],
+          "hint": "What does quarantine actually do?",
+          "explanation": "Quarantine poison messages without hiding incidents: alert on DLQ age and ownership."
+        }
+      ]
+    }
+  ]
+}

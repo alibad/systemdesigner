@@ -138,6 +138,19 @@ try {
     await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
   ).toBe(true);
   await page.screenshot({ path: `${output}/phone-part-two-start.png` });
+  // A returning learner with many due skills gets a bounded set first, not a wall of cards.
+  await expect(page.getByText(/^Today’s set: 5 of \d+ due skills\.$/)).toBeVisible();
+  await page.getByRole("tab", { name: /^Practice/ }).click();
+  const review = page.getByRole("tabpanel");
+  await expect(review.getByText(/^Today’s set: 5 of \d+ due skills\./)).toBeVisible();
+  const cards = review.getByRole("button", { name: /min$/ });
+  await expect(cards).toHaveCount(5);
+  await review.getByRole("button", { name: /^Show all \d+ due skills$/ }).click();
+  expect(await cards.count()).toBeGreaterThan(5);
+  await review.getByRole("button", { name: "Show today’s set", exact: true }).click();
+  await expect(cards).toHaveCount(5);
+  await page.screenshot({ path: `${output}/phone-review-set.png` });
+  await page.getByRole("tab", { name: /^Learn/ }).click();
   // The full path lists every part; part one is complete and part two is current.
   await page.getByText("Explore the full path", { exact: true }).click();
   await expect(page.locator("summary", { hasText: /^Part 1 · / })).toContainText("30/30");

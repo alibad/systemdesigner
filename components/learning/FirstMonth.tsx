@@ -34,6 +34,7 @@ import {
 } from "@/lib/learning-path";
 import type { useDailyLearning } from "@/hooks/useDailyLearning";
 import { adaptiveReviewQueue } from "@/lib/learning-evidence";
+import { DAILY_REVIEW_SET } from "./AdaptiveReviewPanel";
 import SystemScene from "./SystemScene";
 
 export default function FirstMonth({
@@ -147,8 +148,9 @@ export default function FirstMonth({
               A little recall goes a long way
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              {due.length} {due.length === 1 ? "skill is" : "skills are"} ready
-              to revisit.
+              {due.length > DAILY_REVIEW_SET
+                ? `Today’s set: ${DAILY_REVIEW_SET} of ${due.length} due skills.`
+                : `${due.length} ${due.length === 1 ? "skill is" : "skills are"} ready to revisit.`}
             </p>
           </div>
           <button

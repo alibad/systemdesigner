@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { ArrowRight, Check, RotateCcw } from "lucide-react";
 import { adaptiveReviewQueue } from "@/lib/learning-evidence";
 import {
@@ -8,6 +9,8 @@ import {
   type LearningStep,
   type PathProgress,
 } from "@/lib/learning-path";
+
+export const DAILY_REVIEW_SET = 5;
 
 export default function AdaptiveReviewPanel({
   progress,
@@ -21,6 +24,10 @@ export default function AdaptiveReviewPanel({
   onBack: () => void;
 }) {
   const due = today ? adaptiveReviewQueue(progress, today) : [];
+  // A returning learner can have dozens of due skills. Offer a bounded set first so the
+  // next step stays small; the full queue stays one tap away.
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? due : due.slice(0, DAILY_REVIEW_SET);
   const states = Object.values(progress.skillReview || {});
   const nextDate = states
     .map((state) => state.reviewOn)
@@ -60,7 +67,13 @@ export default function AdaptiveReviewPanel({
       )}
       {due.length ? (
         <div className="space-y-3">
-          {due.map(({ step, reason, status }) => (
+          {due.length > DAILY_REVIEW_SET && (
+            <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-300">
+              Today’s set: {Math.min(DAILY_REVIEW_SET, due.length)} of {due.length}{" "}
+              due skills. Mistakes come first, then the longest-overdue checks.
+            </p>
+          )}
+          {visible.map(({ step, reason, status }) => (
             <button
               key={step.id}
               onClick={() => begin(step)}
@@ -81,6 +94,17 @@ export default function AdaptiveReviewPanel({
               <ArrowRight className="h-4 w-4 shrink-0 text-neutral-400" />
             </button>
           ))}
+          {due.length > DAILY_REVIEW_SET && (
+            <button
+              onClick={() => setShowAll((value) => !value)}
+              aria-expanded={showAll}
+              className="min-h-11 text-sm font-semibold text-emerald-700 underline underline-offset-4 dark:text-emerald-400"
+            >
+              {showAll
+                ? "Show today’s set"
+                : `Show all ${due.length} due skills`}
+            </button>
+          )}
         </div>
       ) : (
         <div className="rounded-2xl border border-dashed border-neutral-300 p-8 dark:border-neutral-700">

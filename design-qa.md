@@ -148,3 +148,32 @@ Logs and captures: `.artifacts/journey-continuation/` (suite logs including the 
 ### Limits
 
 The second-month chapter is browser-verified end to end; days 39–130 are verified by unit tests over the real prerequisite gates and by the curriculum sweep of every lesson, not by a browser walk of each study day. Authored practice covers the first five design units and selected later lessons; the remaining 169 packs are still derived. The streak chip, hand-off buttons, and full-path listing were reviewed at 390×844 and 1440×1000 in light mode; dark-mode captures of the new elements come from the existing suites’ small-screen dark check. Physical devices, screen readers, and a live signed-in two-device session remain unverified.
+
+## Month-two and month-three practice and a bounded review set
+
+Date: September 4, 2026, after release `041b246b`. Scope: the open items from the previous section that could be completed in the repository: authored practice for the next units the journey reaches, and the returning-learner review overload.
+
+| Severity | Finding | Resolution |
+| --- | --- | --- |
+| P2 | Journey days 50–57 (service interfaces) and 61–72 (asynchronous systems) still used derived matching plus three source questions each, so the second and third months dropped back to recognition tasks right after the authored data-at-scale chapter. | Thirteen authored packs (65 groups, 195 variants): page-limit, resolver fan-out, deadline-budget, gateway-fleet, queue-backlog and drain, retained-bytes, quorum, and recovery-window calculations; ordered protocols for the contract, idempotency, WebSocket admission and resume, HTTP/2 streams, partition planning, the outbox path, and the SQS lease; scenario decisions with option-specific feedback. Answers were checked against the lesson sources, including the RFC 9218 urgency scale, Chrome 106 push default, SQS visibility bounds, and Raft majority rule stated there. |
+| P2 | A learner returning after a break saw “23 skills are ready to revisit” on the trail and 23 cards on the Practice tab, with no suggested first step beyond the top card. | Both surfaces present a bounded daily set of five in the existing priority order (mistakes first, then longest overdue) and a “Show all” toggle. The queue, evidence, and scheduling are unchanged; the bound is display-only. |
+
+### Intentional adaptations
+
+- The review set bound is five because a lesson session is three to seven minutes and the daily goal maximum is three sessions; five reviews plus one new lesson keeps a day under an hour. The number is a product default, not a calibrated value.
+- Derived packs remain derived and are counted separately: 46 authored, 156 derived.
+
+### Evidence
+
+- `pnpm test`: 377 passed. Pack validation now covers 46 authored packs with unique variant IDs and rotating review variants.
+- Repository gates: type checking, lint, content/block/catalog/journey validation, and the production build passed.
+- `pnpm qa:learning-journey` (extended, 390×844): with 26 due skills after a seeded first month, the trail banner reads “Today’s set: 5 of 26 due skills”, the Practice tab shows five cards, “Show all 26 due skills” reveals the rest, and “Show today’s set” collapses them; days 31–38 then completed through the real UI as before. No uncaught page errors.
+- `pnpm qa:learning-curriculum`: all 202 lesson sessions completed through real grading, including the thirteen new authored packs, with representative wrong-answer retries and persisted completion state.
+- `pnpm qa:adaptive-learning` and `pnpm qa:learning-path` passed unchanged (review priority and recovery with fewer than five due skills, all 25 coding sessions, placement across four courses).
+- Hands-on: the Practice tab capture with the bounded set and toggle was reviewed at 390×844.
+
+Logs and captures: `.artifacts/practice-depth/` and `.artifacts/learning-journey/phone-review-set.png`.
+
+### Limits
+
+Days 50–57 and 61–72 are verified through the per-lesson curriculum sweep, not a browser walk of each study day. The first-month and offline suites were not rerun; the trail change is a text branch inside the recall banner and the journey suite renders the same component. Not pushed or deployed in this round.
