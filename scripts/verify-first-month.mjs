@@ -7,6 +7,8 @@ const base = process.env.LEARNING_QA_BASE_URL || "http://localhost:3101";
 const output = ".artifacts/first-month";
 const read = async (path) => JSON.parse(await fs.readFile(path, "utf8"));
 const month = await read("content/learning/first-month.json");
+const journey = await read("content/learning/journey.json");
+const totalDays = journey.parts.reduce((sum, part) => sum + part.days.length, 0);
 const sessions = await read("content/learning/sessions.json");
 const bank = await read("lib/quiz-bank/all-quizzes.json");
 const key = "sd:daily-learning:v2:guest";
@@ -46,7 +48,7 @@ async function footer(name) {
 }
 async function open(day, step) {
   await expect(
-    page.getByText(`Study day ${day.number} of 30`, { exact: true }),
+    page.getByText(`Study day ${day.number} of ${totalDays}`, { exact: true }),
   ).toBeVisible();
   await page
     .getByRole("tabpanel")
@@ -253,7 +255,7 @@ try {
       if (day.number === 9 && part === 0) {
         await page.reload();
         await expect(
-          page.getByText("Study day 9 of 30", { exact: true }),
+          page.getByText(`Study day 9 of ${totalDays}`, { exact: true }),
         ).toBeVisible();
         expect(
           (await saved()).journey.tasks["day-09:request-journey"],
@@ -263,19 +265,24 @@ try {
         ).toBeUndefined();
       }
     }
+    // Finishing day 30 moves the trail to part two, whose own progress starts at zero.
     await expect(
       page.getByRole("progressbar", {
-        name: "First month progress",
+        name: day.number < 30 ? "Part 1 progress" : "Part 2 progress",
         exact: true,
       }),
-    ).toHaveAttribute("aria-valuenow", String(day.number));
+    ).toHaveAttribute("aria-valuenow", day.number < 30 ? String(day.number) : "0");
     console.log(`PASS day ${day.number}: ${day.title}`);
   }
+  // The journey continues directly into part two; the first-month milestone stays recorded.
   await expect(
-    page.getByRole("heading", {
-      name: "Your first month is complete.",
-      exact: true,
-    }),
+    page.getByText(`Study day 31 of ${totalDays}`, { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: journey.parts[1].title, exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("30 of " + totalDays + " study days complete", { exact: true }),
   ).toBeVisible();
   expect(completed(await saved())).toBe(26);
   const finished = await saved();
@@ -287,11 +294,8 @@ try {
   }
   await page.reload();
   await expect(
-    page.getByRole("progressbar", {
-      name: "First month progress",
-      exact: true,
-    }),
-  ).toHaveAttribute("aria-valuenow", "30");
+    page.getByRole("progressbar", { name: "Part 2 progress", exact: true }),
+  ).toHaveAttribute("aria-valuenow", "0");
   await page.screenshot({
     path: `${output}/phone-complete.png`,
     fullPage: true,
@@ -324,14 +328,12 @@ try {
     await context.setOffline(true);
     await page.reload();
     await expect(
-      page.getByRole("progressbar", {
-        name: "First month progress",
-        exact: true,
-      }),
-    ).toHaveAttribute("aria-valuenow", "30");
-    await page.getByText("Explore the 30-day path", { exact: true }).click();
+      page.getByText(`Study day 31 of ${totalDays}`, { exact: true }),
+    ).toBeVisible();
+    await page.getByText("Explore the full path", { exact: true }).click();
+    await page.getByText(/^Part 1 · /).click();
     await page
-      .getByRole("list", { name: "Thirty study days" })
+      .getByRole("list", { name: "Part 1 study days" })
       .getByRole("button", { name: /How a web request works/ })
       .click();
     await expect(

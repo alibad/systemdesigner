@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "cassandra-quorum-math",
+      "variants": [
+        {
+          "id": "cassandra-quorum-math-1",
+          "kind": "number",
+          "title": "Count the acknowledgements",
+          "context": "For one replica set, W + R > RF guarantees every successful write acknowledgement set and read response set share a replica. QUORUM needs a majority: floor(RF ÷ 2) + 1 responses.",
+          "prompt": "A keyspace has replication factor 3. How many replica responses does a QUORUM write need before the coordinator replies?",
+          "answer": 2,
+          "unit": "responses",
+          "hint": "A quorum is a majority of the replica set.",
+          "explanation": "floor(3 ÷ 2) + 1 = 2. QUORUM writes plus QUORUM reads overlap because 2 + 2 > 3.",
+          "mistakes": [
+            {
+              "value": 3,
+              "feedback": "Three would be ALL. A quorum is a majority, and one replica can be down."
+            },
+            {
+              "value": 1,
+              "feedback": "One response is level ONE; it does not guarantee overlap with a QUORUM read."
+            }
+          ]
+        },
+        {
+          "id": "cassandra-quorum-math-2",
+          "kind": "number",
+          "title": "Count the acknowledgements",
+          "context": "For one replica set, W + R > RF guarantees every successful write acknowledgement set and read response set share a replica. QUORUM needs a majority: floor(RF ÷ 2) + 1 responses.",
+          "prompt": "A keyspace has replication factor 5. How many responses does QUORUM need?",
+          "answer": 3,
+          "unit": "responses",
+          "hint": "A quorum is floor(RF ÷ 2) + 1.",
+          "explanation": "floor(5 ÷ 2) + 1 = 3. Two replicas can be unavailable and a QUORUM operation still succeeds.",
+          "mistakes": [
+            {
+              "value": 2,
+              "feedback": "Two of five is not a majority; two QUORUM sets could miss each other."
+            },
+            {
+              "value": 5,
+              "feedback": "Five is ALL. Any single failure would block the operation."
+            }
+          ]
+        },
+        {
+          "id": "cassandra-quorum-math-3",
+          "kind": "number",
+          "title": "Count the acknowledgements",
+          "context": "For one replica set, W + R > RF guarantees every successful write acknowledgement set and read response set share a replica. QUORUM needs a majority: floor(RF ÷ 2) + 1 responses.",
+          "prompt": "Replication factor is 3 and writes use consistency ONE. What is the smallest read consistency, in responses, that guarantees a read set overlaps every successful write set?",
+          "answer": 3,
+          "unit": "responses",
+          "hint": "W + R must exceed RF.",
+          "explanation": "1 + R > 3 means R = 3, which is ALL. Cheap writes push the cost onto reads, and any replica outage then blocks the read.",
+          "mistakes": [
+            {
+              "value": 2,
+              "feedback": "1 + 2 = 3 does not exceed 3; a QUORUM read could miss the single replica that acknowledged."
+            },
+            {
+              "value": 1,
+              "feedback": "1 + 1 = 2 is far below the replication factor."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cassandra-partition-design",
+      "variants": [
+        {
+          "id": "cassandra-partition-design-1",
+          "kind": "choice",
+          "title": "Fix the partition",
+          "context": "The partition key is hashed to a token and decides placement. Clustering columns order rows inside one partition; they do not redistribute a hot partition. Replication copies a partition; it does not split it.",
+          "prompt": "One tenant’s partition takes most of the cluster’s writes. Will raising the replication factor from 3 to 5 help?",
+          "options": [
+            "No. Every copy still receives that partition’s writes; only a different partition key divides them.",
+            "Yes. More replicas share the writes.",
+            "Yes, if reads use LOCAL_ONE."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Replication adds redundancy and work per write; it cannot shard one logical partition.",
+            "Every replica of the partition applies every write to it.",
+            "Read levels change read cost; the write hot spot is unchanged."
+          ],
+          "hint": "What does each replica of a hot partition receive?",
+          "explanation": "Replication cannot rescue a hot partition. Add a bucket such as a day or hash suffix to the partition key so the tenant spreads across owners."
+        },
+        {
+          "id": "cassandra-partition-design-2",
+          "kind": "choice",
+          "title": "Fix the partition",
+          "context": "The partition key is hashed to a token and decides placement. Clustering columns order rows inside one partition; they do not redistribute a hot partition. Replication copies a partition; it does not split it.",
+          "prompt": "A device-telemetry partition keyed by device_id grows without bound. Which change bounds its size without changing the query for one device?",
+          "options": [
+            "Add a time bucket to the partition key, such as (device_id, day).",
+            "Add event_time as another clustering column.",
+            "Increase the replication factor."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A composite key with a daily bucket caps each partition and keeps single-device reads direct.",
+            "Clustering columns order rows inside the partition; they do not bound its growth.",
+            "More copies of an unbounded partition make the problem larger."
+          ],
+          "hint": "Which part of the primary key decides placement and size?",
+          "explanation": "Only the partition key changes placement and bounds the unit. A time bucket keeps each partition small while the caller still names device and day."
+        },
+        {
+          "id": "cassandra-partition-design-3",
+          "kind": "choice",
+          "title": "Fix the partition",
+          "context": "The partition key is hashed to a token and decides placement. Clustering columns order rows inside one partition; they do not redistribute a hot partition. Replication copies a partition; it does not split it.",
+          "prompt": "Product wants “find all devices that reported a status for a tenant today,” but the table is keyed by (device_id, day). What is the Cassandra-shaped answer?",
+          "options": [
+            "Write a second table keyed for that query; the application owns the fan-out.",
+            "Add a secondary index and scan every device partition.",
+            "Use ALLOW FILTERING in production."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Each important query gets its own projection with a direct key path.",
+            "Scanning many partitions is exactly what the data model is supposed to avoid.",
+            "Filtering across partitions is table-wide work dressed as a query."
+          ],
+          "hint": "Every table is a query-specific projection.",
+          "explanation": "Cassandra moves design into the schema: one business fact may live in several tables so each query names a bounded partition."
+        }
+      ]
+    },
+    {
+      "id": "cassandra-write-route",
+      "variants": [
+        {
+          "id": "cassandra-write-route-1",
+          "kind": "sequence",
+          "title": "Route a write",
+          "context": "Cassandra hashes the partition key to a token, finds the token owners on the ring, applies the keyspace replication strategy and rack topology, then the coordinator waits for the consistency level’s acknowledgements.",
+          "prompt": "A client sends a mutation to any node. Put the coordinator’s steps in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Hash the complete partition key to one token."
+            },
+            {
+              "id": "s2",
+              "text": "Locate the token range and its owners on the ring."
+            },
+            {
+              "id": "s3",
+              "text": "Apply the keyspace replication strategy and rack topology to pick replicas."
+            },
+            {
+              "id": "s4",
+              "text": "Send to the replicas and wait for the consistency level’s acknowledgements."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Placement happens before any replica is contacted.",
+          "explanation": "Hash → owners → replicas by policy → acknowledgements. NetworkTopologyStrategy spreads replicas across the racks and datacenters the snitch reports."
+        },
+        {
+          "id": "cassandra-write-route-2",
+          "kind": "sequence",
+          "title": "Route a write",
+          "context": "Cassandra hashes the partition key to a token, finds the token owners on the ring, applies the keyspace replication strategy and rack topology, then the coordinator waits for the consistency level’s acknowledgements.",
+          "prompt": "A token-aware driver sends a write. Put the steps in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Compute the token from the partition key so the driver can pick a likely replica."
+            },
+            {
+              "id": "s2",
+              "text": "Find the ring range containing that token."
+            },
+            {
+              "id": "s3",
+              "text": "Choose replicas per datacenter using the configured replication factor."
+            },
+            {
+              "id": "s4",
+              "text": "Return to the client only when the chosen consistency level is satisfied or a timeout fires."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "A token-aware driver still follows the same ownership steps.",
+          "explanation": "The driver only shortens the first hop. Ownership, replica choice, and the acknowledgement wait are unchanged."
+        },
+        {
+          "id": "cassandra-write-route-3",
+          "kind": "sequence",
+          "title": "Route a write",
+          "context": "Cassandra hashes the partition key to a token, finds the token owners on the ring, applies the keyspace replication strategy and rack topology, then the coordinator waits for the consistency level’s acknowledgements.",
+          "prompt": "A write times out. Reconstruct what happened, in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "The key was hashed and the token owners were found."
+            },
+            {
+              "id": "s2",
+              "text": "Replicas were chosen according to the keyspace policy."
+            },
+            {
+              "id": "s3",
+              "text": "The mutation was sent to all configured replicas."
+            },
+            {
+              "id": "s4",
+              "text": "The coordinator failed to collect enough acknowledgements in time and reported a timeout."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "A timeout is about acknowledgements, not about whether the mutation was sent.",
+          "explanation": "The mutation may have been applied by some replicas. A timeout means “not enough acknowledgements”, so retries must be idempotent."
+        }
+      ]
+    },
+    {
+      "id": "cassandra-convergence",
+      "variants": [
+        {
+          "id": "cassandra-convergence-1",
+          "kind": "choice",
+          "title": "Converge after failure",
+          "context": "There is no permanent leader. Hints replay missed writes on a best-effort basis; repair compares replicas with Merkle trees and streams differences; tombstones must not be purged before stale replicas are repaired.",
+          "prompt": "A replica was down for ten minutes and is back. What guarantees it catches up?",
+          "options": [
+            "Repair; hints are best effort and may not cover everything.",
+            "Hints alone; they always replay every missed write.",
+            "Nothing is needed; QUORUM reads fix replicas automatically."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Repair compares replicas and streams differences; it is the durable convergence path.",
+            "Hints shorten common outages but can be dropped or expire.",
+            "Read repair can help individual keys that happen to be read; it is not systematic."
+          ],
+          "hint": "Which mechanism is designed to be complete rather than fast?",
+          "explanation": "Hints are a best-effort handoff. Scheduled repair is what makes replicas converge, and its I/O belongs in capacity planning."
+        },
+        {
+          "id": "cassandra-convergence-2",
+          "kind": "choice",
+          "title": "Converge after failure",
+          "context": "There is no permanent leader. Hints replay missed writes on a best-effort basis; repair compares replicas with Merkle trees and streams differences; tombstones must not be purged before stale replicas are repaired.",
+          "prompt": "An operator purges tombstones older than a few hours to save space. Later, deleted rows return. Why?",
+          "options": [
+            "A stale replica still held the live value and was repaired after the tombstone was gone.",
+            "Tombstones cannot be removed in Cassandra.",
+            "QUORUM reads resurrected the row."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Purging a tombstone before every replica has seen it lets an old live value win later.",
+            "Tombstones are removed after gc_grace_seconds and successful repair.",
+            "Reads do not create data; a stale replica does."
+          ],
+          "hint": "What does a tombstone need to outlive?",
+          "explanation": "A delete is a timestamped tombstone. Purge it before stale replicas are repaired and deleted data can reappear."
+        },
+        {
+          "id": "cassandra-convergence-3",
+          "kind": "choice",
+          "title": "Converge after failure",
+          "context": "There is no permanent leader. Hints replay missed writes on a best-effort basis; repair compares replicas with Merkle trees and streams differences; tombstones must not be purged before stale replicas are repaired.",
+          "prompt": "A write timed out. The client retries. What must be true of the operation?",
+          "options": [
+            "The retry must be idempotent, because some replicas may already have applied the write.",
+            "The retry must use a lower consistency level.",
+            "The retry must go to a different datacenter."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A timeout means the coordinator lacked acknowledgements, not that nothing was written.",
+            "Lowering the level changes the contract; it does not make a duplicate write safe.",
+            "Location does not remove the possibility of a duplicate apply."
+          ],
+          "hint": "What does a write timeout actually tell you?",
+          "explanation": "“Not enough acknowledgements in time” is ambiguous. Retries are safe only when applying the mutation twice is harmless."
+        }
+      ]
+    }
+  ]
+}

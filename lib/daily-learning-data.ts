@@ -21,7 +21,7 @@ import {
   type AttemptEvidence,
 } from "./learning-evidence";
 import {
-  FIRST_MONTH,
+  JOURNEY_DAYS,
   JourneyStateSchema,
   emptyJourney,
   mergeJourney,
@@ -493,7 +493,7 @@ export function recordJourneyTask(
   dayId: string,
   stepId: string,
 ): DailyLearningData {
-  const day = FIRST_MONTH.days.find((day) => day.id === dayId);
+  const day = JOURNEY_DAYS.find((day) => day.id === dayId);
   const step = ALL_STEPS.find((step) => step.id === stepId);
   const progress = dailyProgress(data);
   const active = currentJourneyDay(progress, data.journey);

@@ -2,7 +2,7 @@
 
 SystemDesigner is becoming a substantial learning platform for engineering: connected courses, daily practice, immediate feedback, and progression toward building complete systems. The goal is a Duolingo-style learning habit across a large curriculum.
 
-Last reviewed: September 3, 2026. These are priorities, not promised release dates. The milestones below are implemented in the development checkout; a production release is a separate delivery step.
+Last reviewed: September 3, 2026. These are priorities, not promised release dates. The milestones through “practice throughout the curriculum” were deployed to SystemDesigner.net in release `d67a2ec0`; the guided journey beyond the first month and the second-month authored practice are implemented and verified locally in the development checkout. The remaining product and validation work is described below.
 
 ## Implemented: four connected courses
 
@@ -45,7 +45,7 @@ Version 5 progress preserves existing completions, preferences, and drafts with 
 
 ## Implemented: a mobile first month
 
-SystemDesigner.net remains the product and the full library remains available. The guided entry at `/learn` serves aspiring and early-career engineers learning coding and system design. GenAI and ML remain separate courses for later exploration.
+SystemDesigner.net remains the product and the full library remains available. The guided entry at `/learn` serves aspiring and early-career engineers learning coding and system design. GenAI and ML remain separate courses for later exploration. The first month is now the opening part of a longer guided journey, described below.
 
 - A choice of starting with foundations or using placement, followed by 30 study days at the learner’s own pace.
 - A connected sequence through requests, capacity, caching, performance, data modeling, and safe updates, interleaved with JavaScript practice.
@@ -72,11 +72,29 @@ The catalog references 400 existing interactive models. Later daily lessons expo
 
 Version 5 learning progress resumes interrupted exercises and mixed quizzes, including selected inputs, hints, locked feedback, completed exercise groups, and review variants. Restored answers are checked against the current content revision. A completed session leaves a durable reset marker so an older sync cannot reopen it. Recent displaced coding drafts are recoverable inside the editor, including alternatives retained during sync. Existing v2/v3/v4 documents and backups migrate in place.
 
+## Implemented: a guided journey through every design and coding session
+
+The guided path no longer ends at day 30. Five parts and 130 study days connect all 77 system-design sessions and 25 coding exercises in course order:
+
+| Part | Days | Covers | Closes with |
+| --- | ---: | --- | --- |
+| Build your first system | 1–30 | Request flow, capacity, caching, performance, storage; coding units 1–2 | The link-service project |
+| Serve data at scale | 31–60 | Replication and sharding, hashing, distributed stores, caches, search, object storage, the edge, APIs and contracts; API-boundary coding | The expiring-cache project |
+| Keep services running | 61–90 | Queues, streams, event-driven design, workflows, proxies, limits, breakers, concurrency, chaos; traffic-control and safe-state coding | The exactly-once event applier |
+| Ship complete systems | 91–120 | Containers, orchestration, observability, identity, secrets, web security, five complete designs; job-processing coding | The bounded worker plan |
+| Learn from real systems | 121–130 | WhatsApp, Netflix, GitHub, and Uber case studies with reviews that connect earlier designs and builds | The real-systems checkpoint |
+
+Twenty-eight review days revisit 56 earlier sessions at the current content revision, sixteen milestones mark chapter ends, and every 30-day month ends with a coding project. The trail keeps the approved chapter view, adds a compact streak and daily-goal signal once a learner has practiced, lists the full path by part with per-part progress, and hands off to the Generative AI and Machine learning courses when the journey is complete. Existing day IDs and journey tasks are unchanged.
+
+Ten lessons that open the second month (replication and sharding, consistent hashing, SSTables, Cassandra, DynamoDB, Memcached, Elasticsearch, Lucene, object storage, and CloudFront) now have hand-authored practice: 47 groups and 141 variants of capacity and cost calculations, ordered protocols, and scenario decisions whose answers were checked against the lesson sources. Authored practice now totals 33 packs, 116 groups, and 348 variants. The 169 remaining derived packs name the lesson section each matching task comes from, give hints that recall the lesson’s key idea instead of listing the answer, and explain each part’s responsibility after checking. Every lesson session links its registry prerequisites from “Go a little deeper”.
+
+Unit placement now survives practice improvements: a unit revision follows its assessment content alone, so authoring better exercises for a lesson refreshes that lesson’s review evidence without revoking a placement the learner earned. This first regeneration reset earlier placement grants and practice evidence once; historical completions were unaffected.
+
 ## Next: validate learning outcomes and the experience on real devices
 
 The implemented web experience has local browser verification across the full curriculum. Production releases publish the verified `main` branch through the existing Vercel project. The remaining device checks require physical iOS/Android devices and a live signed-in two-device smoke test. Native app-store distribution is a separate product decision.
 
-Curriculum improvement continues with real learner evidence: check placement difficulty, evaluate retention and transfer, refine broad lesson-level skills, and replace weaker source assessments with more specific authored challenges. The current review scheduler remains an explainable heuristic rather than a calibrated proficiency estimate. Matching a source model is useful practice, but does not establish mastery of its whole subject.
+Curriculum improvement continues with real learner evidence: check placement difficulty, evaluate retention and transfer, refine broad lesson-level skills, and keep replacing derived matching and recognition tasks with authored calculations, diagnoses, and trade-offs. The service-interfaces, asynchronous-systems, and resilient-services units that fill months two and three are the next authoring targets. The current review scheduler remains an explainable heuristic rather than a calibrated proficiency estimate. Matching a source model is useful practice, but does not establish mastery of its whole subject.
 
 ## Then: stronger coding and project assessment
 

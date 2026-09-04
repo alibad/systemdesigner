@@ -34,6 +34,10 @@ const common = {
   exampleLabel: z.string().optional(),
   lab: z.enum(["request", "capacity", "cache"]).optional(),
   models: z.array(LearningModelSchema).optional(),
+  prerequisites: z
+    .array(z.object({ title: z.string().min(1), path: z.string().startsWith("/") }))
+    .max(4)
+    .optional(),
   success: z.string().optional(),
   isCheckpoint: z.boolean().optional(),
   unitId: z.string().optional(),

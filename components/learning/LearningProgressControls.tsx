@@ -279,7 +279,7 @@ export default function LearningProgressControls({
               <p className="text-sm">
                 Learning plan after merging:{" "}
                 {mergedData.journey.enrollment.value === "guided"
-                  ? `guided first month, ${currentJourneyDay(merged, mergedData.journey) ? `next study day ${currentJourneyDay(merged, mergedData.journey)!.number}` : "all 30 days complete"}`
+                  ? `guided journey, ${currentJourneyDay(merged, mergedData.journey) ? `next study day ${currentJourneyDay(merged, mergedData.journey)!.number}` : "all study days complete"}`
                   : mergedData.journey.enrollment.value === "courses"
                     ? "explore courses"
                     : "choose a plan when ready"}

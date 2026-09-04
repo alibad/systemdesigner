@@ -49,9 +49,13 @@ export function sourcePractice(step, questions) {
     });
   }
   const groups = [];
-  const collections = nodes.filter(
-    (n) => n.tag === "process-flow" || n.tag === "concept-grid",
-  );
+  const collections = [];
+  heading = step.title;
+  for (const node of nodes) {
+    if (node.type === "heading") heading = clean(text(node)) || heading;
+    if (node.tag === "process-flow" || node.tag === "concept-grid")
+      collections.push(Object.assign(node, { heading }));
+  }
   const roleSets = collections
     .map((node, index) => {
       const pairs = node.children
@@ -72,18 +76,17 @@ export function sourcePractice(step, questions) {
         new Set(pairs.map((p) => p.detail)).size !== pairs.length
       )
         return null;
+      // The hint nudges strategy and recalls the takeaway; it never lists the answer key.
       return {
         id: `${step.id}-roles-${index + 1}`,
         kind: "match",
         title: "Give each part its job",
         context: step.summary,
         recap: true,
-        prompt:
-          "Match each part to its responsibility.",
+        prompt: `From the lesson section “${node.heading}”: match each part to its responsibility.`,
         pairs,
-        hint: pairs.map((p) => `${p.label}: ${p.detail}`).join("\n\n"),
-        explanation:
-          "Each part has a distinct responsibility. Keeping these boundaries clear helps you find the place to change when the system behaves unexpectedly.",
+        hint: `Give each part the one job only it can do, then rule out the rest. ${firstSentence(step.takeaway)}`,
+        explanation: `Each part has a distinct responsibility. ${pairs.map((p) => `${p.label}: ${p.detail}`).join(" ")}`,
       };
     })
     .filter(Boolean);
@@ -111,7 +114,7 @@ export function sourcePractice(step, questions) {
             q.optionFeedback?.length === q.options.length
               ? q.optionFeedback
               : q.options.map(() => q.explanation),
-          hint: q.explanation,
+          hint: `Think about the key idea first: ${firstSentence(step.example)}`,
         })),
     }),
   );

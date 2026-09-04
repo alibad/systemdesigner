@@ -2,7 +2,9 @@
 
 Last updated: September 3, 2026.
 
-The product direction is a substantial Duolingo-style engineering learning platform. `/learn` has four courses, 43 units, 264 sessions, and 227 skills. Every one of its 202 noncoding lesson sessions now has mixed practice: 23 hand-authored packs (69 groups, 207 variants) plus 179 packs derived from existing authored role/process descriptions and assessments. Across both sources: 785 groups, 2,009 variants. The catalog links 400 source-model references; later lessons open their models on demand, while the opening three use their compact models. The opening trail and its request/capacity/cache models remain the approved visual direction. Version 5 adds revision-aware quiz/exercise resume and recoverable recent coding drafts. Placement, adaptive review, the 30-study-day journey, and offline visited content remain available.
+For the next Claude session, start with [`CLAUDE_HANDOFF.md`](CLAUDE_HANDOFF.md). The verified production release is `d67a2ec0357768f43636d0788cc6a24c11473bce`, deployed to `https://www.systemdesigner.net/learn` as Vercel deployment `dpl_WEwitRbFix4S1anvzZQgG9G29JZq`. Live guest checks passed for session/content APIs, coding execution, interrupted-session recovery, six interactive models, and visited-model offline loading. Physical-device and live signed-in two-device checks remain outstanding.
+
+The product direction is a substantial Duolingo-style engineering learning platform. `/learn` has four courses, 43 units, 264 sessions, and 227 skills. Every one of its 202 noncoding lesson sessions now has mixed practice: 33 hand-authored packs (116 groups, 348 variants) plus 169 packs derived from existing authored role/process descriptions and assessments. Across both sources: 792 groups, 2,040 variants. The guided journey covers every design and coding session across 130 study days in five parts. The catalog links 400 source-model references; later lessons open their models on demand, while the opening three use their compact models. The opening trail and its request/capacity/cache models remain the approved visual direction. Version 5 adds revision-aware quiz/exercise resume and recoverable recent coding drafts. Placement, adaptive review, the 130-study-day journey, and offline visited content remain available.
 
 Read `AGENTS.md`, `ROADMAP.md`, and `docs/daily-learning-path.md` before changing architecture or curriculum. The public `/roadmap` page renders `ROADMAP.md` directly.
 
@@ -40,8 +42,8 @@ Anonymous learning needs no environment variables. Optional account sync uses th
 - 202 sessions adapted from registry-backed lessons, 37 mixed unit checkpoints, and 25 coding exercises. The broader library still has 425 entries.
 - Definition → example/key idea → practice → feedback/retry → completion. Most adapted lesson assessments select four source questions.
 - Unit prerequisites and checkpoint gating; courses progress independently. Placement can satisfy a unit without adding lesson completions, XP, or daily activity. Locked sessions still link to their full lessons. Stable original completion IDs are preserved.
-- Twenty-three lessons have 69 hand-authored groups and 207 variants. Additional authored packs cover concurrency, Redis, RAG, LLM serving, tokenization, multimodal budgets, ML framing, serving, and monitoring. Every other lesson uses matching and source decision tasks through the same schema.
-- A 30-study-day guided path blends the first three design units with the first two coding units: 26 distinct sessions, eight review tasks across four review days, four milestones, and a final in-memory link-service model with eight behavioral fixtures.
+- Thirty-three lessons have 116 hand-authored groups and 348 variants: the first three design units, concurrency, Redis, RAG, LLM serving, tokenization, multimodal budgets, ML framing, serving, monitoring, and the ten data-at-scale and fast-reads lessons that open month two. Every other lesson uses matching and source decision tasks through the same schema; derived prompts name their lesson section and derived hints recall the key idea rather than the answer. Lesson sessions link their registry prerequisites.
+- A 130-study-day guided journey in five parts covers every design and coding session in course order: the first month blends the first three design units with the first two coding units (26 sessions, eight review tasks, four milestones, the link-service capstone); parts two to five add the remaining 76 sessions, 28 review days, 12 milestones, and a coding project at the end of each month. Day IDs are stable, and the trail hands off to the GenAI and ML courses at the end.
 - Onboarding offers foundations or placement. Ordinary days accept valid placement; review days still require practice. Study days follow progress rather than the calendar.
 - A chapter path with completed/current/locked nodes, direct next-day continuation, and an optional placement entry. Three introductory models and 27 authored exercise scenes make request flow, capacity/failure, and caching visible. Scene metadata is validated against the exercise schema; numeric model parameters are checked against the authored answers.
 - A compact learning shell, full-screen lesson/placement dialogs, fixed action footers, phone bottom navigation, safe-area spacing, and dark mode.
@@ -61,11 +63,11 @@ Anonymous learning needs no environment variables. Optional account sync uses th
 | --- | --- |
 | Course map and menus | `app/learn/page.tsx`, `components/learning/DailyLearningPath.tsx` |
 | Session loading and UI | `app/api/learning/sessions/[id]/route.ts`, `LearningSessionLoader.tsx`, `LearningSession.tsx`, `CodingExercise.tsx` under `components/learning/` |
-| Curriculum source | `content/learning/course-outline.json`, `content/learning/first-month.json` |
+| Curriculum source | `content/learning/course-outline.json`; journey parts `first-month.json`, `second-month.json`, `third-month.json`, `fourth-month.json`, `fifth-part.json` |
 | Interactive systems | `components/learning/LearningLab.tsx`, `SystemScene.tsx`, `ExerciseScene.tsx`, `lib/learning-lab.ts`, `public/learning/` |
 | Guided month and milestones | `lib/learning-journey.ts`, `components/learning/FirstMonth.tsx` |
 | Phone installation and offline caching | `components/learning/LearningInstall.tsx`, `public/learning-sw.js`, `public/manifest.json`, `lib/learning-assets.ts` |
-| Generated catalog and sessions | `content/learning/catalog.json`, `content/learning/sessions.json`, `scripts/generate-learning-catalog.mjs` |
+| Generated catalog, sessions, and journey | `content/learning/catalog.json`, `content/learning/sessions.json`, `content/learning/journey.json`, `scripts/generate-learning-catalog.mjs` |
 | Checkpoints and coding sources | Co-located lesson `quiz/path-*-checkpoint.json`, `data/learning-code-challenges.json`, and `code/code-*.js` files |
 | Rich exercise sources and renderer | Co-located `data/skill-exercises.json` and `daily-practice.generated.json`, `scripts/learning-source-practice.mjs`, `lib/skill-exercise-schema.ts`, `components/learning/SkillPractice.tsx` |
 | Existing lesson models in practice | `components/learning/SourceExploration.tsx`, generated session `models` references |
@@ -77,10 +79,10 @@ Anonymous learning needs no environment variables. Optional account sync uses th
 | JavaScript isolation and comparison | `lib/coding-runner.ts` |
 | Shared quizzes | `components/fundamentals/InteractiveLearning.tsx` |
 | Core tests | `lib/learning-path.test.ts`, `lib/learning-exercises.test.ts`, `lib/learning-evidence.test.ts`, `lib/daily-learning-*.test.ts` |
-| Browser verification | `scripts/verify-daily-learning.mjs`, `scripts/verify-adaptive-learning.mjs`, `scripts/verify-first-month.mjs`, `scripts/verify-learning-continuity.mjs`, `scripts/verify-learning-curriculum.mjs`, `scripts/verify-learning-models.mjs`, shared `scripts/learning-browser-helpers.mjs` |
+| Browser verification | `scripts/verify-daily-learning.mjs`, `scripts/verify-adaptive-learning.mjs`, `scripts/verify-first-month.mjs`, `scripts/verify-learning-journey.mjs`, `scripts/verify-learning-continuity.mjs`, `scripts/verify-learning-curriculum.mjs`, `scripts/verify-learning-models.mjs`, shared `scripts/learning-browser-helpers.mjs` |
 | Account integration | `firebase.learning-emulators.json`, `scripts/verify-daily-learning-sync.mjs` |
 
-Author the course outline and co-located sources, then run `pnpm generate:learning`. Do not hand-edit generated outputs. `pnpm validate:learning` checks for drift and is included in `pnpm validate:content`. A new full lesson still requires the registry-first authoring workflow. Adding a course session around an existing lesson does not require a duplicate registry entry or body.
+Author the course outline, journey parts, and co-located sources, then run `pnpm generate:learning`. Do not hand-edit generated outputs (`catalog.json`, `sessions.json`, `journey.json`, checkpoints, or `daily-practice.generated.json`). `pnpm validate:learning` checks for drift and is included in `pnpm validate:content`. A new full lesson still requires the registry-first authoring workflow. Adding a course session around an existing lesson does not require a duplicate registry entry or body. To replace a derived pack, write `data/skill-exercises.json` beside the lesson, add it to `exerciseSources`, delete the stale generated file, and regenerate; variant IDs must be unique across all packs.
 
 ## Limits and next milestone
 
@@ -92,6 +94,7 @@ Continue in this repository and keep SystemDesigner.net as the product. Physical
 Preserve these boundaries:
 
 - Schema version is 5, while browser keys intentionally remain `sd:daily-learning:v2:guest` and `sd:daily-learning:v2:user:<uid>` for in-place migration. V1 progress and old draft keys remain as recovery copies.
+- Unit revisions hash placement-assessment content only (checkpoint questions without embedded lesson revisions, or coding tests). Lesson step revisions still include practice packs, models, and prerequisites. The September 3 regeneration changed every unit and lesson revision once.
 - Evidence retains the four most recent practice dates per skill. Same-day mistakes and hints survive retries and merges. Current content revisions invalidate old evidence and placement grants, while preserving historical completions.
 - Guest data is shared within a browser profile. Copying it into an account does not erase the original guest work. Account-only work must never leak back into guest mode or another account.
 - Successful practice, completed review-day parts, and unfinished attempts are portable. Coding drafts retain bounded recent alternatives inside the editor.
@@ -101,7 +104,7 @@ Preserve these boundaries:
 
 ## Verification
 
-The completion work passes 376 unit tests and six real Firebase emulator tests, including v5 attempt restoration and concurrent draft recovery. The browser curriculum sweep completed all 202 noncoding lessons with actual grading and no uncaught page errors. Six source models were exercised at 390×844 and 1440×1000, including an offline model reload. The final production continuity, all-25-coding, adaptive/placement, and 30-day/offline suites pass; evidence and limits are recorded in `design-qa.md`. A startup hydration/navigation race found during the browser walk-through was corrected. The production build passes type/lint gates and traces 2,229 canonical content assets. Physical-device installation and production signed-in checks remain external release checks.
+The journey-continuation work passes 377 unit tests (the six Firebase emulator tests were last run for the September 3 release; the sync contract did not change). The browser curriculum sweep completed all 202 noncoding lessons with actual grading against the reworked derived packs and ten new authored packs, with no uncaught page errors. The new journey suite completes the first chapter of part two through the real UI, and the first-month suite now asserts the trail continues into part two. Six source models were exercised at 390×844 and 1440×1000, including an offline model reload. The continuity, all-25-coding, adaptive/placement, models, journey, and 30-day/offline suites pass against the rebuilt app; evidence and limits are recorded in `design-qa.md` (“Journey continuation and second-month practice”). A startup hydration/navigation race found during the browser walk-through was corrected. The production build passes type/lint gates and traces 2,229 canonical content assets. Physical-device installation and production signed-in checks remain external release checks.
 
 Run all local gates before delivery:
 
@@ -116,7 +119,7 @@ pnpm lint
 pnpm build
 ```
 
-After building, run `pnpm start --port 3101`, then `pnpm qa:learning-path`, `pnpm qa:adaptive-learning`, `pnpm qa:learning-continuity`, `pnpm qa:learning-curriculum`, `pnpm qa:learning-models`, and `LEARNING_QA_OFFLINE=1 pnpm qa:first-month` in another terminal with `LEARNING_QA_BASE_URL=http://localhost:3101`. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chrome executable or install Chromium with `pnpm exec playwright install chromium`. Screenshots go under ignored `.artifacts/daily-learning/`, `.artifacts/adaptive-learning/`, `.artifacts/first-month/`, `.artifacts/learning-continuity/`, `.artifacts/learning-curriculum/`, and `.artifacts/learning-models/`.
+After building, run `pnpm start --port 3101`, then `pnpm qa:learning-path`, `pnpm qa:adaptive-learning`, `pnpm qa:learning-continuity`, `pnpm qa:learning-curriculum`, `pnpm qa:learning-models`, `pnpm qa:learning-journey`, and `LEARNING_QA_OFFLINE=1 pnpm qa:first-month` in another terminal with `LEARNING_QA_BASE_URL=http://localhost:3101`. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chrome executable or install Chromium with `pnpm exec playwright install chromium`. Screenshots go under ignored `.artifacts/daily-learning/`, `.artifacts/adaptive-learning/`, `.artifacts/first-month/`, `.artifacts/learning-continuity/`, `.artifacts/learning-curriculum/`, and `.artifacts/learning-models/`.
 
 Browser checks cover all 25 coding sessions through the actual worker; design-unit/checkpoint completion; representative GenAI/ML sessions; load failures; wrong answers; unit unlocking; rotating reviews; keyboard/menu behavior; mobile dark mode; draft/backup restore; offline settings; storage failure; and navigation.
 

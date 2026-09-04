@@ -1,6 +1,6 @@
 # First-month verification
 
-Verified locally on September 3, 2026 against the production build at `http://localhost:3101/learn`.
+Verified locally on September 3, 2026 against the production build at `http://localhost:3101/learn`. This records the first-month release verification; the later journey continuation (days 31–130) and its evidence are recorded in `design-qa.md` and `docs/CONTINUE_DEVELOPMENT.md`.
 
 The learner starts the chapter trail or chooses placement, follows 30 study days, completes authored practice and executable coding tasks, revisits earlier skills, and finishes a link-service model. Progress flows from the learning UI through the shared learning store to local storage and optional owner-scoped Firebase sync. Public lesson content comes from the session and canonical content APIs.
 

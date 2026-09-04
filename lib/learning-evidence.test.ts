@@ -116,12 +116,16 @@ describe('authored skill exercise packs', () => {
     const ids=new Set<string>();
     for(const reference of Object.values(outline.exerciseSources) as string[]) {
       const pack=SkillExercisePackSchema.parse(JSON.parse(fs.readFileSync(reference.replace('/api/content/','content/entries/'),'utf8')));
-      expect(pack.groups).toHaveLength(3);
+      // Three to five exercises per session: enough variety without an exhausting session.
+      expect(pack.groups.length).toBeGreaterThanOrEqual(3);
+      expect(pack.groups.length).toBeLessThanOrEqual(5);
+      for (const group of pack.groups) expect(group.variants.length, group.id).toBeGreaterThanOrEqual(2);
       const initial=selectSkillExercises(pack,0), review=selectSkillExercises(pack,1);
       expect(initial.map(item=>item.id)).not.toEqual(review.map(item=>item.id));
       expect(selectSkillExercises(pack,3)).toEqual(initial);
       for(const group of pack.groups)for(const item of group.variants){expect(ids.has(item.id)).toBe(false);ids.add(item.id);}
     }
-    expect(ids.size).toBe(Object.keys(outline.exerciseSources).length * 9);
+    // Every authored pack contributes at least nine unique variants; larger packs add more.
+    expect(ids.size).toBeGreaterThanOrEqual(Object.keys(outline.exerciseSources).length * 9);
   });
 });

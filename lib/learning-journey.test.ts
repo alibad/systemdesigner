@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   FIRST_MONTH,
+  JOURNEY,
+  JOURNEY_DAYS,
   currentJourneyDay,
   journeyDayDone,
+  journeyPartFor,
   mergeJourney,
 } from "./learning-journey";
 import {
@@ -23,11 +26,43 @@ import {
   stepIsUnlocked,
 } from "./learning-path";
 
-describe("first-month learning journey", () => {
-  it("finishes all 30 days through real prerequisite gates, with explicit reviews and a final build", () => {
+describe("guided learning journey", () => {
+  it("covers every design and coding session exactly once, in course order, across all parts", () => {
+    const practiced = JOURNEY_DAYS.filter((day) => day.kind !== "review").flatMap(
+      (day) => day.stepIds,
+    );
+    expect(new Set(practiced).size).toBe(practiced.length);
+    const expected = LEARNING_TRACKS.filter((course) =>
+      ["design", "coding"].includes(course.id),
+    ).flatMap((course) => course.steps.map((step) => step.id));
+    expect([...practiced].sort()).toEqual([...expected].sort());
+    for (const day of JOURNEY_DAYS.filter((day) => day.kind === "review"))
+      for (const id of day.stepIds)
+        expect(
+          JOURNEY_DAYS.find(
+            (earlier) => earlier.number < day.number && earlier.stepIds.includes(id),
+          ),
+          `${day.id} reviews ${id}`,
+        ).toBeDefined();
+    expect(JOURNEY.parts).toHaveLength(5);
+    expect(FIRST_MONTH.days).toHaveLength(30);
+    for (const part of JOURNEY.parts) {
+      expect(part.days.at(-1)?.milestone).toBeTruthy();
+      expect(part.days.filter((day) => day.kind === "review").length).toBeGreaterThanOrEqual(4);
+      for (const day of part.days) expect(journeyPartFor(day).id).toBe(part.id);
+    }
+    expect(JOURNEY_DAYS.map((day) => day.number)).toEqual(
+      JOURNEY_DAYS.map((_, index) => index + 1),
+    );
+  });
+  it("finishes all study days through real prerequisite gates, with explicit reviews and project builds", () => {
     let data = emptyDailyLearning();
     let reviewTasks = 0;
-    for (const day of FIRST_MONTH.days) {
+    for (const day of JOURNEY_DAYS) {
+      if (day.number === 31) {
+        expect(Object.keys(dailyProgress(data).completed)).toHaveLength(26);
+        expect(reviewTasks).toBe(8);
+      }
       expect(currentJourneyDay(dailyProgress(data), data.journey)?.id).toBe(
         day.id,
       );
@@ -54,12 +89,16 @@ describe("first-month learning journey", () => {
       }
       expect(journeyDayDone(dailyProgress(data), data.journey, day)).toBe(true);
     }
-    expect(reviewTasks).toBe(8);
+    expect(reviewTasks).toBe(56);
     expect(
       currentJourneyDay(dailyProgress(data), data.journey),
     ).toBeUndefined();
-    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(26);
+    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(102);
     expect(FIRST_MONTH.days.at(-1)?.stepIds).toEqual(["code-link-service"]);
+    for (const day of JOURNEY_DAYS.filter((day) => day.kind === "project"))
+      expect(ALL_STEPS.find((step) => step.id === day.stepIds[0])?.kind).toBe(
+        "coding",
+      );
   });
   it("rejects jumping ahead, unknown tasks, and uncompleted practice", () => {
     const data = emptyDailyLearning();

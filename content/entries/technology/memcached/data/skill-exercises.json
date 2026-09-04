@@ -1,0 +1,411 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "memcached-cache-aside",
+      "variants": [
+        {
+          "id": "memcached-cache-aside-1",
+          "kind": "sequence",
+          "title": "Walk the cache-aside read",
+          "context": "In cache-aside, the application reads Memcached first. A hit returns immediately. A miss makes the application read the authoritative source, store a disposable copy, and return the source result.",
+          "prompt": "A product page needs a product record. Put the read path in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Build a namespaced, versioned key and choose a short cache timeout."
+            },
+            {
+              "id": "s2",
+              "text": "Hash the key to a server in the current pool."
+            },
+            {
+              "id": "s3",
+              "text": "Ask Memcached; a hit returns the bytes, a miss reports absence."
+            },
+            {
+              "id": "s4",
+              "text": "On a miss, read the database, store a temporary copy, and return the source result."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "The cache never loads the source itself; the application does.",
+          "explanation": "Key → server → get → source on miss. Memcached reports absence; it does not discover or load the value."
+        },
+        {
+          "id": "memcached-cache-aside-2",
+          "kind": "sequence",
+          "title": "Walk the cache-aside read",
+          "context": "In cache-aside, the application reads Memcached first. A hit returns immediately. A miss makes the application read the authoritative source, store a disposable copy, and return the source result.",
+          "prompt": "A request arrives just after the cache pool restarted. Put the read path in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Construct the key as usual."
+            },
+            {
+              "id": "s2",
+              "text": "Route the key to a server; the pool is empty but reachable."
+            },
+            {
+              "id": "s3",
+              "text": "Get returns a miss."
+            },
+            {
+              "id": "s4",
+              "text": "Read the source under admission control, then repopulate the cache."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "A cold cache changes the outcome, not the order.",
+          "explanation": "The steps are identical; nearly every request follows the miss branch, so the source needs admission control during warm-up."
+        },
+        {
+          "id": "memcached-cache-aside-3",
+          "kind": "sequence",
+          "title": "Walk the cache-aside read",
+          "context": "In cache-aside, the application reads Memcached first. A hit returns immediately. A miss makes the application read the authoritative source, store a disposable copy, and return the source result.",
+          "prompt": "The cache lookup times out. Put the steps in order, including how the timeout is treated.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Build the key with a bounded lookup timeout."
+            },
+            {
+              "id": "s2",
+              "text": "Route to the server and wait no longer than the timeout."
+            },
+            {
+              "id": "s3",
+              "text": "Record the timeout as its own telemetry, distinct from a miss."
+            },
+            {
+              "id": "s4",
+              "text": "Fall back to the source with a concurrency limit and return its result."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Timeout, miss, and connection failure all fall back to the source but must be counted separately.",
+          "explanation": "A slow cache can make fallback slower than bypassing it. Bound the lookup, count the timeout, then take the source path."
+        }
+      ]
+    },
+    {
+      "id": "memcached-slab-pressure",
+      "variants": [
+        {
+          "id": "memcached-slab-pressure-1",
+          "kind": "choice",
+          "title": "Read the memory signal",
+          "context": "Memcached assigns items to slab classes. Expiration marks a copy invalid; reclaim frees expired space lazily; eviction removes a live item when a class needs a chunk. An eviction is a capacity signal, not data loss.",
+          "prompt": "Evictions climb while total memory use is far below the limit. What is the most likely cause?",
+          "options": [
+            "One slab class is under pressure while another class holds unused pages.",
+            "The server is losing data.",
+            "TTLs are too long."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Each size class behaves like its own small cache; one band can starve beside spare capacity elsewhere.",
+            "An eviction removes a disposable copy; the source still has the data.",
+            "Long TTLs affect freshness; they do not create class imbalance."
+          ],
+          "hint": "Memory is allocated per size class, not as one pool.",
+          "explanation": "Inspect slab-class statistics. A pressured object-size band next to idle capacity is a distribution problem, not a total-RAM problem."
+        },
+        {
+          "id": "memcached-slab-pressure-2",
+          "kind": "choice",
+          "title": "Read the memory signal",
+          "context": "Memcached assigns items to slab classes. Expiration marks a copy invalid; reclaim frees expired space lazily; eviction removes a live item when a class needs a chunk. An eviction is a capacity signal, not data loss.",
+          "prompt": "A key’s TTL passed a minute ago, yet stats show its bytes are still counted. Is something broken?",
+          "options": [
+            "No. Expired items are reclaimed lazily by maintenance, lookup, or allocation.",
+            "Yes. Expiration must clear bytes at the boundary.",
+            "Yes. The item was evicted."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "The server does not synchronously clear every expired byte at the TTL boundary.",
+            "Expiration marks the copy invalid; reclaim is lazy.",
+            "Eviction removes live items; an expired item is simply awaiting reclaim."
+          ],
+          "hint": "What does expiration guarantee, and what does it not?",
+          "explanation": "Expiration is a freshness boundary, not a durable deletion guarantee. Reads treat the item as gone even before its space is reclaimed."
+        },
+        {
+          "id": "memcached-slab-pressure-3",
+          "kind": "choice",
+          "title": "Read the memory signal",
+          "context": "Memcached assigns items to slab classes. Expiration marks a copy invalid; reclaim frees expired space lazily; eviction removes a live item when a class needs a chunk. An eviction is a capacity signal, not data loss.",
+          "prompt": "A team stores one 900 KB blob per page instead of several small objects. What is the main cost?",
+          "options": [
+            "Serialization time, transfer cost, allocator waste, and a larger blast radius per miss.",
+            "Nothing; fewer keys are always better.",
+            "Memcached refuses values over 1 KB."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Giant values cost more on every path and mean one miss rebuilds everything.",
+            "Fewer keys can mean far more bytes per request and worse slab fit.",
+            "Large values are configurable, but their cost is the point."
+          ],
+          "hint": "What happens on a single miss of that key?",
+          "explanation": "Prefer compact, independently refreshable objects when readers do not always need the whole payload."
+        }
+      ]
+    },
+    {
+      "id": "memcached-invalidation",
+      "variants": [
+        {
+          "id": "memcached-invalidation-1",
+          "kind": "choice",
+          "title": "Choose the invalidation rule",
+          "context": "Every cached value must be disposable. TTL suits bounded staleness; delete-after-commit races with refills; versioned keys retire old representations; CAS rejects a write when the item changed since it was read.",
+          "prompt": "The service deletes the cache key after each database commit, yet stale values keep appearing. What is the likely race?",
+          "options": [
+            "A refill that read the old row finished after the delete and repopulated the stale value.",
+            "Delete is not supported.",
+            "The TTL is too short."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Delete-after-commit is simple, but a racing refill can put the old value back.",
+            "Delete works; the ordering of concurrent refills is the problem.",
+            "A shorter TTL bounds the damage but does not remove the race."
+          ],
+          "hint": "What was another caller doing while the write committed?",
+          "explanation": "Guard the refill: use CAS or versioned keys so an older refill cannot replace a newer value."
+        },
+        {
+          "id": "memcached-invalidation-2",
+          "kind": "choice",
+          "title": "Choose the invalidation rule",
+          "context": "Every cached value must be disposable. TTL suits bounded staleness; delete-after-commit races with refills; versioned keys retire old representations; CAS rejects a write when the item changed since it was read.",
+          "prompt": "A release changes the serialized shape of cached product records. How do you avoid a risky global flush?",
+          "options": [
+            "Bump the representation version in the key so old entries become unreachable and expire.",
+            "Flush the whole pool at deploy time.",
+            "Keep the same keys and hope the decoder copes."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Versioned keys retire old representations without a flush storm.",
+            "A global flush turns every read into a miss at once.",
+            "Mixed representations under one key cause decode failures."
+          ],
+          "hint": "Which key component describes the shape of the value?",
+          "explanation": "Include a representation version in the key. Old copies expire naturally instead of being flushed together."
+        },
+        {
+          "id": "memcached-invalidation-3",
+          "kind": "choice",
+          "title": "Choose the invalidation rule",
+          "context": "Every cached value must be disposable. TTL suits bounded staleness; delete-after-commit races with refills; versioned keys retire old representations; CAS rejects a write when the item changed since it was read.",
+          "prompt": "Two clients read a cached counter, both increment it locally, and both write back. What prevents the second write from overwriting the first?",
+          "options": [
+            "Use gets to obtain a CAS token and cas to store only if it still matches.",
+            "Use set from both clients.",
+            "Use a longer TTL."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "CAS rejects a write when another caller changed the item after it was read.",
+            "set writes regardless of prior state; the second one wins blindly.",
+            "TTL is about freshness, not concurrent updates."
+          ],
+          "hint": "Which command can detect an intervening update?",
+          "explanation": "gets returns a CAS token; cas stores only if the token still matches, so a stale write is refused instead of clobbering."
+        }
+      ]
+    },
+    {
+      "id": "memcached-miss-load",
+      "variants": [
+        {
+          "id": "memcached-miss-load-1",
+          "kind": "number",
+          "title": "Size the source for misses",
+          "context": "Hit rate changes latency and source load, never correctness. Misses per second equal total reads multiplied by the miss rate, and every miss reaches the source.",
+          "prompt": "The cache serves 12,000 reads per second at a 95% hit rate. How many reads per second reach the source?",
+          "answer": 600,
+          "unit": "reads per second",
+          "hint": "Misses = total × (1 − hit rate).",
+          "explanation": "12,000 × 0.05 = 600 reads per second reach the source. The source must sustain that plus a cold-start surge.",
+          "mistakes": [
+            {
+              "value": 11400,
+              "feedback": "That is the hit count. Misses are the reads that reach the source."
+            },
+            {
+              "value": 60,
+              "feedback": "5% of 12,000 is 600, not 60."
+            }
+          ]
+        },
+        {
+          "id": "memcached-miss-load-2",
+          "kind": "number",
+          "title": "Size the source for misses",
+          "context": "Hit rate changes latency and source load, never correctness. Misses per second equal total reads multiplied by the miss rate, and every miss reaches the source.",
+          "prompt": "The cache pool restarts cold. Reads are 12,000 per second and the database sustains 2,000 reads per second. Without admission control, how many reads per second exceed the database’s limit?",
+          "answer": 10000,
+          "unit": "reads per second",
+          "hint": "During warm-up the hit rate is near zero, so every read is a miss.",
+          "explanation": "12,000 misses per second against a 2,000 limit leaves 10,000 over the line. Admission control or a degraded mode must absorb them.",
+          "mistakes": [
+            {
+              "value": 600,
+              "feedback": "That is the steady-state miss rate; a cold cache misses almost everything."
+            },
+            {
+              "value": 12000,
+              "feedback": "The database can take 2,000 of them; the excess is 10,000."
+            }
+          ]
+        },
+        {
+          "id": "memcached-miss-load-3",
+          "kind": "number",
+          "title": "Size the source for misses",
+          "context": "Hit rate changes latency and source load, never correctness. Misses per second equal total reads multiplied by the miss rate, and every miss reaches the source.",
+          "prompt": "Reads are 20,000 per second. The source can sustain 2,400 reads per second. What is the minimum hit rate, in percent, that keeps the source within its limit?",
+          "answer": 88,
+          "unit": "percent",
+          "hint": "Misses must be at most 2,400 of 20,000.",
+          "explanation": "2,400 ÷ 20,000 = 12% misses, so the hit rate must be at least 88%. Popularity, not memory coverage, decides whether that holds.",
+          "mistakes": [
+            {
+              "value": 12,
+              "feedback": "12% is the maximum miss rate; the question asks for the hit rate."
+            },
+            {
+              "value": 90,
+              "feedback": "90% would work, but the minimum that fits is 88%."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "memcached-key-contract",
+      "variants": [
+        {
+          "id": "memcached-key-contract-1",
+          "kind": "sequence",
+          "title": "Design the key contract",
+          "context": "A cache key is a compatibility boundary. Build it in a fixed order: namespace the owner, include the representation version, choose freshness, then bound refill ownership.",
+          "prompt": "A catalog team designs keys for product records. Put the steps in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Namespace the owner, such as catalog:product."
+            },
+            {
+              "id": "s2",
+              "text": "Include the representation version, such as v3."
+            },
+            {
+              "id": "s3",
+              "text": "Derive the TTL from acceptable staleness and decide when to invalidate."
+            },
+            {
+              "id": "s4",
+              "text": "Choose single-flight, a lease, early recache, or stale serving for hot refills."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Collision control comes before anything about freshness.",
+          "explanation": "Namespace → version → freshness → refill ownership. Each step protects a different failure: collisions, schema change, staleness, and refill storms."
+        },
+        {
+          "id": "memcached-key-contract-2",
+          "kind": "sequence",
+          "title": "Design the key contract",
+          "context": "A cache key is a compatibility boundary. Build it in a fixed order: namespace the owner, include the representation version, choose freshness, then bound refill ownership.",
+          "prompt": "A hot key expires every minute and thousands of requests hit the source together. Put the full key contract in order, ending with the fix.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Start the key with the service and entity name."
+            },
+            {
+              "id": "s2",
+              "text": "Add a version for the serialized shape."
+            },
+            {
+              "id": "s3",
+              "text": "Set the TTL with jitter so related keys do not expire on the same second."
+            },
+            {
+              "id": "s4",
+              "text": "Elect a single refill owner so one caller rebuilds while others wait or serve stale."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "The stampede is solved by the last step, but the earlier steps still come first.",
+          "explanation": "The refill-ownership step is what stops the stampede: single-flight or the meta protocol’s recache ownership limits source work to one rebuild."
+        },
+        {
+          "id": "memcached-key-contract-3",
+          "kind": "sequence",
+          "title": "Design the key contract",
+          "context": "A cache key is a compatibility boundary. Build it in a fixed order: namespace the owner, include the representation version, choose freshness, then bound refill ownership.",
+          "prompt": "Two teams accidentally share keys. Put the contract steps in order so the collision cannot recur.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Prefix keys with the owning service and entity."
+            },
+            {
+              "id": "s2",
+              "text": "Version the representation."
+            },
+            {
+              "id": "s3",
+              "text": "Pick TTL and invalidation from the data contract."
+            },
+            {
+              "id": "s4",
+              "text": "Bound who may refill a popular key."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "The collision is fixed by the first step.",
+          "explanation": "Namespacing the owner prevents unrelated teams from reusing a key space; the remaining steps complete the contract."
+        }
+      ]
+    }
+  ]
+}

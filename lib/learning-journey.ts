@@ -1,31 +1,47 @@
 import { z } from "zod";
-import source from "@/content/learning/first-month.json";
+import source from "@/content/learning/journey.json";
 import { ALL_STEPS, stepIsSatisfied, type PathProgress } from "./learning-path";
 
-export const FIRST_MONTH = z
+const DaySchema = z.object({
+  id: z.string(),
+  number: z.number().int(),
+  title: z.string(),
+  objective: z.string(),
+  kind: z.enum(["practice", "review", "project"]),
+  stepIds: z.array(z.string()).min(1),
+  milestone: z.string().optional(),
+});
+/** The guided journey: the first month plus the parts that continue its numbering. */
+export const JOURNEY = z
   .object({
     version: z.number(),
-    id: z.string(),
-    title: z.string(),
-    description: z.string(),
-    days: z
+    parts: z
       .array(
         z.object({
           id: z.string(),
-          number: z.number().int(),
           title: z.string(),
-          objective: z.string(),
-          kind: z.enum(["practice", "review", "project"]),
-          stepIds: z.array(z.string()).min(1),
-          milestone: z.string().optional(),
+          description: z.string(),
+          days: z.array(DaySchema).min(1),
         }),
       )
-      .length(30),
+      .min(1),
   })
   .parse(source);
-export type JourneyDay = (typeof FIRST_MONTH.days)[number];
+export type JourneyPart = (typeof JOURNEY.parts)[number];
+export type JourneyDay = JourneyPart["days"][number];
+export const JOURNEY_DAYS: JourneyDay[] = JOURNEY.parts.flatMap(
+  (part) => part.days,
+);
+/** The opening 30 study days keep their original IDs; later parts continue them. */
+export const FIRST_MONTH = JOURNEY.parts[0];
+export const JOURNEY_MILESTONES = JOURNEY_DAYS.filter((day) => day.milestone);
+export function journeyPartFor(day: JourneyDay): JourneyPart {
+  return JOURNEY.parts.find((part) =>
+    part.days.some((candidate) => candidate.id === day.id),
+  )!;
+}
 const taskKeys = new Set(
-  FIRST_MONTH.days.flatMap((day) => day.stepIds.map((id) => `${day.id}:${id}`)),
+  JOURNEY_DAYS.flatMap((day) => day.stepIds.map((id) => `${day.id}:${id}`)),
 );
 const stamp = z
   .number()
@@ -88,9 +104,7 @@ export function currentJourneyDay(
   progress: PathProgress,
   journey: JourneyState,
 ) {
-  return FIRST_MONTH.days.find(
-    (day) => !journeyDayDone(progress, journey, day),
-  );
+  return JOURNEY_DAYS.find((day) => !journeyDayDone(progress, journey, day));
 }
 export function mergeJourney(a: JourneyState, b: JourneyState): JourneyState {
   const choose = <T extends { at: number }>(left: T, right: T) =>

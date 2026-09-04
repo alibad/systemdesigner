@@ -229,8 +229,28 @@ export default function LearningSession({
                 <summary className="cursor-pointer py-2 font-medium text-slate-500">
                   Go a little deeper
                 </summary>
+                {!!step.prerequisites?.length && (
+                  <div className="my-3">
+                    <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                      Foundations first
+                    </p>
+                    <ul className="space-y-1">
+                      {step.prerequisites.map((item) => (
+                        <li key={item.path}>
+                          <Link
+                            href={item.path as Route}
+                            className="inline-flex min-h-8 items-center text-sm text-slate-700 underline underline-offset-4 dark:text-slate-200"
+                          >
+                            {item.title}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <p className="my-3 leading-6 text-slate-600 dark:text-slate-300">
-                  {step.example}
+                  The full lesson has the worked examples, trade-offs, and
+                  interactive models behind this practice.
                 </p>
                 <Link
                   href={step.lessonPath as Route}

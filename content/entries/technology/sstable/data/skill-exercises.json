@@ -1,0 +1,411 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "sstable-write-path",
+      "variants": [
+        {
+          "id": "sstable-write-path-1",
+          "kind": "sequence",
+          "title": "Follow a write to disk",
+          "context": "An LSM tree records a write durably first, keeps a sorted working set in memory, flushes it as an immutable SSTable, and merges files in the background. The newest visible version of each key must win.",
+          "prompt": "A client updates a key. Put the storage engine’s steps in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Append the record and checksum to the write-ahead log."
+            },
+            {
+              "id": "s2",
+              "text": "Insert the newest version into the sorted MemTable."
+            },
+            {
+              "id": "s3",
+              "text": "Freeze the full MemTable and flush it as a new SSTable, published atomically."
+            },
+            {
+              "id": "s4",
+              "text": "Compact runs in the background, keeping the newest visible version."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Durability comes before anything the engine could lose on a crash.",
+          "explanation": "WAL → MemTable → flush → compact. If an acknowledged record existed only in memory, a crash would lose it."
+        },
+        {
+          "id": "sstable-write-path-2",
+          "kind": "sequence",
+          "title": "Follow a write to disk",
+          "context": "An LSM tree records a write durably first, keeps a sorted working set in memory, flushes it as an immutable SSTable, and merges files in the background. The newest visible version of each key must win.",
+          "prompt": "A delete arrives for a key. Put the steps in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Append the tombstone to the WAL before acknowledging."
+            },
+            {
+              "id": "s2",
+              "text": "Insert the tombstone into the MemTable so reads see the deletion now."
+            },
+            {
+              "id": "s3",
+              "text": "Flush the frozen MemTable into an immutable file with index and footer."
+            },
+            {
+              "id": "s4",
+              "text": "Merge files later, retaining the tombstone until its safety boundary passes."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "A delete is written like any other record; it just carries a tombstone.",
+          "explanation": "Same path as an update. The tombstone must survive compaction until no older value can reappear from any file, replica, or restore."
+        },
+        {
+          "id": "sstable-write-path-3",
+          "kind": "sequence",
+          "title": "Follow a write to disk",
+          "context": "An LSM tree records a write durably first, keeps a sorted working set in memory, flushes it as an immutable SSTable, and merges files in the background. The newest visible version of each key must win.",
+          "prompt": "Many small random writes arrive. Put the steps that turn them into sequential file writes in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Record each write durably in the append-only WAL."
+            },
+            {
+              "id": "s2",
+              "text": "Keep the newest versions sorted in memory."
+            },
+            {
+              "id": "s3",
+              "text": "Stream the frozen sorted set into blocks and publish one immutable SSTable."
+            },
+            {
+              "id": "s4",
+              "text": "Merge selected runs into verified outputs and replace the inputs."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Random updates become sequential because the engine never edits a file in place.",
+          "explanation": "Append, sort in memory, flush sequentially, compact. No existing data page is ever rewritten in place."
+        }
+      ]
+    },
+    {
+      "id": "sstable-read-path",
+      "variants": [
+        {
+          "id": "sstable-read-path-1",
+          "kind": "sequence",
+          "title": "Narrow a point lookup",
+          "context": "A point lookup checks mutable memory, then immutable memory, then on-disk runs from newest to oldest. Each stage can remove work, but only a value or tombstone at the newest visible sequence decides the answer.",
+          "prompt": "A reader asks for one exact key. Put the lookup stages in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Search the current and frozen MemTables; a match outranks every file."
+            },
+            {
+              "id": "s2",
+              "text": "Skip files whose key interval or Bloom filter proves the key cannot be there."
+            },
+            {
+              "id": "s3",
+              "text": "Binary-search the sparse index for the block that could hold the key."
+            },
+            {
+              "id": "s4",
+              "text": "Verify and decompress that block, then search its sorted records."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Memory holds the newest versions, so it is checked before any file.",
+          "explanation": "Memory → file pruning → sparse index → data block. Each stage removes work; the last one finds the newest visible version or a tombstone."
+        },
+        {
+          "id": "sstable-read-path-2",
+          "kind": "sequence",
+          "title": "Narrow a point lookup",
+          "context": "A point lookup checks mutable memory, then immutable memory, then on-disk runs from newest to oldest. Each stage can remove work, but only a value or tombstone at the newest visible sequence decides the answer.",
+          "prompt": "A key was overwritten a minute ago and the new version is still in memory. Put the lookup stages in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Check mutable memory first and find the newest version there."
+            },
+            {
+              "id": "s2",
+              "text": "Stop: a memory match outranks every older SSTable."
+            },
+            {
+              "id": "s3",
+              "text": "Only on a miss would the reader prune files by interval and Bloom filter."
+            },
+            {
+              "id": "s4",
+              "text": "Only then would it use the index and read a data block."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "The newest version wins, and it lives in memory.",
+          "explanation": "The lookup ends at the first stage. Older versions on disk are never consulted because memory already holds the newest visible value."
+        },
+        {
+          "id": "sstable-read-path-3",
+          "kind": "sequence",
+          "title": "Narrow a point lookup",
+          "context": "A point lookup checks mutable memory, then immutable memory, then on-disk runs from newest to oldest. Each stage can remove work, but only a value or tombstone at the newest visible sequence decides the answer.",
+          "prompt": "A key that was never written is requested. Put the lookup stages in order.",
+          "items": [
+            {
+              "id": "s1",
+              "text": "Check the MemTables and find nothing."
+            },
+            {
+              "id": "s2",
+              "text": "Reject every file whose Bloom filter returns negative."
+            },
+            {
+              "id": "s3",
+              "text": "Consult the sparse index only for files with a positive filter result."
+            },
+            {
+              "id": "s4",
+              "text": "Read and verify a candidate block only when the index points to one."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "A negative Bloom result proves absence; a positive one only permits a look.",
+          "explanation": "For a true miss, most files are rejected by their filters. Only false positives cost an index lookup and a block read."
+        }
+      ]
+    },
+    {
+      "id": "sstable-bloom-decision",
+      "variants": [
+        {
+          "id": "sstable-bloom-decision-1",
+          "kind": "choice",
+          "title": "Read the Bloom filter",
+          "context": "A Bloom filter proves that an exact key is absent from a file. A positive result means only “possibly present”, so the read continues through the sparse index and data block.",
+          "prompt": "A file’s Bloom filter returns “possibly present” for the key. What should the reader do?",
+          "options": [
+            "Continue through the sparse index and read the candidate data block.",
+            "Return the value from the filter.",
+            "Skip the file; the filter was not certain."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A positive result is a permission to look, not an answer.",
+            "A Bloom filter stores no values; it can only answer membership.",
+            "Skipping on a positive could miss a real value or tombstone."
+          ],
+          "hint": "Which result is a proof, and which is only a hint?",
+          "explanation": "Bloom filters prove absence. A positive result may be a false positive, so the reader must still consult the index and the block."
+        },
+        {
+          "id": "sstable-bloom-decision-2",
+          "kind": "choice",
+          "title": "Read the Bloom filter",
+          "context": "A Bloom filter proves that an exact key is absent from a file. A positive result means only “possibly present”, so the read continues through the sparse index and data block.",
+          "prompt": "A range scan needs every key between two bounds. Can the point-key Bloom filter reject a file for the scan?",
+          "options": [
+            "No. The filter answers exact keys, so scans rely on key intervals and layout instead.",
+            "Yes, if the filter is large enough.",
+            "Yes, by testing the two bounds."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A filter built on exact keys cannot say whether any key inside an interval exists.",
+            "Size changes the false-positive rate; it does not change what the filter can answer.",
+            "Testing two endpoints says nothing about the keys between them."
+          ],
+          "hint": "What question was the filter built to answer?",
+          "explanation": "A point-key Bloom filter cannot reject an interval. Range scans depend on compaction layout, key-range overlap, block size, and readahead."
+        },
+        {
+          "id": "sstable-bloom-decision-3",
+          "kind": "choice",
+          "title": "Read the Bloom filter",
+          "context": "A Bloom filter proves that an exact key is absent from a file. A positive result means only “possibly present”, so the read continues through the sparse index and data block.",
+          "prompt": "A Bloom filter returns negative for a key, but the engine still reads the file’s index. What is wrong?",
+          "options": [
+            "Wasted work: a negative result is a proof of absence and the file should be skipped.",
+            "Nothing: negatives must always be double-checked.",
+            "The filter must be rebuilt from the in-memory snapshot."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A negative Bloom result is a guarantee; reading the file cannot find the key.",
+            "Only positives need confirmation; negatives are certain.",
+            "Filters are derived from the exact records committed to the file, and a negative from such a filter is correct."
+          ],
+          "hint": "Only one of the two answers can be wrong. Which one?",
+          "explanation": "A negative means the key is definitely not in the file. Consulting the index anyway spends I/O for nothing."
+        }
+      ]
+    },
+    {
+      "id": "sstable-write-amplification",
+      "variants": [
+        {
+          "id": "sstable-write-amplification-1",
+          "kind": "number",
+          "title": "Measure write amplification",
+          "context": "Compaction rewrites data to keep reads cheap. Write amplification is total bytes the device writes divided by logical bytes the application wrote.",
+          "prompt": "The application writes 100 GB of logical data per day. Flushes and compaction bring total device writes to 800 GB per day. What is the write amplification?",
+          "answer": 8,
+          "unit": "×",
+          "hint": "Divide total device writes by logical writes.",
+          "explanation": "800 ÷ 100 = 8. Every logical byte is rewritten about eight times over its life, which costs bandwidth and device endurance.",
+          "mistakes": [
+            {
+              "value": 700,
+              "feedback": "Amplification is a ratio, not a difference: 800 ÷ 100."
+            },
+            {
+              "value": 0.125,
+              "feedback": "Divide device writes by logical writes, not the other way around."
+            }
+          ]
+        },
+        {
+          "id": "sstable-write-amplification-2",
+          "kind": "number",
+          "title": "Measure write amplification",
+          "context": "Compaction rewrites data to keep reads cheap. Write amplification is total bytes the device writes divided by logical bytes the application wrote.",
+          "prompt": "The application writes 50 GB per day. The device writes 350 GB per day in total. What is the write amplification?",
+          "answer": 7,
+          "unit": "×",
+          "hint": "Divide total device writes by logical writes.",
+          "explanation": "350 ÷ 50 = 7. Leveled compaction often lands in this range because values move through several levels.",
+          "mistakes": [
+            {
+              "value": 300,
+              "feedback": "Subtracting gives extra bytes, not the amplification ratio."
+            },
+            {
+              "value": 0.14,
+              "feedback": "Divide device writes by logical writes."
+            }
+          ]
+        },
+        {
+          "id": "sstable-write-amplification-3",
+          "kind": "number",
+          "title": "Measure write amplification",
+          "context": "Compaction rewrites data to keep reads cheap. Write amplification is total bytes the device writes divided by logical bytes the application wrote.",
+          "prompt": "A device can sustain 600 GB of writes per day. Write amplification is measured at 12. What is the most logical data the application can write per day without exceeding the device?",
+          "answer": 50,
+          "unit": "GB per day",
+          "hint": "Logical writes × amplification must stay within the device budget.",
+          "explanation": "600 ÷ 12 = 50 GB of logical writes per day. Reserve part of that budget for reads, WAL syncs, repair, and backups.",
+          "mistakes": [
+            {
+              "value": 7200,
+              "feedback": "That multiplies instead of dividing; the device would write 12 times the logical volume."
+            },
+            {
+              "value": 600,
+              "feedback": "The device budget includes all rewrites, not just logical data."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sstable-compaction-choice",
+      "variants": [
+        {
+          "id": "sstable-compaction-choice-1",
+          "kind": "choice",
+          "title": "Choose the compaction rule",
+          "context": "Compaction merges immutable runs, keeps the newest version, and drops tombstones only after their safety boundary. Size-tiered favors sustained ingest; leveled favors predictable reads at the cost of rewrites.",
+          "prompt": "Point reads are latency-critical, disks have spare write bandwidth, and the key space is updated evenly. Which strategy fits?",
+          "options": [
+            "Leveled compaction: fewer overlapping runs per read, at the cost of more rewrites.",
+            "Size-tiered compaction: fewer rewrites, more overlapping files.",
+            "No compaction: keep every flushed file."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "Leveled keeps non-overlapping ranges in larger levels, so a read touches fewer runs.",
+            "Size-tiered leaves more overlapping files, which raises read amplification.",
+            "Without compaction, run count and read amplification grow without bound."
+          ],
+          "hint": "Which resource is scarce here: read latency or write bandwidth?",
+          "explanation": "When reads must be predictable and rewrite bandwidth is available, leveled compaction spends writes to buy a smaller read shape."
+        },
+        {
+          "id": "sstable-compaction-choice-2",
+          "kind": "choice",
+          "title": "Choose the compaction rule",
+          "context": "Compaction merges immutable runs, keeps the newest version, and drops tombstones only after their safety boundary. Size-tiered favors sustained ingest; leveled favors predictable reads at the cost of rewrites.",
+          "prompt": "A crash interrupts a compaction halfway through writing its output. What must be true for recovery to be safe?",
+          "options": [
+            "The input files were not retired until the complete output was durable and referenced by the manifest.",
+            "The output file was published block by block as it was written.",
+            "The WAL was discarded once compaction started."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "If inputs remain, the interrupted merge can restart from the prior state.",
+            "Publishing partial output would let restart trust an incomplete file.",
+            "The WAL protects unflushed writes and must outlive every file it covers."
+          ],
+          "hint": "Immutability means nothing is repaired in place. What stays available until the new file is proven?",
+          "explanation": "Compaction never edits inputs; it replaces them only after the verified output is atomically referenced. Until then, the old files are the truth."
+        },
+        {
+          "id": "sstable-compaction-choice-3",
+          "kind": "choice",
+          "title": "Choose the compaction rule",
+          "context": "Compaction merges immutable runs, keeps the newest version, and drops tombstones only after their safety boundary. Size-tiered favors sustained ingest; leveled favors predictable reads at the cost of rewrites.",
+          "prompt": "To reclaim space, an operator drops tombstones older than a day. Deleted rows later reappear. What happened?",
+          "options": [
+            "A tombstone was purged before every older value was gone from uncompacted files, replicas, or restores.",
+            "Tombstones cannot be compacted at all.",
+            "The Bloom filter reported the deleted key as absent."
+          ],
+          "correctAnswer": 0,
+          "optionFeedback": [
+            "A tombstone needs a proof boundary; age alone is not proof that no older value can resurface.",
+            "Tombstones can be dropped, but only after the safety boundary passes.",
+            "A filter cannot resurrect data; only a surviving older version can."
+          ],
+          "hint": "What does a tombstone protect against, and for how long?",
+          "explanation": "A tombstone can be discarded only after the system knows no older value can reappear. Removing it because it is old resurrects deleted data."
+        }
+      ]
+    }
+  ]
+}
