@@ -237,3 +237,43 @@ A fourth check found one hint that stated its own answer; every other hint acros
 - Difficulty is not calibrated against learner outcomes. These are exercises written against the lesson sources, not items with measured discrimination.
 - Practice content changed for most lessons, so per-skill review evidence for those steps resets once. Unit placements survive, because a unit revision is derived from assessment content only.
 - Physical-device installation, screen-reader testing, and a live signed-in two-device sync check remain outstanding external checks.
+
+## One guided path, and a second reading of every calculation
+
+Date: September 4, 2026, after the `d8a1ee2c` release. Scope: close the gaps that release left open. The guided journey stopped at day 130 while 162 generative-AI and machine-learning sessions had authored practice but no order; the 540 calculation answers had each been written once and never checked; and only the first variant of each practice group had ever run in a browser.
+
+### The journey now reaches every session
+
+317 study days in 14 parts cover all 264 sessions exactly once in course order, with 53 review days (106 review tasks) and 25 milestones. Parts one to five are unchanged. Parts six to ten add generative AI over 103 days; parts eleven to fourteen add machine learning over 84 days. A coding project still closes each of the first four months; the later parts end on unit checkpoints, which the generator already permits.
+
+Day IDs stay stable, so a learner mid-journey keeps their tasks. The end-of-journey screen used to offer "Start Generative AI" and "Start Machine learning"; both are now inside the path, so it points at the full path instead.
+
+The journey remains one ordered sequence rather than per-course tracks. That keeps the progress model and day IDs intact, and course pages plus placement still let a learner study out of order.
+
+### Every calculation was re-derived
+
+All 540 `number` exercises were re-derived from `context` and `prompt` alone, by a reader other than the author, before the stored answer was looked at.
+
+**No stored answer was wrong.** Fourteen exercises were changed for other reasons:
+
+- Four prompts depended on a convention stated only in the hint or the lesson, so a learner using the standard reading was marked wrong. The quantity now appears in the prompt. The clearest case was three sharding exercises whose "keep 30% headroom" meant "plan for 30% above peak", a rule that lived only in the hint.
+- Six distractors named an error their value does not encode, or sat on a value no plausible error reaches. One told a learner who had answered wrongly to use the method that produces the correct answer.
+- Three explanations or units were wrong for their own numbers, including three latency exercises whose explanation instructed a millisecond conversion no prompt required.
+
+### Later variants now run in a browser
+
+`pnpm qa:practice-variants` seeds prior completions so each lesson opens at its second or third review, then answers those exercises through the real interface with grading. Every group's variants differ in answerable content, so a passing run is evidence the intended variant rendered, not a coincidence.
+
+Getting it to pass took three attempts, and every failure was in the harness rather than the app. The instructive one: `locator.isVisible()` does not wait, so a readiness check written with it returned false the instant a view had not yet rendered, and the sweep concluded the lesson would not open. Instrumenting the click showed the session opening normally. The sweep now waits with `waitFor`, confirms the first exercise heading is on screen, and reopens from a reloaded page if it is not. No product defect was found here, and the earlier note in this file claiming one was withdrawn.
+
+### Verification
+
+- Unit tests 377 passed, including a walk of all 317 study days through real prerequisite gates. Typecheck, lint, content validation, the authored-practice contract, and the secret scan passed. The production build passed and traced 2,229 canonical content assets.
+- Browser, against a clean local production build: journey, adaptive and placement, learning path, offline first-month, models, and the full 202-lesson curriculum sweep all passed. The new later-variant sweeps then passed at both review levels, each walking all 202 lessons and answering 961 exercises. With the curriculum sweep's first variants, all 2,883 authored exercises have now been rendered and graded through the real interface.
+
+### Limits
+
+- Review-day density in the new parts is 13%, against 22% in the design course, because several units have only three or four lessons and a review can be neither the first nor the last day of a unit.
+- The journey is one linear path. A learner who wants only machine learning uses course pages and placement rather than the trail.
+- Difficulty is still not calibrated against learner outcomes.
+- An earlier run of the browser suites failed with a chunk-load error that looked like a code regression. It was a half-written build left by a rebuild that was killed mid-flight. Re-running against a clean build passed. Stopping a local server by process-name pattern also stopped unrelated projects' dev servers on the same machine; target the port instead.

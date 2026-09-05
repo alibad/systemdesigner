@@ -348,10 +348,6 @@ export default function DailyLearningPath() {
               begin={begin}
               onSettings={() => setSettings(true)}
               onCourses={() => setTab("path")}
-              onCourse={(id) => {
-                update((value) => ({ ...value, track: id }));
-                setTab("path");
-              }}
               onPlacement={() => {
                 update((value) => ({ ...value, track: "design" }));
                 setPlacement(true);

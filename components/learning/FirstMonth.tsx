@@ -4,7 +4,6 @@ import {
   ArrowRight,
   ArrowDown,
   BookOpen,
-  BrainCircuit,
   Check,
   Clock3,
   Code2,
@@ -13,7 +12,6 @@ import {
   LockKeyhole,
   Play,
   RotateCcw,
-  Sparkles,
   Trophy,
 } from "lucide-react";
 import {
@@ -30,7 +28,6 @@ import {
   ALL_STEPS,
   pathStreak,
   type LearningStep,
-  type TrackId,
 } from "@/lib/learning-path";
 import type { useDailyLearning } from "@/hooks/useDailyLearning";
 import { adaptiveReviewQueue } from "@/lib/learning-evidence";
@@ -41,14 +38,12 @@ export default function FirstMonth({
   learning,
   begin,
   onCourses,
-  onCourse,
   onPlacement,
   onSettings,
 }: {
   learning: ReturnType<typeof useDailyLearning>;
   begin: (step: LearningStep, day?: JourneyDay) => void;
   onCourses: () => void;
-  onCourse?: (id: TrackId) => void;
   onPlacement: () => void;
   onSettings: () => void;
 }) {
@@ -165,31 +160,18 @@ export default function FirstMonth({
       {!active && (
         <div className="py-8 text-center">
           <Trophy className="mx-auto mb-4 h-12 w-12 text-amber-500" />
-          <h2 className="text-2xl font-bold">You built complete systems.</h2>
+          <h2 className="text-2xl font-bold">You finished the path.</h2>
           <p className="mt-3 text-slate-500">
-            All {JOURNEY_DAYS.length} study days are complete. Keep your skills
-            sharp with reviews, or start a new course.
+            All {JOURNEY_DAYS.length} study days are complete, across system
+            design, coding, generative AI, and machine learning. Keep your
+            skills sharp with reviews.
           </p>
-          {onCourse && (
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
-              {(
-                [
-                  ["genai", "Generative AI", Sparkles],
-                  ["ml", "Machine learning", BrainCircuit],
-                ] as const
-              ).map(([id, title, Icon]) => (
-                <button
-                  key={id}
-                  onClick={() => onCourse(id)}
-                  className="flex min-h-14 items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left text-sm font-semibold hover:border-sky-400 dark:border-slate-700 dark:bg-slate-900"
-                >
-                  <Icon className="h-5 w-5 text-sky-600" aria-hidden />
-                  Start {title}
-                  <ArrowRight className="ml-auto h-4 w-4 text-slate-400" />
-                </button>
-              ))}
-            </div>
-          )}
+          <button
+            onClick={onCourses}
+            className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-semibold hover:border-sky-400 dark:border-slate-700 dark:bg-slate-900"
+          >
+            Explore the full path <ArrowRight className="h-4 w-4" />
+          </button>
         </div>
       )}
       <ol aria-label="Your learning path" className="trail-nodes">

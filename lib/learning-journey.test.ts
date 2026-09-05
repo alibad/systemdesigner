@@ -27,14 +27,14 @@ import {
 } from "./learning-path";
 
 describe("guided learning journey", () => {
-  it("covers every design and coding session exactly once, in course order, across all parts", () => {
+  it("covers every noncoding and coding session exactly once, in course order, across all parts", () => {
     const practiced = JOURNEY_DAYS.filter((day) => day.kind !== "review").flatMap(
       (day) => day.stepIds,
     );
     expect(new Set(practiced).size).toBe(practiced.length);
-    const expected = LEARNING_TRACKS.filter((course) =>
-      ["design", "coding"].includes(course.id),
-    ).flatMap((course) => course.steps.map((step) => step.id));
+    const expected = LEARNING_TRACKS.flatMap((course) =>
+      course.steps.map((step) => step.id),
+    );
     expect([...practiced].sort()).toEqual([...expected].sort());
     for (const day of JOURNEY_DAYS.filter((day) => day.kind === "review"))
       for (const id of day.stepIds)
@@ -44,11 +44,11 @@ describe("guided learning journey", () => {
           ),
           `${day.id} reviews ${id}`,
         ).toBeDefined();
-    expect(JOURNEY.parts).toHaveLength(5);
+    expect(JOURNEY.parts).toHaveLength(14);
     expect(FIRST_MONTH.days).toHaveLength(30);
     for (const part of JOURNEY.parts) {
       expect(part.days.at(-1)?.milestone).toBeTruthy();
-      expect(part.days.filter((day) => day.kind === "review").length).toBeGreaterThanOrEqual(4);
+      expect(part.days.filter((day) => day.kind === "review").length).toBeGreaterThanOrEqual(2);
       for (const day of part.days) expect(journeyPartFor(day).id).toBe(part.id);
     }
     expect(JOURNEY_DAYS.map((day) => day.number)).toEqual(
@@ -89,17 +89,19 @@ describe("guided learning journey", () => {
       }
       expect(journeyDayDone(dailyProgress(data), data.journey, day)).toBe(true);
     }
-    expect(reviewTasks).toBe(56);
+    expect(reviewTasks).toBe(106);
     expect(
       currentJourneyDay(dailyProgress(data), data.journey),
     ).toBeUndefined();
-    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(102);
+    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(264);
     expect(FIRST_MONTH.days.at(-1)?.stepIds).toEqual(["code-link-service"]);
     for (const day of JOURNEY_DAYS.filter((day) => day.kind === "project"))
       expect(ALL_STEPS.find((step) => step.id === day.stepIds[0])?.kind).toBe(
         "coding",
       );
-  });
+    // The walk now covers all 317 study days with an export/import round trip per
+    // step, so it needs more than the default per-test budget.
+  }, 60000);
   it("rejects jumping ahead, unknown tasks, and uncompleted practice", () => {
     const data = emptyDailyLearning();
     expect(() => recordJourneyTask(data, "day-01", "request-journey")).toThrow(

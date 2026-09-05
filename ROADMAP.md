@@ -74,7 +74,7 @@ Version 5 learning progress resumes interrupted exercises and mixed quizzes, inc
 
 ## Implemented: a guided journey through every design and coding session
 
-The guided path no longer ends at day 30. Five parts and 130 study days connect all 77 system-design sessions and 25 coding exercises in course order:
+The guided path no longer ends at day 30. Fourteen parts and 317 study days connect all 264 sessions across the four courses in course order:
 
 | Part | Days | Covers | Closes with |
 | --- | ---: | --- | --- |
@@ -97,6 +97,16 @@ Unit placement now survives practice improvements: a unit revision follows its a
 All 202 lesson sessions now use hand-authored practice: 202 packs, 961 groups, and 2,883 variants covering the GenAI and ML courses as well as system design. Each group is one skill with three variants that differ in substance, so a learner's first, second, and third review are different problems rather than the same problem with a renamed noun.
 
 A measured defect was removed at the same time. Across the existing multiple-choice exercises the correct option was the longest one most of the time and averaged more than twice the length of its alternatives, so a learner could score well by measuring text instead of understanding the lesson. Distractors were rewritten into specific, plausible wrong positions, padded correct answers were tightened, and every pack is now checked against a contract: options whose length carries no signal, ordering steps shuffled rather than listed in solved order, at least two named mistakes on every calculation, and hints that nudge the method without naming the answer.
+
+### One guided path through all four courses
+
+The journey used to stop at day 130, after system design and coding, and hand the learner off to a course page with 162 GenAI and ML sessions and no order. It now continues: 14 parts and 317 study days cover every session in the curriculum exactly once, in course order, with 53 review days and 25 milestones. Parts six to ten walk generative AI from token prediction through retrieval, agents, serving, evaluation, and safety. Parts eleven to fourteen walk machine learning from problem framing through data, training, efficiency, operations, and applications.
+
+Course pages and placement still work as before, so a learner who wants to jump straight to a topic can. What changed is that following the path no longer runs out.
+
+### Every calculation checked a second time
+
+The 540 calculation exercises were each written by one author and never verified. All of them were independently re-derived from the prompt alone. No stored answer was wrong. The audit did surface smaller defects and fixed them: prompts that depended on a convention stated only in the hint, distractor values that no plausible error reaches, feedback naming a different error than its value encodes, an explanation instructing a unit conversion the prompt never required, and units written as sentences.
 
 ## Next: validate learning outcomes and the experience on real devices
 
