@@ -11,15 +11,15 @@
           "context": "A protected branch advances only after policy is revalidated for the exact candidate commit and the expected target head. Search, Actions, notifications, audit, and webhooks consume the committed result; none becomes the source of truth for history.",
           "prompt": "Two merges race for the same target branch. What prevents a lost update?",
           "options": [
-            "Atomically advance the reference only if its old value still matches the expected head; the loser retries policy evaluation.",
-            "Last writer wins.",
-            "A global lock on all repositories."
+            "A global write lock across every repository, taken before each merge.",
+            "Advance the reference only if its old value still matches the expected head.",
+            "Accept both writes and let the last one to land define the branch head."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "One lock across all repositories serializes unrelated work, and the conflict is only ever on a single reference.",
             "Compare-and-swap on the reference is the safety mechanism.",
-            "Last-writer-wins loses one merge.",
-            "A global lock is unnecessary and slow."
+            "Letting the last write win silently discards the other merge, which is the lost update itself."
           ],
           "hint": "What must be true of the target head at commit time?",
           "explanation": "Policy is revalidated for the exact candidate and target head."
@@ -31,15 +31,15 @@
           "context": "A protected branch advances only after policy is revalidated for the exact candidate commit and the expected target head. Search, Actions, notifications, audit, and webhooks consume the committed result; none becomes the source of truth for history.",
           "prompt": "The search index is behind. Is repository history wrong?",
           "options": [
-            "No. Search is a derived view; the protected reference is the truth and search catches up.",
-            "Yes.",
-            "Yes, until reindexed."
+            "Yes. Whatever search returns is what the repository currently contains.",
+            "Yes, history is inconsistent until the index finishes catching up.",
+            "No. Search is a derived view; the protected reference stays the truth."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Derived systems consume the committed result.",
-            "History lives in the repository service.",
-            "Lag is a freshness matter, not correctness."
+            "Search is a read model built from history; it never defines history.",
+            "The lag makes search stale, not history inconsistent; the reference never moved.",
+            "Derived systems consume the committed result."
           ],
           "hint": "Which system owns history?",
           "explanation": "None of the derived systems may become the source of truth."
@@ -51,15 +51,15 @@
           "context": "A protected branch advances only after policy is revalidated for the exact candidate commit and the expected target head. Search, Actions, notifications, audit, and webhooks consume the committed result; none becomes the source of truth for history.",
           "prompt": "A webhook subscriber is down for an hour. May merges continue?",
           "options": [
-            "Yes. Writes stay durable; events queue with bounded retries per subscriber.",
-            "No; block merges.",
-            "Only for public repositories."
+            "Only for public repositories, where webhook delivery is best effort.",
+            "Yes. Writes stay durable and events queue with bounded per-subscriber retries.",
+            "No. Block merges until the subscriber acknowledges again, to keep it in step."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "Repository visibility has nothing to do with delivery; both kinds queue the same way.",
             "Subscriber failure must not become a repository outage.",
-            "Blocking developers for a webhook is backwards.",
-            "Visibility is unrelated."
+            "Blocking merges on a downstream consumer turns one broken endpoint into an outage."
           ],
           "hint": "Which path is synchronous, and which is not?",
           "explanation": "The synchronous path ends after the authorized durable update."
@@ -145,16 +145,16 @@
           "prompt": "A pull request is merged. Put the path in order.",
           "items": [
             {
-              "id": "s1",
-              "text": "Load the candidate SHA, current target head, permissions, reviews, required checks, and branch policy; reject evidence for other commits."
+              "id": "s3",
+              "text": "Publish a versioned event with repository, actor, old and new references, policy version, and trace ID from the journal."
             },
             {
               "id": "s2",
               "text": "Verify objects exist, atomically advance the target reference only if its old value still matches, and record the transition durably."
             },
             {
-              "id": "s3",
-              "text": "Publish a versioned event with repository, actor, old and new references, policy version, and trace ID from the journal."
+              "id": "s1",
+              "text": "Load the candidate SHA, current target head, permissions, reviews, required checks, and branch policy; reject evidence for other commits."
             },
             {
               "id": "s4",
@@ -178,20 +178,20 @@
           "prompt": "The target head moved after evaluation. Put the path in order.",
           "items": [
             {
-              "id": "s1",
-              "text": "Evidence was loaded for the candidate against the old target head."
-            },
-            {
-              "id": "s2",
-              "text": "The compare-and-swap fails because the reference’s value changed."
-            },
-            {
               "id": "s3",
               "text": "The coordinator re-evaluates mergeability and policy against the new head."
             },
             {
+              "id": "s1",
+              "text": "Evidence was loaded for the candidate against the old target head."
+            },
+            {
               "id": "s4",
               "text": "On success, the transition is recorded and the event published."
+            },
+            {
+              "id": "s2",
+              "text": "The compare-and-swap fails because the reference’s value changed."
             }
           ],
           "answer": [
@@ -211,20 +211,20 @@
           "prompt": "A required check passed on an older commit of the PR. Put the path in order.",
           "items": [
             {
-              "id": "s1",
-              "text": "The coordinator loads status evidence bound to exact commit SHAs."
-            },
-            {
-              "id": "s2",
-              "text": "The evidence belongs to a different commit than the candidate: rejected."
-            },
-            {
               "id": "s3",
               "text": "No reference change occurs."
             },
             {
+              "id": "s1",
+              "text": "The coordinator loads status evidence bound to exact commit SHAs."
+            },
+            {
               "id": "s4",
               "text": "No event is published; the author is told which check is missing for the current commit."
+            },
+            {
+              "id": "s2",
+              "text": "The evidence belongs to a different commit than the candidate: rejected."
             }
           ],
           "answer": [
@@ -248,15 +248,15 @@
           "context": "Bind review and status evidence to exact commit identities, not mutable pull-request labels. Mutable handles must resolve to immutable commits and a target-head version.",
           "prompt": "An approval was given on commit A; the author pushed commit B. Is the approval valid for B?",
           "options": [
-            "No. Review evidence binds to the reviewed commit; B needs its own evidence unless policy says otherwise.",
-            "Yes; the PR is approved.",
-            "Yes, if B is small."
+            "Yes. Approval attaches to the pull request, which is still the same request.",
+            "Yes, as long as B only adds small changes such as formatting or comments.",
+            "No. Review evidence binds to the reviewed commit, so B needs its own approval."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Mutable PR labels cannot carry commit-bound evidence.",
-            "Approval is per commit.",
-            "Size does not change binding."
+            "The pull request is a mutable handle; approval has to name the commit it reviewed.",
+            "Nobody reviewed B, so its size is a guess, and small diffs still change what ships.",
+            "Mutable PR labels cannot carry commit-bound evidence."
           ],
           "hint": "Which commit did the reviewer look at?",
           "explanation": "Bind evidence to exact commit identities."
@@ -268,15 +268,15 @@
           "context": "Bind review and status evidence to exact commit identities, not mutable pull-request labels. Mutable handles must resolve to immutable commits and a target-head version.",
           "prompt": "Which fields must a status record carry?",
           "options": [
-            "Check name, exact commit SHA, conclusion, attempt, producer identity, completion time, and artifact link.",
-            "Only pass or fail.",
-            "The PR number."
+            "Only the conclusion, since a check either passed or failed for the branch.",
+            "The pull request number and the conclusion, which is enough to find the run.",
+            "Check name, exact commit SHA, conclusion, attempt, producer, and finish time."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Commit-bound, attributable evidence is replayable.",
-            "A bare result cannot be bound.",
-            "PR numbers are mutable handles."
+            "A bare pass or fail cannot be tied to a commit or to the run that produced it.",
+            "Pull request numbers are mutable handles; the head commit changes under them.",
+            "Commit-bound, attributable evidence is replayable."
           ],
           "hint": "What makes the evidence verifiable later?",
           "explanation": "Status evidence names the exact commit."
@@ -288,15 +288,15 @@
           "context": "Bind review and status evidence to exact commit identities, not mutable pull-request labels. Mutable handles must resolve to immutable commits and a target-head version.",
           "prompt": "Why keep a monotonically increasing version on a protected reference?",
           "options": [
-            "So decisions record which target-head version they used and stale evaluations are detectable.",
-            "For display.",
-            "For sorting."
+            "To let the interface sort branches by which protected reference moved most recently.",
+            "So each decision records the target-head version it used and stale ones are caught.",
+            "To show developers a readable build number next to the branch name."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "Ordering a branch list is a display concern and needs no version on the reference.",
             "Versioning makes compare-and-swap and audit precise.",
-            "It is not cosmetic.",
-            "Sorting is not the purpose."
+            "A human-facing counter would not tell an evaluation whether it read a stale head."
           ],
           "hint": "How do you know an evaluation is stale?",
           "explanation": "Record the target-head version each decision used."
@@ -313,15 +313,15 @@
           "context": "Repository writes stay durable when a derived consumer is slow; one repository or subscriber cannot exhaust the shared fleet; webhook retries are bounded per subscriber with dead-letter handling.",
           "prompt": "A single hot repository generates most events. What protects other repositories’ delivery?",
           "options": [
-            "Partitioning, per-repository and per-subscriber bounds, and separate backlog measurement.",
-            "Nothing; queues are shared.",
-            "Blocking the hot repository."
+            "Blocking the hot repository from emitting events until its backlog clears.",
+            "Partitioning plus per-repository and per-subscriber bounds on delivery work.",
+            "Nothing extra; a shared queue drains fast enough to absorb one busy repository."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "Stopping one repository to save the rest is an outage for it, not isolation.",
             "Bound one repository or subscriber from exhausting the shared fleet.",
-            "Shared queues without bounds are the failure.",
-            "Blocking is not isolation."
+            "A shared unbounded queue is exactly how one repository starves every other subscriber."
           ],
           "hint": "What does one hot tenant do to a shared queue?",
           "explanation": "Load-test with a hot repository, a slow subscriber, a retry burst, and a failed zone."
@@ -333,15 +333,15 @@
           "context": "Repository writes stay durable when a derived consumer is slow; one repository or subscriber cannot exhaust the shared fleet; webhook retries are bounded per subscriber with dead-letter handling.",
           "prompt": "Which backlog metric maps to the developer-visible promise?",
           "options": [
-            "The age of the oldest undelivered event per consumer.",
-            "Total queue depth.",
-            "Number of partitions."
+            "The total number of events sitting in the shared queue.",
+            "The number of partitions configured for the event stream.",
+            "The age of the oldest undelivered event per consumer."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Backlog is a freshness budget.",
-            "Depth alone is incomplete.",
-            "Partition count is configuration."
+            "Depth says how much is waiting, not how long anyone has been waiting.",
+            "Partition count is a capacity setting; it does not move when delivery falls behind.",
+            "Backlog is a freshness budget."
           ],
           "hint": "What does a developer notice?",
           "explanation": "Measure oldest-event age per consumer."
@@ -353,15 +353,15 @@
           "context": "Repository writes stay durable when a derived consumer is slow; one repository or subscriber cannot exhaust the shared fleet; webhook retries are bounded per subscriber with dead-letter handling.",
           "prompt": "A customer webhook endpoint fails continuously. What should the webhook service do?",
           "options": [
-            "Retry with bounds per subscriber, dead-letter, and expose replay controls.",
-            "Retry forever.",
-            "Drop all events for that customer silently."
+            "Retry the endpoint indefinitely until it accepts the events again.",
+            "Drop every event for that customer silently once failures pass a threshold.",
+            "Retry with bounds per subscriber, dead-letter, and expose replay controls."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Bounded retries plus dead-letter handling isolate the failure.",
-            "Infinite retries consume the fleet.",
-            "Silent drops break the contract."
+            "Unbounded retries to a dead endpoint spend capacity every other subscriber needs.",
+            "Silent drops leave the customer with a gap they cannot see or replay.",
+            "Bounded retries plus dead-letter handling isolate the failure."
           ],
           "hint": "How long should one subscriber consume delivery capacity?",
           "explanation": "The webhook service owns bounded retries and dead-letter handling."

@@ -189,7 +189,7 @@ Date: September 4, 2026, second round, after release `3089d150`. Scope: finish h
 ### Intentional adaptations
 
 - The case-study packs use the lessons’ illustrative planning envelopes (450M WhatsApp users, 18K GitHub events per second, 900 Uber requests per minute) and say so in their context; they are not claims about production fleets.
-- Authored practice is now complete for the design course only. The GenAI and ML courses keep derived packs and are counted separately: 72 authored, 130 derived.
+- Authored practice was complete for the design course only at this point. The GenAI and ML courses still used derived packs: 72 authored, 130 derived. This was finished later the same day; see the final section.
 
 ### Evidence
 
@@ -203,4 +203,37 @@ Logs: `.artifacts/design-course-practice/`.
 
 ### Limits
 
-Days 39–130 are verified through the per-lesson curriculum sweep and unit tests over the real prerequisite gates, not a browser walk of each study day. Authored practice is complete for the design course; the GenAI and ML courses keep derived packs.
+Days 39–130 are verified through the per-lesson curriculum sweep and unit tests over the real prerequisite gates, not a browser walk of each study day.
+
+## Hand-authored practice for every lesson, and the answer-length defect
+
+Date: September 4, 2026, after the `00cbd003` docs commit. Scope: finish authored practice for the GenAI and ML courses, then audit the whole exercise corpus for shortcuts a learner could exploit without understanding the lesson.
+
+### What the audit found
+
+Three defects, measured across every pack rather than sampled:
+
+- **The longest answer usually won.** Of 681 multiple-choice exercises, the correct option was the longest in 85% of cases, and averaged well over twice the length of its alternatives. Distractors were frequently one-word stubs ("Yes.", "Never.", "None.", "Job.") beside a full, specific correct sentence. A learner could score well by measuring text.
+- **Ordering steps were listed in solved order.** Sequence items were stored, and therefore displayed, in the correct order, so the answer was the order already on screen.
+- **Some groups repeated one exercise three times.** Several groups differed only by a renamed noun or an incremented version number, which wasted two of the three spaced repetitions.
+
+A fourth check found one hint that stated its own answer; every other hint across the corpus was clean.
+
+### What changed
+
+- All 202 lesson sessions now use hand-authored practice: 202 packs, 961 groups, 2,883 variants (990 ordering, 1,068 decision, 540 calculation, 285 matching). No `daily-practice.generated.json` files remain.
+- Every choice exercise was rebalanced. The correct option is now 1.07 times the average distractor on average, with a maximum of 1.59 and zero exercises failing the contract. Where the correct answer stays longest it now wins by a few characters rather than by a sentence.
+- All 990 ordering exercises are shuffled deterministically for display; none are listed in solved order.
+- The three packs behind the interactive models were rebuilt with genuinely different variants while keeping their visual scenes and their nine-exercise contract.
+
+### Verification
+
+- Unit tests: 377 passed, 6 Firebase emulator tests skipped. Content validation, the content-block registry check, the learning-catalog drift check, and the secret scan passed. The production build passed and traced 2,229 canonical content assets.
+- Browser, against the rebuilt local production server on port 3101: `qa:learning-curriculum` completed all 202 lesson sessions with real grading against every authored pack, including matching, ordering, calculation, and choice exercises, with representative wrong-answer retries and persisted completion; `qa:learning-journey`, `qa:adaptive-learning`, `qa:learning-path`, `LEARNING_QA_OFFLINE=1 qa:first-month`, and `qa:learning-models` all passed. No uncaught page errors.
+
+### Limits
+
+- The browser sweep exercises the first variant of each group. Variants two and three are schema-validated and were reviewed by their authors, but have not been walked in a browser.
+- Difficulty is not calibrated against learner outcomes. These are exercises written against the lesson sources, not items with measured discrimination.
+- Practice content changed for most lessons, so per-skill review evidence for those steps resets once. Unit placements survive, because a unit revision is derived from assessment content only.
+- Physical-device installation, screen-reader testing, and a live signed-in two-device sync check remain outstanding external checks.

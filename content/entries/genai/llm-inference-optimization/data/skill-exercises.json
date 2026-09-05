@@ -1,0 +1,426 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "llm-inference-optimization-request-path",
+      "variants": [
+        {
+          "id": "llm-inference-optimization-request-path-1",
+          "kind": "sequence",
+          "title": "Trace the request path",
+          "context": "A production inference request passes through admission and routing, prefix lookup, prefill, the decode scheduler, and streaming with observation. TTFT ends when the first token reaches the client; TPOT measures later tokens; goodput measures work finished inside the SLO.",
+          "prompt": "A chat request arrives at a shared serving pool. Put the request path in order.",
+          "items": [
+            {
+              "id": "s4",
+              "text": "Interleave the sequence with other active sequences one decode iteration at a time."
+            },
+            {
+              "id": "s2",
+              "text": "Look up reusable KV blocks that match the model, adapter, tokenized prefix, and cache namespace."
+            },
+            {
+              "id": "s5",
+              "text": "Stream tokens to the client and record latency, cache, capacity, quality, and stop-reason evidence."
+            },
+            {
+              "id": "s3",
+              "text": "Prefill the uncached input tokens in parallel and write keys and values for every layer."
+            },
+            {
+              "id": "s1",
+              "text": "Apply tenant quotas, deadline, priority, model routing, and overload policy before any expensive work."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Cheap decisions and lookups come before the compute-heavy phase.",
+          "explanation": "Admission, prefix lookup, prefill, decode, then stream and observe; measuring each stage separately keeps a GPU win from hiding a longer queue."
+        },
+        {
+          "id": "llm-inference-optimization-request-path-2",
+          "kind": "sequence",
+          "title": "Trace the request path",
+          "context": "A production inference request passes through admission and routing, prefix lookup, prefill, the decode scheduler, and streaming with observation. TTFT ends when the first token reaches the client; TPOT measures later tokens; goodput measures work finished inside the SLO.",
+          "prompt": "A request shares a 3,000-token system prompt with thousands of others. Put the path in order and note where the shared prefix pays off.",
+          "items": [
+            {
+              "id": "s3",
+              "text": "Prefill only the tokens after the cached prefix, skipping the already computed blocks."
+            },
+            {
+              "id": "s5",
+              "text": "Report the reused tokens and the prefill milliseconds avoided, not just a cache-hit count."
+            },
+            {
+              "id": "s2",
+              "text": "Find the KV blocks for the exact 3,000-token prefix in the pool's cache namespace."
+            },
+            {
+              "id": "s1",
+              "text": "Admit the request under its tenant quota and route it to a pool serving the same model and adapter."
+            },
+            {
+              "id": "s4",
+              "text": "Decode new tokens at the normal cadence, since prefix reuse does not speed up generation."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Prefix reuse is concentrated in one phase.",
+          "explanation": "Prefix caching accelerates prefill when an exact prefix matches; decode still runs step by step, so measure tokens saved rather than hits."
+        },
+        {
+          "id": "llm-inference-optimization-request-path-3",
+          "kind": "sequence",
+          "title": "Trace the request path",
+          "context": "A production inference request passes through admission and routing, prefix lookup, prefill, the decode scheduler, and streaming with observation. TTFT ends when the first token reaches the client; TPOT measures later tokens; goodput measures work finished inside the SLO.",
+          "prompt": "A client disconnects while a long answer is streaming. Put the path in order, ending with the cancellation being honored.",
+          "items": [
+            {
+              "id": "s3",
+              "text": "The decode scheduler was interleaving the sequence with other active work."
+            },
+            {
+              "id": "s4",
+              "text": "The stream layer detects the disconnect and propagates cancellation to the worker."
+            },
+            {
+              "id": "s5",
+              "text": "The scheduler drops the abandoned sequence and releases its cache pages for queued work."
+            },
+            {
+              "id": "s1",
+              "text": "Admission bounded the request with a deadline and a cancellation owner."
+            },
+            {
+              "id": "s2",
+              "text": "Prefix lookup and prefill produced the sequence's KV state."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Where does the disconnect become visible, and what must be freed afterward?",
+          "explanation": "Cancellation must propagate to every worker so abandoned sequences release scheduler and cache capacity instead of generating tokens nobody reads."
+        }
+      ]
+    },
+    {
+      "id": "llm-inference-optimization-admission",
+      "variants": [
+        {
+          "id": "llm-inference-optimization-admission-1",
+          "kind": "sequence",
+          "title": "Admit under overload",
+          "context": "Continuous batching improves utilization but does not create infinite capacity. Admission is part of the optimization: classify the request at ingress, reserve memory before execution, schedule by iteration during decode, and shed overload explicitly at the boundary instead of letting timeouts decide.",
+          "prompt": "An interactive request arrives at a pool near its KV limit. Put the admission steps in order.",
+          "items": [
+            {
+              "id": "s4",
+              "text": "Delay, downgrade, or reject further arrivals before queues exceed the SLO."
+            },
+            {
+              "id": "s1",
+              "text": "Record tenant, priority, prompt and output bounds, streaming mode, deadline, cache eligibility, and cancellation owner."
+            },
+            {
+              "id": "s2",
+              "text": "Check model weights, runtime workspace, and the projected KV pages before admitting the sequence."
+            },
+            {
+              "id": "s3",
+              "text": "Batch it with compatible active sequences while keeping a bounded TPOT for latency-sensitive work."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Nothing reaches a worker before its memory is accounted for.",
+          "explanation": "Classify, reserve, schedule, shed: overload becomes an explicit decision made at the boundary, not a timeout discovered later."
+        },
+        {
+          "id": "llm-inference-optimization-admission-2",
+          "kind": "sequence",
+          "title": "Admit under overload",
+          "context": "Continuous batching improves utilization but does not create infinite capacity. Admission is part of the optimization: classify the request at ingress, reserve memory before execution, schedule by iteration during decode, and shed overload explicitly at the boundary instead of letting timeouts decide.",
+          "prompt": "A 30,000-token document request arrives with batch priority while interactive traffic is active. Put the admission steps in order.",
+          "items": [
+            {
+              "id": "s4",
+              "text": "If pages run short, preempt or delay the batch request rather than letting an interactive stream time out."
+            },
+            {
+              "id": "s1",
+              "text": "Classify it as batch priority with a long prompt, a generous deadline, and no prefix eligibility."
+            },
+            {
+              "id": "s2",
+              "text": "Project its KV bytes from the prompt and output bounds and confirm the pool has the pages."
+            },
+            {
+              "id": "s3",
+              "text": "Schedule its decode iterations so interactive sequences keep their TPOT bound."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "The batch class has its own budget and yields to the interactive class.",
+          "explanation": "Separate budgets for interactive and batch traffic plus a starvation bound let long work proceed without turning timeouts into the capacity policy."
+        },
+        {
+          "id": "llm-inference-optimization-admission-3",
+          "kind": "sequence",
+          "title": "Admit under overload",
+          "context": "Continuous batching improves utilization but does not create infinite capacity. Admission is part of the optimization: classify the request at ingress, reserve memory before execution, schedule by iteration during decode, and shed overload explicitly at the boundary instead of letting timeouts decide.",
+          "prompt": "A burst of retries from an upstream gateway hits the pool. Put the admission steps in order.",
+          "items": [
+            {
+              "id": "s2",
+              "text": "Reserve memory only for the retries the pool can hold within its maximum queued tokens and predicted KV bytes."
+            },
+            {
+              "id": "s4",
+              "text": "Reject the remainder with an explicit overload response instead of queueing them past the SLO."
+            },
+            {
+              "id": "s1",
+              "text": "Classify the arrivals as internal retry traffic with its own separate budget."
+            },
+            {
+              "id": "s3",
+              "text": "Schedule the admitted retries by iteration behind deadline-ordered interactive work."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Retry traffic must not share the interactive budget.",
+          "explanation": "Overload controls specify separate budgets, a deadline-aware ordering rule, and the response returned when no route can meet the contract."
+        }
+      ]
+    },
+    {
+      "id": "llm-inference-optimization-memory-math",
+      "variants": [
+        {
+          "id": "llm-inference-optimization-memory-math-1",
+          "kind": "number",
+          "title": "Do the memory math",
+          "context": "KV bytes per token = 2 x layers x KV heads x head dimension x bytes per element, where the 2 stands for keys and values. Weight memory is about parameters x bits / 8. Memory free for KV state is what remains after weights and runtime workspace.",
+          "prompt": "A decoder has 48 layers, 32 query heads grouped onto 4 KV heads, head dimension 128, and 2-byte cache elements. How many KV bytes does one token require across all layers?",
+          "answer": 98304,
+          "unit": "bytes",
+          "hint": "Keys and values are both stored, and only KV heads count.",
+          "explanation": "2 x 48 x 4 x 128 x 2 = 98,304 bytes per token before runtime layout overhead.",
+          "mistakes": [
+            {
+              "value": 49152,
+              "feedback": "Multiply by 2 for keys and values."
+            },
+            {
+              "value": 786432,
+              "feedback": "Use the 4 KV heads, not the 32 query heads; grouped-query attention shares KV heads."
+            }
+          ]
+        },
+        {
+          "id": "llm-inference-optimization-memory-math-2",
+          "kind": "number",
+          "title": "Do the memory math",
+          "context": "KV bytes per token = 2 x layers x KV heads x head dimension x bytes per element, where the 2 stands for keys and values. Weight memory is about parameters x bits / 8. Memory free for KV state is what remains after weights and runtime workspace.",
+          "prompt": "A BF16 checkpoint occupies 32 GB of weight memory. The team quantizes it to INT4 weight-only. What is the approximate raw weight storage in GB, before scales, metadata, and padding?",
+          "answer": 8,
+          "unit": "GB",
+          "hint": "Compare the bits per weight before and after.",
+          "explanation": "16 bits to 4 bits is a fourfold reduction, so 32 GB becomes about 8 GB; scales, metadata, workspace, and KV cache still add to the footprint.",
+          "mistakes": [
+            {
+              "value": 16,
+              "feedback": "INT4 is 4 bits, a quarter of BF16's 16 bits, not half."
+            },
+            {
+              "value": 4,
+              "feedback": "Divide 16 bits by 4 bits: the ratio is 4, not 8."
+            }
+          ]
+        },
+        {
+          "id": "llm-inference-optimization-memory-math-3",
+          "kind": "number",
+          "title": "Do the memory math",
+          "context": "KV bytes per token = 2 x layers x KV heads x head dimension x bytes per element, where the 2 stands for keys and values. Weight memory is about parameters x bits / 8. Memory free for KV state is what remains after weights and runtime workspace.",
+          "prompt": "An 80 GiB accelerator holds 16 GiB of weights and needs 4 GiB of runtime workspace. Each active sequence's projected KV state is 2 GiB. How many whole sequences can be active before overhead?",
+          "answer": 30,
+          "unit": "sequences",
+          "hint": "Reserve memory checks weights, workspace, and projected KV pages together.",
+          "explanation": "(80 - 16 - 4) / 2 = 30 sequences; admitting more creates preemption and a tail-latency cliff.",
+          "mistakes": [
+            {
+              "value": 40,
+              "feedback": "Subtract the weights and workspace before dividing; the KV cache shares the device."
+            },
+            {
+              "value": 32,
+              "feedback": "Runtime workspace also consumes memory; subtract it too."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "llm-inference-optimization-diagnose",
+      "variants": [
+        {
+          "id": "llm-inference-optimization-diagnose-1",
+          "kind": "choice",
+          "title": "Diagnose the optimization failure",
+          "context": "Optimization failures hide behind healthy-looking numbers: cache entries instead of tokens saved, average benchmark scores instead of slices, raw tokens per second instead of goodput. Name the failure before tuning anything.",
+          "prompt": "A dashboard shows a 90% prefix-cache hit rate, yet median prefill latency has not changed since caching was enabled. What is the most likely explanation?",
+          "options": [
+            "Prefill latency is dominated by the network path, not the GPU.",
+            "The cache is returning blocks for the wrong model.",
+            "The hits are tiny prefixes that avoid little prefill work."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Prefill latency measures GPU processing of uncached tokens; the network is outside it.",
+            "Wrong-model blocks would be a correctness incident, not a latency one.",
+            "Counting entries instead of tokens saved makes many small hits look healthy; measure reused tokens and prefill milliseconds avoided."
+          ],
+          "hint": "Which unit was the dashboard counting?",
+          "explanation": "Measure reused tokens and prefill milliseconds avoided, not entry hits."
+        },
+        {
+          "id": "llm-inference-optimization-diagnose-2",
+          "kind": "choice",
+          "title": "Diagnose the optimization failure",
+          "context": "Optimization failures hide behind healthy-looking numbers: cache entries instead of tokens saved, average benchmark scores instead of slices, raw tokens per second instead of goodput. Name the failure before tuning anything.",
+          "prompt": "An INT4 checkpoint matches the BF16 baseline on the average benchmark, and the team wants to ship it fleet-wide. What is missing before release?",
+          "options": [
+            "Nothing; the average proves quality is preserved.",
+            "Task, safety, and structured-output evaluation by slice.",
+            "A comparison at unconstrained saturation throughput."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "A flat average can hide a critical domain that regressed.",
+            "Quantization changes numerical representation and outputs; gate release on the slices that matter.",
+            "Throughput comparisons belong at the same SLO, and they do not test quality."
+          ],
+          "hint": "What can an average hide?",
+          "explanation": "Quantizing without slice evaluation is a named failure: average quality stays flat while a critical domain regresses."
+        },
+        {
+          "id": "llm-inference-optimization-diagnose-3",
+          "kind": "choice",
+          "title": "Diagnose the optimization failure",
+          "context": "Optimization failures hide behind healthy-looking numbers: cache entries instead of tokens saved, average benchmark scores instead of slices, raw tokens per second instead of goodput. Name the failure before tuning anything.",
+          "prompt": "After a scheduler change, tokens per second rose 25%, but requests completed inside the SLO stayed flat and client timeouts increased. What happened?",
+          "options": [
+            "TPOT regressed because the batches are too small.",
+            "Capacity genuinely improved and the SLO needs to be relaxed.",
+            "The system is generating tokens after deadlines and cancellations."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Higher tokens per second suggests larger batches, not smaller ones.",
+            "Raw tokens are not useful work; the SLO is the contract.",
+            "Optimizing raw throughput produces tokens nobody receives; track goodput and propagate cancellation."
+          ],
+          "hint": "Which metric counts only useful work?",
+          "explanation": "Goodput counts requests or tokens completed inside the SLO; raw throughput can rise while goodput stays flat."
+        }
+      ]
+    },
+    {
+      "id": "llm-inference-optimization-operating-point",
+      "variants": [
+        {
+          "id": "llm-inference-optimization-operating-point-1",
+          "kind": "choice",
+          "title": "Choose the control for the product",
+          "context": "Each optimization has an operating point: the product decides which latency metric matters, cache namespaces are data-isolation boundaries, and speculative decoding only pays off where measured acceptance is high and target batches are small.",
+          "prompt": "A real-time voice assistant reports a healthy average of 60 tokens per second, but users complain about pauses mid-sentence. Which measurement should the team adopt?",
+          "options": [
+            "Average tokens per second, sampled more often.",
+            "Tail TPOT and jitter per stream against a strict latency bound.",
+            "Aggregate completion throughput per hour."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "Averages cannot describe interruptions or jitter.",
+            "Real-time voice needs strict tail latency; per-token cadence and its variance expose the pauses.",
+            "Aggregate throughput fits offline batch work, not a live voice stream."
+          ],
+          "hint": "Which metric describes a pause?",
+          "explanation": "Choose the metric that matches the product: voice needs tail latency and jitter, not an average token rate."
+        },
+        {
+          "id": "llm-inference-optimization-operating-point-2",
+          "kind": "choice",
+          "title": "Choose the control for the product",
+          "context": "Each optimization has an operating point: the product decides which latency metric matters, cache namespaces are data-isolation boundaries, and speculative decoding only pays off where measured acceptance is high and target batches are small.",
+          "prompt": "Two tenants use private LoRA adapters on the same base model. The prefix cache is keyed by tokenized prefix only. What should change?",
+          "options": [
+            "Nothing, because the tokenized prefix is already unique per prompt.",
+            "Disable prefix caching for all tenants to be safe.",
+            "Add model, adapter, and tenant boundary to the cache key."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Two tenants can send the same words through different adapters and private state.",
+            "Caching can stay; the key needs the missing identity.",
+            "Cache namespace design is a data-isolation boundary; include adapter and tenant identity."
+          ],
+          "hint": "What does the key omit that changes the computed blocks?",
+          "explanation": "Unsafe prefix reuse comes from a cache key that omits tenant, adapter, or model identity."
+        },
+        {
+          "id": "llm-inference-optimization-operating-point-3",
+          "kind": "choice",
+          "title": "Choose the control for the product",
+          "context": "Each optimization has an operating point: the product decides which latency metric matters, cache namespaces are data-isolation boundaries, and speculative decoding only pays off where measured acceptance is high and target batches are small.",
+          "prompt": "A route already runs large efficient batches, and a trial drafter shows 35% token acceptance there. Should speculative decoding be enabled on it?",
+          "options": [
+            "Yes, but only after quantizing the drafter to INT4.",
+            "Yes, everywhere, since exact speculative sampling preserves the target distribution.",
+            "No on this route; enable it only where acceptance is high and batches are small."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Drafter precision does not fix low acceptance at a large-batch operating point.",
+            "Preserving the distribution says nothing about speed; drafting still costs capacity.",
+            "Drafting overhead consumes capacity when acceptance is low or the target already runs in large batches."
+          ],
+          "hint": "Where does the drafter's cost exceed its savings?",
+          "explanation": "Speculating at the wrong operating point is a named failure; enable it only on measured routes."
+        }
+      ]
+    }
+  ]
+}

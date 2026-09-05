@@ -1,0 +1,449 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "production-transformer-architecture-request-path",
+      "variants": [
+        {
+          "id": "production-transformer-architecture-request-path-1",
+          "kind": "sequence",
+          "title": "Trace one request",
+          "context": "A request crosses four boundaries that each protect a different resource: validate and admit, prefill the prompt into key and value state, schedule decode iterations that reuse that state, then stream, account, and release.",
+          "prompt": "A chat request arrives at a healthy serving pool. Put the phases in order.",
+          "items": [
+            {
+              "id": "s2",
+              "text": "Prefill: run the prompt tokens through every block, produce the first-token logits, and write reusable key and value state."
+            },
+            {
+              "id": "s4",
+              "text": "Stream and account: emit bounded output, record phase latency, release cache pages, and commit terminal status once."
+            },
+            {
+              "id": "s1",
+              "text": "Validate and admit: resolve the model bundle, cap input and output tokens, authenticate, and reserve queue and cache capacity."
+            },
+            {
+              "id": "s3",
+              "text": "Schedule decode: combine active sequences, read their cache pages, run one token step, and retire completed work."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Which phase creates the state that the next phase only reads?",
+          "explanation": "Prefill builds the key and value state that decode reuses, and accounting closes the request exactly once after the pages are released."
+        },
+        {
+          "id": "production-transformer-architecture-request-path-2",
+          "kind": "sequence",
+          "title": "Trace one request",
+          "context": "A request crosses four boundaries that each protect a different resource: validate and admit, prefill the prompt into key and value state, schedule decode iterations that reuse that state, then stream, account, and release.",
+          "prompt": "A client disconnects while tokens are still streaming. Put the events in order, ending with the pages returned to the pool.",
+          "items": [
+            {
+              "id": "s2",
+              "text": "Prefill writes the prompt's key and value state into those reserved pages."
+            },
+            {
+              "id": "s3",
+              "text": "Decode streams tokens until the client disconnects mid-generation."
+            },
+            {
+              "id": "s4",
+              "text": "The scheduler retires the sequence at the next safe iteration boundary."
+            },
+            {
+              "id": "s1",
+              "text": "Admission reserves cache pages for the request's declared maximum tokens."
+            },
+            {
+              "id": "s5",
+              "text": "Accounting releases the pages and commits one terminal status for the request."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5"
+          ],
+          "hint": "Cancellation is handled at a boundary, not in the middle of a token step.",
+          "explanation": "Cancellation has to reach the scheduler and the allocator, otherwise a disconnected client leaves reserved pages stranded."
+        },
+        {
+          "id": "production-transformer-architecture-request-path-3",
+          "kind": "sequence",
+          "title": "Trace one request",
+          "context": "A request crosses four boundaries that each protect a different resource: validate and admit, prefill the prompt into key and value state, schedule decode iterations that reuse that state, then stream, account, and release.",
+          "prompt": "An operator is deciding which phase metric to read first for a slow request. Put the metrics in order from the earliest phase they cover to the latest.",
+          "items": [
+            {
+              "id": "s2",
+              "text": "Time to first token adds tokenization, scheduling, and prefill on top of that wait."
+            },
+            {
+              "id": "s1",
+              "text": "Queue delay accumulates while the request waits for admission and shows pressure before execution starts."
+            },
+            {
+              "id": "s3",
+              "text": "Inter-token latency measures the decode cadence once streaming has begun."
+            },
+            {
+              "id": "s4",
+              "text": "End-to-end latency finally includes the generated length, so it cannot replace the phase metrics."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Which number already contains the one before it?",
+          "explanation": "Phase metrics nest: reading them in order separates admission pressure from prefill cost from decode cadence."
+        }
+      ]
+    },
+    {
+      "id": "production-transformer-architecture-iteration-schedule",
+      "variants": [
+        {
+          "id": "production-transformer-architecture-iteration-schedule-1",
+          "kind": "sequence",
+          "title": "Schedule tokens, not batches",
+          "context": "Continuous batching bounds each request, allocates paged key and value state, composes each iteration from decode tokens and bounded prefill chunks, then retires finished sequences and refills at the next safe boundary.",
+          "prompt": "A pool moves from static request batching to continuous batching. Put the scheduler steps in order.",
+          "items": [
+            {
+              "id": "s4",
+              "text": "Retire and refill: release completed sequence pages and admit compatible queued work at the next safe boundary."
+            },
+            {
+              "id": "s2",
+              "text": "Allocate paged state: reserve noncontiguous cache blocks so growth needs no single large allocation."
+            },
+            {
+              "id": "s3",
+              "text": "Compose an iteration: select decode tokens and bounded prefill chunks inside the token, sequence, and memory limits."
+            },
+            {
+              "id": "s1",
+              "text": "Bound the request: estimate prompt and output tokens, deadline, cache pages, priority, and the compatible pool."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "What has to be reserved before an iteration can include the sequence?",
+          "explanation": "Bounding and paged allocation come before scheduling, which is why a finished sequence can free capacity for queued work immediately."
+        },
+        {
+          "id": "production-transformer-architecture-iteration-schedule-2",
+          "kind": "sequence",
+          "title": "Schedule tokens, not batches",
+          "context": "Continuous batching bounds each request, allocates paged key and value state, composes each iteration from decode tokens and bounded prefill chunks, then retires finished sequences and refills at the next safe boundary.",
+          "prompt": "A very long prompt arrives while interactive streams are decoding. Put the steps in order so the long prefill cannot monopolize the loop.",
+          "items": [
+            {
+              "id": "s2",
+              "text": "Allocate noncontiguous cache blocks for its declared maximum instead of one contiguous region."
+            },
+            {
+              "id": "s1",
+              "text": "Bound the arriving request against the pool's prompt, output, and total token contract."
+            },
+            {
+              "id": "s3",
+              "text": "Compose the next iteration from active decode tokens plus one bounded prefill chunk of the long prompt."
+            },
+            {
+              "id": "s4",
+              "text": "Retire the sequences that finished, release their pages, and admit compatible queued work."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "Chunking is a scheduling decision, not a client concern.",
+          "explanation": "Chunked prefill lets a long prompt make progress across iterations while interactive decode keeps its cadence."
+        },
+        {
+          "id": "production-transformer-architecture-iteration-schedule-3",
+          "kind": "sequence",
+          "title": "Schedule tokens, not batches",
+          "context": "Continuous batching bounds each request, allocates paged key and value state, composes each iteration from decode tokens and bounded prefill chunks, then retires finished sequences and refills at the next safe boundary.",
+          "prompt": "Mixed generation lengths were stranding slots in a static batch. Put the steps in order that stop the waste.",
+          "items": [
+            {
+              "id": "s3",
+              "text": "Run one iteration over the active sequences without waiting for the longest generation to end."
+            },
+            {
+              "id": "s2",
+              "text": "Reserve paged state for the sequences that will actually run this iteration."
+            },
+            {
+              "id": "s1",
+              "text": "Bound each queued request so its declared work fits the pool before anything is scheduled."
+            },
+            {
+              "id": "s4",
+              "text": "Release the pages of finished sequences and admit new work at the next iteration boundary."
+            }
+          ],
+          "answer": [
+            "s1",
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "hint": "What does a static batch keep holding after a short generation ends?",
+          "explanation": "Iteration-level scheduling lets finished sequences leave and queued sequences join between decode steps, so short generations stop reserving idle slots."
+        }
+      ]
+    },
+    {
+      "id": "production-transformer-architecture-page-math",
+      "variants": [
+        {
+          "id": "production-transformer-architecture-page-math-1",
+          "kind": "number",
+          "title": "Reserve KV pages",
+          "context": "Admission reserves cache pages for the work a request declares, which is prompt tokens plus maximum output tokens, rounded up to whole pages. Reserved pages cannot be double-allocated across active sequences.",
+          "prompt": "A request declares 6,144 prompt tokens and 1,024 maximum output tokens. The pool stores 256 tokens per cache page. How many pages must admission reserve?",
+          "answer": 28,
+          "unit": "pages",
+          "hint": "Reserve for the declared maximum, not the expected answer length.",
+          "explanation": "Admission reserves prompt plus maximum output tokens as whole pages, so concurrent growth cannot exhaust device memory later.",
+          "mistakes": [
+            {
+              "value": 24,
+              "feedback": "That reserves the prompt only; the declared output tokens need pages before execution starts."
+            },
+            {
+              "value": 4,
+              "feedback": "That reserves the output tokens alone and leaves the prompt state unaccounted."
+            }
+          ]
+        },
+        {
+          "id": "production-transformer-architecture-page-math-2",
+          "kind": "number",
+          "title": "Reserve KV pages",
+          "context": "Admission reserves cache pages for the work a request declares, which is prompt tokens plus maximum output tokens, rounded up to whole pages. Reserved pages cannot be double-allocated across active sequences.",
+          "prompt": "A second request declares 5,000 prompt tokens and 1,200 maximum output tokens on a pool that stores 512 tokens per page. How many pages must admission reserve?",
+          "answer": 13,
+          "unit": "pages",
+          "hint": "A partial page is still a whole page once it is reserved.",
+          "explanation": "Page reservations round up, because a sequence cannot share the tail of a page with another sequence.",
+          "mistakes": [
+            {
+              "value": 12,
+              "feedback": "That truncates instead of rounding up, so the last 88 tokens have nowhere to live."
+            },
+            {
+              "value": 10,
+              "feedback": "That reserves the prompt alone, rounded up, and ignores the declared output tokens."
+            }
+          ]
+        },
+        {
+          "id": "production-transformer-architecture-page-math-3",
+          "kind": "number",
+          "title": "Reserve KV pages",
+          "context": "Admission reserves cache pages for the work a request declares, which is prompt tokens plus maximum output tokens, rounded up to whole pages. Reserved pages cannot be double-allocated across active sequences.",
+          "prompt": "A degraded pool has 40 free cache pages and every queued request needs 12 pages for its declared maximum. How many of those requests can be admitted before the pool must queue or reject?",
+          "answer": 3,
+          "unit": "requests",
+          "hint": "Reserved pages cannot be double-allocated, so count only whole reservations.",
+          "explanation": "Degraded capacity has to reduce admission immediately instead of waiting for the allocator to fail.",
+          "mistakes": [
+            {
+              "value": 4,
+              "feedback": "That rounds up; a fourth request would need 48 pages and only 40 are free."
+            },
+            {
+              "value": 40,
+              "feedback": "That reports free pages rather than the number of requests they can hold."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "production-transformer-architecture-attention-shape",
+      "variants": [
+        {
+          "id": "production-transformer-architecture-attention-shape-1",
+          "kind": "choice",
+          "title": "Change the shape or the kernel",
+          "context": "The number of query heads and key and value heads is part of the learned checkpoint, so MHA, GQA, and MQA are architecture choices. FlashAttention changes how exact attention executes, not how many learned key and value projections exist.",
+          "prompt": "To cut cache pressure, a team proposes setting the key and value head count to 1 in the server configuration for a checkpoint trained with multi-head attention. What should you tell them?",
+          "options": [
+            "Set the flag and compare throughput, since the attention math is unchanged by head sharing.",
+            "Enable FlashAttention instead, because it reduces the number of learned projections.",
+            "The key and value head count is learned, so MQA needs a checkpoint trained or deliberately converted and evaluated."
+          ],
+          "correctAnswer": 2,
+          "optionFeedback": [
+            "Sharing key and value heads changes which learned projections exist, so the outputs are not the same model.",
+            "FlashAttention changes execution, not the number of learned key and value projections.",
+            "MHA, GQA, and MQA differ in learned projections, so a server flag cannot create a shape the checkpoint never trained."
+          ],
+          "hint": "Is this a property of the checkpoint or of the kernel?",
+          "explanation": "Attention shape belongs to the checkpoint. A runtime can only serve the shape the weights were trained or converted for."
+        },
+        {
+          "id": "production-transformer-architecture-attention-shape-2",
+          "kind": "choice",
+          "title": "Change the shape or the kernel",
+          "context": "The number of query heads and key and value heads is part of the learned checkpoint, so MHA, GQA, and MQA are architecture choices. FlashAttention changes how exact attention executes, not how many learned key and value projections exist.",
+          "prompt": "A team enables FlashAttention and expects to fit more concurrent sequences inside the same cache budget. What actually changes?",
+          "options": [
+            "Cached tokens are compressed, so the same budget holds more sequences.",
+            "Exact attention executes with IO-aware tiling, while cache bytes per token stay the same.",
+            "Key and value heads are merged at runtime, so cache bytes per token fall."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "Nothing in the kernel compresses cached key and value state.",
+            "FlashAttention avoids materializing the full score matrix; it does not change the learned KV shape.",
+            "No runtime kernel merges learned heads, and doing so would change the model."
+          ],
+          "hint": "Which of these changes the number of learned projections?",
+          "explanation": "Long context is not free capacity: a more memory-efficient kernel still needs checkpoint-compatible KV state for every retained token."
+        },
+        {
+          "id": "production-transformer-architecture-attention-shape-3",
+          "kind": "choice",
+          "title": "Change the shape or the kernel",
+          "context": "The number of query heads and key and value heads is part of the learned checkpoint, so MHA, GQA, and MQA are architecture choices. FlashAttention changes how exact attention executes, not how many learned key and value projections exist.",
+          "prompt": "A decode-bound long-context service must cut cache bandwidth but wants to keep more than one KV group. Which checkpoint shape fits that requirement?",
+          "options": [
+            "Multi-head attention, which keeps one key and value head per query head.",
+            "Grouped-query attention, where several query heads share each key and value head.",
+            "Multi-query attention, because a single KV head is the safest default shape."
+          ],
+          "correctAnswer": 1,
+          "optionFeedback": [
+            "MHA keeps the largest KV footprint of the three, which is what the service is trying to reduce.",
+            "GQA sits between MHA and MQA: less incremental-decoding cache than MHA, more KV groups than MQA.",
+            "MQA minimizes KV state but collapses to one group, which the requirement rules out."
+          ],
+          "hint": "The requirement names both a reduction and a floor.",
+          "explanation": "Pick the attention shape from the cache and bandwidth requirement, then confirm the checkpoint and kernel actually support it."
+        }
+      ]
+    },
+    {
+      "id": "production-transformer-architecture-partition-map",
+      "variants": [
+        {
+          "id": "production-transformer-architecture-partition-map-1",
+          "kind": "match",
+          "title": "Map the partition to its job",
+          "context": "Replica parallelism splits requests, tensor parallelism splits each layer, pipeline parallelism splits model depth, and context parallelism splits sequence positions. Each one adds its own communication and failure behavior.",
+          "prompt": "A design review lists four parallelism strategies. Match each one to what it partitions.",
+          "pairs": [
+            {
+              "id": "p1",
+              "label": "Replica parallelism",
+              "detail": "Independent requests across complete model copies"
+            },
+            {
+              "id": "p2",
+              "label": "Tensor parallelism",
+              "detail": "The matrix operations inside each layer across tightly connected devices"
+            },
+            {
+              "id": "p3",
+              "label": "Pipeline parallelism",
+              "detail": "Different layer ranges across separate stages"
+            },
+            {
+              "id": "p4",
+              "label": "Context parallelism",
+              "detail": "Sequence positions for long-context execution"
+            }
+          ],
+          "hint": "Name the unit each strategy cuts before naming its benefit.",
+          "explanation": "Start with the smallest topology that fits the model and its live state, then add a partition only when measured pressure justifies it."
+        },
+        {
+          "id": "production-transformer-architecture-partition-map-2",
+          "kind": "match",
+          "title": "Map the partition to its job",
+          "context": "Replica parallelism splits requests, tensor parallelism splits each layer, pipeline parallelism splits model depth, and context parallelism splits sequence positions. Each one adds its own communication and failure behavior.",
+          "prompt": "The same review asks what each strategy costs. Match each strategy to the cost it introduces.",
+          "pairs": [
+            {
+              "id": "p1",
+              "label": "Replica parallelism",
+              "detail": "Needs the whole model and its live cache to fit one serving group"
+            },
+            {
+              "id": "p2",
+              "label": "Tensor parallelism",
+              "detail": "Adds collectives on the critical path of every token step"
+            },
+            {
+              "id": "p3",
+              "label": "Pipeline parallelism",
+              "detail": "Adds pipeline bubbles and stage imbalance, and any stage failure breaks the replica"
+            },
+            {
+              "id": "p4",
+              "label": "Context parallelism",
+              "detail": "Needs a supported communication pattern because attention still crosses partitions"
+            }
+          ],
+          "hint": "Every partition buys memory or capacity and charges communication.",
+          "explanation": "Parallelism adds communication and coordination, so a partition is justified by measured memory, compute, or latency pressure rather than by a diagram."
+        },
+        {
+          "id": "production-transformer-architecture-partition-map-3",
+          "kind": "match",
+          "title": "Map the partition to its job",
+          "context": "Replica parallelism splits requests, tensor parallelism splits each layer, pipeline parallelism splits model depth, and context parallelism splits sequence positions. Each one adds its own communication and failure behavior.",
+          "prompt": "Four pools report different constraints. Match each constraint to the partitioning decision it argues for.",
+          "pairs": [
+            {
+              "id": "p1",
+              "label": "Weights and live cache already fit one device comfortably",
+              "detail": "Keep complete replicas and route independent requests across them"
+            },
+            {
+              "id": "p2",
+              "label": "Weights exceed one device but the devices share a fast interconnect",
+              "detail": "Shard each layer's matrix operations across those devices"
+            },
+            {
+              "id": "p3",
+              "label": "A very deep model still does not fit after sharding layers",
+              "detail": "Place different layer ranges on separate stages"
+            },
+            {
+              "id": "p4",
+              "label": "One sequence is too long for a single device's attention state",
+              "detail": "Partition sequence positions and measure the communication pattern"
+            }
+          ],
+          "hint": "Partition the bottleneck that was actually measured.",
+          "explanation": "Match the partition to the constraint: request capacity, per-device weight memory, model depth, and sequence length each argue for a different split."
+        }
+      ]
+    }
+  ]
+}

@@ -12,6 +12,10 @@
           "prompt": "A worker processes messages from a queue. Put the lease protocol in order.",
           "items": [
             {
+              "id": "s5",
+              "text": "Delete with the current receipt handle after success, checking each batch entry."
+            },
+            {
               "id": "s1",
               "text": "Long-poll a bounded batch that can finish within the lease."
             },
@@ -20,16 +24,12 @@
               "text": "Validate the contract before any side effect."
             },
             {
-              "id": "s3",
-              "text": "Apply the work with an idempotency key written atomically with the effect."
-            },
-            {
               "id": "s4",
               "text": "Extend visibility only while the worker can prove live progress."
             },
             {
-              "id": "s5",
-              "text": "Delete with the current receipt handle after success, checking each batch entry."
+              "id": "s3",
+              "text": "Apply the work with an idempotency key written atomically with the effect."
             }
           ],
           "answer": [
@@ -50,12 +50,16 @@
           "prompt": "A message needs a long-running job. Put the steps in order.",
           "items": [
             {
-              "id": "s1",
-              "text": "Receive a small batch under long polling."
+              "id": "s5",
+              "text": "Delete the current receipt once the job’s result is durable."
             },
             {
               "id": "s2",
               "text": "Reject unsupported versions deliberately rather than burning transient retries."
+            },
+            {
+              "id": "s1",
+              "text": "Receive a small batch under long polling."
             },
             {
               "id": "s3",
@@ -64,10 +68,6 @@
             {
               "id": "s4",
               "text": "Call ChangeMessageVisibility while the job is genuinely progressing."
-            },
-            {
-              "id": "s5",
-              "text": "Delete the current receipt once the job’s result is durable."
             }
           ],
           "answer": [
@@ -88,20 +88,20 @@
           "prompt": "A worker crashes mid-batch. Put what happens next in order, from the surviving flow’s view.",
           "items": [
             {
-              "id": "s1",
-              "text": "Messages were received and made invisible for the lease period."
-            },
-            {
               "id": "s2",
               "text": "Validation had passed for the ones in flight."
             },
             {
-              "id": "s3",
-              "text": "Any effect already applied is keyed, so a repeat becomes a no-op."
-            },
-            {
               "id": "s4",
               "text": "Nobody extends the lease, so visibility expires."
+            },
+            {
+              "id": "s1",
+              "text": "Messages were received and made invisible for the lease period."
+            },
+            {
+              "id": "s3",
+              "text": "Any effect already applied is keyed, so a repeat becomes a no-op."
             },
             {
               "id": "s5",
@@ -130,15 +130,15 @@
           "context": "Standard queues give at-least-once delivery and best-effort ordering for independent work. FIFO queues preserve order within a MessageGroupId and suppress duplicate sends by deduplication ID; one hot or blocked group stays serial. Neither makes an external side effect exactly once.",
           "prompt": "Thumbnail jobs are independent, duplicates are harmless, and throughput matters most. Which queue?",
           "options": [
-            "Standard.",
             "FIFO with one message group.",
-            "FIFO with a group per job."
+            "FIFO with a group per job.",
+            "Standard with no groups."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Standard queues fit independent, duplicate-safe work at scale.",
             "One group makes everything serial.",
-            "Per-job groups add ordering machinery for nothing."
+            "Per-job groups add ordering machinery for nothing.",
+            "Standard queues fit independent, duplicate-safe work at scale."
           ],
           "hint": "Does anything need order?",
           "explanation": "Choose Standard when messages can run independently and effects are idempotent."
@@ -150,15 +150,15 @@
           "context": "Standard queues give at-least-once delivery and best-effort ordering for independent work. FIFO queues preserve order within a MessageGroupId and suppress duplicate sends by deduplication ID; one hot or blocked group stays serial. Neither makes an external side effect exactly once.",
           "prompt": "Events for one account must be processed in order, but accounts are independent. Which queue?",
           "options": [
-            "FIFO with MessageGroupId per account.",
-            "Standard.",
-            "FIFO with a single group for all accounts."
+            "Standard with no message groups.",
+            "FIFO with a single group for all accounts.",
+            "FIFO with MessageGroupId per account."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "Order within a group; different groups run concurrently.",
             "Standard gives best-effort ordering only.",
-            "A single group serializes every account."
+            "A single group serializes every account.",
+            "Order within a group; different groups run concurrently."
           ],
           "hint": "What is the smallest entity that needs order?",
           "explanation": "Group by the smallest entity that needs order."
@@ -170,15 +170,15 @@
           "context": "Standard queues give at-least-once delivery and best-effort ordering for independent work. FIFO queues preserve order within a MessageGroupId and suppress duplicate sends by deduplication ID; one hot or blocked group stays serial. Neither makes an external side effect exactly once.",
           "prompt": "A FIFO queue deduplicates sends. Does the consumer’s card charge now happen exactly once?",
           "options": [
-            "No. Deduplication covers sends; a crash before delete can still repeat processing.",
-            "Yes.",
-            "Yes, if the deduplication ID is the charge ID."
+            "Yes, because FIFO removes duplicates end to end.",
+            "Yes, if the deduplication ID is the charge ID.",
+            "No. Dedup covers sends; a crash before delete repeats work."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 2,
           "optionFeedback": [
-            "SQS cannot atomically combine DeleteMessage with an external system.",
-            "Send dedup is not processing dedup.",
-            "The ID stops duplicate sends, not duplicate processing."
+            "Send deduplication is not processing deduplication, and the crash happens later.",
+            "The ID stops duplicate sends, not duplicate processing.",
+            "SQS cannot atomically combine DeleteMessage with an external system."
           ],
           "hint": "Which boundary does deduplication cover?",
           "explanation": "Put the idempotency record and business mutation in one destination transaction when possible."
@@ -263,15 +263,15 @@
           "context": "The most important SQS failure happens after the business operation succeeds but before the receipt is deleted; SQS sees that as unfinished work and redelivers. Visibility must cover processing time, or extend it only for live work.",
           "prompt": "The order was written, then DeleteMessage failed. What does SQS do?",
           "options": [
-            "Redeliver the message after visibility expires; the consumer must treat it as a duplicate.",
-            "Nothing; the work succeeded.",
-            "Move it to the DLQ immediately."
+            "It goes to the dead-letter queue immediately.",
+            "It is redelivered once the visibility timeout expires.",
+            "Nothing, because the business write already succeeded."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "The DLQ only receives a message after maxReceiveCount is exceeded.",
             "SQS cannot distinguish a failed delete from a crashed worker.",
-            "SQS never saw the completion.",
-            "DLQ only after maxReceiveCount."
+            "SQS never saw the completion, so it still counts the message as in flight."
           ],
           "hint": "What did SQS observe?",
           "explanation": "Idempotency at the business-effect boundary is what makes this failure harmless."
@@ -283,15 +283,15 @@
           "context": "The most important SQS failure happens after the business operation succeeds but before the receipt is deleted; SQS sees that as unfinished work and redelivers. Visibility must cover processing time, or extend it only for live work.",
           "prompt": "Processing takes 90 seconds but visibility is the 30-second default. What happens?",
           "options": [
-            "Another consumer receives the same message while the first is still working.",
-            "The first consumer is cancelled.",
-            "SQS extends visibility automatically."
+            "Another consumer receives it while the first still works.",
+            "The first consumer is cancelled at the 30-second mark.",
+            "SQS extends the visibility timeout automatically."
           ],
           "correctAnswer": 0,
           "optionFeedback": [
             "Extend visibility for live work or shorten the batch.",
-            "SQS does not cancel workers.",
-            "Extension is the consumer’s job via ChangeMessageVisibility."
+            "SQS does not cancel workers, and the first one keeps running unaware.",
+            "Extension is the consumer's job via ChangeMessageVisibility."
           ],
           "hint": "Who owns the lease length?",
           "explanation": "Keep each batch small enough that every message can finish before its lease expires."
@@ -303,15 +303,15 @@
           "context": "The most important SQS failure happens after the business operation succeeds but before the receipt is deleted; SQS sees that as unfinished work and redelivers. Visibility must cover processing time, or extend it only for live work.",
           "prompt": "A message has been received more times than maxReceiveCount. Where does it go?",
           "options": [
-            "To the dead-letter queue configured by the redrive policy.",
-            "Back to the front of the queue.",
-            "It is deleted."
+            "It is deleted after the receive count is exceeded.",
+            "To the dead-letter queue set by the redrive policy.",
+            "Back to the front of the same queue for one retry."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "It is preserved for diagnosis, not deleted.",
             "A DLQ isolates poison messages from healthy work.",
-            "Redrive policy moves it out.",
-            "It is preserved for diagnosis, not deleted."
+            "The redrive policy moves it out of the queue instead of reordering it."
           ],
           "hint": "What protects healthy work from an endlessly failing message?",
           "explanation": "The DLQ preserves context; someone still has to diagnose and replay."
@@ -328,15 +328,15 @@
           "context": "A dead-letter queue isolates messages that exceed maxReceiveCount. Retry timeouts, throttling, and brief outages with backoff and jitter; quarantine invalid schemas and deterministic business-rule failures. The DLQ does not diagnose, repair, or replay by itself.",
           "prompt": "A message fails because its schema version is unsupported. Retry with backoff?",
           "options": [
-            "No. Quarantine it; a deterministic contract error should not consume transient retries.",
-            "Yes, up to maxReceiveCount.",
-            "Yes, forever."
+            "Yes, retry indefinitely until someone notices.",
+            "No. Quarantine it; the failure is deterministic.",
+            "Yes, retry the full maxReceiveCount budget."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "Infinite retries hide the incident and never repair an unsupported schema.",
             "Permanent failures go to quarantine unless a code or data change can repair them.",
-            "Retrying a deterministic failure just burns the budget.",
-            "Infinite retries hide incidents."
+            "Retrying a deterministic failure just burns the budget before quarantine."
           ],
           "hint": "Can this failure recover on its own?",
           "explanation": "Classify before retrying: transient versus deterministic."
@@ -348,15 +348,15 @@
           "context": "A dead-letter queue isolates messages that exceed maxReceiveCount. Retry timeouts, throttling, and brief outages with backoff and jitter; quarantine invalid schemas and deterministic business-rule failures. The DLQ does not diagnose, repair, or replay by itself.",
           "prompt": "A downstream API throttles the consumer. Retry?",
           "options": [
-            "Yes, with backoff and jitter within the receive budget.",
-            "No; quarantine immediately.",
-            "Yes, immediately and repeatedly."
+            "Yes, with backoff and jitter within the budget.",
+            "No, quarantine the message immediately.",
+            "Yes, retry immediately and keep retrying."
           ],
           "correctAnswer": 0,
           "optionFeedback": [
             "Throttling is transient.",
             "Quarantining transient failures hides capacity problems.",
-            "Immediate retries worsen throttling."
+            "Immediate retries add load and make the throttling worse."
           ],
           "hint": "Is throttling permanent?",
           "explanation": "Retry timeouts, throttling, and brief outages with backoff and jitter."
@@ -368,15 +368,15 @@
           "context": "A dead-letter queue isolates messages that exceed maxReceiveCount. Retry timeouts, throttling, and brief outages with backoff and jitter; quarantine invalid schemas and deterministic business-rule failures. The DLQ does not diagnose, repair, or replay by itself.",
           "prompt": "Does a DLQ repair and replay poison messages by itself?",
           "options": [
-            "No. It isolates them; diagnosis, repair, and replay are operator workflows.",
-            "Yes.",
-            "Yes, after a delay."
+            "Yes, once the configured retention delay passes.",
+            "No. It isolates them; repair and replay are manual.",
+            "Yes, it replays them back to the source queue."
           ],
-          "correctAnswer": 0,
+          "correctAnswer": 1,
           "optionFeedback": [
+            "Time does not fix data; the same message fails the same way.",
             "Preserve context so someone can repair and replay safely.",
-            "Isolation is not repair.",
-            "Time does not fix data."
+            "Redrive is an operator action, and isolation is not repair."
           ],
           "hint": "What does quarantine actually do?",
           "explanation": "Quarantine poison messages without hiding incidents: alert on DLQ age and ownership."
