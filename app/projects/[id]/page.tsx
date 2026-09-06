@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
-import React, { useState } from 'react';
+import React, { useState, use } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useFirebaseProject } from '@/hooks/useFirebaseProjects';
 import { useAIGenerationQueue } from '@/hooks/useAIGenerationQueue';
@@ -47,7 +47,8 @@ import {
   Trash2
 } from 'lucide-react';
 
-export default function ProjectWorkspacePage({ params }: { params: { id: string } }) {
+export default function ProjectWorkspacePage(props: { params: Promise<{ id: string }> }) {
+  const params = use(props.params);
   const router = useRouter();
   const searchParams = useSearchParams();
   const pageIdFromUrl = searchParams.get('page');

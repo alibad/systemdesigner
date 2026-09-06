@@ -1,16 +1,17 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, use } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { INTERVIEW_PROMPTS, generateSessionId } from '@/lib/interview-sessions';
 import { useInterviewSessions } from '@/hooks/useInterviewSessions';
 
-export default function GymSessionPage({ params }: { params: { id: string } }) {
+export default function GymSessionPage(props: { params: Promise<{ id: string }> }) {
+  const params = use(props.params);
   const router = useRouter();
   const prompt = useMemo(() => INTERVIEW_PROMPTS.find(p => p.id === params.id), [params.id]);
   const { createSession } = useInterviewSessions();
-  
+
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [timeLeft, setTimeLeft] = useState(0);
   const [isActive, setIsActive] = useState(false);

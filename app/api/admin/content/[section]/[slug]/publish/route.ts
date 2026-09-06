@@ -15,10 +15,11 @@ const PublishSchema = z.object({
 });
 
 interface RouteContext {
-  params: { section: string; slug: string };
+  params: Promise<{ section: string; slug: string }>;
 }
 
-export async function POST(request: NextRequest, { params }: RouteContext) {
+export async function POST(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     const actor = await requireAdmin(request);
     const payload = PublishSchema.safeParse(await request.json());

@@ -28,13 +28,7 @@ import {
   Send,
   Trash2,
 } from 'lucide-react';
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, use } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -159,11 +153,12 @@ function workflowBadge(state: ContentStudioDocument['workflowState']) {
   return <Badge variant="secondary">Published</Badge>;
 }
 
-export default function AdminContentStudioPage({
-  params,
-}: {
-  params: { section: string; slug: string };
-}) {
+export default function AdminContentStudioPage(
+  props: {
+    params: Promise<{ section: string; slug: string }>;
+  }
+) {
+  const params = use(props.params);
   const router = useRouter();
   const { user, isAdmin, loading: authLoading } = useAuth();
   const [document, setDocument] = useState<ContentStudioDocument | null>(null);

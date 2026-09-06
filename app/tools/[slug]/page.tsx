@@ -7,10 +7,12 @@ export function generateStaticParams() {
   return generateContentStaticParams('tools');
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }) {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return generateContentMetadata('tools', params.slug);
 }
 
-export default function ToolContentPage({ params }: { params: { slug: string } }) {
+export default async function ToolContentPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return <GeneralizedContentPage section="tools" slug={params.slug} />;
 }

@@ -7,10 +7,12 @@ export function generateStaticParams() {
   return generateContentStaticParams('genai');
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }) {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return generateContentMetadata('genai', params.slug);
 }
 
-export default function GenAIContentPage({ params }: { params: { slug: string } }) {
+export default async function GenAIContentPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return <GeneralizedContentPage section="genai" slug={params.slug} />;
 }

@@ -7,7 +7,8 @@ import {
   readContentAsset,
 } from '@/lib/content-assets';
 
-export async function GET(_request: NextRequest, { params }: { params: { path: string[] } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ path: string[] }> }) {
+  const params = await props.params;
   try {
     const asset = await readContentAsset(params.path);
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, use } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import Link from 'next/link';
@@ -53,10 +53,11 @@ import UserLevelDisplay from '@/components/admin/UserLevelDisplay';
 import { ACHIEVEMENTS } from '@/lib/gamification';
 
 interface PageProps {
-  params: { userId: string };
+  params: Promise<{ userId: string }>;
 }
 
-export default function UserDetailPage({ params }: PageProps) {
+export default function UserDetailPage(props: PageProps) {
+  const params = use(props.params);
   const router = useRouter();
   const { isAdmin, loading: authLoading } = useAuth();
   const [userDetails, setUserDetails] = useState<UserDetailView | null>(null);

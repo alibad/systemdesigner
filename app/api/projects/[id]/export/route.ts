@@ -4,7 +4,7 @@ import { Project as FlexibleProject, ProjectPage } from '@/lib/project-data-mode
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { format, project, pages } = await request.json();

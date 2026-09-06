@@ -7,10 +7,11 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 interface RouteContext {
-  params: { section: string; slug: string };
+  params: Promise<{ section: string; slug: string }>;
 }
 
-export async function GET(request: NextRequest, { params }: RouteContext) {
+export async function GET(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     await requireAdmin(request);
     return NextResponse.json({

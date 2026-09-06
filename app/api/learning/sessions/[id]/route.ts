@@ -2,10 +2,8 @@ import { NextResponse } from "next/server";
 import sessions from "@/content/learning/sessions.json";
 import { PracticeStepSchema } from "@/lib/learning-path";
 
-export async function GET(
-  request: Request,
-  { params }: { params: { id: string } },
-) {
+export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   if (!Object.hasOwn(sessions, params.id))
     return NextResponse.json(
       { error: "Learning session not found" },

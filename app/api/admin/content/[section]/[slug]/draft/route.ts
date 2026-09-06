@@ -22,10 +22,11 @@ const DiscardDraftSchema = z.object({
 });
 
 interface RouteContext {
-  params: { section: string; slug: string };
+  params: Promise<{ section: string; slug: string }>;
 }
 
-export async function PUT(request: NextRequest, { params }: RouteContext) {
+export async function PUT(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     const actor = await requireAdmin(request);
     const payload = SaveDraftSchema.safeParse(await request.json());
@@ -50,7 +51,8 @@ export async function PUT(request: NextRequest, { params }: RouteContext) {
   }
 }
 
-export async function DELETE(request: NextRequest, { params }: RouteContext) {
+export async function DELETE(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     await requireAdmin(request);
     const payload = DiscardDraftSchema.safeParse(await request.json());
@@ -65,7 +67,8 @@ export async function DELETE(request: NextRequest, { params }: RouteContext) {
   }
 }
 
-export async function PATCH(request: NextRequest, { params }: RouteContext) {
+export async function PATCH(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     const actor = await requireAdmin(request);
     const payload = z

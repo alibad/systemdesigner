@@ -7,10 +7,12 @@ export function generateStaticParams() {
   return generateContentStaticParams('technology');
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }) {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return generateContentMetadata('technology', params.slug);
 }
 
-export default function TechnologyContentPage({ params }: { params: { slug: string } }) {
+export default async function TechnologyContentPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return <GeneralizedContentPage section="technology" slug={params.slug} />;
 }

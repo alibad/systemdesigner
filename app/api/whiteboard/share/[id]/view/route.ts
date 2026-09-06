@@ -2,10 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { doc, setDoc, increment, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const { pageId } = await request.json();
     const diagramId = params.id;

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, use } from 'react';
 import { Tldraw } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
 import { useSearchParams } from 'next/navigation';
@@ -136,11 +136,12 @@ function loadRecordsIntoEditor(editor: any, records: any[]) {
   console.log('[Share] Records loaded and view centered');
 }
 
-export default function SharedWhiteboardPage({ params }: { params: { id: string } }) {
+export default function SharedWhiteboardPage(props: { params: Promise<{ id: string }> }) {
+  const params = use(props.params);
   const searchParams = useSearchParams();
   const pageParam = searchParams.get('page');
   const requestedPageId = pageParam || undefined; // Use pageId directly, not parseInt!
-  
+
   const [data, setData] = useState<{ board: WhiteboardData } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

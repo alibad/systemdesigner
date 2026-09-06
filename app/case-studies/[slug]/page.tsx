@@ -7,10 +7,12 @@ export function generateStaticParams() {
   return generateContentStaticParams('case-studies');
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }) {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return generateContentMetadata('case-studies', params.slug);
 }
 
-export default function CaseStudyContentPage({ params }: { params: { slug: string } }) {
+export default async function CaseStudyContentPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return <GeneralizedContentPage section="case-studies" slug={params.slug} />;
 }

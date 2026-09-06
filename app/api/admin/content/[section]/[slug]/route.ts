@@ -16,10 +16,11 @@ const ValidatePayloadSchema = z.object({
 });
 
 interface RouteContext {
-  params: { section: string; slug: string };
+  params: Promise<{ section: string; slug: string }>;
 }
 
-export async function GET(request: NextRequest, { params }: RouteContext) {
+export async function GET(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     await requireAdmin(request);
     return NextResponse.json(await getContentStudioDocument(params.section, params.slug), {
@@ -30,7 +31,8 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
   }
 }
 
-export async function POST(request: NextRequest, { params }: RouteContext) {
+export async function POST(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     await requireAdmin(request);
     const payload = ValidatePayloadSchema.safeParse(await request.json());

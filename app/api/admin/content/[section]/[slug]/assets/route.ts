@@ -21,10 +21,11 @@ const AssetMutationSchema = z.object({
 });
 
 interface RouteContext {
-  params: { section: string; slug: string };
+  params: Promise<{ section: string; slug: string }>;
 }
 
-export async function GET(request: NextRequest, { params }: RouteContext) {
+export async function GET(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     await requireAdmin(request);
     const kind = request.nextUrl.searchParams.get('kind');
@@ -47,7 +48,8 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
   }
 }
 
-export async function POST(request: NextRequest, { params }: RouteContext) {
+export async function POST(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     const actor = await requireAdmin(request);
     const payload = AssetMutationSchema.safeParse(await request.json());
@@ -73,7 +75,8 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
   }
 }
 
-export async function DELETE(request: NextRequest, { params }: RouteContext) {
+export async function DELETE(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     const actor = await requireAdmin(request);
     const payload = AssetMutationSchema.omit({ content: true }).safeParse(await request.json());

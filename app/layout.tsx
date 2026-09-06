@@ -88,8 +88,8 @@ export const metadata: Metadata = {
 
 const inter = Inter({ subsets: ['latin'], display: 'swap' });
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const theme = cookies().get('theme')?.value;
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const theme = (await cookies()).get('theme')?.value;
   const isDark = theme ? theme === 'dark' : undefined;
   return (
     <html lang="en" className={isDark ? 'dark' : undefined} suppressHydrationWarning>

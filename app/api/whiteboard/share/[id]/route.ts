@@ -39,10 +39,8 @@ async function getDiagramPageByIdPublic(diagramId: string, pageId: string): Prom
   return null;
 }
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const { searchParams } = new URL(request.url);
     const pageParam = searchParams.get('page'); // Now expects pageId, not index

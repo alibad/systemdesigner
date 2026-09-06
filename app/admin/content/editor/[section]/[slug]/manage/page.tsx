@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, use } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -116,11 +116,12 @@ async function readApiError(response: Response): Promise<string> {
   return payload?.error || `Request failed with status ${response.status}.`;
 }
 
-export default function AdminContentManagementPage({
-  params,
-}: {
-  params: { section: string; slug: string };
-}) {
+export default function AdminContentManagementPage(
+  props: {
+    params: Promise<{ section: string; slug: string }>;
+  }
+) {
+  const params = use(props.params);
   const router = useRouter();
   const { user, isAdmin, loading: authLoading } = useAuth();
   const [metadataDocument, setMetadataDocument] = useState<MetadataDocument | null>(null);

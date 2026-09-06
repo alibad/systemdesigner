@@ -4,10 +4,8 @@ import { db } from '@/lib/firebase';
 
 const ADMIN_USER_IDS = ['0Dhfj8riMoUSLqV14GNPx3sA3hE3']; // Your admin user ID
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const { searchParams } = new URL(request.url);
     const userId = searchParams.get('userId');

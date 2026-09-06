@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { headers } from 'next/headers';
+import { headers, type UnsafeUnwrappedHeaders } from 'next/headers';
 
 // Free IP geolocation service (no API key required for basic usage)
 // Alternatives: ipapi.co, ip-api.com, ipinfo.io (with API key)
@@ -33,7 +33,7 @@ interface GeolocationData {
  */
 function getIPAddress(request: NextRequest): string {
   // Try various headers that might contain the real IP
-  const headersList = headers();
+  const headersList = (headers() as unknown as UnsafeUnwrappedHeaders);
 
   // Vercel/Cloudflare/Common proxies
   const forwardedFor = headersList.get('x-forwarded-for');
@@ -51,7 +51,8 @@ function getIPAddress(request: NextRequest): string {
   if (realIp) return realIp;
 
   // Fallback to request IP (may be proxy IP)
-  const ip = request.ip || request.headers.get('x-forwarded-for') || 'unknown';
+  // Next 15 removed request.ip; the proxy header is the remaining source.
+  const ip = request.headers.get('x-forwarded-for') || 'unknown';
   return ip;
 }
 

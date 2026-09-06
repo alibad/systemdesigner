@@ -7,10 +7,12 @@ export function generateStaticParams() {
   return generateContentStaticParams('fundamentals');
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }) {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return generateContentMetadata('fundamentals', params.slug);
 }
 
-export default function FundamentalsContentPage({ params }: { params: { slug: string } }) {
+export default async function FundamentalsContentPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   return <GeneralizedContentPage section="fundamentals" slug={params.slug} />;
 }

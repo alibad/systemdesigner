@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getDiagram, updateDiagram, deleteDiagram } from '@/lib/firebase';
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(_req: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const diagram = await getDiagram(params.id);
     if (!diagram) return NextResponse.json({ error: 'Diagram not found' }, { status: 404 });
@@ -12,7 +13,8 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   }
 }
 
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
+export async function PUT(req: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const body = await req.json();
     // Handle both 'json' (from whiteboard) and 'canvas' (legacy) formats
@@ -31,7 +33,8 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+export async function DELETE(_req: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     await deleteDiagram(params.id);
     return NextResponse.json({ success: true });

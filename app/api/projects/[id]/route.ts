@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getProject, updateProject } from '@/lib/firebase';
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(_req: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const project = await getProject(params.id);
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
@@ -12,7 +13,8 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   }
 }
 
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
+export async function PUT(req: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const body = await req.json();
     await updateProject(params.id, body);

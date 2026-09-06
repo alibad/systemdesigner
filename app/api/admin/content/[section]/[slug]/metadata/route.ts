@@ -18,10 +18,11 @@ const UpdateMetadataSchema = z.object({
 });
 
 interface RouteContext {
-  params: { section: string; slug: string };
+  params: Promise<{ section: string; slug: string }>;
 }
 
-export async function GET(request: NextRequest, { params }: RouteContext) {
+export async function GET(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     await requireAdmin(request);
     return NextResponse.json(await getAdminContentMetadata(params.section, params.slug), {
@@ -32,7 +33,8 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
   }
 }
 
-export async function PUT(request: NextRequest, { params }: RouteContext) {
+export async function PUT(request: NextRequest, props: RouteContext) {
+  const params = await props.params;
   try {
     const actor = await requireAdmin(request);
     const payload = UpdateMetadataSchema.safeParse(await request.json());
