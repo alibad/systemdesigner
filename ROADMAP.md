@@ -6,7 +6,7 @@ Last reviewed: September 4, 2026. These are priorities, not promised release dat
 
 ## Implemented: four connected courses
 
-The learning hub at `/learn` organizes 272 sessions into 45 units:
+The learning hub at `/learn` organizes 273 sessions into 46 units:
 
 | Course | Units | Sessions | Scope |
 | --- | ---: | ---: | --- |
@@ -74,7 +74,7 @@ Version 5 learning progress resumes interrupted exercises and mixed quizzes, inc
 
 ## Implemented: a guided journey through every design and coding session
 
-The guided path no longer ends at day 30. Fifteen parts and 325 study days connect all 272 sessions across the four courses in course order:
+The guided path no longer ends at day 30. Fifteen parts and 326 study days connect all 273 sessions across the four courses in course order:
 
 | Part | Days | Covers | Closes with |
 | --- | ---: | --- | --- |
@@ -100,7 +100,7 @@ A measured defect was removed at the same time. Across the existing multiple-cho
 
 ### One guided path through all four courses
 
-The journey used to stop at day 130, after system design and coding, and hand the learner off to a course page with 162 GenAI and ML sessions and no order. It now continues: 15 parts and 325 study days cover every session in the curriculum exactly once, in course order, with 53 review days and 26 milestones. Parts six to ten walk generative AI from token prediction through retrieval, agents, serving, evaluation, and safety. Parts eleven to fourteen walk machine learning from problem framing through data, training, efficiency, operations, and applications. A closing part turns the last two courses back into code.
+The journey used to stop at day 130, after system design and coding, and hand the learner off to a course page with 162 GenAI and ML sessions and no order. It now continues: 15 parts and 326 study days cover every session in the curriculum exactly once, in course order, with 53 review days and 26 milestones. Parts six to ten walk generative AI from token prediction through retrieval, agents, serving, evaluation, and safety. Parts eleven to fourteen walk machine learning from problem framing through data, training, efficiency, operations, and applications. A closing part turns the last two courses back into code.
 
 Course pages and placement still work as before, so a learner who wants to jump straight to a topic can. What changed is that following the path no longer runs out.
 
@@ -113,6 +113,8 @@ The 540 calculation exercises were each written by one author and never verified
 The coding course used to stop where system design did, so 187 days of the journey were reading and answering with nothing to implement. Eight new exercises change that, in two units: budget a context window, fuse two ranked lists by rank rather than raw score, plan overlapping chunks from a stride, and assemble an evidence packet that refuses when nothing survives its filters; then report precision and recall against their own denominators, split records without leaking across the boundary, find the largest distribution shift by share, and decide whether a canary is promoted, held, or rolled back.
 
 They close the journey as its fifteenth part, so every existing study day keeps its number and any saved journey task keeps its key. Each exercise ships with a reference solution that the test suite runs against every fixture.
+
+A ninth exercise goes further. The runner used to call one function per exercise, which limits a task to a single pure computation. It now also drives an ordered sequence of calls across several functions the learner writes, rebuilding them for each test so state cannot leak between cases. The closing capstone uses it: an inference gateway where admission reserves a slot against a tenant budget and a capacity limit, completion gives the slot back, and a report has to agree with everything that happened.
 
 ## Next: validate learning outcomes and the experience on real devices
 

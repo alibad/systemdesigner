@@ -50,13 +50,24 @@ const WORKER_SOURCE = `
 const codeValuesEqual = ${codeValuesEqual.toString()};
 self.onmessage = async ({ data }) => {
   try {
-    const solve = new Function('"use strict";\\n' + data.code + '\\nreturn ' + data.functionName + ';')();
-    if (typeof solve !== 'function') throw new Error('Define the requested function before running tests.');
+    const names = data.exports && data.exports.length ? data.exports : [data.functionName];
+    const build = () => new Function('"use strict";\\n' + data.code + '\\nreturn {' + names.join(',') + '};')();
+    const probe = build();
+    for (const name of names) {
+      if (typeof probe[name] !== 'function') throw new Error('Define ' + name + ' before running tests.');
+    }
     const results = [];
     for (const test of data.tests) {
-      const input = structuredClone(test.args);
-      const actual = await solve(...input);
-      const unchanged = !data.preserveInputs || codeValuesEqual(input, test.args);
+      // Rebuilt per test so state one test leaves behind cannot decide the next.
+      const api = build();
+      // A call sequence shares one set of functions, so state a call leaves behind
+      // is visible to the next one. A single-call test is the one-entry case of it.
+      const calls = test.calls || [{ fn: data.functionName, args: test.args }];
+      const inputs = calls.map(call => structuredClone(call.args));
+      const returned = [];
+      for (let index = 0; index < calls.length; index++) returned.push(await api[calls[index].fn](...inputs[index]));
+      const unchanged = !data.preserveInputs || calls.every((call, index) => codeValuesEqual(inputs[index], call.args));
+      const actual = test.calls ? returned : returned[0];
       results.push({ label: test.label, passed: unchanged && codeValuesEqual(actual, test.expected), actual: unchanged ? String(JSON.stringify(actual)) : 'Input arguments were changed.', expected: String(JSON.stringify(test.expected)) });
     }
     self.postMessage({ results });
@@ -136,6 +147,7 @@ export function runCode(
           id,
           code,
           functionName: step.functionName,
+          exports: step.exports,
           tests: step.tests,
           preserveInputs: step.preserveInputs,
         },

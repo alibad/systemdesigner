@@ -31,15 +31,27 @@ describe("coding exercise contracts", () => {
           "utf8",
         );
       for (const test of step.tests) {
-        const context = vm.createContext({ args: structuredClone(test.args) });
-        const actual = vm.runInContext(
-          `${source}\n${step.functionName}(...args)`,
+        const calls = test.calls || [
+          { fn: step.functionName, args: test.args! },
+        ];
+        const context = vm.createContext({
+          calls: calls.map((call) => ({
+            fn: call.fn,
+            args: structuredClone(call.args),
+          })),
+        });
+        const returned = vm.runInContext(
+          `${source}\nconst api = { ${(step.exports || [step.functionName]).join(", ")} };\ncalls.map((call) => api[call.fn](...call.args));`,
           context,
           { timeout: 500 },
         );
+        const actual = test.calls ? returned : returned[0];
         expect(codeValuesEqual(actual, test.expected), test.label).toBe(true);
         expect(
-          codeValuesEqual(context.args, test.args),
+          codeValuesEqual(
+            context.calls.map((call: { args: unknown[] }) => call.args),
+            calls.map((call) => call.args),
+          ),
           `${test.label}: input mutation`,
         ).toBe(true);
       }

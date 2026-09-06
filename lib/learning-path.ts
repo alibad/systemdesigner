@@ -64,13 +64,34 @@ export const PracticeStepSchema = z
       instruction: z.string().min(1),
       hint: z.string().min(1),
       preserveInputs: z.boolean().optional(),
+      // A multi-step exercise asks the learner to build several named functions and
+      // is driven by an ordered sequence of calls, so a test can observe state that
+      // one call leaves behind for the next.
+      exports: z
+        .array(z.string().regex(/^[a-zA-Z_$][\w$]*$/))
+        .min(2)
+        .max(6)
+        .optional(),
       tests: z
         .array(
-          z.object({
-            label: z.string(),
-            args: z.array(z.unknown()),
-            expected: z.unknown(),
-          }),
+          z
+            .object({
+              label: z.string(),
+              args: z.array(z.unknown()).optional(),
+              calls: z
+                .array(
+                  z.object({
+                    fn: z.string().regex(/^[a-zA-Z_$][\w$]*$/),
+                    args: z.array(z.unknown()),
+                  }),
+                )
+                .min(1)
+                .optional(),
+              expected: z.unknown(),
+            })
+            .refine((test) => Boolean(test.args) !== Boolean(test.calls), {
+              message: "A test drives either one function or a call sequence",
+            }),
         )
         .min(1),
     }),
@@ -82,6 +103,16 @@ export const PracticeStepSchema = z
     {
       message: "Quiz sessions must have exactly one assessment source",
     },
+  )
+  .refine(
+    (step) =>
+      step.kind !== "coding" ||
+      step.tests.every(
+        (test) =>
+          !test.calls ||
+          test.calls.every((call) => step.exports?.includes(call.fn)),
+      ),
+    { message: "Call sequences may only use the exercise's declared exports" },
   );
 
 export type PracticeStep = z.infer<typeof PracticeStepSchema>;

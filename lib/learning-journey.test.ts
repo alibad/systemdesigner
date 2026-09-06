@@ -94,7 +94,7 @@ describe("guided learning journey", () => {
     expect(
       currentJourneyDay(dailyProgress(data), data.journey),
     ).toBeUndefined();
-    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(272);
+    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(273);
     expect(FIRST_MONTH.days.at(-1)?.stepIds).toEqual(["code-link-service"]);
     for (const day of JOURNEY_DAYS.filter((day) => day.kind === "project"))
       expect(ALL_STEPS.find((step) => step.id === day.stepIds[0])?.kind).toBe(
