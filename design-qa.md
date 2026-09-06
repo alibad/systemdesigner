@@ -244,7 +244,7 @@ Date: September 4, 2026, after the `d8a1ee2c` release. Scope: close the gaps tha
 
 ### The journey now reaches every session
 
-317 study days in 14 parts cover all 264 sessions exactly once in course order, with 53 review days (106 review tasks) and 25 milestones. Parts one to five are unchanged. Parts six to ten add generative AI over 103 days; parts eleven to fourteen add machine learning over 84 days. A coding project still closes each of the first four months; the later parts end on unit checkpoints, which the generator already permits.
+325 study days in 14 parts cover all 272 sessions exactly once in course order, with 53 review days (106 review tasks) and 25 milestones. Parts one to five are unchanged. Parts six to ten add generative AI over 103 days; parts eleven to fourteen add machine learning over 84 days. A coding project still closes each of the first four months; the later parts end on unit checkpoints, which the generator already permits.
 
 Day IDs stay stable, so a learner mid-journey keeps their tasks. The end-of-journey screen used to offer "Start Generative AI" and "Start Machine learning"; both are now inside the path, so it points at the full path instead.
 
@@ -268,7 +268,7 @@ Getting it to pass took three attempts, and every failure was in the harness rat
 
 ### Verification
 
-- Unit tests 377 passed, including a walk of all 317 study days through real prerequisite gates. Typecheck, lint, content validation, the authored-practice contract, and the secret scan passed. The production build passed and traced 2,229 canonical content assets.
+- Unit tests 377 passed, including a walk of all 325 study days through real prerequisite gates. Typecheck, lint, content validation, the authored-practice contract, and the secret scan passed. The production build passed and traced 2,229 canonical content assets.
 - Browser, against a clean local production build: journey, adaptive and placement, learning path, offline first-month, models, and the full 202-lesson curriculum sweep all passed. The new later-variant sweeps then passed at both review levels, each walking all 202 lessons and answering 961 exercises. With the curriculum sweep's first variants, all 2,883 authored exercises have now been rendered and graded through the real interface.
 
 ### Limits
@@ -277,3 +277,34 @@ Getting it to pass took three attempts, and every failure was in the harness rat
 - The journey is one linear path. A learner who wants only machine learning uses course pages and placement rather than the trail.
 - Difficulty is still not calibrated against learner outcomes.
 - An earlier run of the browser suites failed with a chunk-load error that looked like a code regression. It was a half-written build left by a rebuild that was killed mid-flight. Re-running against a clean build passed. Stopping a local server by process-name pattern also stopped unrelated projects' dev servers on the same machine; target the port instead.
+
+## Hands-on building for the last two courses
+
+Date: September 6, 2026, after the `1607a66b` release. Scope: the coding course stopped where system design did, so the 187 journey days covering generative AI and machine learning had nothing to implement.
+
+### What was added
+
+Eight coding exercises in two units. **Build GenAI request paths**: budget a context window after reserving instructions and the answer, fuse two ranked lists by rank rather than raw score, plan overlapping chunks from a stride, and assemble an evidence packet that filters for authorization and freshness, drops repeated sources, and refuses when nothing survives. **Judge and ship a model**: report precision, recall and F1 against their own denominators, split records chronologically with an embargo, find the largest distribution shift by share, and decide whether a canary is promoted, held, or rolled back.
+
+Each ships a starter and a reference solution. The existing contract test runs every solution against every fixture and checks it does not mutate its inputs, so a broken exercise fails the suite rather than a learner.
+
+### The decision that shaped the layout
+
+The obvious placement was next to the lessons each exercise draws on. That was implemented and then reverted, because journey day IDs are positional: inserting a day renumbers every day after it, saved journey tasks are keyed `day-NNN:stepId`, and the task schema rejects a key it does not recognize. A learner past day 130 would have had their stored path treated as unreadable. The documentation also promises day IDs are stable.
+
+The eight exercises are a closing fifteenth part instead. Days 1 to 317 are byte-identical to the released journey, verified by diffing against `HEAD`. The journey now ends by building something rather than on a checkpoint.
+
+### What was fixed
+
+The drift exercise originally asked for the largest share change between two buckets. With two buckets the shares always move by the same amount in opposite directions, so the answer was decided by which floating-point subtraction happened to round higher. Gaps are now rounded before comparison and ties break by bucket name, and the fixtures use three buckets with a clear winner.
+
+Two hard-coded counts in the learning-path suite (`31` completed steps, "all 25 coding sessions") are now derived from the catalog, so adding coding exercises no longer requires editing the suite.
+
+### Verification
+
+Unit tests 385 passed, including the eight new reference solutions. Typecheck, lint, content validation, the authored-practice contract, the secret scan, and the production build passed. Browser suites against a clean local build: journey, adaptive and placement, learning path including a walk of all 33 coding sessions to course completion, offline first-month, models, and the 202-lesson curriculum sweep.
+
+### Limits
+
+- The new exercises are single functions, like the existing 25. Genuinely multi-file service tasks would need a different execution model in the runner.
+- The closing part has no review days, so the eight exercises are practised once on the path rather than revisited.

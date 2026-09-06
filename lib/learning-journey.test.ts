@@ -44,11 +44,12 @@ describe("guided learning journey", () => {
           ),
           `${day.id} reviews ${id}`,
         ).toBeDefined();
-    expect(JOURNEY.parts).toHaveLength(14);
+    expect(JOURNEY.parts).toHaveLength(15);
     expect(FIRST_MONTH.days).toHaveLength(30);
     for (const part of JOURNEY.parts) {
       expect(part.days.at(-1)?.milestone).toBeTruthy();
-      expect(part.days.filter((day) => day.kind === "review").length).toBeGreaterThanOrEqual(2);
+      if (part.id !== "build-what-you-learned")
+        expect(part.days.filter((day) => day.kind === "review").length).toBeGreaterThanOrEqual(2);
       for (const day of part.days) expect(journeyPartFor(day).id).toBe(part.id);
     }
     expect(JOURNEY_DAYS.map((day) => day.number)).toEqual(
@@ -93,7 +94,7 @@ describe("guided learning journey", () => {
     expect(
       currentJourneyDay(dailyProgress(data), data.journey),
     ).toBeUndefined();
-    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(264);
+    expect(Object.keys(dailyProgress(data).completed)).toHaveLength(272);
     expect(FIRST_MONTH.days.at(-1)?.stepIds).toEqual(["code-link-service"]);
     for (const day of JOURNEY_DAYS.filter((day) => day.kind === "project"))
       expect(ALL_STEPS.find((step) => step.id === day.stepIds[0])?.kind).toBe(

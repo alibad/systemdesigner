@@ -10,6 +10,8 @@ const read = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 const bank = await read('lib/quiz-bank/all-quizzes.json');
 const sessions = await read('content/learning/sessions.json');
 const { courses } = await read('content/learning/catalog.json');
+// Derived so adding coding exercises does not require editing this suite.
+const codingStepCount = courses.find(course => course.id === 'coding').units.flatMap(unit => unit.steps).length;
 const originals = {
   'code-capacity': 'function serversNeeded(r, c) { return Math.ceil(r / c); }',
   'code-routing': 'function pickServer(s, i) { return s.length ? s[i % s.length] : null; }',
@@ -163,7 +165,7 @@ try {
     await page.getByRole('button', { name: 'All tests passed · Complete step' }).click(); await back();
   }
   await expect(page.getByRole('heading', { name: 'You completed Coding.' })).toBeVisible();
-  console.log('PASS: design unit and checkpoint, all 25 coding sessions, timeout/isolation, immutable inputs, drafts, unlocks, and course completion.');
+  console.log(`PASS: design unit and checkpoint, all ${codingStepCount} coding sessions, timeout/isolation, immutable inputs, drafts, unlocks, and course completion.`);
   for (const id of ['genai', 'ml']) {
     await chooseCourse(id);
     const course = courses.find(course => course.id === id);
@@ -184,7 +186,7 @@ try {
   await page.getByRole('button', { name: 'Let’s practice', exact: true }).click();
   await quiz(sessions[reviewed], { review: 1 }); await back();
   await expect(page.getByText('You’re up to date.', { exact: true })).toBeVisible();
-  expect(await completed()).toHaveLength(31);
+  expect(await completed()).toHaveLength(codingStepCount + 6);
   await chooseCourse('design');
   // Backups are available inside settings and restore a fresh browser only after confirmation.
   await settings();
@@ -196,12 +198,12 @@ try {
   fresh.on('pageerror', error => errors.push(error.message)); await fresh.goto(`${baseUrl}/learn`);
   await settings(fresh);
   const upload = () => fresh.getByLabel('Progress backup file').setInputFiles({ name: 'progress.json', mimeType: 'application/json', buffer: backup });
-  await upload(); await expect(fresh.getByRole('dialog')).toContainText('31 completed steps');
+  await upload(); await expect(fresh.getByRole('dialog')).toContainText(`${codingStepCount + 6} completed steps`);
   await fresh.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(await completed(fresh)).toHaveLength(0);
   await upload(); await fresh.getByRole('button', { name: 'Confirm import', exact: true }).click();
   await closeSettings(fresh); await fresh.reload(); await fresh.getByRole('tab', {name:'Courses', exact:true}).click();
-  expect(await completed(fresh)).toHaveLength(31);
+  expect(await completed(fresh)).toHaveLength(codingStepCount + 6);
   await expect(fresh.getByRole('button', { name: 'Change daily goal' })).toContainText('3 sessions a day');
   await settings(fresh); await upload();
   await expect(fresh.getByRole('dialog')).toContainText('Adds 0 new completed steps (0 path XP)');
