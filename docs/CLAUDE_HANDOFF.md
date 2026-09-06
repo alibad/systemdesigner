@@ -15,9 +15,9 @@ The latest user request is to prepare a new Claude session to complete the remai
 - Repository: `https://github.com/alibad/systemdesigner`
 - Local checkout: `/Users/alibadereddin/Code/GitHub/systemdesigner`
 - Branch: `main` — repository instructions require direct work on this branch unless the user explicitly asks otherwise.
-- Released commit: `441aa5a4cfb661459f77dcedd5b6db5b2e1bd893` (`feat: extend the guided journey through GenAI and ML, verify every exercise`), on top of `d8a1ee2c` (the authored-practice contract check), `dd26a9bd` (hand-authored practice for every lesson), and the earlier design-course and journey work. All are pushed to `origin/main`. Earlier production deployments remain rollback candidates in Vercel.
+- Released commit: `278393767d9cc4e3b1c4d22a909b80cc4efa23af` (`feat: add coding exercises for GenAI and machine learning`), on top of `1607a66b`/`441aa5a4` (the journey extension and exercise verification), `d8a1ee2c` (the authored-practice contract check), `dd26a9bd` (hand-authored practice for every lesson), and the earlier design-course and journey work. All are pushed to `origin/main`. Earlier production deployments remain rollback candidates in Vercel.
 - Live app: `https://www.systemdesigner.net/learn`
-- Vercel deployment: `dpl_2UCtPm3V7ujxwTbRmK72dKfFuRrQ` for `441aa5a4` (immutable URL `https://systemdesigner-aw1esytlz-alibads-projects.vercel.app`), preceded the same day by `dpl_CXX4HZeCzDqSVruWrnQWT4UdkEo1` for `dd26a9bd`, `dpl_3QBrsQY54pRHFsoMTo7ids1ZE1m3` for `cc175c2d`, and `dpl_q99sRX7hz1zT3cT4NCEw6k8f6zmU` for `3089d150`.
+- Vercel deployment: `dpl_2C8agN6XvuwA5HS8NgNvw6jGe8B9` for `27839376` (immutable URL `https://systemdesigner-fkkwjlo9c-alibads-projects.vercel.app`), preceded by `dpl_2UCtPm3V7ujxwTbRmK72dKfFuRrQ` for `441aa5a4` and `dpl_CXX4HZeCzDqSVruWrnQWT4UdkEo1` for `dd26a9bd` on September 4.
 - Vercel reported `READY` with `www.systemdesigner.net` and `systemdesigner.net` among its aliases. Deployment completed September 4 at 06:49 UTC, September 3 at 23:49 in Los Angeles. The build used pnpm 10.4.1 from the `packageManager` pin and Node 24.x, the same as the previous release.
 - Previous release: `dpl_WEwitRbFix4S1anvzZQgG9G29JZq` for `d67a2ec0` (`https://systemdesigner-bqw0qay6y-alibads-projects.vercel.app`).
 - Project: `systemdesigner`, team `alibads-projects`; project ID `prj_zPPUzQrD2kSVZWCOAoPmmrddOHG5`. Production branch is `main`; pushing it automatically deploys.
@@ -87,6 +87,17 @@ Treat completion as a coherent, usable learning journey with reviewed content, r
 - Coding runs inside an opaque iframe/worker with network-blocking CSP, input-mutation checks, and execution timeouts. Client-visible answers/tests are self-assessment, not trusted competitive grading.
 - The service worker caches explicitly allowed public resources only. Never cache account/auth/Firestore responses. Session/content revision checks prevent mismatched practice.
 - Preserve fixes for fullscreen dialog entrance animation, footer overlap, final-unit access, feedback focus/scroll, and hydration resetting early navigation. `design-qa.md` explains the regressions. Do not reintroduce the initial owner-reset race.
+
+## Verification of the September 6 coding round
+
+- **Eight coding exercises for GenAI and ML**, in two new units (`coding-genai-request-paths`, `coding-ml-release-decisions`). The coding course previously stopped where system design did, leaving 187 journey days with nothing to implement. Totals are now **45 units, 272 sessions, 235 skills, 33 coding exercises**.
+- **They form a closing fifteenth journey part**, days 318 to 325, rather than sitting beside the lessons they draw on. Day IDs are positional and journey tasks are keyed `day-NNN:stepId`, so interleaving would have renumbered every day after 130 and made a learner's saved path parse as unreadable. Days 1 to 317 are byte-identical to the released journey, verified by diff against the previous commit.
+- Each exercise ships a reference solution; `lib/learning-exercises.test.ts` runs every solution against every fixture and rejects input mutation.
+- **A fixture decided by floating-point noise was fixed.** The drift exercise compared two buckets whose shares move by equal and opposite amounts, so the winner came down to rounding in the last bit. Gaps are now rounded before comparison, ties break by name, and the fixtures use three buckets.
+- Two hard-coded counts in `scripts/verify-daily-learning.mjs` are now derived from the catalog, so adding coding exercises no longer requires editing that suite.
+- Unit tests 385 passed. Typecheck, lint, content validation, the practice contract, the secret scan, and the production build passed. Browser suites against a clean local build: journey, adaptive/placement, learning path including a walk of all 33 coding sessions to course completion, offline first-month, models, and the 202-lesson curriculum sweep.
+- **Released.** Deployment `dpl_2C8agN6XvuwA5HS8NgNvw6jGe8B9` reached READY about four minutes after the push. Live guest checks: `/learn` and `/roadmap` returned 200, the trail reported 325 study days, and the new starter files and challenge JSON served from the content API. `pnpm qa:learning-journey` passed against the live domain. Logs: `.artifacts/coding-units/`.
+- Limits: the new exercises are single functions like the existing 25; genuinely multi-file service tasks would need a different runner. The closing part has no review days, so those eight are practised once on the path.
 
 ## Verification of the September 4 journey-extension round
 
