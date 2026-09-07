@@ -11,13 +11,13 @@ The learning hub at `/learn` organizes 273 sessions into 46 units:
 | Course | Units | Sessions | Scope |
 | --- | ---: | ---: | --- |
 | System design | 12 | 77 | Request flow, capacity, storage, caching, service interfaces, queues, reliability, operations, security, and complete designs |
-| Coding | 6 | 25 | JavaScript functions, collections, validation, traffic control, safe state changes, and job processing |
+| Coding | 9 | 34 | JavaScript functions, collections, validation, traffic control, safe state changes, job processing, GenAI request paths, model release decisions, and a composed service |
 | Generative AI | 14 | 90 | Model foundations, prompting, retrieval, adaptation, evaluation, safety, agents, multimodal systems, and operations |
 | Machine learning | 11 | 72 | Foundations, features, training, evaluation, efficient models, operations, and complete ML systems |
 
 Each course has a visible unit map and a clear next session. Complete a unit's lessons and checkpoint, or demonstrate its skills in placement, to unlock the next unit. Courses progress independently, and the full reference lessons remain available at any time.
 
-The curriculum draws from 202 existing registry-backed lessons. Most short sessions introduce a concept and use a subset of its source assessment; 37 mixed checkpoints bring the units together. Coding has 25 runnable exercises, including a combined task at the end of each unit. Explicit skill IDs and content revisions connect assessment evidence to all 227 lesson and coding skills.
+The curriculum draws from 202 existing registry-backed lessons. Most short sessions introduce a concept and use a subset of its source assessment; 37 mixed checkpoints bring the units together. Coding has 34 runnable exercises, including a combined task at the end of each unit. Explicit skill IDs and content revisions connect assessment evidence to all 236 lesson and coding skills.
 
 The main experience focuses on continuing a course, seeing progress, and maintaining a daily habit. Course and goal selection use keyboard-accessible popup menus. Reviews have their own view. Account sync and backup utilities live in learning settings.
 
