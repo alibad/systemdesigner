@@ -29,6 +29,10 @@ import { FIRST_MONTH, currentJourneyDay } from './learning-journey';
 
 // Opt-in only: all writes go to the local demo emulators, never a configured project.
 const enabled = process.env.LEARNING_EMULATOR_TESTS === "1";
+// Ports are configurable so this can run beside another project's emulators,
+// which hold the Firebase defaults on a shared machine.
+const authPort = Number(process.env.LEARNING_AUTH_EMULATOR_PORT || 9099);
+const firestorePort = Number(process.env.LEARNING_FIRESTORE_EMULATOR_PORT || 8080);
 describe.skipIf(!enabled)(
   "daily learning against Firebase Auth + Firestore emulators",
   () => {
@@ -43,11 +47,11 @@ describe.skipIf(!enabled)(
           `learning-${run}-${index}`,
         );
         const auth = getAuth(app);
-        connectAuthEmulator(auth, "http://127.0.0.1:9099", {
+        connectAuthEmulator(auth, `http://127.0.0.1:${authPort}`, {
           disableWarnings: true,
         });
         const db = getFirestore(app);
-        connectFirestoreEmulator(db, "127.0.0.1", 8080);
+        connectFirestoreEmulator(db, "127.0.0.1", firestorePort);
         clients.push({ app, auth, db });
       }
       const email = `learner-${run}@example.test`;
