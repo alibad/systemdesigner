@@ -308,3 +308,29 @@ Unit tests 385 passed, including the eight new reference solutions. Typecheck, l
 
 - The new exercises are single functions, like the existing 25. Genuinely multi-file service tasks would need a different execution model in the runner.
 - The closing part has no review days, so the eight exercises are practised once on the path rather than revisited.
+
+## Multi-step exercises and Next.js 15
+
+Date: September 6, 2026, after the `693950c2` release. Scope: the remaining open items, namely a coding model limited to one function per exercise, and 113 dependency advisories.
+
+### The runner can now compose
+
+An exercise used to be one function called once, which confines a task to a pure computation. An exercise can now declare the functions it expects and drive them as an ordered sequence, so a later call observes what an earlier one left behind. The functions are rebuilt for every test so state cannot leak between cases. Single-call exercises are unchanged and all 33 existing ones still pass.
+
+The closing capstone uses it: an inference gateway where admission reserves a slot against both a tenant token budget and a capacity limit, refusals name which limit applied, completion returns the slot, and a report has to agree with the whole sequence. It sits in its own closing unit, because inserting it mid-list would have renumbered later study days.
+
+### Next.js 15
+
+Twelve advisories stood against 14.2.35, including three denial-of-service and three server-side request forgery issues, all fixed only on the 15 line. Advisories drop from 113 to 92; the rest are transitive and mostly build tooling.
+
+Four mechanical changes were needed: promise-shaped route params across 33 files, a placeholder route with no handler, the removal of `request.ip`, and a clean build to regenerate types the previous major left behind. The whole upgrade was developed and verified in a throwaway worktree before the working tree was touched, and committed separately from the coding work so it can be reverted on its own.
+
+### Verification
+
+386 unit tests, typecheck, lint, content validation, the authored-practice contract, the secret scan, and the production build. Browser suites on a clean local Next 15 build: journey, adaptive and placement, learning path, offline first-month, models, and the 202-lesson curriculum sweep. Every dynamic page and API route answered 200 by direct request. After release, the journey and learning-path suites passed against the live site and the trail reported 326 study days.
+
+### Limits
+
+- **The Firebase emulator suite still cannot run here.** `firebase-tools` now requires Java 21 and this machine has 17, so the sync contract remains verified only by its unit tests. This is unchanged by the upgrade and is an environment gap, not a code one.
+- Next 15 no longer caches `fetch` or GET route handlers by default. Nothing regressed in the suites and the offline walk still passes, but that is the behaviour to watch after release.
+- Exercises are still single-file. A learner writes several functions in one editor rather than several modules.
