@@ -461,8 +461,11 @@ export default function DailyLearningPath() {
                             {unit.title}
                           </span>
                           <span className="mt-1 block text-xs text-neutral-500">
-                            {unit.steps.length - 1}{" "}
-                            {course.id === "coding" ? "exercises" : "lessons"} ·{" "}
+                            {/* A unit can be a single closing project, and "0 exercises"
+                                reads like something is missing rather than by design. */}
+                            {unit.steps.length > 1
+                              ? `${unit.steps.length - 1} ${course.id === "coding" ? "exercises" : "lessons"} · `
+                              : ""}
                             {course.id === "coding"
                               ? "1 coding project"
                               : "1 checkpoint"}
