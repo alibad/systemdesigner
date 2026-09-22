@@ -50,6 +50,7 @@ import {
   getNetworkLogs,
   capturePageHtml,
 } from '@/lib/feedback/diagnostics';
+import { DictationButton, useFeedbackDictation } from './useFeedbackDictation';
 
 const CATEGORIES: { value: FeedbackCategory; label: string; color: string }[] = [
   { value: 'bug', label: 'Bug', color: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300 border-red-200 dark:border-red-800' },
@@ -205,6 +206,18 @@ interface FeedbackDeliveryStatus {
 
 export default function FeedbackWidget({ onOpenAI }: FeedbackWidgetProps) {
   const store = useFeedbackStore();
+
+  // Speaking instead of typing, per field. Fills the box; attaches nothing.
+  const dictation = useFeedbackDictation({
+    getText: (field) =>
+      field === 'title'
+        ? useFeedbackStore.getState().title
+        : useFeedbackStore.getState().description,
+    setText: (field, value) =>
+      field === 'title'
+        ? useFeedbackStore.getState().setTitle(value)
+        : useFeedbackStore.getState().setDescription(value),
+  });
   const { user } = useAuth();
   const { triggerFeedback } = useNotificationTriggers();
   const { addToast } = useToast();
@@ -1267,27 +1280,45 @@ export default function FeedbackWidget({ onOpenAI }: FeedbackWidgetProps) {
               {/* Title */}
               <div>
                 <label htmlFor="feedback-title" className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1.5 block">Title</label>
-                <input
-                  id="feedback-title"
-                  type="text"
-                  value={store.title}
-                  onChange={(e) => store.setTitle(e.target.value)}
-                  placeholder="Brief summary of your feedback"
-                  className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                <div className="relative">
+                  <input
+                    id="feedback-title"
+                    type="text"
+                    value={store.title}
+                    onChange={(e) => store.setTitle(e.target.value)}
+                    placeholder="Brief summary of your feedback"
+                    className={`w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${dictation.supported ? 'pr-11' : ''}`}
+                  />
+                  {dictation.supported ? (
+                    <DictationButton
+                      field="title"
+                      listening={dictation.listening}
+                      onToggle={dictation.toggle}
+                    />
+                  ) : null}
+                </div>
               </div>
 
               {/* Description */}
               <div>
                 <label htmlFor="feedback-desc" className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1.5 block">Description</label>
-                <textarea
-                  id="feedback-desc"
-                  value={store.description}
-                  onChange={(e) => store.setDescription(e.target.value)}
-                  placeholder={isMobile ? 'Describe in detail (you can paste screenshots too)...' : 'Describe in detail...'}
-                  rows={4}
-                  className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                />
+                <div className="relative">
+                  <textarea
+                    id="feedback-desc"
+                    value={store.description}
+                    onChange={(e) => store.setDescription(e.target.value)}
+                    placeholder={isMobile ? 'Describe in detail (you can paste screenshots too)...' : 'Describe in detail...'}
+                    rows={4}
+                    className={`w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none ${dictation.supported ? 'pr-11' : ''}`}
+                  />
+                  {dictation.supported ? (
+                    <DictationButton
+                      field="description"
+                      listening={dictation.listening}
+                      onToggle={dictation.toggle}
+                    />
+                  ) : null}
+                </div>
               </div>
 
               {/* Capture tools */}
