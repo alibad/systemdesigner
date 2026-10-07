@@ -23,15 +23,30 @@ function write(file, value) {
   if (check) { console.error(`Learning catalog is stale: ${file}`); stale = true; return; }
   fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text);
 }
+/** Block-level children are separate thoughts, so they never run together. */
+const BLOCK_TYPES = new Set(['paragraph', 'list', 'item', 'blockquote']);
 function words(node) {
   if (!node) return '';
   if (node.type === 'text' || node.type === 'code') return node.attributes.content || '';
   if (node.type === 'softbreak' || node.type === 'hardbreak') return ' ';
-  return (node.children || []).map(words).join('');
+  // A callout's heading used to run straight into its body: "Core invariantA
+  // production Cassandra design…", "OAuth is not a login protocolAn OAuth
+  // access token…". The heading becomes a lead-in instead.
+  return (node.children || []).map(child => {
+    const text = words(child);
+    if (child.type === 'heading') return text.trim() ? `${text.trim()}: ` : '';
+    if (child.type === 'item') return `${text.trim().replace(/[.;:]$/, '')}; `;
+    return BLOCK_TYPES.has(child.type) ? `${text} ` : text;
+  }).join('').replace(/;\s*$/, '.');
 }
 function concise(text, max = 90) {
   // A closing quote or bracket after the punctuation stays with its sentence.
-  const sentences = text.replace(/\s+/g, ' ').trim().match(/[^.!?]+[.!?]+["”’)\]]*(?:\s|$)|[^.!?]+$/g) || [text];
+  // Punctuation only ends a sentence when a space or the end follows it: "OAuth
+  // 2.0" and `generate.invoice` were cut at their dots, and the card opened on
+  // "0 is a framework…" and "invoice; work queues…".
+  const inner = '(?:[^.!?]|[.!?](?![\\s"”’)\\]]|$))';
+  const sentence = new RegExp(`${inner}+[.!?]+["”’)\\]]*(?:\\s|$)|${inner}+$`, 'g');
+  const sentences = text.replace(/\s+/g, ' ').trim().match(sentence) || [text];
   let result = '';
   for (const sentence of sentences) { if (result && (result + sentence).split(/\s+/).length > max) break; result += sentence; }
   return result.trim();
@@ -51,6 +66,11 @@ function blocks(container) {
 }
 /** First candidate that reads as a complete thought rather than a fragment. */
 const complete = candidates => candidates.find(text => text && !text.trim().endsWith(':') && text.trim().length > 40) || candidates.filter(Boolean).at(-1);
+/** Text that teaches, rather than describing the lesson or pointing elsewhere.
+ * Takeaways said "This lesson assumes…", "Continue to transformers…" (a lesson
+ * that does not exist in that course) and "Use the full lesson’s worked
+ * examples and interactive labs…", which a learning app never shows. */
+const teaches = text => Boolean(text) && !/^(This (lesson|walkthrough)|Before this lesson|Continue to|Review |That is the core invariant\.)/.test(text.trim()) && !/full lesson|interactive labs?\b/i.test(text);
 function questionsFor(step) {
   const data = step.quizId ? bank[step.quizId] : read(step.questionsFile.replace('/api/content/', 'content/entries/'));
   const questions = data?.questions || data;
@@ -76,12 +96,12 @@ function fromLesson(id) {
   const quiz = nodes.find(node => node.tag === 'quiz');
   if (!intro || !heading || !paragraphs[0] || !quiz) throw new Error(`Lesson is missing an intro or quiz: ${id}`);
   const summary = concise(paragraphs[0]);
-  const example = concise(complete([paragraphs[1], words(note), otherParagraph, entry.seo.metaDescription]));
+  const example = concise(complete([paragraphs[1], words(note), otherParagraph, entry.seo.metaDescription].filter(teaches)));
   const step = {
     id: `lesson-${id}`, kind: 'quiz', title: entry.title, minutes: 6, prerequisites: prerequisitesFor(entry),
     lessonPath: entry.path, concept: words(heading), summary, example,
     exampleLabel: 'The key idea',
-    takeaway: concise(complete([words(note), paragraphs[2], paragraphs[3], 'Use the full lesson’s worked examples and interactive labs to explore the trade-offs behind these questions.']), 65),
+    takeaway: concise(complete([words(note), paragraphs[2], paragraphs[3], entry.seo.metaDescription, paragraphs[0]].filter(teaches)), 65),
     ...(quiz.attributes.questionsFile ? { questionsFile: quiz.attributes.questionsFile } : { quizId: quiz.attributes.quizId }),
     questionCount: 4,
   };
