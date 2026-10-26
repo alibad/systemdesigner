@@ -69,10 +69,18 @@ export const GITHUB_BRANCH =
 export const GITHUB_REPO_URL = `https://github.com/${GITHUB_REPO}`;
 
 // ---------------------------------------------------------------------------
-// Public app URL (used for absolute links, SEO, emails)
+// Canonical site origin (canonical tags, sitemap.xml, robots.txt). It must be the host the
+// deployment serves without a redirect: Vercel serves www.systemdesigner.net and redirects the
+// apex to it, so canonicals on the apex would point Google at a redirect.
 // ---------------------------------------------------------------------------
-export const APP_URL =
-  process.env.NEXT_PUBLIC_APP_URL || 'https://systemdesigner.net';
+export const SITE_URL = (
+  process.env.NEXT_PUBLIC_SITE_URL || 'https://www.systemdesigner.net'
+).replace(/\/+$/, '');
+
+// ---------------------------------------------------------------------------
+// Public app URL (used for absolute links in emails and issue templates)
+// ---------------------------------------------------------------------------
+export const APP_URL = process.env.NEXT_PUBLIC_APP_URL || SITE_URL;
 
 /**
  * Build the GitHub web-editor URL for a content body given its public route.

@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CONTENT_REGISTRY } from '@/lib/content-registry';
 
@@ -16,6 +17,10 @@ interface ToolCategory {
     tags: string[];
   }>;
 }
+
+export const metadata: Metadata = {
+  alternates: { canonical: '/tools' },
+};
 
 export default function ToolsPage() {
   // Get all tools from content registry

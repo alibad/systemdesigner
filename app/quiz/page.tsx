@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import QuizHub from './QuizHub';
@@ -20,6 +21,10 @@ async function loadAllQuizzes(): Promise<Record<string, QuizData>> {
     return {};
   }
 }
+
+export const metadata: Metadata = {
+  alternates: { canonical: '/quiz' },
+};
 
 export default async function QuizPage() {
   const allQuizzes = await loadAllQuizzes();

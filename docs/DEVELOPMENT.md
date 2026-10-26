@@ -144,7 +144,8 @@ Before opening a PR, run `pnpm scan:secrets`. It intentionally scans only tracke
 | `NEXT_PUBLIC_ADMIN_EMAILS` | Optional | Comma-separated admin emails (unlocks maintainer/admin UI). | `you@example.com,teammate@example.com` |
 | `NEXT_PUBLIC_GITHUB_REPO` | Optional | Repo used by "Edit this page" / "Suggest an improvement" links. | `alibad/systemdesigner` |
 | `NEXT_PUBLIC_GITHUB_BRANCH` | Optional | Branch those edit links target. Defaults to `main`. | `main` |
-| `NEXT_PUBLIC_APP_URL` | Optional | Canonical site URL (used in SEO/metadata). | `https://systemdesigner.net` |
+| `NEXT_PUBLIC_SITE_URL` | Optional | Canonical origin for canonical tags, `sitemap.xml` and `robots.txt`; must be the host served without a redirect. Defaults to `https://www.systemdesigner.net`. | `https://www.systemdesigner.net` |
+| `NEXT_PUBLIC_APP_URL` | Optional | Absolute links in emails and issue templates. Defaults to `NEXT_PUBLIC_SITE_URL`. | `https://www.systemdesigner.net` |
 
 \* The six core `NEXT_PUBLIC_FIREBASE_*` keys are **all required together** *only if* you want sign-in and cloud sync. Leave them all empty to run in anonymous mode.
 
@@ -246,7 +247,7 @@ SystemDesigner is a standard Next.js 14 App Router app, so Vercel is the smoothe
 
 1. Push your fork to GitHub and **import the repo** in the [Vercel dashboard](https://vercel.com/new). Vercel auto-detects Next.js — no build config needed (`pnpm build` runs automatically).
 2. In **Project Settings → Environment Variables**, add the variables you need from the [tables above](#environment-variables). For a full-featured deploy that's the six `NEXT_PUBLIC_FIREBASE_*` keys, `NEXT_PUBLIC_ADMIN_EMAILS`, `NEXT_PUBLIC_APP_URL`, and optionally the GitHub App variables (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`).
-3. Deploy. Set `NEXT_PUBLIC_APP_URL` to your production URL so SEO metadata and canonical links resolve correctly.
+3. Deploy. Set `NEXT_PUBLIC_SITE_URL` (and `NEXT_PUBLIC_APP_URL`) to the production host your deployment serves without a redirect so canonical links, the sitemap and robots.txt resolve correctly.
 4. If you enabled auth, add your Vercel domain to **Firebase Console → Authentication → Settings → Authorized domains**.
 
 > You can also deploy with **no env vars at all** — you'll get a fully working anonymous-mode site (no sign-in, local-only progress). Great for a quick public mirror.

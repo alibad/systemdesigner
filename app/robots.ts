@@ -1,7 +1,8 @@
 import { MetadataRoute } from 'next'
+import { SITE_URL } from '@/lib/site-config'
 
 export default function robots(): MetadataRoute.Robots {
-  const baseUrl = 'https://systemdesigner.net'
+  const baseUrl = SITE_URL
 
   return {
     rules: [
@@ -10,7 +11,6 @@ export default function robots(): MetadataRoute.Robots {
         allow: '/',
         disallow: [
           '/api/',
-          '/_next/',
           '/admin/',
           '/private/',
         ],

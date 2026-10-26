@@ -1,3 +1,23 @@
+import { existsSync, readFileSync } from 'node:fs';
+
+// Links built from registry ids instead of slugs (e.g. /technology/vllm-tech for
+// /technology/vllm) were crawled and now 404. Send every such id URL to the lesson's
+// real path, unless the id URL is itself a route.
+const registry = JSON.parse(
+  readFileSync(new URL('./content/registry.json', import.meta.url), 'utf8'),
+);
+const registryPaths = new Set(registry.map((entry) => entry.path));
+const registryIdRedirects = registry
+  .filter((entry) => entry.status === 'active')
+  .map((entry) => ({ source: `/${entry.section}/${entry.id}`, destination: entry.path }))
+  .filter(
+    ({ source, destination }) =>
+      source !== destination &&
+      !registryPaths.has(source) &&
+      !existsSync(new URL(`./app${source}`, import.meta.url)),
+  )
+  .map((redirect) => ({ ...redirect, permanent: true }));
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
@@ -28,6 +48,11 @@ const nextConfig = {
         destination: '/:section/:slug',
         permanent: true,
       },
+      { source: '/tools/calculators', destination: '/tools', permanent: true },
+      // Retired or mislinked lesson URLs that Google reported as 404.
+      { source: '/reference/consistent-hashing', destination: '/technology/consistent-hashing', permanent: true },
+      { source: '/technology/spinnaker', destination: '/ml-systems/neuromorphic-computing', permanent: true },
+      ...registryIdRedirects,
       { source: '/sandbox', destination: '/tools', permanent: false },
       { source: '/sandbox/load-simulator', destination: '/tools/load-testing', permanent: false },
       { source: '/sandbox/capacity-calculator', destination: '/tools/capacity-planning', permanent: false },

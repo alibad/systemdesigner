@@ -13,6 +13,7 @@ import Script from 'next/script';
 import { cookies } from 'next/headers';
 import Analytics from '@/components/Analytics';
 import ConditionalLayout from '@/components/ConditionalLayout';
+import { SITE_URL } from '@/lib/site-config';
 
 export const metadata: Metadata = {
   title: {
@@ -24,14 +25,13 @@ export const metadata: Metadata = {
   authors: [{ name: 'System Designer Team' }],
   creator: 'System Designer',
   publisher: 'System Designer',
-  metadataBase: new URL('https://systemdesigner.net'),
-  alternates: {
-    canonical: '/',
-  },
+  // No `alternates.canonical` here: every route inherits root metadata, so a canonical set here
+  // would point inner pages at the homepage. Each page declares its own canonical path.
+  metadataBase: new URL(SITE_URL),
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: 'https://systemdesigner.net',
+    url: SITE_URL,
     siteName: 'System Designer',
     title: 'System Designer - Learn System Design & Software Architecture',
     description: 'Master system design with interactive lessons, quizzes, and real-world case studies. Learn distributed systems, databases, caching, and more.',

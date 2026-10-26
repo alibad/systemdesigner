@@ -1,5 +1,6 @@
 import { Metadata } from 'next'
 import { CONTENT_REGISTRY, getContentById } from './content-registry'
+import { SITE_URL } from './site-config'
 
 export interface SEOConfig {
   title?: string
@@ -15,7 +16,7 @@ export interface SEOConfig {
  * Generate Next.js metadata from content registry
  */
 export function generateMetadata(config: SEOConfig): Metadata {
-  const baseUrl = 'https://systemdesigner.io'
+  const baseUrl = SITE_URL
   const siteName = 'System Designer'
   
   let title = config.title || 'System Designer - Learn System Design'
@@ -130,7 +131,7 @@ export function generateStructuredData(contentId: string) {
   const content = getContentById(contentId)
   if (!content) return null
 
-  const baseUrl = 'https://systemdesigner.io'
+  const baseUrl = SITE_URL
   
   const structuredData: any = {
     '@context': 'https://schema.org',
@@ -220,7 +221,7 @@ export function getPageTitle(section: string, slug?: string): string {
  * Generate breadcrumb structured data
  */
 export function generateBreadcrumbData(path: string) {
-  const baseUrl = 'https://systemdesigner.io'
+  const baseUrl = SITE_URL
   const pathSegments = path.split('/').filter(Boolean)
   
   const breadcrumbItems = [

@@ -1,9 +1,10 @@
 import { MetadataRoute } from 'next'
 import { CONTENT_REGISTRY } from '@/lib/content-registry'
+import { SITE_URL } from '@/lib/site-config'
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const registry = CONTENT_REGISTRY
-  const baseUrl = 'https://systemdesigner.net'
+  const baseUrl = SITE_URL
   
   // Static pages
   const staticPages: MetadataRoute.Sitemap = [

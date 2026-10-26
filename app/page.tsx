@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import GuidedPathCTA from '@/components/ui/GuidedPathCTA';
 import AppGlyph from '@/components/ui/AppGlyph';
@@ -7,6 +8,10 @@ import HomepageLearningPlans from '@/components/HomepageLearningPlans';
 import HomepageProgressOverview from '@/components/HomepageProgressOverview';
 import RecentIncompleteLessons from '@/components/RecentIncompleteLessons';
 import LearningStreak from '@/components/LearningStreak';
+
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+};
 
 export default function HomePage() {
   return (
