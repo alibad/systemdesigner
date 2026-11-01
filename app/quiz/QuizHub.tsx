@@ -41,9 +41,11 @@ interface QuizData {
 
 interface QuizHubProps {
   allQuizzes: Record<string, QuizData>;
+  /** Lesson path per quiz id, for quizzes that belong to a lesson. */
+  lessonPaths: Record<string, string>;
 }
 
-export default function QuizHub({ allQuizzes }: QuizHubProps) {
+export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedQuiz, setSelectedQuiz] = useState<string | null>(null);
@@ -257,14 +259,14 @@ export default function QuizHub({ allQuizzes }: QuizHubProps) {
                   >
                     Start Quiz
                   </button>
-                  <Link
-                    href={(quiz.category === 'Fundamentals' ? `/fundamentals/${quiz.id}` :
-                          quiz.category === 'Genai' ? `/genai/${quiz.id}` :
-                          quiz.category === 'Technology' ? `/technology/${quiz.id}` : '#') as any}
-                    className="px-4 py-2 border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-300 rounded-lg text-sm font-medium hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
-                  >
-                    Learn Topic
-                  </Link>
+                  {lessonPaths[quiz.id] && (
+                    <Link
+                      href={lessonPaths[quiz.id] as any}
+                      className="px-4 py-2 border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-300 rounded-lg text-sm font-medium hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
+                    >
+                      Learn Topic
+                    </Link>
+                  )}
                 </div>
                 <div className="text-sm text-emerald-600 dark:text-emerald-400">
                   ✓ Available

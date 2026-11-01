@@ -313,7 +313,7 @@ export default function MLTechnologyPage() {
               <Database className="h-4 w-4" /> ML Reference Guides
             </Link>
             <Link 
-              href={"/ml-systems/practice" as Route<'/ml-systems/practice'>}
+              href="/practice"
               className="btn-soft"
             >
               <Target className="h-4 w-4" /> ML Practice Problems

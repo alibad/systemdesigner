@@ -19,6 +19,8 @@ interface ToolCategory {
 }
 
 export const metadata: Metadata = {
+  title: 'System Design Studio: Interactive Tools',
+  description: 'Interactive calculators, simulators, and visualizers for capacity planning, caching, load balancing, databases, and reliability.',
   alternates: { canonical: '/tools' },
 };
 

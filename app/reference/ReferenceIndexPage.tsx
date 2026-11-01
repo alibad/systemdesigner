@@ -108,7 +108,7 @@ export default function ReferenceIndexPage() {
               Explore Tools
             </Link>
             <Link 
-              href="/sandbox"
+              href="/tools"
               className="px-4 py-2 border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-300 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors font-medium"
             >
               Try Sandbox

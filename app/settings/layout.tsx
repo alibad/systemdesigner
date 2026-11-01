@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
+  title: 'Settings',
+  description: 'Customize your learning experience and manage offline content.',
   alternates: { canonical: '/settings' },
 };
 

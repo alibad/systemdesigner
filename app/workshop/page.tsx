@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 export const metadata: Metadata = {
+  title: 'Design Workshops',
+  description: 'Interactive workshops that guide you through system design decisions with hands-on exercises, decision trees, and practical frameworks.',
   alternates: { canonical: '/workshop' },
 };
 
@@ -13,7 +15,7 @@ export default function WorkshopPage() {
       type: 'Architecture',
       difficulty: 'Intermediate',
       duration: '20-30 min',
-      slug: 'architecture-decisions',
+      href: '/workshop/architecture-decisions',
       features: [
         'Requirements-driven recommendations',
         'Database and caching strategy',
@@ -28,7 +30,7 @@ export default function WorkshopPage() {
       type: 'Design Process',
       difficulty: 'Beginner',
       duration: '45-60 min',
-      slug: 'system-design',
+      href: '/workshop/system-design',
       features: [
         'Guided design methodology',
         'Requirements gathering',
@@ -43,7 +45,7 @@ export default function WorkshopPage() {
       type: 'Scaling',
       difficulty: 'Advanced',
       duration: '30-45 min',
-      slug: 'scalability-planning',
+      href: '/tools/scalability-planner',
       features: [
         'Growth trajectory modeling',
         'Bottleneck identification',
@@ -58,7 +60,7 @@ export default function WorkshopPage() {
       type: 'Data Design',
       difficulty: 'Intermediate',
       duration: '25-35 min',
-      slug: 'database-design',
+      href: '/tools/database-selector',
       features: [
         'Data pattern analysis',
         'Database technology selection',
@@ -73,7 +75,7 @@ export default function WorkshopPage() {
       type: 'Architecture',
       difficulty: 'Advanced',
       duration: '40-50 min',
-      slug: 'microservices-design',
+      href: '/tools/microservices-decomposer',
       features: [
         'Service boundary identification',
         'Communication patterns',
@@ -88,7 +90,7 @@ export default function WorkshopPage() {
       type: 'Performance',
       difficulty: 'Advanced',
       duration: '35-45 min',
-      slug: 'performance-optimization',
+      href: '/tools/latency-analyzer',
       features: [
         'Bottleneck analysis framework',
         'Caching strategy design',
@@ -157,8 +159,8 @@ export default function WorkshopPage() {
       <div className="grid gap-6 md:grid-cols-2">
         {workshops.map(workshop => (
           <Link
-            key={workshop.slug}
-            href={`/workshop/${workshop.slug}` as any}
+            key={workshop.href}
+            href={workshop.href as any}
             className="group block"
           >
             <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-lg transition-all duration-200 p-6">

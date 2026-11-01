@@ -67,7 +67,7 @@ export default function DatabaseCalculatorPage() {
   return (
     <main className="max-w-5xl mx-auto p-6">
       <div className="mb-6">
-        <Link href="/sandbox" className="text-indigo-600 hover:text-indigo-800 text-sm font-medium">← Back to Tools</Link>
+        <Link href="/tools" className="text-indigo-600 hover:text-indigo-800 text-sm font-medium">← Back to Tools</Link>
       </div>
 
       <div className="mb-6">
