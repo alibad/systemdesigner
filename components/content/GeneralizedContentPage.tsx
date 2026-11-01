@@ -91,7 +91,7 @@ export function generateContentMetadata(section: ContentSection, slug: string): 
   if (!content || !entry) return {};
 
   return {
-    title: content.title,
+    title: content.seo.title ?? content.title,
     description: content.seo.metaDescription || entry.frontmatter.description,
     alternates: { canonical: content.path },
   };

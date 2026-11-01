@@ -36,6 +36,7 @@ export interface ContentNode {
 
   // SEO optimization
   seo: {
+    title?: string;              // Search-result title when the display title is shared with another page
     metaDescription: string;     // 150-160 char description
     keywords: string[];          // Target SEO keywords
     priority: number;            // Sitemap priority (0.0-1.0)
