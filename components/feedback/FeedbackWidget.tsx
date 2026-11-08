@@ -777,7 +777,10 @@ export default function FeedbackWidget({ onOpenAI }: FeedbackWidgetProps) {
           pagePath: window.location.pathname,
           currentUrl,
           userAgent: navigator.userAgent,
-          email,
+          // The issue goes to a public repository: send only whether a reply
+          // was asked for. The address itself goes to the admin-only
+          // Firestore feedback record below.
+          wantsReply: Boolean(email),
         }),
       });
       const result = await res.json();
@@ -789,7 +792,8 @@ export default function FeedbackWidget({ onOpenAI }: FeedbackWidgetProps) {
             feedback: `${title}\n\n${description}`,
             category,
             userId: user?.uid || null,
-            userEmail: user?.email || null,
+            // Admin-only record; the "resolve" flow emails this address.
+            userEmail: email || user?.email || null,
             userName: user?.displayName || null,
             userPhotoURL: user?.photoURL || null,
             isAnonymous: user?.isAnonymous ?? true,
@@ -801,7 +805,7 @@ export default function FeedbackWidget({ onOpenAI }: FeedbackWidgetProps) {
             id: feedbackId,
             feedback: `${title}\n\n${description}`,
             category,
-            userEmail: user?.email || undefined,
+            userEmail: email || user?.email || undefined,
             urgent:
               description.toLowerCase().includes('urgent') ||
               description.toLowerCase().includes('critical') ||
