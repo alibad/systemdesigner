@@ -1,32 +1,21 @@
 import { MetadataRoute } from 'next'
 import { SITE_URL } from '@/lib/site-config'
 
+// One group for every crawler: a crawler obeys only the most specific group that names it, so
+// separate Googlebot/Bingbot groups had silently dropped the /admin/ rule for them.
+// Lessons load their code examples, quizzes and lab data from /api/content and /api/quiz-bank
+// in the browser. Those stay crawlable (and send X-Robots-Tag: noindex, see next.config.mjs)
+// so Google's renderer sees the whole lesson; the longer Allow rules win over Disallow /api/.
 export default function robots(): MetadataRoute.Robots {
-  const baseUrl = SITE_URL
-
   return {
     rules: [
       {
         userAgent: '*',
-        allow: '/',
-        disallow: [
-          '/api/',
-          '/admin/',
-          '/private/',
-        ],
-      },
-      {
-        userAgent: 'Googlebot',
-        allow: '/',
-        disallow: ['/api/'],
-      },
-      {
-        userAgent: 'Bingbot',
-        allow: '/',
-        disallow: ['/api/'],
+        allow: ['/', '/api/content/', '/api/quiz-bank/'],
+        disallow: ['/api/', '/admin/', '/private/'],
       },
     ],
-    sitemap: `${baseUrl}/sitemap.xml`,
-    host: baseUrl,
+    sitemap: `${SITE_URL}/sitemap.xml`,
+    host: SITE_URL,
   }
 }

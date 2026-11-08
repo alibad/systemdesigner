@@ -1,8 +1,9 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import AdminEditContentLink from '@/components/admin/AdminEditContentLink';
 import CapacityChallenge from '@/components/challenges/CapacityChallenge';
+import ContentBreadcrumbs from '@/components/content/ContentBreadcrumbs';
+import ContentRelatedLinks from '@/components/content/ContentRelatedLinks';
 import DailyReviewCard from '@/components/challenges/DailyReviewCard';
 import TradeoffChallenge from '@/components/challenges/TradeoffChallenge';
 import LessonCompletion from '@/components/LessonCompletion';
@@ -13,11 +14,17 @@ import type { LearningCategory } from '@/hooks/useProgressTracking';
 import {
   getRenderableContentBySection,
   getRenderableContentBySlug,
-  getSectionRouteConfig,
   toTitleCaseLevel,
   type ContentSection,
   type ContentShellKind,
 } from '@/lib/content-model';
+import {
+  buildContentJsonLd,
+  buildContentSocialMetadata,
+  getBreadcrumbs,
+  getContentLinks,
+  jsonLdScript,
+} from '@/lib/content-seo';
 import { loadLesson } from '@/lib/lessons';
 import { isGradedPractice, PRACTICE_CHALLENGES } from '@/lib/practice-challenges';
 
@@ -90,10 +97,14 @@ export function generateContentMetadata(section: ContentSection, slug: string): 
   const entry = loadLesson(section, slug);
   if (!content || !entry) return {};
 
+  const title = content.seo.title ?? content.title;
+  const description = content.seo.metaDescription || entry.frontmatter.description;
+
   return {
-    title: content.seo.title ?? content.title,
-    description: content.seo.metaDescription || entry.frontmatter.description,
+    title,
+    description,
     alternates: { canonical: content.path },
+    ...buildContentSocialMetadata(content, `${title} | System Designer`, description),
   };
 }
 
@@ -110,20 +121,23 @@ export default function GeneralizedContentPage({
   const entry = loadLesson(section, slug);
   if (!entry) notFound();
 
-  const sectionConfig = getSectionRouteConfig(section);
   const next = content.navigation.next;
+  const previous = content.navigation.previous;
   const policy = SHELL_POLICY[content.shell];
+  const links = getContentLinks(content);
 
   return (
     <>
+      {buildContentJsonLd(content).map((data) => (
+        <script
+          key={data['@type'] as string}
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: jsonLdScript(data) }}
+        />
+      ))}
+
       <div className="max-w-[1200px] mx-auto px-4 md:px-6 py-4 pb-0">
-        <Link
-          href={sectionConfig.landingPath as any}
-          className="inline-flex items-center text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 mb-4"
-        >
-          <span aria-hidden="true" className="mr-2">&larr;</span>
-          {sectionConfig.backLabel}
-        </Link>
+        <ContentBreadcrumbs crumbs={getBreadcrumbs(content)} />
       </div>
 
       {policy.showHeader && (
@@ -162,6 +176,13 @@ export default function GeneralizedContentPage({
             />
           </div>
         )}
+
+        <ContentRelatedLinks
+          previous={previous}
+          next={next}
+          prerequisites={links.prerequisites}
+          related={links.related}
+        />
 
         <AdminEditContentLink section={section} slug={slug} />
 

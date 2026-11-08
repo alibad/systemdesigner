@@ -40,8 +40,9 @@ export function ClientSideKeywordProcessor() {
     const listItems = wrapper.querySelectorAll('li');
 
     listItems.forEach(li => {
-      // Skip if already processed or contains links
-      if (li.querySelector('a') || li.hasAttribute('data-processed')) return;
+      // Skip if already processed, contains links, or belongs to navigation (breadcrumbs,
+      // related lessons) rather than lesson prose
+      if (li.querySelector('a') || li.hasAttribute('data-processed') || li.closest('nav')) return;
 
       let text = li.textContent || '';
       let html = li.innerHTML;

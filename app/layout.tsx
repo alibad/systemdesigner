@@ -28,10 +28,11 @@ export const metadata: Metadata = {
   // No `alternates.canonical` here: every route inherits root metadata, so a canonical set here
   // would point inner pages at the homepage. Each page declares its own canonical path.
   metadataBase: new URL(SITE_URL),
+  // No `openGraph.url` here either: pages without their own Open Graph tags would announce the
+  // homepage URL. Registry pages set their own (lib/content-seo.ts).
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: SITE_URL,
     siteName: 'System Designer',
     title: 'System Designer - Learn System Design & Software Architecture',
     description: 'Master system design with interactive lessons, quizzes, and real-world case studies. Learn distributed systems, databases, caching, and more.',

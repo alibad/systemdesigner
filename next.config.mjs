@@ -72,7 +72,16 @@ const nextConfig = {
       { source: '/sandbox/architecture-guide', destination: '/tools/architecture-decision', permanent: false },
       { source: '/sandbox/reliability-calculator', destination: '/tools/reliability-calculator', permanent: false },
     ];
-  }
+  },
+  async headers() {
+    // Lesson code examples, quizzes and lab data load from these read-only APIs in the browser.
+    // robots.txt lets crawlers fetch them so rendered lessons include that content; this header
+    // keeps the raw files themselves out of the index.
+    return ['/api/content/:path*', '/api/quiz-bank/:path*'].map((source) => ({
+      source,
+      headers: [{ key: 'X-Robots-Tag', value: 'noindex' }],
+    }));
+  },
 };
 
 // /learn registers public/learning-sw.js for explicitly allowed learning assets.
