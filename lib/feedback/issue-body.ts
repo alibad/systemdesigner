@@ -86,7 +86,7 @@ export function buildIssueBody(data: FeedbackPayload, pageName: string): string 
       parts.push(`### Selection ${i + 1}`);
       if (c.elementInfo) parts.push(`**Element:** \`${c.elementInfo}\``);
       if (c.position) parts.push(`**Position:** (${c.position.x}, ${c.position.y})`);
-      if (c.screenshotUrl) parts.push(`![Capture ${i + 1}](${c.screenshotUrl})`);
+      if (c.screenshotUrl) parts.push(`[Open capture ${i + 1} (team sign-in)](${c.screenshotUrl})`);
       parts.push('');
     });
   }
