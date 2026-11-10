@@ -797,7 +797,7 @@ export default function LatencyAnalyzer() {
                       onClick={() => setExecutionMode(mode)}
                       className={`rounded-md border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
                         selected
-                          ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950'
+                          ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-neutral-800 dark:text-white'
                           : 'border-neutral-300 bg-white text-neutral-800 hover:border-neutral-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200'
                       }`}
                     >
@@ -900,7 +900,7 @@ export default function LatencyAnalyzer() {
                       onClick={() => setChallengeId(candidate.id)}
                       className={`min-h-28 rounded-lg border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
                         selected
-                          ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-white dark:text-neutral-950'
+                          ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-neutral-800 dark:text-white'
                           : 'border-neutral-300 bg-white text-neutral-900 hover:border-neutral-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100'
                       }`}
                     >

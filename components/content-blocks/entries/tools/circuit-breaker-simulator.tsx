@@ -270,9 +270,9 @@ function StateNode({
   active: boolean;
 }) {
   const activeClasses: Record<BreakerState, string> = {
-    closed: 'border-emerald-700 bg-emerald-700 text-white dark:border-emerald-300 dark:bg-emerald-300 dark:text-neutral-950',
-    open: 'border-rose-700 bg-rose-700 text-white dark:border-rose-300 dark:bg-rose-300 dark:text-neutral-950',
-    'half-open': 'border-amber-500 bg-amber-400 text-neutral-950 dark:border-amber-300 dark:bg-amber-300',
+    closed: 'border-emerald-700 bg-emerald-700 text-white dark:border-emerald-300 dark:bg-emerald-900 dark:text-white',
+    open: 'border-rose-700 bg-rose-700 text-white dark:border-rose-300 dark:bg-rose-900 dark:text-white',
+    'half-open': 'border-amber-500 bg-amber-400 text-neutral-950 dark:border-amber-300 dark:bg-amber-900 dark:text-white',
   };
 
   return (
@@ -653,7 +653,7 @@ export default function CircuitBreakerSimulator() {
                 onClick={() => applyScenario(item.id)}
                 className={`min-h-16 rounded-md border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-600 dark:focus-visible:ring-cyan-400 ${
                   selected
-                    ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950'
+                    ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-neutral-800 dark:text-white'
                     : 'border-neutral-200 bg-white text-neutral-800 hover:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-neutral-500'
                 }`}
               >
@@ -661,7 +661,7 @@ export default function CircuitBreakerSimulator() {
                 <span
                   className={`mt-1 block text-xs leading-4 ${
                     selected
-                      ? 'text-neutral-300 dark:text-neutral-600'
+                      ? 'text-neutral-300'
                       : 'text-neutral-500 dark:text-neutral-400'
                   }`}
                 >

@@ -582,7 +582,7 @@ export default function CostEstimator() {
                 onClick={() => setScenarioId(candidate.id)}
                 className={`min-h-20 rounded-md border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
                   selected
-                    ? 'border-cyan-700 bg-cyan-700 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-300 dark:text-neutral-950'
+                    ? 'border-cyan-700 bg-cyan-700 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                     : 'border-neutral-300 bg-white text-neutral-800 hover:border-neutral-500 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-neutral-500 dark:hover:bg-neutral-900'
                 }`}
               >
@@ -593,7 +593,7 @@ export default function CostEstimator() {
                 <span
                   className={`mt-1 block text-xs leading-5 ${
                     selected
-                      ? 'text-cyan-50 dark:text-neutral-800'
+                      ? 'text-cyan-50'
                       : 'text-neutral-500 dark:text-neutral-400'
                   }`}
                 >

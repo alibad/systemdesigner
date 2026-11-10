@@ -953,7 +953,7 @@ export default function LoadTestingTool() {
                   onClick={() => setChallengeId(challenge.id)}
                   className={`min-w-0 rounded-lg border p-4 text-left transition focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-neutral-950 ${
                     selected
-                      ? "border-blue-600 bg-blue-600 text-white shadow-sm dark:border-blue-300 dark:bg-blue-300 dark:text-blue-950"
+                      ? "border-blue-600 bg-blue-600 text-white shadow-sm dark:border-blue-300 dark:bg-blue-900 dark:text-white"
                       : "border-neutral-200 bg-white text-neutral-900 hover:border-blue-300 hover:bg-blue-50 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:border-blue-800 dark:hover:bg-blue-950/30"
                   }`}
                 >
@@ -962,7 +962,7 @@ export default function LoadTestingTool() {
                     <span
                       className={`rounded-full px-2 py-1 text-[11px] font-bold ${
                         selected
-                          ? "bg-white/20 text-white dark:bg-blue-950/15 dark:text-blue-950"
+                          ? "bg-white/20 text-white"
                           : "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
                       }`}
                     >
@@ -973,7 +973,7 @@ export default function LoadTestingTool() {
                   <p
                     className={`mt-1 text-sm leading-5 ${
                       selected
-                        ? "text-blue-50 dark:text-blue-950/75"
+                        ? "text-blue-50"
                         : "text-neutral-600 dark:text-neutral-400"
                     }`}
                   >

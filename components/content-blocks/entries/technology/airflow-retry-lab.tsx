@@ -332,10 +332,10 @@ export default function AirflowRetryLab() {
           <div
             className={`rounded-lg border p-5 ${
               outcomeTone === 'emerald'
-                ? 'border-emerald-400 bg-emerald-950 text-emerald-50'
+                ? 'border-emerald-400 bg-emerald-50 text-emerald-950 dark:bg-emerald-950 dark:text-emerald-50'
                 : outcomeTone === 'amber'
-                  ? 'border-amber-400 bg-amber-950 text-amber-50'
-                  : 'border-rose-400 bg-rose-950 text-rose-50'
+                  ? 'border-amber-400 bg-amber-50 text-amber-950 dark:bg-amber-950 dark:text-amber-50'
+                  : 'border-rose-400 bg-rose-50 text-rose-950 dark:bg-rose-950 dark:text-rose-50'
             }`}
           >
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide opacity-80">

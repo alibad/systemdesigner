@@ -73,7 +73,7 @@ export default function MLTechnologyPage() {
   };
 
   return (
-    <main className="max-w-[1200px] mx-auto px-4 md:px-6 py-8">
+    <main className="sdp-index max-w-[1200px] mx-auto px-4 md:px-6 py-8">
       <article className="space-y-8">
         {/* Header */}
         <div>
@@ -127,7 +127,7 @@ export default function MLTechnologyPage() {
                 onClick={() => setSelectedCategory(category)}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                   selectedCategory === category
-                    ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border-2 border-indigo-200 dark:border-indigo-800'
+                    ? 'bg-brand-100 dark:bg-brand-900/30 text-brand-700 dark:text-brand-300 border-2 border-brand-200 dark:border-brand-800'
                     : 'bg-neutral-50 dark:bg-neutral-800/50 text-neutral-700 dark:text-neutral-300 border-2 border-transparent hover:border-neutral-200 dark:hover:border-neutral-700'
                 }`}
               >
@@ -188,7 +188,7 @@ export default function MLTechnologyPage() {
                       </div>
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2">
-                          <h3 className="font-medium text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                          <h3 className="font-medium text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
                             {item.title}
                           </h3>
                           <span className={`px-2 py-0.5 text-xs font-medium rounded ${getDifficultyColor(item.difficulty)}`}>
@@ -210,7 +210,7 @@ export default function MLTechnologyPage() {
                           </span>
                         </div>
                       </div>
-                      <div className="text-neutral-400 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                      <div className="text-neutral-400 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
                         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>

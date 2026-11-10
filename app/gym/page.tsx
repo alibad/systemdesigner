@@ -108,9 +108,9 @@ export default function InterviewGymPage() {
       {/* Filters */}
       <div className="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 p-6 mb-8">
         <div className="flex flex-wrap gap-4 items-center">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Category:</span>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {categories.map(category => (
                 <button
                   key={category}
@@ -127,9 +127,9 @@ export default function InterviewGymPage() {
             </div>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Difficulty:</span>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {difficulties.map(difficulty => (
                 <button
                   key={difficulty}

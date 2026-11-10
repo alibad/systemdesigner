@@ -261,15 +261,15 @@ export default function PatternsPage() {
       </div>
 
       {/* Patterns Grid */}
-      <div className="grid gap-6">
+      <div className="grid grid-cols-1 gap-6">
         {filteredPatterns.map((pattern) => (
           <div
             key={pattern.id}
             className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card hover:shadow-lg transition-all p-6"
           >
             <div className="flex items-start justify-between mb-4">
-              <div className="flex-1">
-                <div className="flex items-center gap-3 mb-2">
+              <div className="flex-1 min-w-0">
+                <div className="flex flex-wrap md:flex-nowrap items-center gap-3 mb-2">
                   <span className="text-2xl">{pattern.icon}</span>
                   <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">
                     {pattern.title}
@@ -288,7 +288,7 @@ export default function PatternsPage() {
                   <strong>Use Case:</strong> {pattern.useCase}
                 </div>
               </div>
-              <div className="text-sm text-neutral-500 dark:text-neutral-400 ml-6">
+              <div className="flex-shrink-0 text-sm text-neutral-500 dark:text-neutral-400 ml-6">
                 {pattern.estimatedTime}
               </div>
             </div>
@@ -307,8 +307,8 @@ export default function PatternsPage() {
               </div>
             </div>
             
-            <div className="flex items-center justify-between">
-              <div className="flex gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap gap-3">
                 <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
                   View Template
                 </button>
@@ -362,7 +362,7 @@ export default function PatternsPage() {
           </div>
         </div>
         
-        <div className="mt-6 flex gap-4">
+        <div className="mt-6 flex flex-wrap gap-4">
           <Link 
             href="/fundamentals" 
             className="px-4 py-2 bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-300 rounded-lg text-sm font-medium hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"

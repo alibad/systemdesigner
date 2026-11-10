@@ -1,4 +1,7 @@
 import './globals.css';
+// Human Quest "Path" look on every page: the family kit, then System Designer's own layer (after globals).
+import '@/components/hq-path/hq-path.css';
+import '@/components/hq-path/system-designer-path.css';
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { StorageProvider } from '@/contexts/StorageContext';
@@ -103,6 +106,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <link rel="apple-touch-icon" sizes="152x152" href="/icons/apple-touch-icon-152x152.png" />
         <link rel="apple-touch-icon" sizes="120x120" href="/icons/apple-touch-icon-120x120.png" />
         <link rel="apple-touch-icon" sizes="76x76" href="/icons/apple-touch-icon-76x76.png" />
+        {/* The family display face (Fraunces) for page and section headings. */}
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+        <link
+          rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        />
       </head>
       <body className={`${inter.className} min-h-screen text-gray-900 dark:text-neutral-100 antialiased dark:bg-neutral-950`} suppressHydrationWarning> 
         <ScreenReaderProvider>
@@ -130,11 +140,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               var isDark = cookieTheme ? cookieTheme === 'dark' : (stored ? stored === 'dark' : prefers);
               if (isDark) {
                 root.classList.add('dark');
-                root.style.backgroundColor = '#0a0a0a';
+                root.style.backgroundColor = '#1c130e';
                 root.style.colorScheme = 'dark';
               } else {
                 root.classList.remove('dark');
-                root.style.backgroundColor = '#fafafa';
+                root.style.backgroundColor = '#f6efe3';
                 root.style.colorScheme = 'light';
               }
             } catch (e) {}

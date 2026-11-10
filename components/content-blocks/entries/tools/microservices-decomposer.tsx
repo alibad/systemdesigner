@@ -691,14 +691,14 @@ export default function MicroservicesDecomposer() {
                   onClick={() => setSelectedCapability(capability.id)}
                   className={`min-h-20 rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     selected
-                      ? 'border-slate-950 bg-slate-950 text-white dark:border-cyan-300 dark:bg-cyan-300 dark:text-slate-950'
+                      ? 'border-slate-950 bg-slate-950 text-white dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                       : `${TONE_STYLES[capability.tone]} hover:border-slate-500`
                   }`}
                 >
                   <span className="block text-sm font-bold">{capability.name}</span>
                   <span
                     className={`mt-1 block text-xs leading-5 ${
-                      selected ? 'text-slate-200 dark:text-slate-800' : 'opacity-75'
+                      selected ? 'text-slate-200' : 'opacity-75'
                     }`}
                   >
                     {state.placement === 'module' ? 'Core module' : 'Independent service'} ·{' '}
@@ -965,7 +965,7 @@ export default function MicroservicesDecomposer() {
                       aria-pressed={selectedCapability === capability.id}
                       className={`rounded-md border p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                         selectedCapability === capability.id
-                          ? 'border-slate-950 bg-slate-950 text-white dark:border-cyan-300 dark:bg-cyan-300 dark:text-slate-950'
+                          ? 'border-slate-950 bg-slate-950 text-white dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                           : TONE_STYLES[capability.tone]
                       }`}
                     >
@@ -973,7 +973,7 @@ export default function MicroservicesDecomposer() {
                       <span
                         className={`mt-1 block text-xs ${
                           selectedCapability === capability.id
-                            ? 'text-slate-200 dark:text-slate-800'
+                            ? 'text-slate-200'
                             : 'opacity-75'
                         }`}
                       >
@@ -1004,7 +1004,7 @@ export default function MicroservicesDecomposer() {
                       aria-pressed={selectedCapability === capability.id}
                       className={`rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                         selectedCapability === capability.id
-                          ? 'border-slate-950 bg-slate-950 text-white dark:border-cyan-300 dark:bg-cyan-300 dark:text-slate-950'
+                          ? 'border-slate-950 bg-slate-950 text-white dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                           : TONE_STYLES[capability.tone]
                       }`}
                     >
@@ -1017,7 +1017,7 @@ export default function MicroservicesDecomposer() {
                       <span
                         className={`mt-2 flex items-center gap-1.5 text-xs ${
                           selectedCapability === capability.id
-                            ? 'text-slate-200 dark:text-slate-800'
+                            ? 'text-slate-200'
                             : 'opacity-75'
                         }`}
                       >
@@ -1086,14 +1086,14 @@ export default function MicroservicesDecomposer() {
                 onClick={() => setWorkflow(item.id)}
                 className={`rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
                   selected
-                    ? 'border-emerald-700 bg-emerald-700 text-white dark:border-emerald-300 dark:bg-emerald-300 dark:text-slate-950'
+                    ? 'border-emerald-700 bg-emerald-700 text-white dark:border-emerald-300 dark:bg-emerald-900 dark:text-white'
                     : 'border-slate-200 bg-white hover:border-emerald-400 dark:border-slate-700 dark:bg-slate-900'
                 }`}
               >
                 <span className="block text-sm font-bold">{item.label}</span>
                 <span
                   className={`mt-1 block text-xs leading-5 ${
-                    selected ? 'text-emerald-50 dark:text-slate-800' : 'text-slate-600 dark:text-slate-400'
+                    selected ? 'text-emerald-50' : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
                   {item.invariant}
@@ -1186,14 +1186,14 @@ export default function MicroservicesDecomposer() {
                 }}
                 className={`min-h-24 rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
                   selected
-                    ? 'border-rose-700 bg-rose-700 text-white dark:border-rose-300 dark:bg-rose-300 dark:text-slate-950'
+                    ? 'border-rose-700 bg-rose-700 text-white dark:border-rose-300 dark:bg-rose-900 dark:text-white'
                     : 'border-slate-200 bg-slate-50 hover:border-rose-400 dark:border-slate-700 dark:bg-slate-950'
                 }`}
               >
                 <span className="block text-sm font-bold">{item.label}</span>
                 <span
                   className={`mt-1 block text-xs leading-5 ${
-                    selected ? 'text-rose-50 dark:text-slate-800' : 'text-slate-600 dark:text-slate-400'
+                    selected ? 'text-rose-50' : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
                   {item.description}

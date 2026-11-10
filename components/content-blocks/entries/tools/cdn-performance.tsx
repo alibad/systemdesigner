@@ -603,7 +603,7 @@ export default function CdnPerformanceTool() {
                 onClick={() => setChallengeId(challenge.id)}
                 className={`min-h-20 rounded-md border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
                   selected
-                    ? 'border-neutral-950 bg-neutral-950 text-white ring-1 ring-neutral-950 dark:border-cyan-300 dark:bg-cyan-300 dark:text-neutral-950 dark:ring-cyan-300'
+                    ? 'border-neutral-950 bg-neutral-950 text-white ring-1 ring-neutral-950 dark:border-cyan-300 dark:bg-cyan-900 dark:text-white dark:ring-cyan-300'
                     : 'border-neutral-200 bg-neutral-50 text-neutral-700 hover:border-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:border-neutral-600'
                 }`}
               >

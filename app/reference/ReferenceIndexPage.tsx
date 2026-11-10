@@ -13,14 +13,14 @@ export default function ReferenceIndexPage() {
   const newItems = categories.reduce((acc, cat) => acc + cat.items.filter(item => item.isNew).length, 0);
 
   return (
-    <main className="space-y-8">
+    <main className="sdp-index space-y-8">
       {/* Tab Navigation */}
       <div className="flex gap-2 mb-6">
         <button
           onClick={() => setActiveTab('library')}
           className={`px-4 py-2 rounded-lg font-medium transition-colors ${
             activeTab === 'library'
-              ? 'bg-indigo-100 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-700'
+              ? 'bg-brand-100 dark:bg-brand-900/20 text-brand-700 dark:text-brand-300 border border-brand-300 dark:border-brand-700'
               : 'bg-neutral-50 dark:bg-neutral-800/50 text-neutral-600 dark:text-neutral-400 border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'
           }`}
         >
@@ -30,7 +30,7 @@ export default function ReferenceIndexPage() {
           onClick={() => setActiveTab('progress')}
           className={`px-4 py-2 rounded-lg font-medium transition-colors ${
             activeTab === 'progress'
-              ? 'bg-indigo-100 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-700'
+              ? 'bg-brand-100 dark:bg-brand-900/20 text-brand-700 dark:text-brand-300 border border-brand-300 dark:border-brand-700'
               : 'bg-neutral-50 dark:bg-neutral-800/50 text-neutral-600 dark:text-neutral-400 border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'
           }`}
         >
@@ -42,7 +42,7 @@ export default function ReferenceIndexPage() {
         <>
           <div className="grid md:grid-cols-3 gap-4 mb-6">
         <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
-          <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400">{totalItems}</div>
+          <div className="text-2xl font-bold text-brand-600 dark:text-brand-400">{totalItems}</div>
           <div className="text-sm text-neutral-600 dark:text-neutral-400">Quick References</div>
         </div>
         <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
@@ -79,7 +79,7 @@ export default function ReferenceIndexPage() {
                       New
                     </span>
                   )}
-                  <div className="text-base font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors mb-1">
+                  <div className="text-base font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors mb-1">
                     {item.title}
                   </div>
                   <div className="text-sm text-neutral-600 dark:text-neutral-400">
@@ -93,7 +93,7 @@ export default function ReferenceIndexPage() {
         </div>
 
         {/* Tools Section */}
-        <div className="mt-8 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-r from-indigo-50 to-emerald-50 dark:from-indigo-900/20 dark:to-emerald-900/20 p-6">
+        <div className="mt-8 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-r from-brand-50 to-emerald-50 dark:from-brand-900/20 dark:to-emerald-900/20 p-6">
           <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2">
             Looking for Interactive Tools?
           </h3>
@@ -103,7 +103,7 @@ export default function ReferenceIndexPage() {
           <div className="flex gap-3">
             <Link 
               href="/tools"
-              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium"
+              className="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors font-medium"
             >
               Explore Tools
             </Link>

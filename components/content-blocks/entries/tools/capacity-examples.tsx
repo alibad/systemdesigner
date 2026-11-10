@@ -698,7 +698,7 @@ export default function CapacityExamplesPage() {
                     aria-pressed={selected}
                     className={`rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
                       selected
-                        ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950'
+                        ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-neutral-800 dark:text-white'
                         : 'border-neutral-200 bg-white text-neutral-900 hover:border-neutral-400 hover:bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-100 dark:hover:border-neutral-600 dark:hover:bg-neutral-900'
                     }`}
                   >
@@ -706,7 +706,7 @@ export default function CapacityExamplesPage() {
                       <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
                       <span className="text-sm font-bold">{item.label}</span>
                     </div>
-                    <span className={`mt-2 block text-xs leading-5 ${selected ? 'text-neutral-300 dark:text-neutral-700' : 'text-neutral-500 dark:text-neutral-400'}`}>
+                    <span className={`mt-2 block text-xs leading-5 ${selected ? 'text-neutral-300' : 'text-neutral-500 dark:text-neutral-400'}`}>
                       {item.description}
                     </span>
                   </button>

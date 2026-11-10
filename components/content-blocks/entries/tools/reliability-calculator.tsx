@@ -729,7 +729,7 @@ export default function ReliabilityCalculator() {
                 onClick={() => setChallengeId(challenge.id)}
                 className={`min-h-[104px] rounded-md border p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 ${
                   selected
-                    ? 'border-teal-800 bg-teal-800 text-white shadow-sm dark:border-teal-300 dark:bg-teal-300 dark:text-neutral-950'
+                    ? 'border-teal-800 bg-teal-800 text-white shadow-sm dark:border-teal-300 dark:bg-teal-900 dark:text-white'
                     : 'border-neutral-200 bg-white text-neutral-700 hover:border-teal-300 hover:bg-teal-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-teal-700 dark:hover:bg-teal-950/50'
                 }`}
               >
@@ -742,7 +742,7 @@ export default function ReliabilityCalculator() {
                     {challenge.badge}
                   </span>
                 </span>
-                <span className={`mt-2 block text-xs leading-5 ${selected ? 'text-teal-50 dark:text-neutral-900' : 'text-neutral-500 dark:text-neutral-400'}`}>
+                <span className={`mt-2 block text-xs leading-5 ${selected ? 'text-teal-50' : 'text-neutral-500 dark:text-neutral-400'}`}>
                   {challenge.description}
                 </span>
               </button>

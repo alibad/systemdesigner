@@ -112,7 +112,7 @@ export default function ToolsPage() {
   };
 
   return (
-    <main className="max-w-7xl mx-auto p-6">
+    <main className="sdp-index max-w-7xl mx-auto p-6">
       <div className="mb-8">
         <h1 className="text-3xl md:text-4xl font-bold text-neutral-900 dark:text-neutral-100 mb-3">
           🔧 System Design Studio
@@ -134,7 +134,7 @@ export default function ToolsPage() {
                 <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 flex-1">
                   Professional-grade tools for system design, capacity planning, and performance optimization.
                 </p>
-                <div className="text-3xl font-bold text-indigo-600 dark:text-indigo-400 mb-1">{totalTools}</div>
+                <div className="text-3xl font-bold text-brand-600 dark:text-brand-400 mb-1">{totalTools}</div>
                 <div className="text-sm text-neutral-500 dark:text-neutral-400">Interactive tools</div>
               </div>
             </div>
@@ -160,13 +160,13 @@ export default function ToolsPage() {
             <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card hover:shadow-lg transition-all p-8 h-full">
               <div className="flex flex-col items-center text-center">
                 <div className="text-4xl mb-4">🏗️</div>
-                <h3 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors mb-3">
+                <h3 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors mb-3">
                   Workshops
                 </h3>
                 <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 flex-1">
                   Guided workshops for architecture decisions, performance optimization, and system analysis.
                 </p>
-                <div className="text-3xl font-bold text-purple-600 dark:text-purple-400 mb-1">5</div>
+                <div className="text-3xl font-bold text-brand-600 dark:text-brand-400 mb-1">5</div>
                 <div className="text-sm text-neutral-500 dark:text-neutral-400">Interactive workshops</div>
               </div>
             </div>
@@ -203,7 +203,7 @@ export default function ToolsPage() {
                   <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card hover:shadow-lg transition-all p-6 h-full">
                     <div className="flex flex-col h-full">
                       <div className="flex items-start justify-between mb-3">
-                        <h4 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors mb-2 flex-1 pr-2">
+                        <h4 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors mb-2 flex-1 pr-2">
                           {tool.title}
                         </h4>
                         <span className={`px-2 py-1 text-xs font-medium rounded-full capitalize ${getLevelColor(tool.level)}`}>
@@ -239,7 +239,7 @@ export default function ToolsPage() {
       </div>
 
       {/* Quick Access Grid */}
-      <div className="bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-2xl p-8 mb-8">
+      <div className="bg-gradient-to-r from-brand-50 to-brand-50 dark:from-brand-900/20 dark:to-brand-900/20 rounded-2xl p-8 mb-8">
         <h2 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100 mb-4">
           🚀 Popular Tools
         </h2>
@@ -255,9 +255,9 @@ export default function ToolsPage() {
             { title: 'Load Balancer Visualizer', path: '/tools/load-balancer-visualizer', icon: '⚖️' }
           ].map((tool) => (
             <Link key={tool.path} href={tool.path as any} className="group">
-              <div className="bg-white dark:bg-neutral-800 rounded-lg p-4 border border-neutral-200 dark:border-neutral-700 hover:border-indigo-500 dark:hover:border-indigo-400 transition-all">
+              <div className="bg-white dark:bg-neutral-800 rounded-lg p-4 border border-neutral-200 dark:border-neutral-700 hover:border-brand-500 dark:hover:border-brand-400 transition-all">
                 <div className="text-2xl mb-2">{tool.icon}</div>
-                <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors text-sm">
+                <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors text-sm">
                   {tool.title}
                 </h3>
               </div>

@@ -623,7 +623,7 @@ function RangeMap({
             className="absolute top-0 h-12 w-px bg-violet-600 dark:bg-violet-300"
             style={{ left: `${position(0)}%` }}
           >
-            <span className="absolute left-1 top-0 text-[10px] font-semibold text-violet-700 dark:text-violet-300">
+            <span className="absolute left-1 top-0 rounded-sm bg-white px-1 text-[10px] font-semibold text-violet-700 dark:bg-neutral-950 dark:text-violet-300">
               zero
             </span>
           </div>

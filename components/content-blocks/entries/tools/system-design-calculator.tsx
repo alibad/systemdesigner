@@ -685,7 +685,7 @@ export default function SystemDesignCalculator() {
                 onClick={() => setScenarioId(scenario.id)}
                 className={`min-h-[104px] rounded-md border p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
                   selected
-                    ? 'border-cyan-800 bg-cyan-800 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-300 dark:text-neutral-950'
+                    ? 'border-cyan-800 bg-cyan-800 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                     : 'border-neutral-200 bg-white text-neutral-700 hover:border-cyan-400 hover:bg-cyan-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-cyan-700 dark:hover:bg-cyan-950/50'
                 }`}
               >
@@ -705,7 +705,7 @@ export default function SystemDesignCalculator() {
                 <span
                   className={`mt-2 block text-xs leading-5 ${
                     selected
-                      ? 'text-cyan-50 dark:text-neutral-900'
+                      ? 'text-cyan-50'
                       : 'text-neutral-500 dark:text-neutral-400'
                   }`}
                 >

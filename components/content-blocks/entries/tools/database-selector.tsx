@@ -536,7 +536,7 @@ function ChoiceGroup<T extends string>({
               onClick={() => onChange(option.value)}
               className={`min-h-11 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 selected
-                  ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-300 dark:text-zinc-950'
+                  ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                   : 'border-zinc-300 bg-white text-zinc-900 hover:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:border-zinc-500'
               }`}
             >
@@ -556,7 +556,7 @@ function ChoiceGroup<T extends string>({
                     <span
                       className={`mt-0.5 block text-xs leading-5 ${
                         selected
-                          ? 'text-blue-100 dark:text-zinc-800'
+                          ? 'text-blue-100 dark:text-cyan-100'
                           : 'text-zinc-500 dark:text-zinc-400'
                       }`}
                     >
@@ -807,7 +807,7 @@ export default function DatabaseSelector() {
                 onClick={() => update('challenge', challenge.id)}
                 className={`min-h-[5.25rem] rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                   selected
-                    ? 'border-amber-500 bg-amber-100 text-amber-950 shadow-sm dark:border-amber-300 dark:bg-amber-300 dark:text-zinc-950'
+                    ? 'border-amber-500 bg-amber-100 text-amber-950 shadow-sm dark:border-amber-300 dark:bg-amber-900 dark:text-white'
                     : 'border-zinc-300 bg-white text-zinc-900 hover:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:border-zinc-500'
                 }`}
               >
@@ -818,7 +818,7 @@ export default function DatabaseSelector() {
                 <span
                   className={`mt-1 block text-xs leading-5 ${
                     selected
-                      ? 'text-amber-900 dark:text-zinc-800'
+                      ? 'text-amber-900 dark:text-amber-100'
                       : 'text-zinc-500 dark:text-zinc-400'
                   }`}
                 >
@@ -1153,7 +1153,7 @@ export default function DatabaseSelector() {
                       onClick={() => setInspectedId(candidate.id)}
                       className={`rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                         selected
-                          ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-300 dark:text-zinc-950'
+                          ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
                           : 'border-zinc-300 bg-white text-zinc-950 hover:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:border-zinc-500'
                       }`}
                     >
@@ -1165,12 +1165,12 @@ export default function DatabaseSelector() {
                       </span>
                       <span
                         className={`mt-2 block h-1.5 overflow-hidden rounded-full ${
-                          selected ? 'bg-white/25 dark:bg-zinc-950/20' : 'bg-zinc-200 dark:bg-zinc-800'
+                          selected ? 'bg-white/25' : 'bg-zinc-200 dark:bg-zinc-800'
                         }`}
                       >
                         <span
                           className={`block h-full rounded-full ${
-                            selected ? 'bg-white dark:bg-zinc-950' : 'bg-blue-600 dark:bg-cyan-300'
+                            selected ? 'bg-white dark:bg-cyan-300' : 'bg-blue-600 dark:bg-cyan-300'
                           }`}
                           style={{ width: `${candidate.score}%` }}
                         />
@@ -1178,7 +1178,7 @@ export default function DatabaseSelector() {
                       <span
                         className={`mt-2 block text-xs ${
                           selected
-                            ? 'text-blue-100 dark:text-zinc-800'
+                            ? 'text-blue-100 dark:text-cyan-100'
                             : 'text-zinc-500 dark:text-zinc-400'
                         }`}
                       >

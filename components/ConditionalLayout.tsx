@@ -26,9 +26,12 @@ export default function ConditionalLayout({
   const isWhiteboardEditor =
     pathname === "/whiteboard" || pathname.startsWith("/whiteboard?");
 
+  // The Human Quest "Path" homepage preview (app/path) brings its own questbar and footer.
+  if (pathname === "/path") return <>{children}</>;
+
   if (pathname === "/learn") {
     return (
-      <div className="learning-page min-h-screen bg-[#fcfcf9] dark:bg-neutral-950">
+      <div className="learning-page min-h-screen bg-[var(--hqp-paper)]">
         <header
           id="side-nav"
           className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6"

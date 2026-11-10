@@ -979,26 +979,26 @@ ${contradictions.length ? contradictions.map((item) => `- ${item}`).join('\n') :
                     onClick={() => setCandidateId(candidate.id)}
                     className={`min-h-64 rounded-md border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                       active
-                        ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950'
+                        ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-neutral-800 dark:text-white'
                         : 'border-neutral-200 bg-white hover:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-950 dark:hover:border-neutral-500'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <span className={`text-xs font-bold uppercase ${active ? 'text-blue-300 dark:text-blue-700' : 'text-neutral-500 dark:text-neutral-400'}`}>
+                      <span className={`text-xs font-bold uppercase ${active ? 'text-blue-300' : 'text-neutral-500 dark:text-neutral-400'}`}>
                         {top ? 'Best fit' : `Rank ${index + 1}`}
                       </span>
-                      <span className={`text-2xl font-black tabular-nums ${active ? 'text-white dark:text-neutral-950' : 'text-neutral-950 dark:text-white'}`}>
+                      <span className={`text-2xl font-black tabular-nums ${active ? 'text-white' : 'text-neutral-950 dark:text-white'}`}>
                         {candidate.score}
                       </span>
                     </div>
                     <div className="mt-2 text-base font-bold">{candidate.name}</div>
-                    <p className={`mt-2 text-sm leading-5 ${active ? 'text-neutral-300 dark:text-neutral-700' : 'text-neutral-600 dark:text-neutral-300'}`}>
+                    <p className={`mt-2 text-sm leading-5 ${active ? 'text-neutral-300' : 'text-neutral-600 dark:text-neutral-300'}`}>
                       {candidate.description}
                     </p>
-                    <div className={`mt-4 h-1.5 overflow-hidden rounded-full ${active ? 'bg-neutral-700 dark:bg-neutral-300' : 'bg-neutral-200 dark:bg-neutral-800'}`}>
+                    <div className={`mt-4 h-1.5 overflow-hidden rounded-full ${active ? 'bg-neutral-700 dark:bg-neutral-600' : 'bg-neutral-200 dark:bg-neutral-800'}`}>
                       <div className={`h-full ${candidate.accent}`} style={{ width: `${candidate.score}%` }} />
                     </div>
-                    <ul className={`mt-4 space-y-2 text-xs ${active ? 'text-neutral-200 dark:text-neutral-800' : 'text-neutral-600 dark:text-neutral-300'}`}>
+                    <ul className={`mt-4 space-y-2 text-xs ${active ? 'text-neutral-200' : 'text-neutral-600 dark:text-neutral-300'}`}>
                       {candidate.strengths.map((strength) => (
                         <li key={strength} className="flex gap-2">
                           <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />

@@ -522,7 +522,7 @@ function ChoiceButton({
       className={
         'min-h-[76px] w-full rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ' +
         (selected
-          ? 'border-cyan-700 bg-cyan-950 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-100 dark:text-cyan-950'
+          ? 'border-cyan-700 bg-cyan-950 text-white shadow-sm dark:border-cyan-300 dark:bg-cyan-900 dark:text-white'
           : 'border-neutral-200 bg-white text-neutral-800 hover:border-neutral-400 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-100 dark:hover:border-neutral-600')
       }
     >
@@ -533,7 +533,7 @@ function ChoiceButton({
           <span
             className={
               'mt-1 block text-xs leading-5 ' +
-              (selected ? 'text-cyan-100 dark:text-cyan-900' : 'text-neutral-500 dark:text-neutral-400')
+              (selected ? 'text-cyan-100' : 'text-neutral-500 dark:text-neutral-400')
             }
           >
             {detail}

@@ -11,6 +11,8 @@ import { Project, ProjectPage, WhiteboardContent } from '@/lib/project-data-mode
 import dynamic from 'next/dynamic';
 
 // Dynamically import Tldraw to avoid SSR issues
+// The whiteboard follows the site day/night (tldraw's own dark mode); loaded the same lazy way.
+const TldrawSiteTheme = dynamic(() => import('@/components/hq-path/TldrawSiteTheme'), { ssr: false });
 const Tldraw = dynamic(() => import('@tldraw/tldraw').then((mod) => mod.Tldraw), {
   ssr: false,
   loading: () => (
@@ -949,7 +951,9 @@ export default function ExamplePreviewPage() {
                                       autoFocus={false}
                                       hideUi={true}
                                       inferDarkMode={true}
-                                    />
+                                    >
+                                      <TldrawSiteTheme />
+                                    </Tldraw>
                                   </div>
                                 </>
                               ) : (

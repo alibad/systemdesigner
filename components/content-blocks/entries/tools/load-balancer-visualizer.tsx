@@ -680,12 +680,12 @@ function DesktopTopology({
         </span>
       </div>
 
-      <div className="absolute left-[32%] top-[36%] w-[17%] border border-neutral-300 bg-neutral-950 px-4 py-5 text-white shadow-md dark:border-neutral-700 dark:bg-white dark:text-neutral-950">
+      <div className="absolute left-[32%] top-[36%] w-[17%] border border-neutral-300 bg-neutral-950 px-4 py-5 text-white shadow-md dark:border-neutral-500 dark:bg-neutral-800 dark:text-white">
         <span className="flex items-center gap-2 text-sm font-bold">
-          <Network className="h-4 w-4 text-cyan-400 dark:text-cyan-600" />
+          <Network className="h-4 w-4 text-cyan-400" />
           Load balancer
         </span>
-        <span className="mt-2 block text-xs leading-5 text-neutral-300 dark:text-neutral-600">
+        <span className="mt-2 block text-xs leading-5 text-neutral-300">
           {algorithmLabel}
         </span>
       </div>
@@ -732,12 +732,12 @@ function MobileTopology({
         <span className="absolute left-1 top-0 h-full border-l-2 border-dashed border-blue-400 dark:border-blue-600" />
         {routingMotion ? <span className="lb-request-dot absolute left-0 top-0 h-3 w-3 rounded-full bg-blue-600" /> : null}
       </div>
-      <div className="mx-auto w-full max-w-64 border border-neutral-300 bg-neutral-950 p-4 text-center text-white dark:border-neutral-700 dark:bg-white dark:text-neutral-950">
+      <div className="mx-auto w-full max-w-64 border border-neutral-300 bg-neutral-950 p-4 text-center text-white dark:border-neutral-500 dark:bg-neutral-800 dark:text-white">
         <span className="flex items-center justify-center gap-2 text-sm font-bold">
-          <Network className="h-4 w-4 text-cyan-400 dark:text-cyan-600" />
+          <Network className="h-4 w-4 text-cyan-400" />
           Load balancer
         </span>
-        <span className="mt-1 block text-xs text-neutral-300 dark:text-neutral-600">
+        <span className="mt-1 block text-xs text-neutral-300">
           {algorithmLabel}
         </span>
       </div>
@@ -1015,7 +1015,7 @@ export default function LoadBalancerVisualizer() {
                   aria-pressed={selected}
                   className={`min-h-24 border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
                     selected
-                      ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950'
+                      ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-neutral-800 dark:text-white'
                       : 'border-neutral-300 bg-white text-neutral-700 hover:border-neutral-500 hover:text-neutral-950 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-300 dark:hover:border-neutral-400 dark:hover:text-white'
                   }`}
                 >
@@ -1026,7 +1026,7 @@ export default function LoadBalancerVisualizer() {
                   <span
                     className={`mt-1 block text-xs leading-5 ${
                       selected
-                        ? 'text-neutral-300 dark:text-neutral-600'
+                        ? 'text-neutral-300'
                         : 'text-neutral-500 dark:text-neutral-400'
                     }`}
                   >
@@ -1107,7 +1107,7 @@ export default function LoadBalancerVisualizer() {
                       aria-pressed={selected}
                       className={`min-h-20 border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
                         selected
-                          ? 'border-blue-700 bg-blue-700 text-white dark:border-blue-300 dark:bg-blue-300 dark:text-blue-950'
+                          ? 'border-blue-700 bg-blue-700 text-white dark:border-blue-300 dark:bg-blue-900 dark:text-white'
                           : 'border-neutral-300 text-neutral-700 hover:border-blue-500 dark:border-neutral-700 dark:text-neutral-300 dark:hover:border-blue-400'
                       }`}
                     >
@@ -1115,7 +1115,7 @@ export default function LoadBalancerVisualizer() {
                       <span
                         className={`mt-1 block text-xs leading-5 ${
                           selected
-                            ? 'text-blue-100 dark:text-blue-900'
+                            ? 'text-blue-100'
                             : 'text-neutral-500 dark:text-neutral-400'
                         }`}
                       >

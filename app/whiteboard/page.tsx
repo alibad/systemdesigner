@@ -14,6 +14,7 @@ import { useWhiteboards } from '@/contexts/WhiteboardContext';
 import { doc as fsDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { useSearchParams } from 'next/navigation';
+import TldrawSiteTheme from '@/components/hq-path/TldrawSiteTheme';
 
 const componentTypes = [
   { type: 'user', icon: '👤', label: 'User/Client', color: 'bg-blue-100 border-blue-300 text-blue-800' },
@@ -1151,7 +1152,7 @@ export default function WhiteboardPage() {
       <main className="h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-neutral-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <div className="text-sm text-neutral-600">Loading...</div>
+          <div className="text-sm text-neutral-600 dark:text-neutral-300">Loading...</div>
         </div>
       </main>
     );
@@ -1160,16 +1161,16 @@ export default function WhiteboardPage() {
   // Require sign-in for whiteboard editing (but allow shared views)
   if (!currentUser || currentUser.isAnonymous) {
     return (
-      <main className="h-screen flex items-center justify-center bg-neutral-50">
+      <main className="h-screen flex items-center justify-center bg-neutral-50 dark:bg-neutral-950">
         <div className="text-center max-w-md mx-auto p-8">
           <div className="mb-6">
-            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg className="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-950 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-indigo-600 dark:text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
               </svg>
             </div>
-            <h2 className="text-2xl font-bold text-neutral-900 mb-2">Create & Save Whiteboards</h2>
-            <p className="text-neutral-600">Sign in to create, save, and share your whiteboards. Your work will be safely stored and accessible from any device.</p>
+            <h2 className="text-2xl font-bold text-neutral-900 dark:text-neutral-50 mb-2">Create & Save Whiteboards</h2>
+            <p className="text-neutral-600 dark:text-neutral-300">Sign in to create, save, and share your whiteboards. Your work will be safely stored and accessible from any device.</p>
           </div>
           
           <div className="space-y-3">
@@ -1193,7 +1194,7 @@ export default function WhiteboardPage() {
               </svg>
               Sign in with Google
             </button>
-            <p className="text-xs text-neutral-500">
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
               Free account • No credit card required
             </p>
           </div>
@@ -1911,6 +1912,7 @@ export default function WhiteboardPage() {
                 setShareBusy(false);
               }
             }} />
+            <TldrawSiteTheme />
           </Tldraw>
           {/* Listen to live document changes and debounce-save to Firestore so the shared link stays current */}
           <script dangerouslySetInnerHTML={{ __html: '' }} />

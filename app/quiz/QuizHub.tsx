@@ -102,11 +102,11 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
   // Show quiz modal
   if (selectedQuiz) {
     return (
-      <main className="max-w-4xl mx-auto p-6">
+      <main className="sdp-index max-w-4xl mx-auto p-6">
         <div className="mb-6">
           <button
             onClick={() => setSelectedQuiz(null)}
-            className="flex items-center gap-2 text-indigo-600 hover:text-indigo-700 mb-4"
+            className="flex items-center gap-2 text-brand-600 hover:text-brand-700 mb-4"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -124,7 +124,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
   }
 
   return (
-    <main className="max-w-7xl mx-auto p-6">
+    <main className="sdp-index max-w-7xl mx-auto p-6">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl md:text-4xl font-bold text-neutral-900 dark:text-neutral-100 mb-3">
@@ -138,7 +138,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
         {/* Stats */}
         <div className="grid md:grid-cols-4 gap-4 mb-8">
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
-            <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400">{stats.total}</div>
+            <div className="text-2xl font-bold text-brand-600 dark:text-brand-400">{stats.total}</div>
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Total Quizzes</div>
           </div>
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
@@ -148,7 +148,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Total Questions</div>
           </div>
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
-            <div className="text-2xl font-bold text-purple-600 dark:text-purple-400">{Object.keys(stats.bySection).length}</div>
+            <div className="text-2xl font-bold text-brand-600 dark:text-brand-400">{Object.keys(stats.bySection).length}</div>
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Learning Sections</div>
           </div>
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
@@ -180,7 +180,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
               onClick={() => setSelectedCategory(category)}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                 selectedCategory === category
-                  ? 'bg-indigo-600 text-white'
+                  ? 'bg-brand-600 text-white'
                   : 'bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700'
               }`}
             >
@@ -255,7 +255,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
                 <div className="flex gap-3">
                   <button
                     onClick={() => setSelectedQuiz(quiz.id)}
-                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+                    className="px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700 transition-colors"
                   >
                     Start Quiz
                   </button>
@@ -278,7 +278,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
       )}
 
       {/* Quiz Statistics */}
-      <div className="mt-12 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 p-8">
+      <div className="mt-12 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-r from-brand-50 to-brand-50 dark:from-brand-900/20 dark:to-brand-900/20 p-8">
         <h3 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100 mb-4">
           📊 Quiz Statistics
         </h3>
@@ -288,7 +288,7 @@ export default function QuizHub({ allQuizzes, lessonPaths }: QuizHubProps) {
               <h4 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-2">
                 {getIconForSection(section)} {section.charAt(0).toUpperCase() + section.slice(1).replace('-', ' ')}
               </h4>
-              <p className="text-2xl font-bold text-indigo-600 dark:text-indigo-400">{count}</p>
+              <p className="text-2xl font-bold text-brand-600 dark:text-brand-400">{count}</p>
               <p className="text-sm text-neutral-600 dark:text-neutral-400">quizzes available</p>
             </div>
           ))}
@@ -307,10 +307,10 @@ const difficultyColors = {
 
 const categoryColors = {
   'Fundamentals': 'bg-blue-100 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300',
-  'Genai': 'bg-purple-100 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300',
+  'Genai': 'bg-brand-100 dark:bg-brand-900/20 text-brand-700 dark:text-brand-300',
   'Ml systems': 'bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-300',
   'Technology': 'bg-orange-100 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300',
-  'Case studies': 'bg-indigo-100 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300',
+  'Case studies': 'bg-brand-100 dark:bg-brand-900/20 text-brand-700 dark:text-brand-300',
   'Practice': 'bg-pink-100 dark:bg-pink-900/20 text-pink-700 dark:text-pink-300',
   'Reference': 'bg-gray-100 dark:bg-gray-900/20 text-gray-700 dark:text-gray-300',
   'Tools': 'bg-cyan-100 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-300'

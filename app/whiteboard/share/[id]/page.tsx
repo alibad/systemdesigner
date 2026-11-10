@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, use } from 'react';
 import { Tldraw } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
 import { useSearchParams } from 'next/navigation';
+import TldrawSiteTheme from '@/components/hq-path/TldrawSiteTheme';
 
 interface WhiteboardData {
   id: string;
@@ -310,7 +311,9 @@ export default function SharedWhiteboardPage(props: { params: Promise<{ id: stri
             document.removeEventListener('keydown', handleKeyDown);
           };
         }}
-      />
+      >
+        <TldrawSiteTheme />
+      </Tldraw>
       <style jsx global>{`
         /* Hide edit-related items in the right-click menu on shared view */
         .wb-share .tlui-context-menu [aria-label="Edit"],

@@ -1,5 +1,40 @@
 import type { Config } from 'tailwindcss';
 
+// Human Quest "Path" look (8 Nov 2026). The app is built on Tailwind's greys, so its greys take the
+// family's warm paper and ink: the same lightness step for step (contrast stays as it was), a warm hue.
+// Light steps are the day paper and cards, dark steps the after-sunset browns, so every `dark:` pair
+// keeps working. `white` is the family card colour. See components/hq-path/system-designer-path.css.
+const pathGreys = {
+  50: '#fbf6ee',
+  100: '#f4ecdf',
+  200: '#e9ddca',
+  300: '#d8c7ae',
+  400: '#a8947e',
+  500: '#7b6856',
+  600: '#5e4d3f',
+  700: '#4d3c2f',
+  800: '#3a2a1f',
+  900: '#2a1d15',
+  950: '#1c130e',
+};
+
+// System Designer's own green (main #05875f, soft #8fd6bb, deep #065f46, night #06976b) as a scale,
+// for accents on the public pages. 600 is a shade under the main colour so small text and button
+// labels stay above 4.5:1 on the cream paper.
+const brand = {
+  50: '#eef8f3',
+  100: '#d5efe3',
+  200: '#b2e3cf',
+  300: '#8fd6bb',
+  400: '#4fb98f',
+  500: '#05875f',
+  600: '#057a56',
+  700: '#056c4e',
+  800: '#065f46',
+  900: '#064e3b',
+  950: '#032b21',
+};
+
 export default {
   darkMode: ['class'],
   content: [
@@ -18,6 +53,12 @@ export default {
     },
     extend: {
       colors: {
+        white: '#fffaf1',
+        neutral: pathGreys,
+        gray: pathGreys,
+        slate: pathGreys,
+        zinc: pathGreys,
+        brand,
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',

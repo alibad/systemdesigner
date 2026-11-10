@@ -338,7 +338,7 @@ function ChoiceGroup<T extends string>({
               onClick={() => onChange(option.value)}
               className={`min-h-[54px] min-w-0 rounded-md border px-3 py-2 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-cyan-500 ${
                 selected
-                  ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-white dark:text-neutral-950'
+                  ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-neutral-800 dark:text-white'
                   : 'border-neutral-200 bg-white text-neutral-700 hover:border-cyan-500 hover:text-neutral-950 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-300 dark:hover:border-cyan-400 dark:hover:text-white'
               }`}
             >
@@ -346,7 +346,7 @@ function ChoiceGroup<T extends string>({
               <span
                 className={`mt-0.5 block text-xs leading-4 ${
                   selected
-                    ? 'text-neutral-300 dark:text-neutral-600'
+                    ? 'text-neutral-300'
                     : 'text-neutral-500 dark:text-neutral-400'
                 }`}
               >
@@ -967,7 +967,7 @@ export default function ScalabilityPlannerTool() {
                 onClick={() => setChallengeId(challenge.id)}
                 className={`min-h-[76px] min-w-0 rounded-md border px-3 py-2 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-rose-500 ${
                   selected
-                    ? 'border-rose-700 bg-rose-700 text-white shadow-sm dark:border-rose-300 dark:bg-rose-200 dark:text-rose-950'
+                    ? 'border-rose-700 bg-rose-700 text-white shadow-sm dark:border-rose-300 dark:bg-rose-900 dark:text-white'
                     : 'border-neutral-200 bg-white text-neutral-700 hover:border-rose-400 hover:text-neutral-950 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-300 dark:hover:border-rose-500 dark:hover:text-white'
                 }`}
               >
@@ -976,7 +976,7 @@ export default function ScalabilityPlannerTool() {
                 <span
                   className={`mt-0.5 block text-[11px] leading-4 ${
                     selected
-                      ? 'text-rose-100 dark:text-rose-800'
+                      ? 'text-rose-100'
                       : 'text-neutral-500 dark:text-neutral-400'
                   }`}
                 >

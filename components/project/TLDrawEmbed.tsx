@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Tldraw, useEditor } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
+import TldrawSiteTheme from '@/components/hq-path/TldrawSiteTheme';
 import { getDiagram, updateDiagram } from '@/lib/firebase';
 
 interface TLDrawEmbedProps {
@@ -165,6 +166,7 @@ export function TLDrawEmbed({
         }}
       >
         <AutoSaveHandler whiteboardId={whiteboardId} pageId={pageId} isEditable={isEditable} />
+        <TldrawSiteTheme />
       </Tldraw>
     </div>
   );

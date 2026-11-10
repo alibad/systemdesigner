@@ -100,10 +100,10 @@ const signalLabels: Array<{
 ];
 
 const sourceColors = [
-  'bg-blue-500 dark:bg-blue-400',
-  'bg-emerald-500 dark:bg-emerald-400',
-  'bg-violet-500 dark:bg-violet-400',
-  'bg-amber-500 dark:bg-amber-400',
+  'bg-blue-600 dark:bg-blue-400',
+  'bg-emerald-700 dark:bg-emerald-400',
+  'bg-violet-600 dark:bg-violet-400',
+  'bg-amber-700 dark:bg-amber-400',
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -477,7 +477,7 @@ function SourceMixtureLab({ data }: { data: MixtureData }) {
                 title={`${source.label}: ${source.share}%`}
               >
                 {source.share >= 12 ? (
-                  <span className="truncate px-2 text-xs font-semibold text-white">
+                  <span className="truncate px-2 text-xs font-semibold text-white dark:text-neutral-950">
                     {source.shortLabel}
                   </span>
                 ) : null}

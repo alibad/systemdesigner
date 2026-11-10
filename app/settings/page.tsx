@@ -17,7 +17,7 @@ interface DownloadProgress {
 }
 
 export default function SettingsPage() {
-  const [dark, setDark] = useState<boolean>(false);
+  const [dark, setDark] = useState<boolean | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>({
     totalPages: 0,
     cachedPages: 0,
@@ -33,7 +33,10 @@ export default function SettingsPage() {
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [autoDownload, setAutoDownload] = useState<boolean>(false);
 
-  // Theme management
+  // Theme management. Start from the theme the page already shows (the theme script and the
+  // menu's theme toggle keep it); `null` until then, so the page never writes a theme it has not
+  // read. It used to write its initial `false` and switch every visitor to light, here and on the
+  // next pages.
   useEffect(() => {
     try {
       const isDark = document.documentElement.classList.contains('dark');
@@ -42,10 +45,13 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    if (dark === null) return;
     const root = document.documentElement;
     if (dark) root.classList.add('dark'); else root.classList.remove('dark');
-    try { 
-      window.localStorage.setItem('sd:theme', dark ? 'dark' : 'light'); 
+    root.style.colorScheme = dark ? 'dark' : 'light';
+    try {
+      window.localStorage.setItem('sd:theme', dark ? 'dark' : 'light');
+      window.localStorage.setItem('theme', dark ? 'dark' : 'light');
       // Also update cookie for SSR
       document.cookie = `theme=${dark ? 'dark' : 'light'}; path=/; max-age=31536000`;
     } catch {}
@@ -53,9 +59,6 @@ export default function SettingsPage() {
 
   useEffect(() => {
     try {
-      const saved = window.localStorage.getItem('sd:theme');
-      if (saved) setDark(saved === 'dark');
-      
       // Load offline preferences
       const offlinePref = window.localStorage.getItem('sd:offline-mode');
       const autoDlPref = window.localStorage.getItem('sd:auto-download');

@@ -48,10 +48,10 @@ export default function QuizPlayer() {
   return (
     <main>
       <div className="card">
-        <h2 className="text-primary-600 text-xl font-semibold border-b-4 border-primary-600 pb-2">Quiz: {topic}</h2>
+        <h2 className="text-brand-700 dark:text-brand-300 text-xl font-semibold border-b-4 border-brand-600 pb-2">Quiz: {topic}</h2>
         {!done ? (
           <div className="mt-4">
-            <div className="text-gray-800 font-medium">{q.prompt}</div>
+            <div className="text-gray-800 dark:text-gray-100 font-medium">{q.prompt}</div>
             {q.type === 'mcq' && (
               <ul className="mt-3 space-y-2">
                 {q.choices?.map(c => (
@@ -65,20 +65,20 @@ export default function QuizPlayer() {
               </ul>
             )}
             {q.type === 'short' && (
-              <input className="mt-3 w-full rounded-md border px-3 py-2 text-sm" placeholder="Your answer" onChange={e => setAnswer(e.target.value)} />
+              <input className="mt-3 w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm" placeholder="Your answer" onChange={e => setAnswer(e.target.value)} />
             )}
-            <button className="mt-4 px-3 py-1.5 rounded-md bg-white text-primary-600 font-semibold shadow" onClick={next}>Next</button>
+            <button className="mt-4 px-3 py-1.5 rounded-md bg-white text-brand-700 dark:bg-neutral-800 dark:text-brand-300 font-semibold shadow" onClick={next}>Next</button>
           </div>
         ) : (
           <div className="mt-4">
-            <div className="text-gray-800">Score: {score} / {questions.length}</div>
+            <div className="text-gray-800 dark:text-gray-100">Score: {score} / {questions.length}</div>
             <ul className="mt-3 space-y-2 text-sm">
               {questions.map(qq => (
-                <li key={qq.id} className="bg-gray-50 p-3 rounded border">
+                <li key={qq.id} className="bg-gray-50 dark:bg-neutral-900 p-3 rounded border border-neutral-200 dark:border-neutral-800">
                   <div className="font-medium">{qq.prompt}</div>
                   <div>Your answer: <span className="font-mono">{answers[qq.id] ?? '—'}</span></div>
                   {qq.answer && <div>Correct: <span className="font-mono">{String(qq.answer)}</span></div>}
-                  {qq.explanation && <div className="text-gray-600">Explanation: {qq.explanation}</div>}
+                  {qq.explanation && <div className="text-gray-600 dark:text-gray-300">Explanation: {qq.explanation}</div>}
                 </li>
               ))}
             </ul>

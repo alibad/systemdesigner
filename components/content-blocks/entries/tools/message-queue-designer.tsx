@@ -502,7 +502,7 @@ function SegmentedControl<T extends string>({
               onClick={() => onChange(option.id)}
               className={`min-h-14 rounded-md border px-3 py-2 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-neutral-950 ${
                 selected
-                  ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-blue-300 dark:bg-blue-300 dark:text-neutral-950'
+                  ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-blue-300 dark:bg-blue-900 dark:text-white'
                   : 'border-neutral-300 bg-white text-neutral-800 hover:border-neutral-500 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-neutral-500 dark:hover:bg-neutral-900'
               }`}
             >
@@ -510,7 +510,7 @@ function SegmentedControl<T extends string>({
               {option.detail ? (
                 <span
                   className={`mt-1 block text-xs leading-5 ${
-                    selected ? 'text-blue-100 dark:text-neutral-800' : 'text-neutral-600 dark:text-neutral-400'
+                    selected ? 'text-blue-100' : 'text-neutral-600 dark:text-neutral-400'
                   }`}
                 >
                   {option.detail}
@@ -796,7 +796,7 @@ export default function MessageQueueDesigner() {
                 onClick={() => setChallenge(item.id)}
                 className={`min-h-16 rounded-md border p-3 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-neutral-950 ${
                   selected
-                    ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-white dark:text-neutral-950'
+                    ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-neutral-800 dark:text-white'
                     : 'border-neutral-300 bg-white text-neutral-800 hover:border-neutral-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-neutral-500'
                 }`}
               >

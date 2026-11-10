@@ -930,7 +930,7 @@ export default function LoadPredictorTool() {
                     onClick={() => setChallengeId(challenge.id)}
                     className={`min-h-20 rounded-md border p-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                       selected
-                        ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-white dark:text-neutral-950'
+                        ? 'border-neutral-950 bg-neutral-950 text-white shadow-sm dark:border-white dark:bg-neutral-800 dark:text-white'
                         : 'border-neutral-200 bg-white text-neutral-700 hover:border-blue-400 hover:bg-blue-50 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-blue-600 dark:hover:bg-blue-950/50'
                     }`}
                   >

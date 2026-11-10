@@ -165,7 +165,7 @@ export default function TechnologyPage() {
   const progressPercentage = getCompletionPercentage(totalLessons);
 
   return (
-    <main className="max-w-7xl mx-auto p-6">
+    <main className="sdp-index max-w-7xl mx-auto p-6">
       <div className="mb-8">
         <h1 className="text-3xl md:text-4xl font-bold text-neutral-900 dark:text-neutral-100 mb-3">
           Technology Deep Dives
@@ -184,7 +184,7 @@ export default function TechnologyPage() {
             </div>
             <div className="w-full bg-neutral-200 dark:bg-neutral-700 rounded-full h-2">
               <div
-                className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all duration-500"
+                className="bg-gradient-to-r from-brand-500 to-brand-500 h-2 rounded-full transition-all duration-500"
                 style={{ width: `${progressPercentage}%` }}
               />
             </div>
@@ -196,7 +196,7 @@ export default function TechnologyPage() {
 
         <div className="grid md:grid-cols-4 gap-4 mb-6">
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
-            <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400">{totalTechnologies}</div>
+            <div className="text-2xl font-bold text-brand-600 dark:text-brand-400">{totalTechnologies}</div>
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Technologies Covered</div>
           </div>
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
@@ -208,14 +208,14 @@ export default function TechnologyPage() {
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Categories</div>
           </div>
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
-            <div className="text-2xl font-bold text-purple-600 dark:text-purple-400">100%</div>
+            <div className="text-2xl font-bold text-brand-600 dark:text-brand-400">100%</div>
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Production-Ready</div>
           </div>
         </div>
 
         {/* New Content Summary */}
         {draftCount > 0 && (
-          <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl border border-blue-200 dark:border-blue-800 p-6 mb-6">
+          <div className="bg-gradient-to-r from-blue-50 to-brand-50 dark:from-blue-900/20 dark:to-brand-900/20 rounded-xl border border-blue-200 dark:border-blue-800 p-6 mb-6">
             <div className="flex items-center gap-3 mb-3">
               <span className="text-2xl">🚀</span>
               <h2 className="text-xl font-bold text-neutral-900 dark:text-neutral-100">
@@ -246,7 +246,7 @@ export default function TechnologyPage() {
                 <div className="text-xs text-neutral-600 dark:text-neutral-400">Data Platforms</div>
               </div>
               <div className="bg-white/50 dark:bg-neutral-800/50 rounded-lg p-3 text-center">
-                <div className="text-lg font-bold text-purple-600 dark:text-purple-400">
+                <div className="text-lg font-bold text-brand-600 dark:text-brand-400">
                   {Object.keys(groupedDraft).filter(cat => ['observability', 'cloud-native'].includes(cat)).reduce((sum, cat) => sum + groupedDraft[cat].length, 0)}
                 </div>
                 <div className="text-xs text-neutral-600 dark:text-neutral-400">Observability</div>
@@ -297,7 +297,7 @@ export default function TechnologyPage() {
       {categories.map(category => (
         <div key={category} className="mb-8">
           <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100 mb-4 flex items-center gap-2">
-            <div className="w-1 h-6 bg-indigo-500 rounded-full"></div>
+            <div className="w-1 h-6 bg-brand-500 rounded-full"></div>
             {getCategoryDisplayName(category)}
           </h2>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -310,7 +310,7 @@ export default function TechnologyPage() {
                   className={`group bg-white dark:bg-neutral-900 rounded-xl border p-6 hover:shadow-lg transition-all duration-200 ${
                     completed
                       ? 'border-green-300 dark:border-green-700 bg-green-50/30 dark:bg-green-900/10'
-                      : 'border-neutral-200 dark:border-neutral-800 hover:border-indigo-300 dark:hover:border-indigo-700'
+                      : 'border-neutral-200 dark:border-neutral-800 hover:border-brand-300 dark:hover:border-brand-700'
                   }`}
                 >
                   <div className="flex items-start justify-between mb-4">
@@ -326,7 +326,7 @@ export default function TechnologyPage() {
                         )}
                       </div>
                       <div>
-                        <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                        <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
                           {tech.name}
                       </h3>
                       <div className="flex items-center gap-2">
@@ -346,7 +346,7 @@ export default function TechnologyPage() {
                       </div>
                     </div>
                   </div>
-                  <svg className="w-5 h-5 text-neutral-400 group-hover:text-indigo-500 group-hover:translate-x-1 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg className="w-5 h-5 text-neutral-400 group-hover:text-brand-500 group-hover:translate-x-1 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                   </svg>
                 </div>

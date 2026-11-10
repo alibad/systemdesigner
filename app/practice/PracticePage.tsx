@@ -146,7 +146,7 @@ export default function PracticePage() {
   };
 
   return (
-    <main className="max-w-6xl mx-auto px-4 md:px-6 py-6">
+    <main className="sdp-index max-w-6xl mx-auto px-4 md:px-6 py-6">
       <div className="mb-8">
         <div className="flex items-center gap-2 mb-4">
           <span className="text-neutral-900 dark:text-neutral-100 font-medium">🎯 Practice Hub</span>
@@ -162,7 +162,7 @@ export default function PracticePage() {
         
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
-            <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400">{problems.length}</div>
+            <div className="text-2xl font-bold text-brand-600 dark:text-brand-400">{problems.length}</div>
             <div className="text-sm text-neutral-600 dark:text-neutral-400">Practice Problems</div>
           </div>
           <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4">
@@ -189,12 +189,12 @@ export default function PracticePage() {
             const isSelected = selectedCategories.includes(category);
             const baseColors = {
               'System Design Practice': 'bg-blue-100 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
-              'ML Systems Practice': 'bg-indigo-100 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800',
+              'ML Systems Practice': 'bg-brand-100 dark:bg-brand-900/20 text-brand-700 dark:text-brand-300 border-brand-200 dark:border-brand-800',
               'GenAI Systems Practice': 'bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-800'
             };
             const selectedColors = {
               'System Design Practice': 'bg-blue-600 dark:bg-blue-500 text-white border-blue-600 dark:border-blue-500',
-              'ML Systems Practice': 'bg-indigo-600 dark:bg-indigo-500 text-white border-indigo-600 dark:border-indigo-500',
+              'ML Systems Practice': 'bg-brand-600 dark:bg-brand-500 text-white border-brand-600 dark:border-brand-500',
               'GenAI Systems Practice': 'bg-violet-600 dark:bg-violet-500 text-white border-violet-600 dark:border-violet-500'
             };
             
@@ -257,7 +257,7 @@ export default function PracticePage() {
                 setSelectedCategories([]);
                 setSelectedDifficulties([]);
               }}
-              className="text-sm text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 font-medium"
+              className="text-sm text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300 font-medium"
             >
               Clear all filters
             </button>
@@ -269,7 +269,7 @@ export default function PracticePage() {
       </div>
 
       {/* Problems Grid */}
-      <div className="grid gap-6">
+      <div className="grid grid-cols-1 gap-6">
         {filteredProblems.length === 0 ? (
           <div className="text-center py-12">
             <div className="text-neutral-400 dark:text-neutral-500 mb-4">
@@ -288,7 +288,7 @@ export default function PracticePage() {
                 setSelectedCategories([]);
                 setSelectedDifficulties([]);
               }}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-colors"
+              className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium transition-colors"
             >
               Clear Filters
             </button>
@@ -302,8 +302,8 @@ export default function PracticePage() {
           >
             <div className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-card hover:shadow-lg transition-shadow p-6">
               <div className="flex items-start justify-between mb-4">
-                <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex flex-wrap md:flex-nowrap items-center gap-3 mb-2">
                     {problem.completed && (
                       <div className="w-5 h-5 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
                         <svg className="w-3 h-3 text-emerald-600 dark:text-emerald-400" fill="currentColor" viewBox="0 0 20 20">
@@ -311,7 +311,7 @@ export default function PracticePage() {
                         </svg>
                       </div>
                     )}
-                    <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                    <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
                       {problem.title}
                     </h2>
                     <span className={`text-xs px-2 py-1 rounded font-medium ${difficultyColors[problem.difficulty as keyof typeof difficultyColors]}`}>
@@ -325,7 +325,7 @@ export default function PracticePage() {
                     {problem.description}
                   </p>
                 </div>
-                <div className="text-neutral-400 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors ml-4">
+                <div className="flex-shrink-0 text-neutral-400 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors ml-4">
                   <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
@@ -338,7 +338,7 @@ export default function PracticePage() {
                   {problem.keyTopics.map(topic => (
                     <span
                       key={`${problem.slug}-topic-${topic}`}
-                      className="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 rounded"
+                      className="text-xs px-2 py-1 bg-brand-100 dark:bg-brand-900/20 text-brand-700 dark:text-brand-300 rounded"
                     >
                       {topic}
                     </span>
@@ -351,7 +351,7 @@ export default function PracticePage() {
                   <span>⏱ {problem.estimatedTime}</span>
                   <span>🏢 {problem.companies.join(', ')}</span>
                 </div>
-                <div className="text-sm font-medium text-indigo-600 dark:text-indigo-400 group-hover:text-indigo-700 dark:group-hover:text-indigo-300">
+                <div className="text-sm font-medium text-brand-600 dark:text-brand-400 group-hover:text-brand-700 dark:group-hover:text-brand-300">
                   {problem.completed ? 'Review →' : 'Start practicing →'}
                 </div>
               </div>
@@ -362,7 +362,7 @@ export default function PracticePage() {
       </div>
 
       {/* Study Guide */}
-      <div className="mt-8 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 p-6">
+      <div className="mt-8 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-gradient-to-r from-brand-50 to-brand-50 dark:from-brand-900/20 dark:to-brand-900/20 p-6">
         <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">
           Enhanced Interview Approach
         </h3>

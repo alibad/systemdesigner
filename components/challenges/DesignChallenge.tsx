@@ -16,6 +16,7 @@ import { Tldraw, createShapeId, type Editor } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
 import { useChallenge } from '@/hooks/useChallenge';
 import GradeResultCard from './GradeResultCard';
+import TldrawSiteTheme from '@/components/hq-path/TldrawSiteTheme';
 
 const PALETTE: Record<string, { icon: string; label: string }> = {
   user: { icon: '👤', label: 'User/Client' },
@@ -132,7 +133,9 @@ export default function DesignChallenge({
           onMount={(editor) => {
             editorRef.current = editor;
           }}
-        />
+        >
+          <TldrawSiteTheme />
+        </Tldraw>
       </div>
 
       {/* Narration (optional, fuels the non-scoring AI coaching note) */}

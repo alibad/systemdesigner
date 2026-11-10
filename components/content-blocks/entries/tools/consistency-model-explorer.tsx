@@ -825,7 +825,7 @@ export default function ConsistencyModelExplorer() {
                     onClick={() => setSelectedModel(model.id)}
                     className={`min-h-[4.75rem] rounded-md border p-3 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-neutral-950 ${
                       selected
-                        ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-blue-300 dark:bg-blue-300 dark:text-neutral-950'
+                        ? 'border-blue-700 bg-blue-700 text-white shadow-sm dark:border-blue-300 dark:bg-blue-900 dark:text-white'
                         : 'border-neutral-300 bg-white text-neutral-800 hover:border-neutral-500 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-neutral-500 dark:hover:bg-neutral-900'
                     }`}
                   >
@@ -835,7 +835,7 @@ export default function ConsistencyModelExplorer() {
                     </span>
                     <span
                       className={`mt-1 block text-xs leading-5 ${
-                        selected ? 'text-blue-100 dark:text-neutral-700' : 'text-neutral-500 dark:text-neutral-400'
+                        selected ? 'text-blue-100' : 'text-neutral-500 dark:text-neutral-400'
                       }`}
                     >
                       {model.promise}
@@ -937,7 +937,7 @@ export default function ConsistencyModelExplorer() {
                     onClick={() => setChallenge(item.id)}
                     className={`min-h-[5.25rem] rounded-md border p-3 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-neutral-950 ${
                       selected
-                        ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950'
+                        ? 'border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-neutral-800 dark:text-white'
                         : 'border-neutral-300 bg-white text-neutral-800 hover:border-neutral-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:border-neutral-500'
                     }`}
                   >
@@ -947,7 +947,7 @@ export default function ConsistencyModelExplorer() {
                     </span>
                     <span
                       className={`mt-1.5 block text-xs leading-5 ${
-                        selected ? 'text-neutral-300 dark:text-neutral-600' : 'text-neutral-500 dark:text-neutral-400'
+                        selected ? 'text-neutral-300' : 'text-neutral-500 dark:text-neutral-400'
                       }`}
                     >
                       {item.description}
